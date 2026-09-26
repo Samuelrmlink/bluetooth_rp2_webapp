@@ -3,4 +3,6 @@ build/
 cfg/
 .config
 _deps/
+node_modules/
 staged/
+web-dist/

@@ -70,11 +70,12 @@ def main():
     ap.add_argument("op", nargs="?")
     ap.add_argument("params", nargs="?", default="{}")
     ap.add_argument("--host", default="192.168.8.1")
+    ap.add_argument("--port", type=int, default=80)
     ap.add_argument("--listen", type=float, default=0, metavar="SECONDS",
                     help="after the reply, print events for this long")
     a = ap.parse_args()
 
-    ws = WS(a.host)
+    ws = WS(a.host, port=a.port)
     if a.op:
         ws.send({"id": 1, "op": a.op, "params": json.loads(a.params)})
         r = ws.recv(timeout=8)

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bluetooth Gateway</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header id="bar">
+  <span id="brand">Bluetooth Gateway</span>
+  <span id="link" class="pill" data-state="down">connecting…</span>
+  <span id="fw" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="scan-toggle" class="btn">Scan</button>
+  <span id="hint" class="muted">alt+? for keys</span>
+</header>
+
+<!-- The pane manager's DOM contract; see js/layout.js. -->
+<div id="workspace">
+  <div id="tiles"></div>
+  <div id="floating-layer" hidden></div>
+</div>
+<nav id="tabbar" hidden></nav>
+<div id="keyhint" class="keyhint" hidden></div>
+
+<!-- Panes live here when not on screen, so their state and listeners survive
+     every layout change. Never destroyed, only moved. -->
+<div id="pane-park" hidden>
+  <section class="pane pane-scanner" id="pane-scanner">
+    <div class="pane-tools">
+      <label>name <input id="f-name" size="8" placeholder="prefix"></label>
+      <label>mfg <input id="f-mfg" size="6" placeholder="ffff"></label>
+      <label>uuid <input id="f-uuid" size="5" placeholder="ff09"></label>
+      <label>rssi ≥ <input id="f-rssi" size="4" placeholder="-90"></label>
+      <label><input type="checkbox" id="f-active" checked> active</label>
+      <button class="btn" id="f-clear">Clear</button>
+    </div>
+    <div class="scroll"><table id="scan-table"><thead><tr>
+      <th>Address</th><th>Name</th><th>RSSI</th><th>UUIDs</th><th>Mfg data</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="pane pane-devices" id="pane-devices">
+    <div class="scroll"><table id="dev-table"><thead><tr>
+      <th>Address</th><th>Name</th><th>MTU</th><th>Services</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section class="pane pane-tree" id="pane-tree">
+    <div class="pane-tools">
+      <select id="tree-dev"></select>
+      <span id="tree-note" class="muted"></span>
+    </div>
+    <div class="scroll" id="tree-body"></div>
+  </section>
+
+  <section class="pane pane-char" id="pane-char">
+    <div class="pane-tools">
+      <span id="char-target" class="muted">select a characteristic</span>
+    </div>
+    <div class="char-body">
+      <div class="row">
+        <button class="btn" id="c-read">Read</button>
+        <button class="btn" id="c-notify">Notify</button>
+        <button class="btn" id="c-indicate">Indicate</button>
+        <button class="btn" id="c-off">Unsubscribe</button>
+      </div>
+      <div class="row">
+        <input id="c-write" placeholder="hex, e.g. ff0914…" spellcheck="false">
+        <label><input type="checkbox" id="c-resp" checked> response</label>
+        <button class="btn" id="c-send">Write</button>
+      </div>
+      <div class="scroll"><table id="c-log"><thead><tr>
+        <th>Time</th><th>Src</th><th>Len</th><th>Hex</th><th>ASCII</th>
+      </tr></thead><tbody></tbody></table></div>
+    </div>
+  </section>
+
+  <section class="pane pane-log" id="pane-log">
+    <div class="pane-tools">
+      <button class="btn" id="log-clear">Clear</button>
+      <label><input type="checkbox" id="log-events" checked> events</label>
+    </div>
+    <div class="scroll"><pre id="log-body"></pre></div>
+  </section>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
