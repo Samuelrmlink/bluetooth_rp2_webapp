@@ -27,6 +27,8 @@
 #if CONFIG_BT_LE
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
+#include "btstack.h"
+#include "bt/le/gattserver.h"
 #endif
 
 #define MAX_LUA_OPS 24
@@ -298,6 +300,82 @@ static int l_bt_subscribe(lua_State *L) {
 }
 #endif
 
+/* --- gatt_server: declare what a PEER sees when it queries us --------------
+ *
+ * att_db_util builds the ATT database at runtime, which is what makes this
+ * scriptable at all -- the usual route is compile_gatt.py at build time, and
+ * that would mean a reflash for every change.
+ *
+ *   gatt_server.begin()
+ *   gatt_server.service('180f')
+ *   gatt_server.characteristic('2a19', {read=true, notify=true}, '\x5a')
+ *   gatt_server.commit()
+ */
+#if CONFIG_BT_LE
+static int l_gs_begin(lua_State *L) { (void)L; gatt_server_begin(); return 0; }
+
+static int l_gs_service(lua_State *L) {
+    const char *uuid = luaL_checkstring(L, 1);
+    const char *err = "unknown";
+    if (!gatt_server_add_service(uuid, &err)) { return luaL_error(L, "%s", err); }
+    return 0;
+}
+
+static uint16_t props_from_table(lua_State *L, int idx) {
+    if (!lua_istable(L, idx)) { return ATT_PROPERTY_READ; }
+    static const struct { const char *k; uint16_t bit; } map[] = {
+        { "read", ATT_PROPERTY_READ }, { "write", ATT_PROPERTY_WRITE },
+        { "write_no_response", ATT_PROPERTY_WRITE_WITHOUT_RESPONSE },
+        { "notify", ATT_PROPERTY_NOTIFY }, { "indicate", ATT_PROPERTY_INDICATE },
+    };
+    uint16_t p = 0;
+    for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); i++) {
+        lua_getfield(L, idx, map[i].k);
+        if (lua_toboolean(L, -1)) { p |= map[i].bit; }
+        lua_pop(L, 1);
+    }
+    return p ? p : ATT_PROPERTY_READ;
+}
+
+static int l_gs_characteristic(lua_State *L) {
+    const char *uuid = luaL_checkstring(L, 1);
+    uint16_t props = props_from_table(L, 2);
+    size_t len = 0;
+    const char *val = lua_isnoneornil(L, 3) ? "" : luaL_checklstring(L, 3, &len);
+    uint16_t handle = 0;
+    const char *err = "unknown";
+    if (!gatt_server_add_characteristic(uuid, props, (const uint8_t *)val,
+                                        (uint16_t)len, &handle, &err)) {
+        return luaL_error(L, "%s", err);
+    }
+    lua_pushinteger(L, handle);
+    return 1;
+}
+
+static int l_gs_commit(lua_State *L) {
+    const char *err = "unknown";
+    if (!gatt_server_commit(&err)) { return luaL_error(L, "%s", err); }
+    return 0;
+}
+
+/* Push a new value to subscribers of a characteristic we serve. */
+static int l_gs_notify(lua_State *L) {
+    lua_Integer handle = luaL_checkinteger(L, 1);
+    size_t len = 0;
+    const char *val = luaL_checklstring(L, 2, &len);
+    int sent = 0;
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        bt_device_t *d = bt_registry_at((size_t)i);
+        if (d && d->connected) {
+            att_server_notify(d->con_handle, (uint16_t)handle, (const uint8_t *)val, (uint16_t)len);
+            sent++;
+        }
+    }
+    lua_pushinteger(L, sent);
+    return 1;
+}
+#endif
+
 /* --- install -------------------------------------------------------------- */
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
     luaL_newlib(L, fns);
@@ -322,6 +400,12 @@ void lbind_open_all(lua_State *L) {
     set_table(L, "sys", sys);
 
 #if CONFIG_BT_LE
+    static const luaL_Reg gs[] = {
+        { "begin", l_gs_begin }, { "service", l_gs_service },
+        { "characteristic", l_gs_characteristic }, { "commit", l_gs_commit },
+        { "notify", l_gs_notify }, { NULL, NULL } };
+    set_table(L, "gatt_server", gs);
+
     static const luaL_Reg bt[] = {
         { "devices", l_bt_devices }, { "connect", l_bt_connect },
         { "write", l_bt_write }, { "subscribe", l_bt_subscribe }, { NULL, NULL } };

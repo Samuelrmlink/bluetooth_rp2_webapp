@@ -23,10 +23,108 @@
 static btstack_packet_callback_registration_t hci_cb;
 static bool s_ready;
 
+/* --- unhandled-event tracing ----------------------------------------------
+ * A generic Bluetooth tool should not silently discard what the stack tells
+ * it. Anything this firmware does not explicitly act on is surfaced as a
+ * bt.unhandled event, which is how you find out that a peripheral is doing
+ * something we have no code for yet -- rather than wondering why nothing
+ * happened.
+ *
+ * On by default; bt.trace turns it off. The only high-rate event is the
+ * advertising report, which IS handled, so this stays quiet in normal use. */
+static bool s_trace_unhandled = true;
+static uint32_t s_unhandled_count;
+
+/* Events some part of this firmware acts on. Listed explicitly rather than
+ * inferred, so adding a handler without adding it here shows up as noise and
+ * gets noticed. */
+static bool event_is_handled(uint8_t evt) {
+    switch (evt) {
+        case BTSTACK_EVENT_STATE:
+        case HCI_EVENT_DISCONNECTION_COMPLETE:
+        case HCI_EVENT_META_GAP:
+        case GAP_EVENT_ADVERTISING_REPORT:
+        /* BTstack delivers LE events twice: the raw HCI_EVENT_LE_META (0x3e)
+         * and a cooked GAP_/GATT_ event. We act on the cooked form, so the raw
+         * one is not "unhandled" -- and counting it as such buried the trace
+         * under one entry per advertisement, which is exactly the noise that
+         * makes a diagnostic useless. */
+        case HCI_EVENT_LE_META:
+        case HCI_EVENT_TRANSPORT_PACKET_SENT:
+        case HCI_EVENT_COMMAND_COMPLETE:
+        case HCI_EVENT_COMMAND_STATUS:
+        case HCI_EVENT_NUMBER_OF_COMPLETED_PACKETS:
+        case BTSTACK_EVENT_NR_CONNECTIONS_CHANGED:
+        case HCI_EVENT_VENDOR_SPECIFIC:
+        case SM_EVENT_JUST_WORKS_REQUEST:
+        case SM_EVENT_PASSKEY_INPUT_NUMBER:
+        case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
+        case SM_EVENT_PAIRING_COMPLETE:
+        case GATT_EVENT_SERVICE_QUERY_RESULT:
+        case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT:
+        case GATT_EVENT_ALL_CHARACTERISTIC_DESCRIPTORS_QUERY_RESULT:
+        case GATT_EVENT_QUERY_COMPLETE:
+        case GATT_EVENT_NOTIFICATION:
+        case GATT_EVENT_INDICATION:
+        case GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT:
+        case GATT_EVENT_MTU:
+        case ATT_EVENT_MTU_EXCHANGE_COMPLETE:
+        case ATT_EVENT_CAN_SEND_NOW:
+        case ATT_EVENT_HANDLE_VALUE_INDICATION_COMPLETE:
+        case L2CAP_EVENT_CAN_SEND_NOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Names for the ones worth recognising at a glance; everything else is
+ * reported by code, which is still enough to look up. */
+static const char *event_name(uint8_t evt) {
+    switch (evt) {
+        case HCI_EVENT_CONNECTION_COMPLETE:            return "connection_complete";
+        case HCI_EVENT_CONNECTION_REQUEST:             return "connection_request";
+        case HCI_EVENT_ENCRYPTION_CHANGE:              return "encryption_change";
+        case HCI_EVENT_ENCRYPTION_KEY_REFRESH_COMPLETE:return "encryption_key_refresh";
+        case HCI_EVENT_READ_REMOTE_VERSION_INFORMATION_COMPLETE: return "remote_version";
+        case HCI_EVENT_INQUIRY_COMPLETE:               return "inquiry_complete";
+        case HCI_EVENT_INQUIRY_RESULT:                 return "inquiry_result";
+        case SM_EVENT_IDENTITY_RESOLVING_STARTED:      return "sm_irk_resolving_started";
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:    return "sm_irk_resolved";
+        case SM_EVENT_IDENTITY_RESOLVING_FAILED:       return "sm_irk_unresolved";
+        case SM_EVENT_REENCRYPTION_STARTED:            return "sm_reencryption_started";
+        case SM_EVENT_REENCRYPTION_COMPLETE:           return "sm_reencryption_complete";
+        case SM_EVENT_AUTHORIZATION_REQUEST:           return "sm_authorization_request";
+        case ATT_EVENT_CONNECTED:                      return "att_connected";
+        case ATT_EVENT_DISCONNECTED:                   return "att_disconnected";
+        case L2CAP_EVENT_CONNECTION_PARAMETER_UPDATE_RESPONSE: return "l2cap_conn_param_response";
+        case GAP_EVENT_INQUIRY_RESULT:                 return "gap_inquiry_result";
+        default:                                       return "unknown";
+    }
+}
+
+static void trace_unhandled(uint8_t evt, const uint8_t *pkt, uint16_t size) {
+    s_unhandled_count++;
+    if (!s_trace_unhandled) {
+        return;
+    }
+    char hex[2 * 24 + 1];
+    uint16_t n = size > 24 ? 24 : size;   /* a prefix is enough to identify it */
+    for (uint16_t i = 0; i < n; i++) {
+        snprintf(hex + i * 2, 3, "%02x", pkt[i]);
+    }
+    hex[n * 2] = 0;
+    char json[200];
+    snprintf(json, sizeof(json),
+             "{\"code\":\"0x%02x\",\"name\":\"%s\",\"len\":%u,\"hex\":\"%s\"%s}",
+             evt, event_name(evt), size, hex, size > 24 ? ",\"truncated\":true" : "");
+    api_emit("bt.unhandled", json);
+}
+
 bool bt_ready(void) { return s_ready; }
 
 static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
-    (void)ch; (void)size;
+    (void)ch;
     if (type != HCI_EVENT_PACKET) {
         return;
     }
@@ -54,6 +152,11 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
             le_on_disconnected(hci_event_disconnection_complete_get_connection_handle(pkt));
             break;
         default:
+            /* Not acted on anywhere in this firmware -- say so rather than
+             * dropping it silently. */
+            if (!event_is_handled(hci_event_packet_get_type(pkt))) {
+                trace_unhandled(hci_event_packet_get_type(pkt), pkt, size);
+            }
             break;
     }
 }
@@ -427,7 +530,26 @@ static void op_bond_remove(const char *params, api_reply_fn reply, void *ctx, lo
     api_reply_ok(reply, ctx, id, "{\"removed\":true}");
 }
 
+/* The local database over the API too -- the registry's rule is that nothing
+ * is reachable from only one front-end. */
+static void op_gattsrv_describe(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    gatt_server_json(list_buf, sizeof(list_buf));
+    api_reply_ok(reply, ctx, id, list_buf);
+}
+
+static void op_bt_trace(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bool on;
+    if (api_json_bool(params, "unhandled", &on)) { s_trace_unhandled = on; }
+    char r[96];
+    snprintf(r, sizeof(r), "{\"unhandled\":%s,\"seen\":%lu}",
+             s_trace_unhandled ? "true" : "false", (unsigned long)s_unhandled_count);
+    api_reply_ok(reply, ctx, id, r);
+}
+
 static const op_def_t bt_ops[] = {
+    { "gatt_server.describe", op_gattsrv_describe },
+    { "bt.trace",             op_bt_trace },
     { "bond.policy",  op_bond_policy },
     { "bond.pair",    op_bond_pair },
     { "bond.passkey", op_bond_passkey },
@@ -451,7 +573,8 @@ static const char *const bt_topics[] = {
     "dev.connected", "dev.disconnected", "scan.device", "scan.done",
     "gatt.discovered", "char.value",
     "security.required", "security.bonded", "security.failed",
-    "security.passkey_request", "security.numeric_comparison", NULL
+    "security.passkey_request", "security.numeric_comparison",
+    "bt.unhandled", NULL
 };
 
 const op_module_t op_module_bt = {
