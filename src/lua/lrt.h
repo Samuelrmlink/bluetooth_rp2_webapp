@@ -36,6 +36,16 @@ bool lrt_draft_chunk(const char *name, size_t offset, const char *src, size_t le
                      const char **err);
 bool lrt_draft_set(const char *name, const char *src, size_t len, const char **err);
 size_t lrt_draft_len(const char *name);
+
+/* Read back the source currently IN EFFECT -- draft if there is one, else
+ * staged, else committed. Paged, for the same reason the upload is: a frame
+ * must stay small. Without this a draft is write-only, and pushing one then
+ * losing the local copy leaves source on the device that nothing can retrieve.
+ *
+ * Returns the number of bytes copied; *tier names which tier answered and
+ * *total the full length. */
+size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
+                       const char **tier, size_t *total);
 bool lrt_stage(const char *name, const char **err);   /* draft -> staged/ */
 bool lrt_commit(const char *name, const char **err);  /* staged -> lua/ */
 bool lrt_revert(const char *name);                    /* drop draft, else staged */

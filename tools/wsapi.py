@@ -77,6 +77,31 @@ class WS:
             off += len(part)
         return last
 
+    def source(self, script):
+        """Read back the source currently in effect, reassembling the pages.
+        Returns (tier, text). The tier says which of draft/staged/committed
+        answered, which is how you tell what is actually running."""
+        out, off, tier = [], 0, None
+        while True:
+            self.send({"id": 1, "op": "script.source",
+                       "params": {"script": script, "offset": off}})
+            while True:
+                r = self.recv(timeout=8)
+                if r is None:
+                    raise RuntimeError("no reply to script.source at %d" % off)
+                if r.startswith('{"id"'):
+                    break
+            j = json.loads(r)
+            if not j.get("ok"):
+                return None, j.get("error", {}).get("message", "error")
+            res = j["result"]
+            tier = res["tier"]
+            out.append(res["chunk"])
+            off += res["bytes"]
+            if res["eof"] or res["bytes"] == 0:
+                break
+        return tier, "".join(out)
+
     def close(self):
         """Send a proper close frame. Without it the device holds the slot
         until keepalive expires, and a handful of test runs exhaust them."""

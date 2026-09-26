@@ -364,6 +364,28 @@ bool lrt_revert(const char *name) {
     return fs_delete(path) >= 0;
 }
 
+size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
+                       const char **tier, size_t *total) {
+    *tier = NULL;
+    *total = 0;
+    if (cap == 0) { return 0; }
+
+    script_t *s = find(name);
+    const char *src = NULL;
+    size_t len = 0;
+    const char *t = resolve_src(s, name, &src, &len);
+    if (!t) { return 0; }
+
+    *tier = t;
+    *total = len;
+    if (offset >= len) { return 0; }
+    size_t n = len - offset;
+    if (n > cap - 1) { n = cap - 1; }
+    memcpy(dst, src + offset, n);
+    dst[n] = 0;
+    return n;
+}
+
 /* --- the scheduler -------------------------------------------------------- */
 void lrt_tick(void) {
     if (!s_ready) { return; }

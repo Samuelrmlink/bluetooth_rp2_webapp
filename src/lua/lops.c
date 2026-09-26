@@ -146,7 +146,39 @@ static void op_eval(const char *params, api_reply_fn reply, void *ctx, long id) 
     api_reply_ok(reply, ctx, id, r);
 }
 
+/* Read the effective source back out. Paged like the upload: a draft may be
+ * far larger than one frame, and this is the only way to retrieve it -- drafts
+ * live in RAM, so the filesystem API cannot see them. */
+static void op_source(const char *params, api_reply_fn reply, void *ctx, long id) {
+    NEED_NAME(params);
+    long offset = 0;
+    (void)api_json_int(params, "offset", &offset);
+    if (offset < 0) { offset = 0; }
+
+    static char chunk[600];
+    const char *tier = NULL;
+    size_t total = 0;
+    size_t n = lrt_source_read(nm, (size_t)offset, chunk, sizeof(chunk), &tier, &total);
+    if (!tier) {
+        api_reply_err(reply, ctx, id, "not_found",
+                      "no draft, staged or committed source for that name");
+        return;
+    }
+    /* The source is arbitrary text and must be escaped before it goes into
+     * JSON -- it is full of newlines and quotes by construction. */
+    static char esc[1400];
+    api_json_escape(esc, sizeof(esc), chunk);
+    char *out = buf;
+    snprintf(out, BUF_SZ,
+             "{\"script\":\"%s\",\"tier\":\"%s\",\"length\":%u,\"offset\":%ld,"
+             "\"bytes\":%u,\"eof\":%s,\"chunk\":\"%s\"}",
+             nm, tier, (unsigned)total, offset, (unsigned)n,
+             ((size_t)offset + n >= total) ? "true" : "false", esc);
+    api_reply_ok(reply, ctx, id, out);
+}
+
 static const op_def_t lua_ops_tbl[] = {
+    { "script.source", op_source },
     { "script.list",   op_list },
     { "script.start",  op_start },
     { "script.stop",   op_stop },
