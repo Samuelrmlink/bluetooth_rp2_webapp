@@ -1,0 +1,49 @@
+menu "I/O subsystems"
+
+comment "Each module is independently gated: a deployed build that does not"
+comment "need I2C/SPI bring-up tooling can drop it and reclaim the flash."
+
+config IO_PINS
+    bool "Pin broker"
+    default n
+    help
+      NOT IMPLEMENTED YET (phase 7). Arbitrates GPIO between subsystems and
+      scripts, hard-reserves the CYW43439's pins (23/24/25/29 on Pico 2 W --
+      claiming one kills Wi-Fi AND Bluetooth), and releases every claim a
+      script made when that script stops. Everything below depends on it.
+
+config IO_GPIO
+    bool "GPIO"
+    depends on IO_PINS
+    default n
+
+config IO_ADC
+    bool "ADC"
+    depends on IO_PINS
+    default n
+
+config IO_PWM
+    bool "PWM"
+    depends on IO_PINS
+    default n
+
+config IO_I2C
+    bool "I2C (with bus scan)"
+    depends on IO_PINS
+    default n
+
+config IO_SPI
+    bool "SPI"
+    depends on IO_PINS
+    default n
+
+config IO_UART
+    bool "Hardware UART"
+    depends on IO_PINS
+    default n
+
+config IO_CDC
+    bool "USB CDC-ACM data ports"
+    default n
+
+endmenu

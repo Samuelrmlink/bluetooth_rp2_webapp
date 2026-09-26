@@ -1,0 +1,51 @@
+menu "Bluetooth"
+
+config BT_LE
+    bool "Bluetooth Low Energy (central)"
+    default y
+    help
+      Scanning, connecting, GATT discovery, read/write/subscribe and SMP
+      bonding, via BTstack's gatt_client. This is the transport the project
+      leads with.
+
+config BT_CLASSIC
+    bool "Bluetooth Classic (SPP/SSP)"
+    default n
+    depends on BT_LE
+    help
+      NOT IMPLEMENTED YET -- the option exists so the seam stays visible.
+      The CYW43439 is dual-mode and pico_btstack_classic composes with
+      pico_btstack_ble, so adding Classic is additive. Note MAX_NR_HCI_CONNECTIONS
+      is shared across both transports, so enabling this means re-checking the
+      RAM budget rather than restructuring anything.
+
+config BT_MAX_LINKS
+    int "Concurrent links (all transports)"
+    default 4
+    range 1 8
+    help
+      Sized so a Lua profile can hold a device while a browser independently
+      pokes another. Each link costs roughly 1 KB of GATT database plus
+      BTstack's own per-connection state.
+
+config GATT_MAX_SVCS
+    int "Max services cached per device"
+    default 12
+
+config GATT_MAX_CHRS
+    int "Max characteristics cached per device"
+    default 48
+
+config GATT_MAX_DSCS
+    int "Max descriptors cached per device"
+    default 24
+
+config GATT_MAX_UUID128
+    int "Max distinct 128-bit UUIDs interned per device"
+    default 24
+    help
+      BTstack hands us a full uuid128 in every service, characteristic and
+      descriptor. Interning them per device is what keeps a typical peripheral
+      at about 1 KB instead of several.
+
+endmenu

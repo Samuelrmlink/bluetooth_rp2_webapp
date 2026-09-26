@@ -1,0 +1,16 @@
+mainmenu "bluetooth_rp2_webapp configuration"
+
+comment "Board / platform"
+
+config BOARD_PICO2_W
+    bool "Target: Raspberry Pi Pico 2 W (RP2350A)"
+    default y
+    help
+      The validated target. RP2350A, 520 KB SRAM, 4 MB flash, CYW43439
+      dual-mode radio. Unset only when building for an RP2040 Pico W, which
+      is supported in principle but not validated.
+
+source "src/net/Kconfig"
+source "src/bt/Kconfig"
+source "src/lua/Kconfig"
+source "src/io/Kconfig"

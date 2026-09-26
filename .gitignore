@@ -1,4 +1,6 @@
+build*/
 build/
-_deps/
-.config
 cfg/
+.config
+_deps/
+staged/

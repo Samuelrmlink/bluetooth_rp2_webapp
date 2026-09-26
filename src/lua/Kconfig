@@ -1,0 +1,25 @@
+menu "Lua scripting"
+
+config LUA_ENABLE
+    bool "Lua runtime"
+    default n
+    help
+      NOT IMPLEMENTED YET (phase 6). Device protocols are meant to live in Lua
+      on LittleFS so they can be changed without a program/erase cycle; only
+      the stable pieces (crypto, checksums, TLV primitives) stay in C.
+
+config LUA_HEAP_KB
+    int "Lua arena (KB)"
+    depends on LUA_ENABLE
+    default 96
+    help
+      A dedicated static arena, not the system heap, so a runaway script hits
+      its own ceiling with an ordinary Lua out-of-memory error instead of
+      starving lwIP or BTstack. Static so the link-time RAM check can see it.
+
+config LUA_HOOK_BUDGET
+    int "Instructions per scheduler slice before a script is forced to yield"
+    depends on LUA_ENABLE
+    default 20000
+
+endmenu

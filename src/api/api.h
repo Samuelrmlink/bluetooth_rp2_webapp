@@ -1,0 +1,25 @@
+#ifndef BTGW_API_H
+#define BTGW_API_H
+
+#include <stddef.h>
+
+/* Reply sink: exactly http.c's ws_reply_line, passed in so the API layer never
+ * includes the transport. */
+typedef void (*api_reply_fn)(const char *line, void *ctx);
+
+/* One inbound WebSocket text frame. Parses the envelope, dispatches to the
+ * module registry, and writes a reply through `reply`. */
+void api_handle_text(const char *text, api_reply_fn reply, void *ctx);
+
+/* Emit an unsolicited event to every subscribed client:
+ *   {"evt":"<topic>","data":<json>}
+ * `json` must already be a valid JSON value. */
+void api_emit(const char *topic, const char *json);
+
+/* Escape a string INTO a JSON string body (no surrounding quotes), returning
+ * the number of bytes written. Device names and script errors are
+ * attacker-controlled in a way an SSID is not, so nothing user-supplied may be
+ * concatenated into JSON without passing through here. */
+size_t api_json_escape(char *dst, size_t cap, const char *src);
+
+#endif

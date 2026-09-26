@@ -1,0 +1,58 @@
+menu "Networking"
+
+config NET_WIFI
+    bool "Wi-Fi (station + SoftAP)"
+    default y
+    help
+      Compiles the cyw43 station/AP state machine, the /api/wifi routes and
+      the credential store in or out entirely. The Bluetooth stack shares the
+      same CYW43439 but does not depend on this: a BLE-only build is valid and
+      is reachable over USB-NCM.
+
+config NET_USB_NCM
+    bool "USB-NCM (Ethernet over the USB cable)"
+    default y
+    help
+      A network interface over the target's own USB port. Worth keeping even
+      on a Wi-Fi build: it is reachable before Wi-Fi is configured and when the
+      access point is down, which is the difference between a bad Wi-Fi setting
+      being an annoyance and being a reflash.
+
+comment "USB-NCM /24: device takes .1, the host is handed .16 by DHCP."
+comment "MUST NOT collide with another NCM device on the same host -- the bench"
+comment "this was developed on already had an unrelated project on 192.168.7.x,"
+comment "and two NCM interfaces sharing a subnet is a routing coin-toss."
+
+config NET_NCM_IP0
+    int "USB-NCM subnet octet 1"
+    depends on NET_USB_NCM
+    default 192
+
+config NET_NCM_IP1
+    int "USB-NCM subnet octet 2"
+    depends on NET_USB_NCM
+    default 168
+
+config NET_NCM_IP2
+    int "USB-NCM subnet octet 3"
+    depends on NET_USB_NCM
+    default 8
+
+config NET_MDNS
+    bool "mDNS responder"
+    default y
+
+config NET_HOSTNAME
+    string "mDNS / DHCP hostname"
+    default "btgw"
+
+config LWIP_MEM_SIZE_KB
+    int "lwIP heap (KB)"
+    default 48
+    help
+      lwIP's transmit heap. 48 KB suits RP2350's 520 KB SRAM; drop to 32 on an
+      RP2040. Every other lwIP setting lives in include/lwipopts.h and must be
+      changed there, never as a -D: those are unconditional #defines and win
+      silently.
+
+endmenu
