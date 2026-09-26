@@ -28,7 +28,14 @@ bool lrt_start(const char *name, const char **err);
 bool lrt_stop(const char *name);
 bool lrt_reload(const char *name, const char **err);
 
+/* Drafts live in RAM and never touch flash -- that is the whole point of the
+ * tier. Source arrives in chunks so the per-connection WebSocket buffer can
+ * stay small (it is multiplied by the connection count) without capping how
+ * large a draft may be: offset 0 starts a new one, later offsets append. */
+bool lrt_draft_chunk(const char *name, size_t offset, const char *src, size_t len,
+                     const char **err);
 bool lrt_draft_set(const char *name, const char *src, size_t len, const char **err);
+size_t lrt_draft_len(const char *name);
 bool lrt_stage(const char *name, const char **err);   /* draft -> staged/ */
 bool lrt_commit(const char *name, const char **err);  /* staged -> lua/ */
 bool lrt_revert(const char *name);                    /* drop draft, else staged */

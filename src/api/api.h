@@ -22,4 +22,13 @@ void api_emit(const char *topic, const char *json);
  * concatenated into JSON without passing through here. */
 size_t api_json_escape(char *dst, size_t cap, const char *src);
 
+/* One shared scratch buffer for building large JSON results (a GATT tree, a
+ * scan listing, a script listing). Safe to share because every caller runs
+ * from the single cooperative loop, one at a time, and each fills and hands it
+ * off within the call -- the same reasoning that makes these buffers static in
+ * the first place. Four private copies of this size would cost ~36 KB for no
+ * benefit. */
+char  *api_scratch(void);
+size_t api_scratch_size(void);
+
 #endif

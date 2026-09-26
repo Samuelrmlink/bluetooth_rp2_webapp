@@ -25,6 +25,7 @@
 #include "bt/le/central.h"
 #include "bt/registry.h"
 #include "api/api.h"
+#include "net/ws.h"
 #include "bt/le/bond.h"
 
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
@@ -327,12 +328,13 @@ static void discover_next(le_link_t *l) {
     db->ready = true;
     gatt_client_get_mtu(l->con_handle, &db->mtu);
 
-    static char tree[3072];
-    size_t n = (size_t)snprintf(tree, sizeof(tree),
+    char *tree = api_scratch();
+    const size_t tree_sz = api_scratch_size();
+    size_t n = (size_t)snprintf(tree, tree_sz,
         "{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"gatt\":",
         l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4], l->addr[5]);
-    n += gattdb_json(db, tree + n, sizeof(tree) - n);
-    snprintf(tree + n, sizeof(tree) - n, "}");
+    n += gattdb_summary_json(db, tree + n, tree_sz - n);
+    snprintf(tree + n, tree_sz - n, "}");
     api_emit("gatt.discovered", tree);
     printf("bt: discovery done, %u svc / %u chr / %u dsc, mtu %u%s\n",
            db->n_svc, db->n_chr, db->n_dsc, db->mtu, db->truncated ? " (TRUNCATED)" : "");

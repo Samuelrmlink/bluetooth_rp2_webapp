@@ -30,19 +30,23 @@ config BT_MAX_LINKS
 
 config GATT_MAX_SVCS
     int "Max services cached per device"
-    default 12
+    default 16
 
 config GATT_MAX_CHRS
     int "Max characteristics cached per device"
-    default 48
+    default 160
+    help
+      Real devices have far more than a handful. A Pinecil V2 exposes over a
+      hundred across its live-data, bulk and settings services, and a cap below
+      that silently returns a partial tree.
 
 config GATT_MAX_DSCS
     int "Max descriptors cached per device"
-    default 24
+    default 48
 
 config GATT_MAX_UUID128
     int "Max distinct 128-bit UUIDs interned per device"
-    default 24
+    default 96
     help
       BTstack hands us a full uuid128 in every service, characteristic and
       descriptor. Interning them per device is what keeps a typical peripheral

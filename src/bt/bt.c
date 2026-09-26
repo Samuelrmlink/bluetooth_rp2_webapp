@@ -18,6 +18,7 @@
 #include "bt/le/gattdb.h"
 #include "bt/le/bond.h"
 #include "bt/le/gattserver.h"
+#include "net/ws.h"
 #include "autoconf.h"
 
 static btstack_packet_callback_registration_t hci_cb;
@@ -194,7 +195,8 @@ static void op_bt_state(const char *params, api_reply_fn reply, void *ctx, long 
 
 /* One scratch buffer, filled and consumed within the call -- core0 is
  * single-threaded and its stack is small. */
-static char list_buf[3072];
+#define list_buf   api_scratch()
+#define LIST_BUF_SZ api_scratch_size()
 
 /* Parses the optional filter object. Note what is absent: there is no way to
  * filter on a GATT service UUID, because those are invisible until after a
@@ -266,7 +268,7 @@ static void op_scan_stop(const char *params, api_reply_fn reply, void *ctx, long
 
 static void op_scan_list(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
-    size_t n = (size_t)snprintf(list_buf, sizeof(list_buf), "{\"devices\":[");
+    size_t n = (size_t)snprintf(list_buf, LIST_BUF_SZ, "{\"devices\":[");
     size_t count = bt_registry_count();
     bool first = true;
     for (size_t i = 0; i < count; i++) {
@@ -276,13 +278,13 @@ static void op_scan_list(const char *params, api_reply_fn reply, void *ctx, long
         }
         char one[512];
         bt_device_json(d, one, sizeof(one));
-        if (n + strlen(one) + 4 >= sizeof(list_buf)) {
+        if (n + strlen(one) + 4 >= LIST_BUF_SZ) {
             break;                    /* truncate rather than overflow */
         }
-        n += (size_t)snprintf(list_buf + n, sizeof(list_buf) - n, "%s%s", first ? "" : ",", one);
+        n += (size_t)snprintf(list_buf + n, LIST_BUF_SZ - n, "%s%s", first ? "" : ",", one);
         first = false;
     }
-    snprintf(list_buf + n, sizeof(list_buf) - n, "],\"scanning\":%s}",
+    snprintf(list_buf + n, LIST_BUF_SZ - n, "],\"scanning\":%s}",
              le_scanning() ? "true" : "false");
     api_reply_ok(reply, ctx, id, list_buf);
 }
@@ -328,7 +330,7 @@ static void op_dev_disconnect(const char *params, api_reply_fn reply, void *ctx,
 
 static void op_dev_list(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
-    size_t n = (size_t)snprintf(list_buf, sizeof(list_buf), "{\"devices\":[");
+    size_t n = (size_t)snprintf(list_buf, LIST_BUF_SZ, "{\"devices\":[");
     bool first = true;
     for (size_t i = 0; i < bt_registry_count(); i++) {
         bt_device_t *d = bt_registry_at(i);
@@ -337,13 +339,13 @@ static void op_dev_list(const char *params, api_reply_fn reply, void *ctx, long 
         }
         char one[512];
         bt_device_json(d, one, sizeof(one));
-        if (n + strlen(one) + 4 >= sizeof(list_buf)) {
+        if (n + strlen(one) + 4 >= LIST_BUF_SZ) {
             break;
         }
-        n += (size_t)snprintf(list_buf + n, sizeof(list_buf) - n, "%s%s", first ? "" : ",", one);
+        n += (size_t)snprintf(list_buf + n, LIST_BUF_SZ - n, "%s%s", first ? "" : ",", one);
         first = false;
     }
-    snprintf(list_buf + n, sizeof(list_buf) - n, "]}");
+    snprintf(list_buf + n, LIST_BUF_SZ - n, "]}");
     api_reply_ok(reply, ctx, id, list_buf);
 }
 
@@ -364,7 +366,20 @@ static void op_gatt_tree(const char *params, api_reply_fn reply, void *ctx, long
         api_reply_err(reply, ctx, id, "discovering", "discovery still in progress");
         return;
     }
-    gattdb_json(db, list_buf, sizeof(list_buf));
+    /* Paged. A device with a hundred-odd characteristics serialises to more
+     * than lwIP's TCP send buffer takes in one write, and an oversized frame
+     * is dropped whole rather than split -- so the summary is always small and
+     * detail is fetched one service at a time. */
+    char svc[8];
+    if (api_json_str(params, "service", svc, sizeof(svc))) {
+        long si = strtol(svc, NULL, 10);
+        if (si < 0 || gattdb_service_json(db, (uint8_t)si, list_buf, LIST_BUF_SZ) == 0) {
+            api_reply_err(reply, ctx, id, "no_such_service", "no service with that index");
+            return;
+        }
+    } else {
+        gattdb_summary_json(db, list_buf, LIST_BUF_SZ);
+    }
     api_reply_ok(reply, ctx, id, list_buf);
 }
 
@@ -534,7 +549,7 @@ static void op_bond_remove(const char *params, api_reply_fn reply, void *ctx, lo
  * is reachable from only one front-end. */
 static void op_gattsrv_describe(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
-    gatt_server_json(list_buf, sizeof(list_buf));
+    gatt_server_json(list_buf, LIST_BUF_SZ);
     api_reply_ok(reply, ctx, id, list_buf);
 }
 

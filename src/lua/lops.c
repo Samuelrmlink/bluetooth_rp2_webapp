@@ -13,11 +13,13 @@
 #include "api/ops.h"
 #include "lua/lrt.h"
 #include "lua/lbind.h"
+#include "net/ws.h"
 #include "autoconf.h"
 
 #if CONFIG_LUA_ENABLE
 
-static char buf[3072];
+#define buf    api_scratch()
+#define BUF_SZ api_scratch_size()
 
 static bool name_of(const char *params, char *out, size_t cap) {
     return api_json_str(params, "script", out, cap) ||
@@ -26,13 +28,13 @@ static bool name_of(const char *params, char *out, size_t cap) {
 
 static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
-    size_t n = (size_t)snprintf(buf, sizeof(buf), "{\"scripts\":");
-    n += lrt_list_json(buf + n, sizeof(buf) - n);
-    n += (size_t)snprintf(buf + n, sizeof(buf) - n, ",\"ops\":");
-    n += lbind_ops_json(buf + n, sizeof(buf) - n);
-    n += (size_t)snprintf(buf + n, sizeof(buf) - n, ",\"runtime\":");
-    n += lrt_stats_json(buf + n, sizeof(buf) - n);
-    snprintf(buf + n, sizeof(buf) - n, "}");
+    size_t n = (size_t)snprintf(buf, BUF_SZ, "{\"scripts\":");
+    n += lrt_list_json(buf + n, BUF_SZ - n);
+    n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"ops\":");
+    n += lbind_ops_json(buf + n, BUF_SZ - n);
+    n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"runtime\":");
+    n += lrt_stats_json(buf + n, BUF_SZ - n);
+    snprintf(buf + n, BUF_SZ - n, "}");
     api_reply_ok(reply, ctx, id, buf);
 }
 
@@ -65,20 +67,45 @@ static void op_reload(const char *params, api_reply_fn reply, void *ctx, long id
  * safe to use on a part with a finite erase budget. */
 static void op_draft(const char *params, api_reply_fn reply, void *ctx, long id) {
     NEED_NAME(params);
-    static char src[3900];
+    /* Bounded by the WebSocket receive buffer, which is deliberately small because
+ * it is per-connection. Source too large for one frame goes through
+ *   PUT /api/fs/staged/<name>.lua   then   script.reload
+ * which streams to flash instead of buffering in RAM. */
+    static char src[WS_RX_MAX - 128];
     if (!api_json_str(params, "source", src, sizeof(src))) {
-        api_reply_err(reply, ctx, id, "bad_request", "need \"source\""); return;
+        api_reply_err(reply, ctx, id, "bad_request",
+                      "need \"source\"; send it in chunks with "
+                      "\"offset\" and \"final\":false for anything larger than a frame");
+        return;
     }
+    /* Chunked so a large draft never needs a large frame: offset 0 starts a
+     * new draft, later offsets append, and only the final chunk runs it. The
+     * draft stays in RAM throughout -- no flash is written at any point. */
+    long offset = 0;
+    (void)api_json_int(params, "offset", &offset);
+    bool final = true;
+    (void)api_json_bool(params, "final", &final);
+
     const char *err = "unknown error";
-    if (!lrt_draft_set(nm, src, strlen(src), &err)) {
+    if (!lrt_draft_chunk(nm, (size_t)offset, src, strlen(src), &err)) {
         api_reply_err(reply, ctx, id, "draft_failed", err); return;
+    }
+    if (!final) {
+        char r[96];
+        snprintf(r, sizeof(r), "{\"draft\":true,\"bytes\":%u,\"flash_written\":false}",
+                 (unsigned)lrt_draft_len(nm));
+        api_reply_ok(reply, ctx, id, r);
+        return;
     }
     bool run = true;
     (void)api_json_bool(params, "run", &run);
     if (run && !lrt_reload(nm, &err)) {
         api_reply_err(reply, ctx, id, "start_failed", err); return;
     }
-    api_reply_ok(reply, ctx, id, "{\"draft\":true,\"flash_written\":false}");
+    char r[96];
+    snprintf(r, sizeof(r), "{\"draft\":true,\"bytes\":%u,\"flash_written\":false}",
+             (unsigned)lrt_draft_len(nm));
+    api_reply_ok(reply, ctx, id, r);
 }
 
 static void op_stage(const char *params, api_reply_fn reply, void *ctx, long id) {

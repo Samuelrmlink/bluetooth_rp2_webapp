@@ -23,6 +23,7 @@
 #include "api/api.h"
 #include "api/ops.h"
 #include "net/http.h"
+#include "net/ws.h"
 #include "pico/time.h"
 #include "autoconf.h"
 #if CONFIG_LUA_ENABLE
@@ -31,8 +32,20 @@
 
 /* One scratch buffer: every caller runs from the single cooperative loop, one
  * at a time, and each fills and consumes it within the call. Static because
- * core0's stack is small and this is on the deepest path it has. */
-static char out_buf[2048];
+ * core0's stack is small and this is on the deepest path it has.
+ *
+ * Sized to WS_TX_MAX, because this holds the whole framed reply -- envelope
+ * plus result. Undersizing it truncates a large result mid-JSON, which reaches
+ * the client as a parse error rather than as anything that points at the
+ * cause; a scan listing found the edge immediately. */
+static char out_buf[WS_TX_MAX];
+static char scratch[WS_TX_MAX - 256];
+
+char  *api_scratch(void)      { return scratch; }
+size_t api_scratch_size(void) { return sizeof(scratch); }
+
+/* Results must leave room for the envelope around them. */
+_Static_assert(WS_TX_MAX >= 1024, "reply buffer too small for a GATT tree");
 
 size_t api_json_escape(char *dst, size_t cap, const char *src) {
     size_t n = 0;
@@ -168,8 +181,19 @@ void api_reply_err(api_reply_fn reply, void *ctx, long id, const char *code, con
 }
 
 void api_emit(const char *topic, const char *json) {
-    char line[1024];
-    snprintf(line, sizeof(line), "{\"evt\":\"%s\",\"data\":%s}", topic, json ? json : "null");
+    /* Static and full-size: a gatt.discovered for a device with a real service
+     * set runs to several kilobytes, and a 1 KB stack buffer here silently
+     * truncated it mid-string -- which reaches the browser as a JSON parse
+     * error with nothing pointing at the cause. */
+    static char line[WS_TX_MAX];
+    int n = snprintf(line, sizeof(line), "{\"evt\":\"%s\",\"data\":%s}",
+                     topic, json ? json : "null");
+    if (n < 0 || (size_t)n >= sizeof(line)) {
+        /* Say so rather than emit half an object. */
+        snprintf(line, sizeof(line),
+                 "{\"evt\":\"log\",\"data\":{\"level\":\"error\",\"message\":"
+                 "\"event %s dropped: %d bytes exceeds the frame buffer\"}}", topic, n);
+    }
     http_broadcast_line(line);
 }
 

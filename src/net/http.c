@@ -196,6 +196,15 @@ static bool copy_path_token(const char *p, char *out, size_t cap) {
  * asset. */
 #define CFG_PREFIX "cfg/"
 
+/* cfg/ is firmware-owned and never reachable from outside. staged/ is
+ * different: it is WRITABLE through the filesystem API on purpose, because
+ * that is how script source larger than a WebSocket frame gets to the device,
+ * streaming straight to flash. It must still never be served as a static
+ * asset, so static_req_name checks it separately. */
+static bool path_is_staged(const char *name) {
+    return strncmp(name, "staged/", 7) == 0;
+}
+
 static bool path_reserved(const char *name) {
     return strncmp(name, CFG_PREFIX, sizeof(CFG_PREFIX) - 1) == 0;
 }
@@ -269,7 +278,9 @@ static bool static_req_name(const char *path, char *out, size_t cap) {
     if (!copy_path_token(p, out, cap)) {
         return false;
     }
-    if (path_reserved(out)) {
+    /* staged/ is writable through the filesystem API but must not be servable:
+     * uploading a script should not publish it at a URL. */
+    if (path_reserved(out) || path_is_staged(out)) {
         return false;
     }
     return fs_valid_path(out);

@@ -22,6 +22,10 @@
  */
 
 #define UUID128_NONE 0xFF
+/* The pool ran out before this UUID could be stored. Rendered as such rather
+ * than as a plausible-looking 16-bit value, because a wrong UUID that looks
+ * right is worse than an obviously missing one. */
+#define UUID128_LOST 0xFE
 
 typedef struct {
     uint16_t uuid16;    /* meaningful when u128 == UUID128_NONE */
@@ -79,8 +83,16 @@ uuid_ref_t gattdb_intern(gattdb_t *db, uint16_t uuid16, const uint8_t *uuid128);
 /* Render a uuid_ref as "180f" or the full dashed 128-bit form. */
 size_t gattdb_uuid_str(const gattdb_t *db, uuid_ref_t u, char *dst, size_t cap);
 
-/* The whole tree, handle-free. */
+/* The whole tree, handle-free. Only safe for small devices -- see the summary
+ * and per-service forms below, which is what the API actually uses. */
 size_t gattdb_json(const gattdb_t *db, char *dst, size_t cap);
+
+/* Services with their characteristic counts, but no characteristics. Bounded
+ * by GATT_MAX_SVCS, so this always fits one frame however large the device. */
+size_t gattdb_summary_json(const gattdb_t *db, char *dst, size_t cap);
+
+/* One service in full. Returns 0 if there is no such index. */
+size_t gattdb_service_json(const gattdb_t *db, uint8_t svc_i, char *dst, size_t cap);
 
 /* Resolve "3", "3.2" or "3.2.1". Returns false when the path does not exist. */
 bool gattdb_resolve_chr(const gattdb_t *db, const char *path, uint8_t *svc_i, uint8_t *chr_i);

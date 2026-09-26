@@ -10,6 +10,7 @@
 #include "lua/lbind.h"
 #include "fs/fs.h"
 #include "api/api.h"
+#include "net/ws.h"
 #include "autoconf.h"
 #include "pico/time.h"
 
@@ -93,7 +94,9 @@ static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 #define NAME_MAX_LEN 32
 /* Matches the WebSocket receive buffer: a larger limit here could not be
  * reached over the wire anyway. */
-#define DRAFT_MAX 3800
+/* The cap on a whole draft, not on one frame. Held in the system heap, which
+ * has ~190 KB free, so this is generous without being reckless. */
+#define DRAFT_MAX 16384
 
 /* How many slices a script may burn without ever yielding on its own before it
  * is killed. At 20000 instructions a slice that is a lot of real work, so this
@@ -286,18 +289,38 @@ bool lrt_reload(const char *name, const char **err) {
 }
 
 /* --- drafts / staging / commit -------------------------------------------- */
-bool lrt_draft_set(const char *name, const char *src, size_t len, const char **err) {
-    if (len > DRAFT_MAX) { *err = "draft too large"; return false; }
+bool lrt_draft_chunk(const char *name, size_t offset, const char *src, size_t len,
+                     const char **err) {
+    if (offset + len > DRAFT_MAX) { *err = "draft exceeds DRAFT_MAX"; return false; }
     script_t *s = alloc_script(name);
     if (!s) { *err = "too many scripts"; return false; }
-    char *copy = malloc(len + 1);
-    if (!copy) { *err = "out of memory"; return false; }
-    memcpy(copy, src, len);
-    copy[len] = 0;
-    free(s->draft);
-    s->draft = copy;
-    s->draft_len = len;
+
+    if (offset == 0) {
+        free(s->draft);
+        s->draft = NULL;
+        s->draft_len = 0;
+    } else if (offset != s->draft_len) {
+        /* Refuse a gap rather than silently assembling corrupt source, which
+         * would surface later as a baffling syntax error. */
+        *err = "chunk offset does not continue the draft";
+        return false;
+    }
+    char *grown = realloc(s->draft, offset + len + 1);
+    if (!grown) { *err = "out of memory"; return false; }
+    memcpy(grown + offset, src, len);
+    grown[offset + len] = 0;
+    s->draft = grown;
+    s->draft_len = offset + len;
     return true;
+}
+
+bool lrt_draft_set(const char *name, const char *src, size_t len, const char **err) {
+    return lrt_draft_chunk(name, 0, src, len, err);
+}
+
+size_t lrt_draft_len(const char *name) {
+    script_t *s = find(name);
+    return s ? s->draft_len : 0;
 }
 
 static bool write_fs(const char *path, const char *data, size_t len, const char **err) {

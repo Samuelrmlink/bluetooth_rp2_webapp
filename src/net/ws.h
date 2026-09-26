@@ -6,8 +6,19 @@
  * where 512 bytes was ample -- and an oversized frame is silently DROPPED by
  * ws_encode_text_frame rather than truncated, which presents as an op that
  * simply never answers. */
+/* Frames must also fit lwIP's TCP send buffer (TCP_SND_BUF, 4 x MSS ~ 5.8 KB):
+ * tcp_write refuses anything larger and the frame is dropped whole, which
+ * presents as an op that never answers. So the API pages large results -- one
+ * GATT service at a time -- rather than this growing to match the biggest
+ * device. 4 KB comfortably holds a page and leaves room in the send buffer. */
 #define WS_TX_MAX 4096
-#define WS_RX_MAX 4096
+/* Per CONNECTION, so this is multiplied by HTTP_CONNS -- at 4 KB that was
+ * 32 KB of SRAM, more than the Lua arena's share and the single largest
+ * avoidable allocation in the firmware. An API request is a couple of hundred
+ * bytes; the only large inbound payload was script source, and that now goes
+ * through PUT /api/fs/staged/<name>.lua, which already streams to flash
+ * without buffering. */
+#define WS_RX_MAX 1024
 
 #include <stddef.h>
 #include <stdint.h>

@@ -54,6 +54,29 @@ class WS:
             ln = struct.unpack(">Q", self._need(8))[0]
         return self._need(ln).decode(errors="replace")
 
+    def draft(self, script, source, chunk=600, run=True):
+        """Push a Lua draft of any size. RAM only -- nothing is written to
+        flash, which is the point of the draft tier; chunking exists so that
+        stays true without needing a large per-connection receive buffer."""
+        off, last = 0, None
+        while off < len(source):
+            part = source[off:off + chunk]
+            final = (off + len(part)) >= len(source)
+            self.send({"id": 1, "op": "script.draft", "params": {
+                "script": script, "source": part, "offset": off,
+                "final": final, "run": run}})
+            while True:
+                r = self.recv(timeout=8)
+                if r is None:
+                    raise RuntimeError("no reply to draft chunk at %d" % off)
+                if r.startswith('{"id"'):
+                    last = json.loads(r)
+                    break
+            if not last.get("ok"):
+                return last
+            off += len(part)
+        return last
+
     def close(self):
         """Send a proper close frame. Without it the device holds the slot
         until keepalive expires, and a handful of test runs exhaust them."""
