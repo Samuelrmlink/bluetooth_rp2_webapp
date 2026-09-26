@@ -633,6 +633,11 @@ function M.run(addr, cfg)
   if not bt.subscribe(addr, link.tel, 'notify') then
     return nil, 'could not subscribe to the telemetry characteristic'
   end
+  -- Let the CCCD write land before sending anything. Without this the first
+  -- stage goes out before the charger has been told we want notifications,
+  -- its reply is dropped by the peer stack, and the symptom is a flat
+  -- "no reply to 0x0001" that looks like a dead device.
+  sys.sleep(400)
   bt.notify_flush()
 
   local ok, err = M.negotiate_only(link, cfg)

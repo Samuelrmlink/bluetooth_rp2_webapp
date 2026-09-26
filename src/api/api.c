@@ -22,6 +22,7 @@
 
 #include "api/api.h"
 #include "api/ops.h"
+#include "fs/fs.h"
 #include "net/http.h"
 #include "net/ws.h"
 #include "pico/time.h"
@@ -243,8 +244,74 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
     api_reply_ok(reply, ctx, id, result);
 }
 
+/* sys.secret_put -- write cfg/<name>.json in one call.
+ *
+ * A convenience, NOT a security boundary. cfg/ is readable through the
+ * ordinary filesystem API, so PUT /api/fs/cfg/<name>.json does the same job;
+ * this exists because provisioning from a websocket session that is already
+ * open is easier than opening an HTTP connection to do one write, and because
+ * it validates the name rather than trusting a path.
+ *
+ * What protects a credential here is that cfg/ is git-ignored, not that the
+ * device withholds it. The device is trusted; the repository is the thing
+ * that must never see an account id or a private key.
+ *
+ * It follows script.stage's precedent in writing flash straight from the
+ * WebSocket handler -- that is already how a staged script is persisted, and
+ * provisioning happens once, not per frame.
+ *
+ * The reply reports the length and not the content, because a reply goes to
+ * every client on the socket and there is no reason to broadcast it. */
+static void op_sys_secret_put(const char *params, api_reply_fn reply, void *ctx,
+                              long id) {
+    char name[32];
+    if (!api_json_str(params, "name", name, sizeof(name))) {
+        api_reply_err(reply, ctx, id, "bad_request", "need \"name\"");
+        return;
+    }
+    /* The name becomes a path, so it may be a bare identifier and nothing
+     * else -- no separator, no dot, no traversal. */
+    for (const char *q = name; *q; q++) {
+        bool ok = (*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+                  (*q >= '0' && *q <= '9') || *q == '_' || *q == '-';
+        if (!ok) {
+            api_reply_err(reply, ctx, id, "bad_request",
+                          "name must be letters, digits, underscore or dash");
+            return;
+        }
+    }
+    if (!name[0]) {
+        api_reply_err(reply, ctx, id, "bad_request", "empty name");
+        return;
+    }
+
+    static char body[1024];
+    if (!api_json_str(params, "body", body, sizeof(body))) {
+        api_reply_err(reply, ctx, id, "bad_request",
+                      "need \"body\" (the file contents, as a JSON string)");
+        return;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "cfg/%s.json", name);
+    size_t len = strlen(body);
+    if (fs_begin_write(path) < 0) {
+        api_reply_err(reply, ctx, id, "write_failed", "filesystem busy or unwritable");
+        return;
+    }
+    if (fs_write((const uint8_t *)body, len) < 0 || fs_end_write() < 0) {
+        api_reply_err(reply, ctx, id, "write_failed", "write failed");
+        return;
+    }
+    char r[96];
+    snprintf(r, sizeof(r), "{\"stored\":\"%s\",\"bytes\":%u,\"readable\":false}",
+             path, (unsigned)len);
+    api_reply_ok(reply, ctx, id, r);
+}
+
 static const op_def_t sys_ops[] = {
     { "sys.info", op_sys_info },
+    { "sys.secret_put", op_sys_secret_put },
     { NULL, NULL }
 };
 

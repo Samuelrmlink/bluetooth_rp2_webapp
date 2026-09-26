@@ -296,6 +296,29 @@ static int l_bt_devices(lua_State *L) {
         lua_pushinteger(L, d->rssi);          lua_setfield(L, -2, "rssi");
         lua_pushboolean(L, d->connected);     lua_setfield(L, -2, "connected");
         if (d->have_name) { lua_pushstring(L, d->name); lua_setfield(L, -2, "name"); }
+        /* The advertisement, which is what a profile matches on. Without this
+         * a script can only match on the name -- and a name is exactly what
+         * an Anker charger does not put its model in, so every match failed
+         * silently. */
+        if (d->have_mfg) {
+            char hex[2 * BT_MFG_MAX + 1];
+            for (uint8_t k = 0; k < d->mfg_len; k++) {
+                snprintf(hex + 2 * k, 3, "%02x", d->mfg[k]);
+            }
+            hex[2 * d->mfg_len] = 0;
+            lua_pushstring(L, hex);
+            lua_setfield(L, -2, "mfg_data");
+        }
+        if (d->have_uuids) {
+            lua_createtable(L, d->n_uuid16, 0);
+            for (uint8_t k = 0; k < d->n_uuid16; k++) {
+                char u[8];
+                snprintf(u, sizeof u, "%04x", d->uuid16[k]);
+                lua_pushstring(L, u);
+                lua_rawseti(L, -2, k + 1);
+            }
+            lua_setfield(L, -2, "service_uuids");
+        }
         lua_seti(L, -2, idx++);
     }
     return 1;

@@ -205,8 +205,21 @@ static bool path_is_staged(const char *name) {
     return strncmp(name, "staged/", 7) == 0;
 }
 
+/* cfg/ used to be refused outright by the filesystem API, on the reasoning
+ * that a credential should not be reachable over the network. That is no
+ * longer the policy: on a development bench the operator wants to read back
+ * what is provisioned, and the thing actually worth protecting is the git
+ * history, not the device. cfg/ is git-ignored and stays that way.
+ *
+ * Note what this now exposes: cfg/wifi.json holds the WiFi PSK, so anyone who
+ * can reach port 80 can read it. On a USB-NCM link or a trusted LAN that is
+ * the intended trade; on an untrusted network it is not.
+ *
+ * Still refused for STATIC serving -- see static_req_name -- because a config
+ * file should not be fetchable as a web asset at its bare path. */
 static bool path_reserved(const char *name) {
-    return strncmp(name, CFG_PREFIX, sizeof(CFG_PREFIX) - 1) == 0;
+    (void)name;
+    return false;
 }
 
 static bool fs_api_name(const char *path, char *out, size_t cap) {

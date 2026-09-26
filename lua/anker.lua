@@ -80,6 +80,21 @@ if not dev.connected then
     log.error('anker: connect failed')
     return
   end
-  sys.sleep(3000)   -- discovery has to finish before bt.find can resolve
 end
+
+-- Wait for DISCOVERY, not for a stopwatch. A fixed sleep is the classic way
+-- to write something that passes on the bench and fails on a busy radio or a
+-- slower peer; bt.find only resolves once the database is ready, so poll it.
+local deadline = sys.ms() + 15000
+local cmd
+repeat
+  cmd = bt.find(addr, a2687.SVC, a2687.CMD)
+  if not cmd then sys.sleep(250) end
+until cmd or sys.ms() > deadline
+if not cmd then
+  log.error('anker: the Anker service never appeared -- discovery did not finish')
+  return
+end
+log.info('anker: discovery ready')
+
 a2687.run(addr, cfg)

@@ -11,11 +11,23 @@ config LUA_ENABLE
 config LUA_HEAP_KB
     int "Lua arena (KB)"
     depends on LUA_ENABLE
-    default 96
+    default 128
     help
       A dedicated static arena, not the system heap, so a runaway script hits
       its own ceiling with an ordinary Lua out-of-memory error instead of
       starving lwIP or BTstack. Static so the link-time RAM check can see it.
+
+      Raised from 96 after measurement, not guesswork. COMPILING a module
+      costs far more than running it: the 28 KB A2687 profile peaks at 82 KB
+      of arena while the parser works, against about 14 KB once it is
+      resident. At 96 KB that loaded only into a completely empty arena and
+      failed with "not enough memory" the moment any other script was also
+      loaded -- which is the normal state of a board being worked on.
+
+      The cost is bss, which this part has to spare. If a future profile
+      approaches this again, the answer is to split it into modules rather
+      than to keep raising the ceiling: peak cost tracks the size of the
+      largest single chunk being compiled, not the total.
 
 config LUA_HOOK_BUDGET
     int "Instructions per scheduler slice before a script is forced to yield"
