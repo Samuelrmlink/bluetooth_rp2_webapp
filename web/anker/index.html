@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Anker</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="bar">
+  <span id="brand">Anker</span>
+  <nav id="appnav"></nav>
+  <span id="link" class="pill" data-state="down">connecting…</span>
+  <span id="fw" class="muted"></span>
+  <span class="spacer"></span>
+</header>
+
+<main id="solo">
+  <section class="pane pane-anker solo" id="pane-anker">
+    <div class="pane-tools">
+      <span id="a-state" class="pill" data-state="none">no data</span>
+      <span id="a-ident" class="muted"></span>
+      <span class="spacer"></span>
+      <strong id="a-total"></strong>
+      <button class="btn" id="a-refresh" title="ask the charger for a full report now">Refresh</button>
+      <button class="btn" id="a-raw-toggle" aria-pressed="false">Raw</button>
+    </div>
+    <div class="scroll">
+      <div id="a-ports" class="ports"></div>
+      <div class="kvbox"><div class="sub-head">settings</div><div id="a-settings"></div></div>
+      <div class="kvbox" hidden><div class="sub-head">tags this webapp does not know yet</div>
+        <div id="a-other"></div></div>
+      <pre id="a-raw" class="mono" hidden></pre>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/js/anker-app.js"></script>
+</body>
+</html>

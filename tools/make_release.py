@@ -37,8 +37,19 @@ ESBUILD = WEB / "node_modules" / ".bin" / "esbuild"
 # Plain-copy asset set (no --minify): every file that actually ships,
 # mirroring the source tree structure exactly so index.html's relative
 # script/link paths need no rewriting either way.
+# Every app's page is DISCOVERED, not listed: each webapp lives in its own
+# directory (web/anker/, web/script/, ...) and a new one must ship the moment
+# it exists, not when someone remembers to add it here. That is exactly the
+# kind of hand-kept list that silently drops a file.
+def _pages() -> list[str]:
+    pages = ["index.html"]
+    for p in sorted(WEB.glob("*/index.html")):
+        pages.append(f"{p.parent.name}/index.html")
+    return pages
+
+
 PLAIN_FILES = [
-    "index.html",
+    *_pages(),
     "css/style.css",
 ]
 # No vendored libraries. The GATT explorer needs no charting, and everything

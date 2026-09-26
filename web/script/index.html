@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Script</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="bar">
+  <span id="brand">Script</span>
+  <nav id="appnav"></nav>
+  <span id="link" class="pill" data-state="down">connecting…</span>
+  <span id="fw" class="muted"></span>
+  <span class="spacer"></span>
+</header>
+
+<main id="solo">
+  <section class="pane pane-script solo" id="pane-script">
+    <div class="pane-tools">
+      <select id="s-script" title="scripts the device knows about"></select>
+      <button class="btn" id="s-new">New</button>
+      <button class="btn" id="s-reload" title="re-read from the device">Load</button>
+      <span id="s-tier" class="pill" data-tier="">—</span>
+      <span class="spacer"></span>
+      <button class="btn" id="s-start">Start</button>
+      <button class="btn" id="s-stop">Stop</button>
+    </div>
+    <textarea id="s-src" class="code" spellcheck="false" autocapitalize="off"
+              autocomplete="off" placeholder="-- Lua. Draft runs it from RAM; flash is never touched."></textarea>
+    <div class="pane-tools">
+      <button class="btn" id="s-draft" title="run from RAM now — no flash write">Draft &amp; run</button>
+      <button class="btn" id="s-draft-only" title="upload to RAM without running">Draft</button>
+      <button class="btn" id="s-stage" title="persist to staged/ — survives reboot, original intact">Stage</button>
+      <button class="btn" id="s-commit" title="promote to lua/ — the real file">Commit</button>
+      <button class="btn" id="s-revert" title="drop the draft, else the staged copy">Revert</button>
+    </div>
+    <div id="s-stat" class="muted statline"></div>
+    <div class="split-v">
+      <div class="sub">
+        <div class="sub-head">errors <button class="tile-btn" id="s-errors-clear">clear</button></div>
+        <pre id="s-errors" class="scroll mono"></pre>
+      </div>
+      <div class="sub">
+        <div class="sub-head">eval — runs inside the script's environment</div>
+        <pre id="s-eval-out" class="scroll mono"></pre>
+        <input id="s-eval" class="mono" placeholder="return tlv.parse(last).a5.value" spellcheck="false">
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/js/script-app.js"></script>
+</body>
+</html>

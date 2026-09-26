@@ -291,6 +291,15 @@ static bool static_req_name(const char *path, char *out, size_t cap) {
     if (!copy_path_token(p, out, cap)) {
         return false;
     }
+    /* "/anker/" and "/anker" name the same app. fs_valid_path rejects the
+     * empty final segment a trailing slash leaves behind, so strip it here --
+     * fs_api_name already does the same for its half of the URL space. The
+     * trailing-slash form is the one the app nav links to, so without this
+     * every link between apps 404s. */
+    size_t len = strlen(out);
+    while (len > 1 && out[len - 1] == '/') {
+        out[--len] = 0;
+    }
     /* staged/ is writable through the filesystem API but must not be servable:
      * uploading a script should not publish it at a URL. */
     if (path_reserved(out) || path_is_staged(out)) {
@@ -305,11 +314,12 @@ static bool ends_with(const char *s, const char *suf) {
     return n >= m && strcmp(s + n - m, suf) == 0;
 }
 
-static bool resolve_static(const char *req, char *name, size_t cap, bool *gzipped) {
-    *gzipped = false;
-    size_t n = strlen(req);
-    if (!ends_with(req, ".gz") && n + 4 < cap) {
-        memcpy(name, req, n);
+/* Try "<base>.gz" before "<base>", because the .gz is what is actually
+ * shipped -- make_release.py stores only the compressed copy. */
+static bool try_file(const char *base, char *name, size_t cap, bool *gzipped) {
+    size_t n = strlen(base);
+    if (!ends_with(base, ".gz") && n + 4 < cap) {
+        memcpy(name, base, n);
         memcpy(name + n, ".gz", 4);
         if (fs_stat(name, NULL)) {
             *gzipped = true;
@@ -319,8 +329,33 @@ static bool resolve_static(const char *req, char *name, size_t cap, bool *gzippe
     if (n >= cap) {
         return false;
     }
-    memcpy(name, req, n + 1);
-    return fs_stat(name, NULL);
+    memcpy(name, base, n + 1);
+    if (fs_stat(name, NULL) && !fs_is_dir(name)) {
+        *gzipped = false;
+        return true;
+    }
+    return false;
+}
+
+static bool resolve_static(const char *req, char *name, size_t cap, bool *gzipped) {
+    *gzipped = false;
+    if (try_file(req, name, cap, gzipped)) {
+        return true;
+    }
+    /* A DIRECTORY serves its index.html, so each webapp can live in its own
+     * folder and be reached at /anker/ or /pinecil/ rather than every app
+     * sharing one page. Both "/anker" and "/anker/" land here. */
+    char idx[FS_PATH_MAX + 1];
+    size_t n = strlen(req);
+    if (n == 0 || n + 12 >= sizeof(idx)) {
+        return false;
+    }
+    int w = snprintf(idx, sizeof(idx), "%s%sindex.html", req,
+                     req[n - 1] == '/' ? "" : "/");
+    if (w <= 0 || (size_t)w >= sizeof(idx)) {
+        return false;
+    }
+    return try_file(idx, name, cap, gzipped);
 }
 
 static const char *mime_of(const char *name) {

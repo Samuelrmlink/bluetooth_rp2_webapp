@@ -7,8 +7,7 @@ import { WsApi } from './wsapi.js';
 import { DeviceStore, uuidLabel, hexToAscii, shortUuid } from './gattdb.js';
 import { Layout } from './tiles.js';
 import { LayoutManager } from './layout.js';
-import { mountScriptPane } from './panes/script.js';
-import { mountAnkerPane } from './panes/anker.js';
+import { mountAppNav } from './appnav.js';
 
 const $ = (id) => document.getElementById(id);
 const api = new WsApi();
@@ -174,8 +173,6 @@ const PANES = [
   { id: 'devices', title: 'Devices',        el: $('pane-devices') },
   { id: 'tree',    title: 'GATT Tree',      el: $('pane-tree') },
   { id: 'char',    title: 'Characteristic', el: $('pane-char') },
-  { id: 'anker',   title: 'Anker',          el: $('pane-anker') },
-  { id: 'script',  title: 'Script',         el: $('pane-script') },
   { id: 'log',     title: 'Log',            el: $('pane-log') },
 ];
 
@@ -216,10 +213,9 @@ const lm = new LayoutManager({
   },
 });
 
-/* Panes that own their own state mount once and manage themselves; renderAll
- * is only for the ones driven by the shared device store. */
-const scriptPane = mountScriptPane({ api, log });
-const ankerPane = mountAnkerPane({ api, log });
+/* Anker and Script are separate apps now -- /anker/ and /script/ -- so this
+ * page is only the generic explorer. */
+mountAppNav('explorer');
 
 /* LayoutManager's constructor builds the tab bar and wires events but does
  * NOT lay the tiles out -- apply() does, and nothing called it, so the page
