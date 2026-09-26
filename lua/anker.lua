@@ -48,18 +48,12 @@ local function load_cfg()
   }
 end
 
--- The A2687 advertises 0xFF09 in its MANUFACTURER DATA. Do not try to match
--- on 8c850001: that is a GATT service UUID and is invisible until after the
--- connection, so a scan filtered on it finds nothing, every time.
+-- Find the charger in the scan table. Match on the PRODUCT TYPE in the
+-- manufacturer data, not on the name: the advertised name is the unit's
+-- serial number, so "A2687" never appears in it.
 local function find_charger()
   for _, d in ipairs(bt.devices()) do
-    if d.connected and d.name and d.name:match('^A2687') then return d.addr end
-  end
-  for _, d in ipairs(bt.devices()) do
-    if d.connected then
-      -- Fall back to anything that actually exposes the Anker service.
-      if bt.find(d.addr, a2687.SVC, a2687.CMD) then return d.addr end
-    end
+    if a2687.matches(d) then return d.addr, d end
   end
   return nil
 end
@@ -71,11 +65,21 @@ if not cfg then
 end
 
 log.info('anker: waiting for a connected charger')
-local addr
+local addr, dev
 repeat
-  addr = find_charger()
+  addr, dev = find_charger()
   if not addr then sys.sleep(500) end
 until addr
 
-log.info('anker: found ' .. addr)
+local adv = a2687.decode_adv(dev.mfg_data)
+log.info(('anker: found %s (%s, sku %s, %s)'):format(
+  addr, adv.product_type, adv.sku, adv.bound and 'bound' or 'unbound'))
+if not dev.connected then
+  log.info('anker: connecting')
+  if not bt.connect(addr) then
+    log.error('anker: connect failed')
+    return
+  end
+  sys.sleep(3000)   -- discovery has to finish before bt.find can resolve
+end
 a2687.run(addr, cfg)

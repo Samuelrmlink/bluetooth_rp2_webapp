@@ -47,13 +47,79 @@ be reading when one of them bites.
 local M = {}
 
 -- ---------------------------------------------------------------------------
--- GATT addressing. Never filter a SCAN on these: 8c850001 is a GATT service
--- UUID and is only visible after connecting. The advertisement carries 0xFF09
--- in its manufacturer data, which is a different thing and does filter.
+-- GATT addressing. NEVER filter a scan on these. 8c850001 is a GATT service
+-- UUID and is invisible until after the connection, so a scan filtered on it
+-- finds nothing, every time.
+--
+-- THREE DIFFERENT THINGS SHARE THE DIGITS FF09 AND NONE OF THEM IS ANOTHER:
+--
+--   AD type 0x03 (Complete List of 16-bit Service Class UUIDs) carries the
+--   value 0xFF09, on air as the bytes 09 ff. THIS is what is advertised and
+--   what a scan can filter on.
+--
+--   AD type 0xFF (Manufacturer Specific Data) is a separate structure in the
+--   same advertisement. Its first two octets are the Company Identifier,
+--   0xFFFF -- the reserved "no company" value, which every current Anker
+--   device uses, so it identifies nothing. Our scanner reports mfg_data
+--   INCLUDING those two octets, which is why decode_adv strips them: leave
+--   them on and byte[0] reads 0xFF and the MAC and product code come out as
+--   nonsense.
+--
+--   FF 09 is also the first two bytes of every protocol frame, at a layer
+--   that has nothing to do with advertising. Reusing the number was surely
+--   deliberate; treating the three as one thing is how you lose a day.
 -- ---------------------------------------------------------------------------
 M.SVC    = '8c850001-0302-41c5-b46e-cf057c562025'
 M.CMD    = '8c850002-0302-41c5-b46e-cf057c562025'   -- write
 M.TEL    = '8c850003-0302-41c5-b46e-cf057c562025'   -- notify
+
+M.ADV_UUID16 = 'ff09'          -- advertised, filterable
+M.PRODUCT_TYPE = 'B405'        -- this model. B105 is the C1000.
+
+-- ---------------------------------------------------------------------------
+-- Advertisement decode.
+--
+-- Every current Anker device uses company id 0xFFFF -- the reserved "no
+-- company" value -- so the company id identifies nothing. The model lives in
+-- the two bytes at [8:10] of the payload AFTER the company id is stripped,
+-- read as four hex characters. Confirmed on the bench against this unit:
+--
+--   ffff 02 7ce913601fd8 02 b405 444a5736 04
+--   |    |  |            |  |    |        capability, bit 2 = AES-GCM capable
+--   |    |  |            |  |    sku "DJW6" (4 ASCII chars, because v2)
+--   |    |  |            |  productType B405
+--   |    |  |            bindType 2 = already bound to an account
+--   |    |  BLE MAC, in order
+--   |    versionCode 2  (v1 has a 3-char sku, so capability shifts one left)
+--   company id
+-- ---------------------------------------------------------------------------
+function M.decode_adv(mfg_hex)
+  if not mfg_hex or #mfg_hex < 20 then return nil end
+  local m = bytes.unhex(mfg_hex)
+  if not m or #m < 10 then return nil end
+  if m:byte(1) ~= 0xff or m:byte(2) ~= 0xff then return nil end
+  local p = m:sub(3)
+  local ver = p:byte(1)
+  local sku_len = (ver == 2) and 4 or 3
+  local cap_at = 10 + sku_len + 1
+  return {
+    version = ver,
+    mac = (('%02X:%02X:%02X:%02X:%02X:%02X')
+             :format(p:byte(2), p:byte(3), p:byte(4), p:byte(5), p:byte(6), p:byte(7))),
+    bound = p:byte(8) == 2,
+    product_type = ('%02X%02X'):format(p:byte(9), p:byte(10)),
+    sku = p:sub(11, 10 + sku_len),
+    -- Absent when the payload is short, which happens; do not assume it.
+    gcm = (#p >= cap_at) and ((p:byte(cap_at) & 0x04) ~= 0) or nil,
+  }
+end
+
+-- True when this scan record is an A2687. Matching on the ADVERTISED name is
+-- wrong: the name is the unit's SERIAL (ASHDJW...), not the model.
+function M.matches(dev)
+  local a = M.decode_adv(dev.mfg_data)
+  return a ~= nil and a.product_type == M.PRODUCT_TYPE
+end
 
 -- ---------------------------------------------------------------------------
 -- Negotiation cipher constants.
@@ -283,7 +349,12 @@ end
 -- ---------------------------------------------------------------------------
 -- The handshake. Five negotiation stages, then ECDH, then the auth burst.
 -- ---------------------------------------------------------------------------
-function M.negotiate(link, cfg)
+-- Stages 1-5 plus the ECDH. NOTHING here needs a credential: the five
+-- negotiation payloads carry an epoch and our public key and nothing else.
+-- That is why this is split out -- it means the entire session-key path can
+-- be proven against real hardware with no account and no secrets, and only
+-- the auth burst below has to wait for them.
+function M.negotiate_only(link, cfg)
   local e = now_epoch()
 
   -- 1  startConnect
@@ -341,23 +412,36 @@ function M.negotiate(link, cfg)
   link.session = { key = Z:sub(1, 16), nonce = Z:sub(17, 28) }
   log.info('a2687: session established with ' .. (link.serial or link.addr))
 
-  -- ---- the auth burst. Gated on each ACK rather than blasted: we do not yet
-  -- know whether the charger needs pacing, and gating tells us WHICH frame
-  -- failed instead of leaving a silent stall.
-  local e2 = now_epoch() + 2
-
-  -- 0x0022 getAesKey. tzOffset is NEGATED seconds (CDT -> 18000).
-  ok, err = link:cmd_gcm(FT_ZX, 0x0022, tlv.build{
-    { tag = 0xa1, enc = 'bytes', value = le32(e2), type_byte = false },
-    { tag = 0xa3, enc = 'bytes', value = le32((-(cfg.tz_offset_sec or 0)) & 0xffffffff),
-      type_byte = false },
+  -- 0x0022 getAesKey is the FIRST frame under the session key, and it needs no
+  -- credential -- only a timezone. That makes it the proof that the ECDH and
+  -- the key/nonce slicing are right: a wrong Z produces a frame the charger
+  -- cannot read, and it answers with one of the canned NAK constants instead
+  -- of a status-0 0x0822. Doing it here rather than in the auth burst means
+  -- the whole key path can be verified against real hardware with no account.
+  --
+  -- tzOffset is NEGATED seconds (US Central -> 18000).
+  local ok22, err22 = link:cmd_gcm(FT_ZX, 0x0022, tlv.build{
+    { tag = 0xa1, enc = 'bytes', value = le32(now_epoch() + 2), type_byte = false },
+    { tag = 0xa3, enc = 'bytes',
+      value = le32((-(cfg.tz_offset_sec or 0)) & 0xffffffff), type_byte = false },
     { tag = 0xa5, enc = 'bytes', value = cfg.tz or 'UTC0', type_byte = false },
   }, 0x0822)
-  if not ok then return nil, err end
+  if not ok22 then return nil, 'session key rejected: ' .. tostring(err22) end
+  log.info('a2687: session key accepted (0x0822 ok)')
+  return true
+end
 
-  -- 0x0027 getAuthentication. The 40-char userId; no password.
+-- The post-auth burst. Everything from here needs the 40-character account
+-- id. Gated on each ACK rather than blasted: we do not yet know whether the
+-- charger needs pacing, and gating tells us WHICH frame failed instead of
+-- leaving a silent stall.
+function M.authenticate(link, cfg)
   local uid = cfg.user_id
   if not uid or #uid ~= 40 then return nil, 'cfg/anker.json has no 40-character user_id' end
+  local ok, err
+  local e2 = now_epoch() + 2
+
+  -- 0x0027 getAuthentication. The 40-char userId; no password.
   ok, err = link:cmd_gcm(FT_ZX, 0x0027, tlv.build{
     { tag = 0xa1, enc = 'bytes', value = le32(e2), type_byte = false },
     { tag = 0xa2, enc = 'bytes', value = uid,      type_byte = false },
@@ -551,7 +635,8 @@ function M.run(addr, cfg)
   end
   bt.notify_flush()
 
-  local ok, err = M.negotiate(link, cfg)
+  local ok, err = M.negotiate_only(link, cfg)
+  if ok then ok, err = M.authenticate(link, cfg) end
   if not ok then
     log.error('a2687: ' .. tostring(err))
     return nil, err

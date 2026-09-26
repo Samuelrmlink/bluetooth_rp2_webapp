@@ -161,6 +161,27 @@ eq('a9 backlight', d.backlight_pct, 80)
 eq('ac cableInfo 3 means nothing plugged', d.c1_control and d.c1_control.cable, 'none')
 eq('ac switch is on', d.c1_control and d.c1_control.on, true)
 
+print('\n== advertisement decode (captured from the bench unit) ==')
+-- Real bytes off the air, 2026-09-26. The company id is 0xFFFF on every
+-- current Anker device, so the model is the productType at [8:10].
+local adv = a.decode_adv('ffff027ce913601fd802b405444a573604')
+eq('adv version', adv and adv.version, 2)
+eq('adv mac', adv and adv.mac, '7C:E9:13:60:1F:D8')
+eq('adv bound', adv and adv.bound, true)
+eq('adv productType is the model', adv and adv.product_type, 'B405')
+eq('adv sku is 4 chars on v2', adv and adv.sku, 'DJW6')
+eq('adv capability bit 2 = AES-GCM', adv and adv.gcm, true)
+eq('matches() accepts the A2687', a.matches({ mfg_data = 'ffff027ce913601fd802b405444a573604' }), true)
+-- A C1000 (B105) must NOT match this profile.
+eq('matches() rejects a C1000', a.matches({ mfg_data = 'ffff027ce913601fd802b105444a573604' }), false)
+eq('matches() rejects a non-Anker advert', a.matches({ mfg_data = '4c0012020001' }), false)
+eq('matches() survives no mfg data at all', a.matches({}), false)
+-- v1 puts capability one byte earlier, because its sku is 3 chars not 4.
+-- v1: 3-char sku, so 14 bytes total against v2's 15.
+local v1 = a.decode_adv('ffff017ce913601fd800b405444a5704')
+eq('adv v1 sku is 3 chars', v1 and v1.sku, 'DJW')
+eq('adv v1 unbound', v1 and v1.bound, false)
+
 -- ---------------------------------------------------------------------------
 print(('\n%d checks, %d failed'):format(checks, fails))
 return fails == 0 and 0 or 1

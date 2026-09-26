@@ -338,9 +338,27 @@ static int l_require(lua_State *Ls) {
     return 1;
 }
 
+/* Drop every cached module.
+ *
+ * Without this, require() defeats the draft tier for the one file you are
+ * actually editing: push a new profile, restart the script, and the OLD
+ * module is still what runs, because it is cached. That was not theoretical
+ * -- it cost a confusing hardware run where a freshly uploaded profile
+ * appeared to ignore a step that had just been added to it.
+ *
+ * Called on every script load, so "push and restart" means what it looks
+ * like. Modules another script already holds a reference to are unaffected;
+ * this only decides what the NEXT require reads. */
+static void flush_modules(void) {
+    if (!L) { return; }
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, MODULE_CACHE);
+}
+
 /* --- start / stop --------------------------------------------------------- */
 static bool load_tier(script_t *s, const char *src, size_t len, const char *tier,
                       const char **err) {
+    flush_modules();
     char chunkname[48];
     snprintf(chunkname, sizeof(chunkname), "@%s(%s)", s->name, tier);
     if (luaL_loadbuffer(L, src, len, chunkname) != LUA_OK) {
