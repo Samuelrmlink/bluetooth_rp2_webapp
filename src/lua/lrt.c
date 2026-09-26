@@ -92,11 +92,21 @@ static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 /* --- state --------------------------------------------------------------- */
 #define MAX_SCRIPTS 8
 #define NAME_MAX_LEN 32
-/* Matches the WebSocket receive buffer: a larger limit here could not be
- * reached over the wire anyway. */
-/* The cap on a whole draft, not on one frame. Held in the system heap, which
- * has ~190 KB free, so this is generous without being reckless. */
-#define DRAFT_MAX 16384
+/* The cap on a whole draft, and on one module's source, not on one frame --
+ * script.draft arrives in chunks precisely so the WebSocket receive buffer
+ * does not have to be this large.
+ *
+ * 32 KB rather than 16: a real device profile is not small. The A2687's is
+ * about 24 KB, most of it the comments that make it the protocol's
+ * documentation, and at 16 KB it could be uploaded to the filesystem and then
+ * not loaded -- which failed as "module not found", a thoroughly misleading
+ * way to say "too big". The buffer is static so the link-time RAM check sees
+ * it, and 16 KB more of ~180 KB free is affordable.
+ *
+ * The real fix is a streaming loader: lua_load with a reader would bound
+ * module size by flash rather than by RAM. Worth doing when a profile
+ * approaches this ceiling rather than pre-emptively. */
+#define DRAFT_MAX 32768
 
 /* How many slices a script may burn without ever yielding on its own before it
  * is killed. At 20000 instructions a slice that is a lot of real work, so this
@@ -152,7 +162,43 @@ static script_t *alloc_script(const char *name) {
 
 /* --- the instruction budget ----------------------------------------------
  * The backstop against a script that never yields. It must exist before the
- * first script is written, not after the first lockup. */
+ * first script is written, not after the first lockup.
+ *
+ * The count alone is not enough, and the gap is not theoretical. lua_sethook
+ * counts VM instructions, and a C function is ONE instruction that cannot be
+ * preempted, so a loop whose body is mostly a slow binding executes very few
+ * VM instructions per unit of wall time. Measured: `while ... crypto.ecdh()`
+ * held the whole cooperative loop for 3 seconds -- USB, lwIP and BTstack with
+ * it -- and this hook never once fired, because 76 iterations is nowhere near
+ * the 20000-instruction budget.
+ *
+ * So the hook also watches the clock. It still cannot interrupt the C call in
+ * progress, but it fires on the first VM instruction after it, which bounds
+ * the damage to one call instead of a whole loop of them. */
+#define SLICE_MAX_MS 25
+
+static uint32_t s_slice_start_ms;
+static uint32_t s_slice_overruns;
+static lua_State *s_current_co;   /* whoever lrt_tick is resuming right now */
+
+static void hook(lua_State *co, lua_Debug *ar);
+
+/* Called BY an expensive C binding, just before it returns.
+ *
+ * A C function cannot be preempted, so the only way to bound the damage from
+ * a slow one is to give the loop control the instant it finishes. Arming the
+ * hook for a single instruction does exactly that: the very next VM
+ * instruction after the binding returns forces a yield. lrt_tick restores the
+ * normal budget on the next resume.
+ *
+ * The result is that `while true do crypto.ecdh() end` costs the loop ONE
+ * call, not an unbounded run of them -- which is what it cost before, because
+ * 20000 VM instructions is over a thousand iterations and forty seconds of
+ * wall time. */
+void lrt_yield_soon(void) {
+    if (s_current_co) { lua_sethook(s_current_co, hook, LUA_MASKCOUNT, 1); }
+}
+
 static void hook(lua_State *co, lua_Debug *ar) {
     (void)ar;
     /* Inside a coroutine this yields; the scheduler resumes it next pass, so
@@ -179,6 +225,9 @@ static bool read_fs(const char *path, char *buf, size_t cap, size_t *out_len) {
     return true;
 }
 
+/* Shared by script loading and by require(). Safe because luaL_loadbuffer
+ * compiles out of it immediately: by the time a chunk RUNS and can require
+ * something else, its own source is no longer needed. */
 static char src_buf[DRAFT_MAX + 1];
 
 /* Returns the tier the source came from, or NULL when there is none. */
@@ -191,6 +240,102 @@ static const char *resolve_src(script_t *s, const char *name,
     snprintf(path, sizeof(path), "lua/%s.lua", name);
     if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return "committed"; }
     return NULL;
+}
+
+/* --- require --------------------------------------------------------------
+ * A protocol layer outgrows one file quickly -- a profile, its field
+ * dictionary, shared helpers -- and without require the only way to split it
+ * is to paste. So module resolution goes through the SAME draft -> staged ->
+ * committed overlay a script does, which is what makes a multi-file profile
+ * editable from the browser with no flash write.
+ *
+ * Lua's own require is not available: package and loadlib are not compiled
+ * in, deliberately, because they would reach a real filesystem and a real
+ * dlopen. This is a replacement, not a wrapper.
+ *
+ * A dot in the name is a directory separator, so require 'profiles.acme' is
+ * lua/profiles/acme.lua. Modules are cached in a registry table, so a module
+ * required twice is loaded once -- and so a module CHANGED on the device is
+ * not reloaded until the runtime restarts the script that required it, which
+ * is the same rule scripts themselves follow.
+ *
+ * A module gets the caller's environment, so it sees the same bindings and
+ * cannot reach another script's globals. */
+#define MODULE_CACHE "btgw.modules"
+
+static bool read_module_src(const char *name, const char **src, size_t *len) {
+    /* dots -> slashes, and nothing else: no "..", no leading slash, so a
+     * module name cannot climb out of lua/. */
+    char rel[64];
+    size_t j = 0;
+    for (size_t i = 0; name[i] && j + 1 < sizeof rel; i++) {
+        char ch = name[i];
+        if (ch == '.') { ch = '/'; }
+        if (ch == '/' && (j == 0 || rel[j - 1] == '/')) { return false; }
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '/')) {
+            return false;
+        }
+        rel[j++] = ch;
+    }
+    rel[j] = 0;
+    if (!j) { return false; }
+
+    char path[96];
+    snprintf(path, sizeof path, "staged/%s.lua", rel);
+    if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return true; }
+    snprintf(path, sizeof path, "lua/%s.lua", rel);
+    if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return true; }
+    return false;
+}
+
+static int l_require(lua_State *Ls) {
+    const char *name = luaL_checkstring(Ls, 1);
+
+    if (lua_getfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE) != LUA_TTABLE) {
+        lua_pop(Ls, 1);
+        lua_newtable(Ls);
+        lua_pushvalue(Ls, -1);
+        lua_setfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE);
+    }
+    if (lua_getfield(Ls, -1, name) != LUA_TNIL) { return 1; }   /* cached */
+    lua_pop(Ls, 1);
+
+    const char *src = NULL;
+    size_t len = 0;
+    if (!read_module_src(name, &src, &len)) {
+        return luaL_error(Ls, "module '%s' not found in staged/ or lua/", name);
+    }
+
+    char chunkname[80];
+    snprintf(chunkname, sizeof chunkname, "@%s", name);
+    if (luaL_loadbuffer(Ls, src, len, chunkname) != LUA_OK) {
+        return luaL_error(Ls, "module '%s': %s", name, lua_tostring(Ls, -1));
+    }
+
+    /* Run it in the CALLER's environment so a module sees the same bindings
+     * and the same sandbox as the script that asked for it. */
+    lua_Debug ar;
+    if (lua_getstack(Ls, 1, &ar) && lua_getinfo(Ls, "f", &ar)) {
+        if (lua_getupvalue(Ls, -1, 1)) {        /* pushes the caller's _ENV */
+            lua_remove(Ls, -2);                 /* drop the caller function */
+        } else {
+            lua_pop(Ls, 1);
+            lua_pushglobaltable(Ls);
+        }
+    } else {
+        lua_pushglobaltable(Ls);
+    }
+    lua_setupvalue(Ls, -2, 1);                  /* chunk's _ENV := that env */
+
+    lua_call(Ls, 0, 1);
+    if (lua_isnil(Ls, -1)) {
+        lua_pop(Ls, 1);
+        lua_pushboolean(Ls, 1);      /* a module that returns nothing is still loaded */
+    }
+    lua_pushvalue(Ls, -1);
+    lua_setfield(Ls, -3, name);      /* cache[name] = module */
+    return 1;
 }
 
 /* --- start / stop --------------------------------------------------------- */
@@ -406,7 +551,20 @@ void lrt_tick(void) {
         if (!co) { s->dead = true; continue; }
 
         int nres = 0;
+        /* Restore the ordinary budget: a binding may have armed a one-shot
+         * hook to hand control back after a slow call. */
+        lua_sethook(co, hook, LUA_MASKCOUNT, CONFIG_LUA_HOOK_BUDGET);
+        s_current_co = co;
+        s_slice_start_ms = to_ms_since_boot(get_absolute_time());
         int rc = lua_resume(co, L, 0, &nres);
+        s_current_co = NULL;
+        if ((uint32_t)(to_ms_since_boot(get_absolute_time()) - s_slice_start_ms)
+                > SLICE_MAX_MS) {
+            /* One slow C binding, not a loop of them: report but do not kill.
+             * A single P-256 operation is ~41 ms on this part and is a normal
+             * thing for a handshake to do. */
+            s_slice_overruns++;
+        }
         s->resumes++;
         if (rc == LUA_YIELD) {
             /* A yield carrying one integer is sys.sleep telling us when it
@@ -509,9 +667,11 @@ size_t lrt_list_json(char *dst, size_t cap) {
 
 size_t lrt_stats_json(char *dst, size_t cap) {
     return (size_t)snprintf(dst, cap,
-        "{\"arena_bytes\":%u,\"used\":%u,\"peak\":%u,\"hook_kills\":%lu,\"budget\":%d}",
+        "{\"arena_bytes\":%u,\"used\":%u,\"peak\":%u,\"hook_kills\":%lu,"
+        "\"budget\":%d,\"slice_overruns\":%lu,\"slice_max_ms\":%d}",
         (unsigned)ARENA_BYTES, (unsigned)heap_used, (unsigned)heap_peak,
-        (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET);
+        (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET,
+        (unsigned long)s_slice_overruns, SLICE_MAX_MS);
 }
 
 void lrt_init(void) {
@@ -530,9 +690,11 @@ void lrt_init(void) {
     luaL_requiref(L, LUA_COLIBNAME, luaopen_coroutine, 1); lua_pop(L, 1);
     luaL_requiref(L, LUA_UTF8LIBNAME, luaopen_utf8, 1); lua_pop(L, 1);
 
-    /* dofile/loadfile would reach a filesystem the sandbox does not expose. */
+    /* dofile/loadfile would reach a filesystem the sandbox does not expose.
+     * require is replaced rather than removed -- see l_require. */
     lua_pushnil(L); lua_setglobal(L, "dofile");
     lua_pushnil(L); lua_setglobal(L, "loadfile");
+    lua_pushcfunction(L, l_require); lua_setglobal(L, "require");
 
     lbind_open_all(L);
 

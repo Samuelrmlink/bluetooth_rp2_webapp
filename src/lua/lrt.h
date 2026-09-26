@@ -20,6 +20,14 @@ bool lrt_ready(void);
 /* Resume whatever is runnable, for at most one slice. Called once per pass. */
 void lrt_tick(void);
 
+/* For an expensive C binding to call just before it returns, so the main loop
+ * gets control back immediately instead of after the caller's next thousand
+ * VM instructions. A C function cannot be preempted by the instruction hook
+ * -- it is one instruction -- so without this a loop over a slow binding
+ * stalls USB, lwIP and BTstack for as long as it runs. Measured at 3 seconds
+ * for a loop over P-256, with the runaway killer never firing. */
+void lrt_yield_soon(void);
+
 /* --- script lifecycle ---------------------------------------------------- */
 /* Source resolution, in order: RAM draft, staged/<name>.lua, lua/<name>.lua.
  * A draft that fails to load falls back to the tier beneath and reports, so a

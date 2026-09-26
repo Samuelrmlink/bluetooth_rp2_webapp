@@ -21,6 +21,7 @@
 #include "api/api.h"
 #include "api/ops.h"
 #include "bt/registry.h"
+#include "fs/fs.h"
 #include "pico/time.h"
 #include "autoconf.h"
 
@@ -202,6 +203,68 @@ size_t lbind_ops_json(char *dst, size_t cap) {
 }
 
 /* --- sys ------------------------------------------------------------------ */
+/* --- sys.secret ------------------------------------------------------------
+ * Read one string field out of a JSON file in cfg/.
+ *
+ * A device protocol needs per-deployment values that must never be compiled
+ * in or committed: an account identifier, a private key, a token. They live
+ * in cfg/<name>.json, which is git-ignored and which the HTTP filesystem API
+ * refuses to serve, so this binding is the only way to reach them -- and it
+ * is why no profile has to carry a secret in its source.
+ *
+ * It is deliberately narrow: `name` may not contain a path separator or a
+ * dot, so the path is always exactly cfg/<name>.json and cannot be steered
+ * anywhere else. It reads only top-level string fields, which is all a
+ * credential ever is, and it is a READ -- there is no way to set a secret
+ * from a script.
+ *
+ * Any script can call it. That is the intent: scripts are code the operator
+ * uploaded, not untrusted input, and a profile that cannot reach its own
+ * credentials is useless. It is worth knowing rather than discovering. */
+static int l_sys_secret(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    const char *key = luaL_checkstring(L, 2);
+    for (const char *p = name; *p; p++) {
+        if (*p == '/' || *p == '\\' || *p == '.') {
+            return luaL_error(L, "secret file name may not contain a path");
+        }
+    }
+    char path[48];
+    snprintf(path, sizeof path, "cfg/%s.json", name);
+
+    static char buf[1024];
+    size_t sz = 0;
+    if (!fs_stat(path, &sz) || sz >= sizeof buf) {
+        lua_pushnil(L);
+        lua_pushfstring(L, "%s is missing or too large", path);
+        return 2;
+    }
+    int h = fs_begin_read(path, NULL);
+    if (h < 0) { lua_pushnil(L); lua_pushstring(L, "cannot open"); return 2; }
+    int n = fs_read(h, (uint8_t *)buf, sz);
+    fs_end_read(h);
+    if (n < 0) { lua_pushnil(L); lua_pushstring(L, "read failed"); return 2; }
+    buf[n] = 0;
+
+    /* "key" : "value" -- enough JSON for a flat credential file, and it does
+     * not pretend to be more. Escapes are not interpreted: a credential that
+     * needs one is a credential that should be hex. */
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\"", key);
+    const char *k = strstr(buf, needle);
+    if (!k) { lua_pushnil(L); return 1; }
+    const char *v = strchr(k + strlen(needle), ':');
+    if (!v) { lua_pushnil(L); return 1; }
+    v++;
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') { v++; }
+    if (*v != '"') { lua_pushnil(L); return 1; }
+    v++;
+    const char *end = strchr(v, '"');
+    if (!end) { lua_pushnil(L); return 1; }
+    lua_pushlstring(L, v, (size_t)(end - v));
+    return 1;
+}
+
 static int l_sys_ms(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)to_ms_since_boot(get_absolute_time()));
     return 1;
@@ -455,7 +518,8 @@ void lbind_open_all(lua_State *L) {
     set_table(L, "ops", ops);
 
     static const luaL_Reg sys[] = {
-        { "ms", l_sys_ms }, { "sleep", l_sys_sleep }, { NULL, NULL } };
+        { "ms", l_sys_ms }, { "sleep", l_sys_sleep },
+        { "secret", l_sys_secret }, { NULL, NULL } };
     set_table(L, "sys", sys);
 
 #if CONFIG_BT_LE

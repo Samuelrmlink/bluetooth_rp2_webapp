@@ -25,6 +25,7 @@
 #if CONFIG_PROTO_ANKER_CRYPTO
 #include "crypto/anker_crypto.h"
 #include "crypto/ghash.h"
+#include "lua/lrt.h"
 #endif
 
 /* The parse scratch. 96 items at ~40 bytes each is nearly 4 KB, which is more
@@ -382,7 +383,9 @@ static const uint8_t *checkbuf(lua_State *L, int idx, size_t want, size_t *got) 
 static int l_crypto_pubkey(lua_State *L) {
     const uint8_t *d = checkbuf(L, 1, 32, NULL);
     uint8_t xy[64];
-    if (anker_pubkey_xy(d, xy) != 0) { lua_pushnil(L); lua_pushstring(L, "bad private key"); return 2; }
+    int rc = anker_pubkey_xy(d, xy);
+    lrt_yield_soon();          /* ~41 ms of uninterruptible C; see lrt.h */
+    if (rc != 0) { lua_pushnil(L); lua_pushstring(L, "bad private key"); return 2; }
     lua_pushlstring(L, (const char *)xy, 64);
     return 1;
 }
@@ -392,7 +395,9 @@ static int l_crypto_ecdh(lua_State *L) {
     size_t pn = 0;
     const uint8_t *peer = checkbuf(L, 2, 0, &pn);
     uint8_t Z[32];
-    if (anker_ecdh_z(d, peer, pn, Z) != 0) { lua_pushnil(L); lua_pushstring(L, "ecdh failed"); return 2; }
+    int rc = anker_ecdh_z(d, peer, pn, Z);
+    lrt_yield_soon();          /* ~41 ms of uninterruptible C; see lrt.h */
+    if (rc != 0) { lua_pushnil(L); lua_pushstring(L, "ecdh failed"); return 2; }
     lua_pushlstring(L, (const char *)Z, 32);
     return 1;
 }

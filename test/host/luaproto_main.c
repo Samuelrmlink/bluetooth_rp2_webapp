@@ -19,6 +19,12 @@
 
 void lbind_proto_open(lua_State *L);
 
+/* The bindings hand control back to the cooperative scheduler after a slow
+ * call. There is no scheduler here and nothing else waiting on the loop, so
+ * on the host this is a no-op -- but it must exist, or the harness would not
+ * link and the tests would silently stop covering the real binding. */
+void lrt_yield_soon(void) { }
+
 /* sys.ms() is the only thing the profile needs from the runtime that the
  * harness has to stand in for. Monotonic milliseconds is all it promises. */
 #include <time.h>
