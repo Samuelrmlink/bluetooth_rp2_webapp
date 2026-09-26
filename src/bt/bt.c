@@ -17,6 +17,7 @@
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
 #include "bt/le/bond.h"
+#include "bt/le/gattserver.h"
 #include "autoconf.h"
 
 static btstack_packet_callback_registration_t hci_cb;
@@ -62,6 +63,9 @@ void bt_init(void) {
     sm_init();
     /* SM configuration belongs to bond.c, which owns the policy. */
     gatt_client_init();
+    /* A peer can query US over the same connection; without a local database
+     * those reads fail. See src/bt/le/gattserver.c. */
+    gatt_server_init(CONFIG_NET_HOSTNAME);
 
     bt_registry_reset();
     le_central_init();

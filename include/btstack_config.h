@@ -25,7 +25,12 @@
 /* 517 is the largest ATT MTU that fits an LE Data Length Extension PDU, and
  * some peripherals negotiate right up to it. Anker's answer 253, but the point
  * of this firmware is that it works with peripherals we have never seen. */
-#define MAX_ATT_DB_SIZE 0
+/* Room for the LOCAL ATT database, which att_db_util builds at RUNTIME rather
+ * than compile_gatt.py building it at compile time. A central still needs one:
+ * the peer can act as a GATT client over the same connection and read our GAP
+ * service, and some stacks (Apple's notably) do exactly that. Building it at
+ * runtime is also what lets a Lua script declare services without a reflash. */
+#define MAX_ATT_DB_SIZE 1024
 #define NVM_NUM_DEVICE_DB_ENTRIES 16
 #define NVM_NUM_LINK_KEYS 16
 
