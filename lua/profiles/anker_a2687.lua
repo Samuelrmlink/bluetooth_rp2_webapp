@@ -265,7 +265,10 @@ function Link:await(opcode, timeout_ms)
   local deadline = sys.ms() + (timeout_ms or 3000)
   repeat
     local n = bt.notify_take()
-    if n and n.id == self.tel then
+    -- Read results share this inbox now (the Pinecil has no notify
+    -- characteristic and can only be polled), so ignore anything that is not
+    -- the device talking on its own.
+    if n and n.id == self.tel and n.source ~= 'read' then
       local f = frame.parse(n.value)
       if f then
         if not f.checksum_ok then

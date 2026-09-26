@@ -164,13 +164,150 @@ static int l_ops_register(lua_State *L) {
     return 0;
 }
 
+/* --- params: JSON object -> Lua table --------------------------------------
+ * An op handler used to be handed the raw params JSON as a STRING, which made
+ * every registered op that takes an argument silently useless: p.celsius on a
+ * string is nil, so a setpoint write became a write of zero. It went unnoticed
+ * because the only registered op until now took no parameters.
+ *
+ * This decodes the flat object the API actually sends -- string, number,
+ * boolean, null -- and hands a nested object or array through as its raw JSON
+ * text rather than dropping it, so nothing is lost and a script can parse it
+ * itself if it ever needs to. It is not a general JSON parser and does not
+ * pretend to be one. */
+static const char *skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') { p++; }
+    return p;
+}
+
+/* Copy a JSON string body into `out`, resolving the escapes that matter.
+ * Returns the character after the closing quote, or NULL. */
+static const char *json_string(const char *p, char *out, size_t cap) {
+    if (*p != '"') { return NULL; }
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"') {
+        char ch = *p++;
+        if (ch == '\\' && *p) {
+            char e = *p++;
+            switch (e) {
+                case 'n': ch = '\n'; break;
+                case 't': ch = '\t'; break;
+                case 'r': ch = '\r'; break;
+                case 'b': ch = '\b'; break;
+                case 'f': ch = '\f'; break;
+                case 'u': {
+                    /* Only the Latin-1 range, which is all an op parameter has
+                     * ever carried; anything else becomes '?' rather than
+                     * silently truncating the string. */
+                    unsigned v = 0;
+                    for (int k = 0; k < 4 && p[k]; k++) {
+                        char d = p[k];
+                        v = (v << 4) | (unsigned)(d <= '9' ? d - '0' : (d | 32) - 'a' + 10);
+                    }
+                    p += 4;
+                    ch = v < 256 ? (char)v : '?';
+                    break;
+                }
+                default: ch = e; break;     /* \" \\ \/ and anything else */
+            }
+        }
+        if (n + 1 < cap) { out[n++] = ch; }
+    }
+    if (*p != '"') { return NULL; }
+    out[n < cap ? n : cap - 1] = 0;
+    return p + 1;
+}
+
+/* Span of a nested object/array, so it can be passed through verbatim. */
+static const char *json_span(const char *p) {
+    char open = *p, close = (open == '{') ? '}' : ']';
+    int depth = 0;
+    bool in_str = false;
+    while (*p) {
+        if (in_str) {
+            if (*p == '\\' && p[1]) { p++; }
+            else if (*p == '"') { in_str = false; }
+        } else if (*p == '"') {
+            in_str = true;
+        } else if (*p == open) {
+            depth++;
+        } else if (*p == close) {
+            if (--depth == 0) { return p + 1; }
+        }
+        p++;
+    }
+    return NULL;
+}
+
+static void push_params(lua_State *L, const char *json) {
+    lua_newtable(L);
+    if (!json) { return; }
+    const char *p = skip_ws(json);
+    if (*p != '{') { return; }
+    p = skip_ws(p + 1);
+    while (*p && *p != '}') {
+        static char key[64];
+        p = json_string(p, key, sizeof key);
+        if (!p) { return; }
+        p = skip_ws(p);
+        if (*p != ':') { return; }
+        p = skip_ws(p + 1);
+
+        if (*p == '"') {
+            static char val[256];
+            const char *q = json_string(p, val, sizeof val);
+            if (!q) { return; }
+            lua_pushstring(L, val);
+            p = q;
+        } else if (*p == '{' || *p == '[') {
+            const char *q = json_span(p);
+            if (!q) { return; }
+            lua_pushlstring(L, p, (size_t)(q - p));
+            p = q;
+        } else if (!strncmp(p, "true", 4)) {
+            lua_pushboolean(L, 1); p += 4;
+        } else if (!strncmp(p, "false", 5)) {
+            lua_pushboolean(L, 0); p += 5;
+        } else if (!strncmp(p, "null", 4)) {
+            lua_pushnil(L); p += 4;
+        } else {
+            char *end = NULL;
+            double d = strtod(p, &end);
+            if (end == p) { return; }
+            /* Integers stay integers: a byte count or a temperature that
+             * arrives as 320.0 reads badly and indexes worse. */
+            if (d == (double)(long long)d) { lua_pushinteger(L, (lua_Integer)d); }
+            else { lua_pushnumber(L, (lua_Number)d); }
+            p = end;
+        }
+        lua_setfield(L, -2, key);
+
+        p = skip_ws(p);
+        if (*p == ',') { p = skip_ws(p + 1); }
+    }
+}
+
 bool lbind_dispatch(const char *name, const char *params_json,
                     void (*reply)(const char *, void *), void *ctx, long id) {
     if (!gL) { return false; }
     for (int i = 0; i < n_lua_ops; i++) {
         if (strcmp(lua_ops[i].name, name) != 0) { continue; }
         lua_rawgeti(gL, LUA_REGISTRYINDEX, lua_ops[i].fn_ref);
-        lua_pushstring(gL, params_json ? params_json : "{}");
+        push_params(gL, params_json);
+        /* The raw text stays reachable as params._json for anything this flat
+         * decoder cannot represent. Trimmed to the object: params_of() hands
+         * back a pointer INTO the request and never terminates the span, so
+         * the unclipped string carries the envelope's closing brace too. */
+        if (params_json) {
+            const char *q = skip_ws(params_json);
+            const char *end = (*q == '{') ? json_span(q) : NULL;
+            if (end) { lua_pushlstring(gL, q, (size_t)(end - q)); }
+            else { lua_pushstring(gL, params_json); }
+        } else {
+            lua_pushstring(gL, "{}");
+        }
+        lua_setfield(gL, -2, "_json");
         if (lua_pcall(gL, 1, 1, 0) != LUA_OK) {
             char esc[240];
             api_json_escape(esc, sizeof(esc), lua_tostring(gL, -1) ? lua_tostring(gL, -1) : "error");
@@ -498,14 +635,38 @@ static int l_bt_find(lua_State *L) {
  * interval costs one coroutine resume every few milliseconds against a device
  * that takes ~900 ms to answer its key exchange. */
 static int l_bt_notify_take(lua_State *L) {
-    char addr[18], id[8];
+    char addr[18], id[8], src[10];
     static uint8_t val[256];
-    int n = le_notify_take(addr, sizeof addr, id, sizeof id, val, sizeof val);
+    int n = le_notify_take(addr, sizeof addr, id, sizeof id, src, sizeof src,
+                           val, sizeof val);
     if (n < 0) { lua_pushnil(L); return 1; }
-    lua_createtable(L, 0, 3);
+    lua_createtable(L, 0, 4);
     lua_pushstring(L, addr);                  lua_setfield(L, -2, "addr");
     lua_pushstring(L, id);                    lua_setfield(L, -2, "id");
+    lua_pushstring(L, src);                   lua_setfield(L, -2, "source");
     lua_pushlstring(L, (const char *)val, (size_t)n); lua_setfield(L, -2, "value");
+    return 1;
+}
+
+/* Ask for a characteristic's value. The answer does NOT come back here -- it
+ * arrives in the inbox tagged source="read", because a GATT read is a round
+ * trip and blocking the cooperative loop on one would stall the radio. The
+ * caller polls bt.notify_take() for it, which is the same shape as waiting
+ * for a notification and keeps one pattern instead of two. */
+static int l_bt_read(lua_State *L) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
+    const char *id = luaL_checkstring(L, 2);
+    bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
+    if (!d || !d->connected) { lua_pushboolean(L, 0); lua_pushstring(L, "not connected"); return 2; }
+    gattdb_t *db = le_db_for(d->con_handle);
+    uint8_t si, ci;
+    if (!db || !db->ready || !gattdb_resolve_chr(db, id, &si, &ci)) {
+        lua_pushboolean(L, 0); lua_pushstring(L, "no such characteristic"); return 2;
+    }
+    int rc = le_read(d->addr, si, ci);
+    lua_pushboolean(L, rc == 0);
+    if (rc != 0) { lua_pushstring(L, "read refused (busy?)"); return 2; }
     return 1;
 }
 
@@ -556,6 +717,7 @@ void lbind_open_all(lua_State *L) {
         { "devices", l_bt_devices }, { "connect", l_bt_connect },
         { "write", l_bt_write }, { "subscribe", l_bt_subscribe },
         { "find", l_bt_find },
+        { "read", l_bt_read },
         { "notify_take", l_bt_notify_take },
         { "notify_dropped", l_bt_notify_dropped },
         { "notify_flush", l_bt_notify_flush },

@@ -166,6 +166,33 @@ td.wrap { white-space: normal; word-break: break-all; }
 #a-raw { margin: 0; padding: 6px 10px; white-space: pre-wrap; word-break: break-all;
          border-top: 1px solid var(--line); color: var(--muted); }
 
+/* --- Pinecil pane -------------------------------------------------------- */
+#p-state[data-state="live"]  { color: var(--ok); border-color: var(--ok); }
+#p-state[data-state="stale"] { color: var(--warn); border-color: var(--warn); }
+#p-state[data-state="lost"]  { color: var(--err); border-color: var(--err); }
+
+.iron { padding: 14px 12px 10px; }
+.iron-temp { display: flex; align-items: baseline; gap: 10px; font-family: var(--mono); }
+#p-tip { font-size: 40px; line-height: 1; }
+#p-set { font-size: 14px; }
+.iron-bar {
+  margin-top: 10px; height: 8px; border-radius: 4px;
+  background: var(--bg3); border: 1px solid var(--line); overflow: hidden;
+}
+.iron-bar > div { height: 100%; width: 0; background: var(--muted); transition: width .4s linear; }
+/* The bar's colour is the THERMAL state, not the operating mode: an iron in
+   "soldering" mode sitting at temperature is holding, not heating. */
+.iron-bar[data-state="heating"] > div { background: var(--warn); }
+.iron-bar[data-state="holding"] > div { background: var(--ok); }
+.iron-bar[data-state="cooling"] > div { background: var(--accent); }
+.iron-bar[data-state="sleeping"] > div { background: var(--muted); }
+.iron-mode { margin-top: 6px; font-size: 12px; }
+.iron-mode[data-state="heating"] { color: var(--warn); }
+.iron-mode[data-state="holding"] { color: var(--ok); }
+#p-setpoint { width: 5em; font-family: var(--mono); }
+#p-raw { margin: 0; padding: 6px 10px; white-space: pre-wrap; word-break: break-all;
+         border-top: 1px solid var(--line); color: var(--muted); }
+
 /* --- Script pane --------------------------------------------------------- */
 .code {
   flex: 1 1 auto; min-height: 120px; resize: none;

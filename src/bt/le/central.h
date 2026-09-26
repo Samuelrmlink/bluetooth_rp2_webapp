@@ -63,9 +63,12 @@ void le_register_notifications(uint16_t con_handle);
  * a build with no Lua does not have it.
  *
  * `addr_out` gets "AA:BB:..", `id_out` the "svc.chr" path -- no handles, same
- * rule as everywhere else. Returns the value length, or -1 when empty. */
+ * rule as everywhere else -- and `src_out` "notify", "indicate" or "read".
+ * Read results are queued too: a script has no other way to see one, and a
+ * peripheral with no notify characteristic (the Pinecil has none) can only be
+ * polled. Returns the value length, or -1 when empty. */
 int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
-                   uint8_t *val, size_t val_cap);
+                   char *src_out, size_t src_cap, uint8_t *val, size_t val_cap);
 uint32_t le_notify_dropped(void);
 void le_notify_flush(void);
 #endif

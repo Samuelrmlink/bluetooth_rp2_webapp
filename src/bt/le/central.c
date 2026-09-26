@@ -548,6 +548,7 @@ static gatt_client_notification_t notif_reg[CONFIG_BT_MAX_LINKS];
 typedef struct {
     char     addr[18];
     char     id[8];
+    char     source[10];   /* notify | indicate | read */
     uint16_t len;
     uint8_t  val[NOTIFY_VAL_MAX];
 } notify_slot_t;
@@ -557,8 +558,8 @@ static uint8_t s_inbox_head;     /* next write */
 static uint8_t s_inbox_count;
 static uint32_t s_inbox_dropped;
 
-static void notify_push(const char *addr, const char *id, const uint8_t *val,
-                        uint16_t len) {
+static void notify_push(const char *addr, const char *id, const char *source,
+                        const uint8_t *val, uint16_t len) {
     if (len > NOTIFY_VAL_MAX) {
         /* Truncating would hand a script a frame whose checksum cannot pass,
          * which is a worse failure than never seeing it. */
@@ -574,12 +575,13 @@ static void notify_push(const char *addr, const char *id, const uint8_t *val,
     }
     snprintf(s->addr, sizeof s->addr, "%s", addr);
     snprintf(s->id, sizeof s->id, "%s", id);
+    snprintf(s->source, sizeof s->source, "%s", source);
     s->len = len;
     memcpy(s->val, val, len);
 }
 
 int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
-                   uint8_t *val, size_t val_cap) {
+                   char *src_out, size_t src_cap, uint8_t *val, size_t val_cap) {
     if (!s_inbox_count) { return -1; }
     uint8_t tail = (uint8_t)((s_inbox_head + NOTIFY_SLOTS - s_inbox_count) % NOTIFY_SLOTS);
     notify_slot_t *s = &s_inbox[tail];
@@ -587,6 +589,7 @@ int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
     if (s->len > val_cap) { return -1; }
     if (addr_out) { snprintf(addr_out, addr_cap, "%s", s->addr); }
     if (id_out) { snprintf(id_out, id_cap, "%s", s->id); }
+    if (src_out) { snprintf(src_out, src_cap, "%s", s->source); }
     memcpy(val, s->val, s->len);
     return (int)s->len;
 }
@@ -620,16 +623,19 @@ static void emit_char_value(le_link_t *l, uint16_t value_handle,
             snprintf(ev + n, sizeof(ev) - n, "\"}");
             api_emit("char.value", ev);
 #if CONFIG_LUA_ENABLE
-            /* Only unsolicited values. A read result already has a caller
-             * holding its reply; queueing it too would show up in an awaiting
-             * script as a frame nobody sent. */
-            if (source[0] == 'n' || source[0] == 'i') {
+            /* Reads are queued alongside notifications, tagged with which
+             * they were. The websocket caller of a read already has its
+             * reply, but a SCRIPT has no other way to see one -- and a device
+             * like the Pinecil exposes no notify characteristic at all, so
+             * polling reads is the only way to talk to it. The consumer
+             * filters on `source`. */
+            {
                 char a[18], pid[8];
                 snprintf(a, sizeof a, "%02X:%02X:%02X:%02X:%02X:%02X",
                          l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4],
                          l->addr[5]);
                 snprintf(pid, sizeof pid, "%u.%u", si, k);
-                notify_push(a, pid, data, len);
+                notify_push(a, pid, source, data, len);
             }
 #endif
             return;
