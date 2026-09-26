@@ -626,6 +626,13 @@ static bool try_ws_upgrade(http_conn_t *c, struct tcp_pcb *tpcb, const char *met
     tcp_write(tpcb, resp, (uint16_t)rl, TCP_WRITE_FLAG_COPY);
     tcp_output(tpcb);
     c->is_ws = true;
+    /* Reclaim the slot if the peer vanishes without a close frame -- otherwise
+     * eight abandoned clients exhaust HTTP_CONNS and the server stops
+     * answering, which presents as "connection closed" on a healthy device. */
+    ip_set_option(tpcb, SOF_KEEPALIVE);
+    tpcb->keep_idle  = 20000;   /* ms of silence before the first probe */
+    tpcb->keep_intvl = 5000;
+    tpcb->keep_cnt   = 3;
     c->dropped = 0;
     ws_parser_reset(&c->ws);
     return true;
@@ -995,7 +1002,10 @@ static err_t http_poll(void *arg, struct tcp_pcb *tpcb) {
         return ERR_OK;
     }
     if (c->is_ws) {
-        return ERR_OK; /* long-lived, no retry/timeout bookkeeping needed */
+        /* No retry budget: a WebSocket may be legitimately silent for minutes.
+         * TCP keepalive (armed at upgrade) is what reclaims a peer that has
+         * actually gone away. */
+        return ERR_OK;
     }
     if (c->retries < 255) {
         c->retries++;

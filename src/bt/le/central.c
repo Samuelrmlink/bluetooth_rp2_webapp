@@ -25,6 +25,7 @@
 #include "bt/le/central.h"
 #include "bt/registry.h"
 #include "api/api.h"
+#include "bt/le/bond.h"
 
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
 void le_on_disconnected(uint16_t con_handle);
@@ -406,9 +407,27 @@ static void gatt_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size)
             break;
         }
         case GATT_EVENT_QUERY_COMPLETE: {
-            l = link_by_handle(gatt_event_query_complete_get_handle(pkt));
+            uint16_t h = gatt_event_query_complete_get_handle(pkt);
+            uint8_t att_status = gatt_event_query_complete_get_att_status(pkt);
+            l = link_by_handle(h);
             if (!l) { return; }
-            discover_next(l);
+            /* The peripheral refusing for want of security is the ONLY thing
+             * that triggers pairing under the default policy -- we do not ask
+             * to bond with everything we connect to. */
+            if (bond_att_error_wants_security(att_status)) {
+                char extra[48];
+                snprintf(extra, sizeof(extra), "{\"att_error\":%u,\"policy\":\"%s\"}",
+                         att_status, bond_policy_name(bond_policy()));
+                api_emit("security.required", extra);
+                if (bond_policy() != BOND_POLICY_NEVER) {
+                    printf("bt: att 0x%02x wants security; requesting pairing\n", att_status);
+                    bond_request(h);
+                }
+                return;   /* the caller retries once the link is secured */
+            }
+            if (!l->db.ready) {
+                discover_next(l);
+            }
             break;
         }
         default:
@@ -443,6 +462,8 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
         d->addr_type = addr_type;
     }
     emit_device_event("dev.connected", addr);
+
+    le_register_notifications(con_handle);
 
     /* Discovery starts immediately; the MTU is read once it completes, because
      * BTstack negotiates it as part of the first GATT procedure. */
@@ -488,4 +509,145 @@ bool le_disconnect(const uint8_t *addr) {
     }
     gap_disconnect(d->con_handle);
     return true;
+}
+
+/* ===================== read / write / subscribe ============================
+ *
+ * Every operation here addresses a characteristic by its index in our own
+ * database, never by an ATT handle from the client. The handle is looked up on
+ * this side at the last possible moment.
+ */
+
+/* Notifications are delivered through one registration per link, made when the
+ * link is established rather than per subscription: BTstack routes every
+ * notification on a connection to the same handler, and the value handle in the
+ * event is what identifies the characteristic. */
+static gatt_client_notification_t notif_reg[CONFIG_BT_MAX_LINKS];
+
+static void emit_char_value(le_link_t *l, uint16_t value_handle,
+                            const uint8_t *data, uint16_t len, const char *source) {
+    gattdb_t *db = &l->db;
+    /* Map the value handle back to a path index so no handle escapes. */
+    for (uint8_t si = 0; si < db->n_svc; si++) {
+        for (uint8_t k = 0; k < db->svc[si].n_chr; k++) {
+            uint8_t ci = (uint8_t)(db->svc[si].first_chr + k);
+            if (db->chr[ci].value_handle != value_handle) {
+                continue;
+            }
+            char uuid[40];
+            gattdb_uuid_str(db, db->chr[ci].uuid, uuid, sizeof(uuid));
+            static char ev[1600];
+            size_t n = (size_t)snprintf(ev, sizeof(ev),
+                "{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"id\":\"%u.%u\",\"uuid\":\"%s\","
+                "\"source\":\"%s\",\"len\":%u,\"value\":\"",
+                l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4], l->addr[5],
+                si, k, uuid, source, len);
+            for (uint16_t i = 0; i < len && n + 4 < sizeof(ev); i++) {
+                n += (size_t)snprintf(ev + n, sizeof(ev) - n, "%02x", data[i]);
+            }
+            snprintf(ev + n, sizeof(ev) - n, "\"}");
+            api_emit("char.value", ev);
+            return;
+        }
+    }
+}
+
+static void value_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
+    (void)type; (void)size;
+    switch (hci_event_packet_get_type(pkt)) {
+        case GATT_EVENT_NOTIFICATION: {
+            le_link_t *l = link_by_handle(gatt_event_notification_get_handle(pkt));
+            if (l) {
+                emit_char_value(l, gatt_event_notification_get_value_handle(pkt),
+                                gatt_event_notification_get_value(pkt),
+                                gatt_event_notification_get_value_length(pkt), "notify");
+            }
+            break;
+        }
+        case GATT_EVENT_INDICATION: {
+            le_link_t *l = link_by_handle(gatt_event_indication_get_handle(pkt));
+            if (l) {
+                emit_char_value(l, gatt_event_indication_get_value_handle(pkt),
+                                gatt_event_indication_get_value(pkt),
+                                gatt_event_indication_get_value_length(pkt), "indicate");
+            }
+            break;
+        }
+        case GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT: {
+            le_link_t *l = link_by_handle(gatt_event_characteristic_value_query_result_get_handle(pkt));
+            if (l) {
+                emit_char_value(l, gatt_event_characteristic_value_query_result_get_value_handle(pkt),
+                                gatt_event_characteristic_value_query_result_get_value(pkt),
+                                gatt_event_characteristic_value_query_result_get_value_length(pkt), "read");
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void le_register_notifications(uint16_t con_handle) {
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        if (links[i].active && links[i].con_handle == con_handle) {
+            gatt_client_listen_for_characteristic_value_updates(
+                &notif_reg[i], value_handler, con_handle, NULL);
+            return;
+        }
+    }
+}
+
+/* BTstack runs ONE gatt_client procedure at a time per connection. Issuing a
+ * second while the first is outstanding fails in a way that looks like the
+ * peripheral refused it, so check first and say plainly that we are busy. */
+#define LE_BUSY (-4)
+
+int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i) {
+    bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
+    if (!d || !d->connected) { return -1; }
+    le_link_t *l = link_by_handle(d->con_handle);
+    if (!l || !l->db.ready) { return -2; }
+    if (!gatt_client_is_ready(l->con_handle)) { return LE_BUSY; }
+    (void)svc_i;
+    return gatt_client_read_value_of_characteristic_using_value_handle(
+               value_handler, l->con_handle, l->db.chr[chr_i].value_handle) == 0 ? 0 : -3;
+}
+
+int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
+             const uint8_t *data, uint16_t len, bool with_response) {
+    bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
+    if (!d || !d->connected) { return -1; }
+    le_link_t *l = link_by_handle(d->con_handle);
+    if (!l || !l->db.ready) { return -2; }
+    if (!gatt_client_is_ready(l->con_handle)) { return LE_BUSY; }
+    (void)svc_i;
+    uint16_t vh = l->db.chr[chr_i].value_handle;
+    uint8_t rc = with_response
+        ? gatt_client_write_value_of_characteristic(value_handler, l->con_handle, vh, len, (uint8_t *)data)
+        : gatt_client_write_value_of_characteristic_without_response(l->con_handle, vh, len, (uint8_t *)data);
+    return rc == 0 ? 0 : -3;
+}
+
+int le_subscribe(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i, int mode) {
+    bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
+    if (!d || !d->connected) { return -1; }
+    le_link_t *l = link_by_handle(d->con_handle);
+    if (!l || !l->db.ready) { return -2; }
+    if (!gatt_client_is_ready(l->con_handle)) { return LE_BUSY; }
+    (void)svc_i;
+    gdb_char_t *c = &l->db.chr[chr_i];
+
+    uint16_t cccd = c->cccd_handle;
+    if (cccd == 0) {
+        /* Discovery does not always report the CCC descriptor even when the
+         * characteristic is notifiable. The declaration, value and CCCD are
+         * consecutive in every implementation that gets this wrong, so the
+         * next handle is the right guess -- and a wrong guess fails as an ATT
+         * error rather than silently doing nothing. */
+        cccd = (uint16_t)(c->value_handle + 1);
+        printf("bt: no CCCD discovered for chr %u, trying value_handle+1 (0x%04x)\n", chr_i, cccd);
+    }
+    uint8_t v[2] = { (uint8_t)mode, 0x00 };   /* 1 notify, 2 indicate, 0 off */
+    return gatt_client_write_characteristic_descriptor_using_descriptor_handle(
+               value_handler, l->con_handle, cccd, sizeof(v), v) == 0 ? 0 : -3;
 }

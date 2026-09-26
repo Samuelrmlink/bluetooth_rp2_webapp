@@ -39,4 +39,13 @@ void le_central_tick(void);
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
 void le_on_disconnected(uint16_t con_handle);
 
+
+
+/* Value operations. svc_i is accepted for symmetry and future Classic
+ * dispatch; chr_i is the index into the device's characteristic table. */
+int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i);
+int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
+             const uint8_t *data, uint16_t len, bool with_response);
+int le_subscribe(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i, int mode);
+void le_register_notifications(uint16_t con_handle);
 #endif

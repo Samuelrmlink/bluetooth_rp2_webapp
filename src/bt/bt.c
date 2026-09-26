@@ -15,6 +15,8 @@
 #include "api/ops.h"
 #include "bt/registry.h"
 #include "bt/le/central.h"
+#include "bt/le/gattdb.h"
+#include "bt/le/bond.h"
 #include "autoconf.h"
 
 static btstack_packet_callback_registration_t hci_cb;
@@ -58,14 +60,12 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
 void bt_init(void) {
     l2cap_init();
     sm_init();
-    /* Central role, no bonding requirement by default: most peripherals want
-     * none, and the ones that do ask for it during a procedure. Phase 4 makes
-     * this configurable per connection. */
-    sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
+    /* SM configuration belongs to bond.c, which owns the policy. */
     gatt_client_init();
 
     bt_registry_reset();
     le_central_init();
+    bond_init();
 
     hci_cb.callback = &hci_handler;
     hci_add_event_handler(&hci_cb);
@@ -261,7 +261,177 @@ static void op_gatt_tree(const char *params, api_reply_fn reply, void *ctx, long
     api_reply_ok(reply, ctx, id, list_buf);
 }
 
+/* Resolve a characteristic from either addressing form:
+ *   {"device":..,"id":"2.1"}
+ *   {"device":..,"service":"8c85...","characteristic":"8c85...","instance":0}
+ * Both are accepted everywhere, and neither is an ATT handle. */
+static bool resolve_chr(const char *params, bt_device_t **out_d,
+                        uint8_t *svc_i, uint8_t *chr_i, const char **err) {
+    bt_device_t *d = dev_param(params);
+    if (!d || !d->connected) { *err = "device is not connected"; return false; }
+    gattdb_t *db = le_db_for(d->con_handle);
+    if (!db || !db->ready) { *err = "discovery still in progress"; return false; }
+
+    char id[24];
+    if (api_json_str(params, "id", id, sizeof(id))) {
+        if (!gattdb_resolve_chr(db, id, svc_i, chr_i)) { *err = "no such path"; return false; }
+    } else {
+        char su[40] = "", cu[40] = "";
+        api_json_str(params, "service", su, sizeof(su));
+        if (!api_json_str(params, "characteristic", cu, sizeof(cu))) {
+            *err = "need \"id\" or \"characteristic\""; return false;
+        }
+        long inst = 0;
+        (void)api_json_int(params, "instance", &inst);
+        if (!gattdb_find_chr(db, su, cu, (int)inst, svc_i, chr_i)) {
+            *err = "no such characteristic"; return false;
+        }
+    }
+    *out_d = d;
+    return true;
+}
+
+static int unhex(const char *h, uint8_t *out, size_t cap) {
+    size_t n = strlen(h) / 2;
+    if (n > cap) { n = cap; }
+    for (size_t i = 0; i < n; i++) {
+        unsigned b = 0;
+        if (sscanf(h + i * 2, "%2x", &b) != 1) { return -1; }
+        out[i] = (uint8_t)b;
+    }
+    return (int)n;
+}
+
+static void op_gatt_read(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d; uint8_t si, ci; const char *err = NULL;
+    if (!resolve_chr(params, &d, &si, &ci, &err)) {
+        api_reply_err(reply, ctx, id, "bad_target", err); return;
+    }
+    int rc = le_read(d->addr, si, ci);
+    if (rc == -4) {
+        api_reply_err(reply, ctx, id, "busy",
+                      "another GATT procedure is in flight on this link; retry");
+        return;
+    }
+    if (rc != 0) {
+        api_reply_err(reply, ctx, id, "read_failed", "the stack refused the read"); return;
+    }
+    /* The value arrives as a char.value event with source "read": one shape for
+     * a value however it was produced, rather than two. */
+    api_reply_ok(reply, ctx, id, "{\"reading\":true}");
+}
+
+static void op_gatt_write(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d; uint8_t si, ci; const char *err = NULL;
+    if (!resolve_chr(params, &d, &si, &ci, &err)) {
+        api_reply_err(reply, ctx, id, "bad_target", err); return;
+    }
+    char hex[1024];
+    if (!api_json_str(params, "value", hex, sizeof(hex))) {
+        api_reply_err(reply, ctx, id, "bad_request", "need \"value\" as a hex string"); return;
+    }
+    static uint8_t buf[512];
+    int n = unhex(hex, buf, sizeof(buf));
+    if (n < 0) {
+        api_reply_err(reply, ctx, id, "bad_request", "\"value\" is not valid hex"); return;
+    }
+    bool with_response = true;
+    (void)api_json_bool(params, "response", &with_response);
+    int rc = le_write(d->addr, si, ci, buf, (uint16_t)n, with_response);
+    if (rc == -4) {
+        api_reply_err(reply, ctx, id, "busy",
+                      "another GATT procedure is in flight on this link; retry");
+        return;
+    }
+    if (rc != 0) {
+        api_reply_err(reply, ctx, id, "write_failed", "the stack refused the write"); return;
+    }
+    char r[64];
+    snprintf(r, sizeof(r), "{\"written\":%d,\"response\":%s}", n, with_response ? "true" : "false");
+    api_reply_ok(reply, ctx, id, r);
+}
+
+static void op_gatt_subscribe(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d; uint8_t si, ci; const char *err = NULL;
+    if (!resolve_chr(params, &d, &si, &ci, &err)) {
+        api_reply_err(reply, ctx, id, "bad_target", err); return;
+    }
+    char mode[12] = "notify";
+    api_json_str(params, "mode", mode, sizeof(mode));
+    int m = strcmp(mode, "indicate") == 0 ? 2 : strcmp(mode, "off") == 0 ? 0 : 1;
+    int rc = le_subscribe(d->addr, si, ci, m);
+    if (rc == -4) {
+        api_reply_err(reply, ctx, id, "busy",
+                      "another GATT procedure is in flight on this link; retry");
+        return;
+    }
+    if (rc != 0) {
+        api_reply_err(reply, ctx, id, "subscribe_failed", "the stack refused the CCCD write"); return;
+    }
+    char r[64];
+    snprintf(r, sizeof(r), "{\"mode\":\"%s\"}", mode);
+    api_reply_ok(reply, ctx, id, r);
+}
+
+static void op_bond_policy(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char name[16];
+    if (api_json_str(params, "policy", name, sizeof(name)) && !bond_set_policy(name)) {
+        api_reply_err(reply, ctx, id, "bad_request", "policy is never|on_demand|always");
+        return;
+    }
+    char r[64];
+    snprintf(r, sizeof(r), "{\"policy\":\"%s\"}", bond_policy_name(bond_policy()));
+    api_reply_ok(reply, ctx, id, r);
+}
+
+static void op_bond_pair(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    if (!d || !d->connected) {
+        api_reply_err(reply, ctx, id, "not_connected", "connect first"); return;
+    }
+    if (!bond_request(d->con_handle)) {
+        api_reply_err(reply, ctx, id, "refused", "bond policy is \"never\""); return;
+    }
+    api_reply_ok(reply, ctx, id, "{\"pairing\":true}");
+}
+
+static void op_bond_passkey(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    long pk = 0;
+    if (!d || !d->connected || !api_json_int(params, "passkey", &pk)) {
+        api_reply_err(reply, ctx, id, "bad_request", "need a connected device and \"passkey\"");
+        return;
+    }
+    bond_supply_passkey(d->con_handle, (uint32_t)pk);
+    api_reply_ok(reply, ctx, id, "{\"supplied\":true}");
+}
+
+static void op_bond_list(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    char r[1024];
+    size_t n = (size_t)snprintf(r, sizeof(r), "{\"policy\":\"%s\",\"bonds\":", bond_policy_name(bond_policy()));
+    n += bond_list_json(r + n, sizeof(r) - n);
+    snprintf(r + n, sizeof(r) - n, "}");
+    api_reply_ok(reply, ctx, id, r);
+}
+
+static void op_bond_remove(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    if (!d || !bond_remove(d->addr, d->addr_type)) {
+        api_reply_err(reply, ctx, id, "not_found", "no stored bond for that device"); return;
+    }
+    api_reply_ok(reply, ctx, id, "{\"removed\":true}");
+}
+
 static const op_def_t bt_ops[] = {
+    { "bond.policy",  op_bond_policy },
+    { "bond.pair",    op_bond_pair },
+    { "bond.passkey", op_bond_passkey },
+    { "bond.list",    op_bond_list },
+    { "bond.remove",  op_bond_remove },
+    { "gatt.read",      op_gatt_read },
+    { "gatt.write",     op_gatt_write },
+    { "gatt.subscribe", op_gatt_subscribe },
     { "dev.connect",    op_dev_connect },
     { "dev.disconnect", op_dev_disconnect },
     { "dev.list",       op_dev_list },
@@ -274,7 +444,10 @@ static const op_def_t bt_ops[] = {
 };
 
 static const char *const bt_topics[] = {
-    "dev.connected", "dev.disconnected", "scan.device", "scan.done", NULL
+    "dev.connected", "dev.disconnected", "scan.device", "scan.done",
+    "gatt.discovered", "char.value",
+    "security.required", "security.bonded", "security.failed",
+    "security.passkey_request", "security.numeric_comparison", NULL
 };
 
 const op_module_t op_module_bt = {

@@ -46,6 +46,16 @@ class WS:
             ln = struct.unpack(">Q", self._need(8))[0]
         return self._need(ln).decode(errors="replace")
 
+    def close(self):
+        """Send a proper close frame. Without it the device holds the slot
+        until keepalive expires, and a handful of test runs exhaust them."""
+        try:
+            m = os.urandom(4)
+            self.s.sendall(bytes([0x88, 0x80]) + m)
+            self.s.close()
+        except OSError:
+            pass
+
     def _need(self, n):
         while len(self.buf) < n:
             d = self.s.recv(4096)
@@ -75,6 +85,7 @@ def main():
             line = ws.recv(timeout=max(0.2, end - time.time()))
             if line:
                 print(line)
+    ws.close()
 
 if __name__ == "__main__":
     main()
