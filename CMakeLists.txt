@@ -81,6 +81,12 @@ if(CONFIG_BT_CLASSIC)
     target_link_libraries(btgw pico_btstack_classic)
 endif()
 
+if(CONFIG_LUA_ENABLE)
+    add_subdirectory(third_party/lua)
+    target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lbind.c src/lua/lops.c)
+    target_link_libraries(btgw lua)
+endif()
+
 if(CONFIG_NET_WIFI)
     target_sources(btgw PRIVATE src/net/wifi.c)
 endif()

@@ -28,6 +28,9 @@
 #include "tusb.h"
 #include "net/mdns.h"
 #include "api/ops.h"
+#if CONFIG_LUA_ENABLE
+#include "lua/lrt.h"
+#endif
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
 #endif
@@ -93,6 +96,9 @@ int main(void) {
 
 #if CONFIG_BT_LE
         le_central_tick();
+#endif
+#if CONFIG_LUA_ENABLE
+        lrt_tick();
 #endif
         cfg_tick();
         /* Coalesce whatever the pass produced into as few segments as possible;

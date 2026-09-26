@@ -14,11 +14,17 @@ extern const op_module_t op_module_sys;
 #if CONFIG_BT_LE
 extern const op_module_t op_module_bt;
 #endif
+#if CONFIG_LUA_ENABLE
+extern const op_module_t op_module_lua;
+#endif
 
 static const op_module_t *const modules[] = {
     &op_module_sys,
 #if CONFIG_BT_LE
     &op_module_bt,
+#endif
+#if CONFIG_LUA_ENABLE
+    &op_module_lua,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

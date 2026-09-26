@@ -25,6 +25,9 @@
 #include "net/http.h"
 #include "pico/time.h"
 #include "autoconf.h"
+#if CONFIG_LUA_ENABLE
+#include "lua/lbind.h"
+#endif
 
 /* One scratch buffer: every caller runs from the single cooperative loop, one
  * at a time, and each fills and consumes it within the call. Static because
@@ -152,11 +155,19 @@ void api_handle_text(const char *text, api_reply_fn reply, void *ctx) {
     }
 
     const op_def_t *def = ops_lookup(op);
-    if (!def) {
-        api_reply_err(reply, ctx, id, "unknown_op", op);
+    if (def) {
+        def->fn(params_of(text), reply, ctx, id);
         return;
     }
-    def->fn(params_of(text), reply, ctx, id);
+#if CONFIG_LUA_ENABLE
+    /* A script may have registered this name. Built-ins are checked first, and
+     * ops.register refuses to shadow one, so a client can trust that sys.info
+     * always means what the firmware says it means. */
+    if (lbind_dispatch(op, params_of(text), reply, ctx, id)) {
+        return;
+    }
+#endif
+    api_reply_err(reply, ctx, id, "unknown_op", op);
 }
 
 /* ---- sys.* : the one module that is always present ---------------------- */
