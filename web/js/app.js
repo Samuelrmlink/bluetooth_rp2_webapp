@@ -7,6 +7,7 @@ import { WsApi } from './wsapi.js';
 import { DeviceStore, uuidLabel, hexToAscii, shortUuid } from './gattdb.js';
 import { Layout } from './tiles.js';
 import { LayoutManager } from './layout.js';
+import { mountScriptPane } from './panes/script.js';
 
 const $ = (id) => document.getElementById(id);
 const api = new WsApi();
@@ -172,6 +173,7 @@ const PANES = [
   { id: 'devices', title: 'Devices',        el: $('pane-devices') },
   { id: 'tree',    title: 'GATT Tree',      el: $('pane-tree') },
   { id: 'char',    title: 'Characteristic', el: $('pane-char') },
+  { id: 'script',  title: 'Script',         el: $('pane-script') },
   { id: 'log',     title: 'Log',            el: $('pane-log') },
 ];
 
@@ -194,6 +196,10 @@ const lm = new LayoutManager({
     } catch { /* private mode, quota: not worth failing over */ }
   },
 });
+
+/* Panes that own their own state mount once and manage themselves; renderAll
+ * is only for the ones driven by the shared device store. */
+const scriptPane = mountScriptPane({ api, log });
 
 function renderAll() { renderScan(); renderDevices(); renderTree(); renderChar(); }
 
