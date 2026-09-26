@@ -193,6 +193,27 @@ td.wrap { white-space: normal; word-break: break-all; }
 #p-raw { margin: 0; padding: 6px 10px; white-space: pre-wrap; word-break: break-all;
          border-top: 1px solid var(--line); color: var(--muted); }
 
+/* --- Hardware pane ------------------------------------------------------- */
+.pingrid { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 10px; }
+.pin {
+  font: 11px/1 var(--mono); width: 30px; height: 26px; cursor: pointer;
+  color: var(--fg); background: var(--bg3);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.pin:hover:not(:disabled) { border-color: var(--accent); }
+.pin[data-state="claimed"] { border-color: var(--ok); color: var(--ok); }
+/* Reserved is not "busy". These four are the radio, and driving one kills
+   WiFi and Bluetooth together -- including the socket you would fix it over.
+   Disabled and struck through, not merely a different colour. */
+.pin[data-state="reserved"] {
+  border-color: var(--err); color: var(--err);
+  text-decoration: line-through; cursor: not-allowed; opacity: .75;
+}
+#h-pin-detail { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.addrs { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 10px 10px; }
+.addr { font-family: var(--mono); font-size: 12px; padding: 2px 8px;
+        background: var(--bg3); border: 1px solid var(--ok); border-radius: 4px; color: var(--ok); }
+
 /* --- Script pane --------------------------------------------------------- */
 .code {
   flex: 1 1 auto; min-height: 120px; resize: none;
