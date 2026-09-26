@@ -30,8 +30,16 @@ class WS:
     def send(self, obj):
         p = json.dumps(obj).encode()
         m = os.urandom(4)
-        self.s.sendall(bytes([0x81, 0x80 | len(p)]) + m +
-                       bytes(b ^ m[i % 4] for i, b in enumerate(p)))
+        # Extended length forms matter here: a script.draft payload is well over
+        # the 125 bytes the short form can express.
+        n = len(p)
+        if n < 126:
+            hdr = bytes([0x81, 0x80 | n])
+        elif n < (1 << 16):
+            hdr = bytes([0x81, 0x80 | 126]) + struct.pack("!H", n)
+        else:
+            hdr = bytes([0x81, 0x80 | 127]) + struct.pack("!Q", n)
+        self.s.sendall(hdr + m + bytes(b ^ m[i % 4] for i, b in enumerate(p)))
 
     def recv(self, timeout=None):
         self.s.settimeout(timeout)

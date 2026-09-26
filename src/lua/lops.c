@@ -65,7 +65,7 @@ static void op_reload(const char *params, api_reply_fn reply, void *ctx, long id
  * safe to use on a part with a finite erase budget. */
 static void op_draft(const char *params, api_reply_fn reply, void *ctx, long id) {
     NEED_NAME(params);
-    static char src[8193];
+    static char src[3900];
     if (!api_json_str(params, "source", src, sizeof(src))) {
         api_reply_err(reply, ctx, id, "bad_request", "need \"source\""); return;
     }

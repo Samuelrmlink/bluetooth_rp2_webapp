@@ -7,6 +7,7 @@
  * ws_encode_text_frame rather than truncated, which presents as an op that
  * simply never answers. */
 #define WS_TX_MAX 4096
+#define WS_RX_MAX 4096
 
 #include <stddef.h>
 #include <stdint.h>
@@ -48,7 +49,12 @@ typedef struct {
     uint8_t mask[4];
     size_t payload_len;
     size_t payload_got;
-    uint8_t payload[1024];
+    /* Sized for a script.draft, which is the largest thing a client sends --
+     * an API request is a couple of hundred bytes. This is per-connection
+     * state, so it is HTTP_CONNS times this much RAM; 4 KB x 8 = 32 KB of the
+     * RP2350's 520 KB, which is worth it to avoid silently truncating source
+     * code on the way in. */
+    uint8_t payload[WS_RX_MAX];
     bool in_payload;
 } ws_parser_t;
 

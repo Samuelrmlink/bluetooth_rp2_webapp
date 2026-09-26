@@ -91,7 +91,14 @@ static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
 /* --- state --------------------------------------------------------------- */
 #define MAX_SCRIPTS 8
 #define NAME_MAX_LEN 32
-#define DRAFT_MAX 8192
+/* Matches the WebSocket receive buffer: a larger limit here could not be
+ * reached over the wire anyway. */
+#define DRAFT_MAX 3800
+
+/* How many slices a script may burn without ever yielding on its own before it
+ * is killed. At 20000 instructions a slice that is a lot of real work, so this
+ * only catches something genuinely stuck. */
+#define FORCED_YIELD_LIMIT 300
 
 typedef struct {
     bool  used;
@@ -102,6 +109,8 @@ typedef struct {
     bool  dead;
     char  err[160];
     uint32_t resumes;
+    uint32_t wake_at_ms;   /* 0 = runnable now; set by sys.sleep */
+    uint32_t forced_yields; /* consecutive hook-forced yields; reset by a real one */
     char  *draft;        /* NULL unless a RAM draft exists */
     size_t draft_len;
 } script_t;
@@ -112,6 +121,8 @@ static bool s_ready;
 static uint32_t s_hook_kills;
 
 bool lrt_ready(void) { return s_ready; }
+
+static void teardown(script_t *s);
 
 static script_t *find(const char *name) {
     for (int i = 0; i < MAX_SCRIPTS; i++) {
@@ -218,6 +229,7 @@ bool lrt_start(const char *name, const char **err) {
     if (!s_ready) { *err = "lua runtime is not up"; return false; }
     script_t *s = alloc_script(name);
     if (!s) { *err = "too many scripts"; return false; }
+    if (s->running) { teardown(s); }
 
     const char *src = NULL; size_t len = 0;
     const char *tier = resolve_src(s, name, &src, &len);
@@ -249,19 +261,27 @@ bool lrt_start(const char *name, const char **err) {
     return false;
 }
 
+/* Tears down the coroutine and environment but KEEPS the entry and its draft.
+ * A draft is source, not runtime state: destroying it here made reload (which
+ * is stop-then-start) lose the very thing it was asked to reload. */
+static void teardown(script_t *s) {
+    if (s->co_ref != LUA_NOREF)  { luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref);  s->co_ref = LUA_NOREF; }
+    if (s->env_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->env_ref); s->env_ref = LUA_NOREF; }
+    /* Phase 7 releases this script's pin and bus claims here too. */
+    s->running = false;
+    s->dead = false;
+}
+
 bool lrt_stop(const char *name) {
     script_t *s = find(name);
     if (!s) { return false; }
-    if (s->co_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref); }
-    if (s->env_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->env_ref); }
-    /* Phase 7 releases this script's pin/bus claims here too. */
-    free(s->draft);
-    memset(s, 0, sizeof(*s));
+    teardown(s);
     return true;
 }
 
 bool lrt_reload(const char *name, const char **err) {
-    lrt_stop(name);
+    script_t *s = find(name);
+    if (s) { teardown(s); }
     return lrt_start(name, err);
 }
 
@@ -312,7 +332,10 @@ bool lrt_commit(const char *name, const char **err) {
 
 bool lrt_revert(const char *name) {
     script_t *s = find(name);
-    if (s && s->draft) { free(s->draft); s->draft = NULL; s->draft_len = 0; return true; }
+    if (s && s->draft) {
+        free(s->draft); s->draft = NULL; s->draft_len = 0;
+        return true;   /* the staged or committed tier beneath is now in effect */
+    }
     char path[80];
     snprintf(path, sizeof(path), "staged/%s.lua", name);
     return fs_delete(path) >= 0;
@@ -324,6 +347,13 @@ void lrt_tick(void) {
     for (int i = 0; i < MAX_SCRIPTS; i++) {
         script_t *s = &scripts[i];
         if (!s->used || !s->running || s->dead || s->co_ref == LUA_NOREF) { continue; }
+        /* sys.sleep yields a wake time rather than busy-waiting, because a
+         * busy-wait here would stall the radio and the network with it. */
+        if (s->wake_at_ms &&
+            (int32_t)(to_ms_since_boot(get_absolute_time()) - s->wake_at_ms) < 0) {
+            continue;
+        }
+        s->wake_at_ms = 0;
 
         lua_rawgeti(L, LUA_REGISTRYINDEX, s->co_ref);
         lua_State *co = lua_tothread(L, -1);
@@ -334,8 +364,38 @@ void lrt_tick(void) {
         int rc = lua_resume(co, L, 0, &nres);
         s->resumes++;
         if (rc == LUA_YIELD) {
+            /* A yield carrying one integer is sys.sleep telling us when it
+             * wants to run again; a bare yield (the instruction hook) means
+             * "resume me next pass". */
+            if (nres >= 1 && lua_isinteger(co, -1)) {
+                s->wake_at_ms = (uint32_t)lua_tointeger(co, -1);
+                s->forced_yields = 0;          /* it yielded of its own accord */
+            } else {
+                /* Forced by the instruction hook. Tolerated for a while --
+                 * ordinary long work should still finish -- but a script that
+                 * NEVER yields voluntarily is a runaway, and leaving it to
+                 * consume a slice on every pass forever is not a fix. */
+                if (++s->forced_yields > FORCED_YIELD_LIMIT) {
+                    lua_pop(co, nres);
+                    s->running = false;
+                    s->dead = true;
+                    s_hook_kills++;
+                    snprintf(s->err, sizeof(s->err),
+                             "killed: %lu consecutive slices without yielding "
+                             "(add a sys.sleep, or yield)",
+                             (unsigned long)s->forced_yields);
+                    char msg[300];
+                    size_t n = (size_t)snprintf(msg, sizeof(msg),
+                                                "{\"script\":\"%s\",\"killed\":true,\"error\":\"", s->name);
+                    n += api_json_escape(msg + n, sizeof(msg) - n - 4, s->err);
+                    snprintf(msg + n, sizeof(msg) - n, "\"}");
+                    api_emit("script.error", msg);
+                    printf("lua: %s %s\n", s->name, s->err);
+                    continue;
+                }
+            }
             lua_pop(co, nres);
-            continue;                       /* politely paused; resumed next pass */
+            continue;
         }
         s->running = false;
         if (rc != LUA_OK) {

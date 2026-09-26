@@ -84,10 +84,39 @@ bool api_json_str(const char *json, const char *key, char *out, size_t cap) {
     p++;
     size_t n = 0;
     while (*p && *p != '"' && n + 1 < cap) {
-        if (*p == '\\' && p[1]) {
-            p++;                       /* accept an escape, store it raw */
+        if (*p != '\\' || !p[1]) {
+            out[n++] = *p++;
+            continue;
         }
-        out[n++] = *p++;
+        /* Escapes must be DECODED, not merely skipped over. Storing the
+         * character after the backslash raw turns every \n in a Lua source
+         * string into a literal 'n', which produces a syntax error on line 1
+         * and nothing that points at the cause. */
+        p++;
+        switch (*p) {
+            case 'n':  out[n++] = '\n'; p++; break;
+            case 't':  out[n++] = '\t'; p++; break;
+            case 'r':  out[n++] = '\r'; p++; break;
+            case 'b':  out[n++] = '\b'; p++; break;
+            case 'f':  out[n++] = '\f'; p++; break;
+            case '"':  out[n++] = '"';  p++; break;
+            case '\\': out[n++] = '\\'; p++; break;
+            case '/':  out[n++] = '/';  p++; break;
+            case 'u': {
+                /* Only the BMP-ASCII range is meaningful here; anything above
+                 * it is passed through as '?' rather than mangling the byte
+                 * stream. */
+                unsigned cp = 0;
+                if (sscanf(p + 1, "%4x", &cp) == 1) {
+                    p += 5;
+                    out[n++] = (cp < 0x80) ? (char)cp : '?';
+                } else {
+                    out[n++] = *p++;
+                }
+                break;
+            }
+            default: out[n++] = *p++; break;
+        }
     }
     out[n] = 0;
     return *p == '"';
