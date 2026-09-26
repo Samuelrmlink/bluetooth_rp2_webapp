@@ -2,6 +2,7 @@
 #define BTGW_LE_CENTRAL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "bt/registry.h"
 #include "bt/le/gattdb.h"
@@ -48,4 +49,23 @@ int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
              const uint8_t *data, uint16_t len, bool with_response);
 int le_subscribe(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i, int mode);
 void le_register_notifications(uint16_t con_handle);
+
+/* --- the notification inbox ----------------------------------------------
+ * Notifications already go out as char.value events, which is right for a
+ * browser watching a device but useless to a script that has just written a
+ * request and wants the answer. Events are fire-and-forget: a reply that
+ * arrives between the write and the wait is simply gone, and a handshake made
+ * of request/response pairs cannot be written against that.
+ *
+ * So arriving values are ALSO queued here, briefly, for a script to drain.
+ * The queue is small and drops oldest-first: it is a rendezvous buffer for a
+ * script that is actively listening, not a log. Nothing else consumes it, and
+ * a build with no Lua does not have it.
+ *
+ * `addr_out` gets "AA:BB:..", `id_out` the "svc.chr" path -- no handles, same
+ * rule as everywhere else. Returns the value length, or -1 when empty. */
+int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
+                   uint8_t *val, size_t val_cap);
+uint32_t le_notify_dropped(void);
+void le_notify_flush(void);
 #endif

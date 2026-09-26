@@ -48,8 +48,118 @@ def _grep(pattern, paths):
     return (len(hits) == 0), (hits[0][:90] if hits else "")
 
 def t_no_device_in_core():
-    return _grep(r"anker|8c8500|0x0840",
-                 ["src/bt/", "src/ops/", "src/api/", "src/lua/", "src/io/"])
+    # src/lua/lbind_proto.c is excluded here and checked more strictly below.
+    # It is the bridge to src/codec + src/crypto, so it cannot avoid naming
+    # them in an #include; a blanket exemption would be too generous, so it
+    # gets its own tighter rule instead.
+    rc, out = sh("grep -rnE 'anker|8c8500|0x0840' "
+                 "src/bt/ src/ops/ src/api/ src/lua/ src/io/ 2>/dev/null")
+    hits = [l for l in out.splitlines()
+            if l.strip() and not l.startswith("src/lua/lbind_proto.c:")]
+    return (len(hits) == 0), (hits[0][:90] if hits else "")
+
+def t_proto_binding_is_thin():
+    """The protocol binding may NAME the codec it wraps; it may not know the
+    protocol. Anything Anker-ish outside an #include line is device knowledge
+    that belongs in lua/."""
+    rc, out = sh("grep -nE 'anker|8c8500|0x0840' src/lua/lbind_proto.c 2>/dev/null")
+    hits = [l for l in out.splitlines()
+            if l.strip() and "#include" not in l and "ANKER_REASM_MAX" not in l
+            and "anker_tlv_item_t" not in l and "anker_tlv_spec_t" not in l
+            and "anker_enc_t" not in l and "anker_frame_t" not in l
+            and "anker_reasm_t" not in l and "ANKER_ENC_" not in l
+            and "ANKER_TLV_" not in l and "CONFIG_PROTO_ANKER" not in l
+            and not re.search(r"\banker_(frame|tlv|reasm|pubkey|ecdh|aes)\w*\(", l)]
+    return (len(hits) == 0), (hits[0][:90] if hits else "")
+
+def t_neg_constants_agree():
+    """The negotiation keystream lives in the Lua profile; the C parity test
+    keeps a fixture copy so it can prove the generalised GHASH still matches
+    the tags the Anker-specific original produced. Two copies can drift, and a
+    drift here would be invisible until a charger stopped answering, so assert
+    they are identical."""
+    import pathlib
+    fix = pathlib.Path(ROOT, "test/host/neg_fixture.h")
+    prof = pathlib.Path(ROOT, "lua/profiles/anker_a2687.lua")
+    if not fix.exists() or not prof.exists():
+        return False, "fixture or profile missing"
+    ftxt, ptxt = fix.read_text(), prof.read_text()
+
+    def c_hex(name):
+        m = re.search(re.escape(name) + r"\s*\[[^\]]*\]\s*=\s*\{(.*?)\};", ftxt, re.S)
+        if not m:
+            return None
+        return "".join(b.lower() for b in re.findall(r"0x([0-9a-fA-F]{2})", m.group(1)))
+
+    def lua_hex(name):
+        # The value may be several quoted chunks joined with '..'.
+        m = re.search(r"\b" + re.escape(name) + r"\s*=\s*bytes\.unhex\((.*?)\)\n", ptxt, re.S)
+        if not m:
+            return None
+        return "".join(re.findall(r"'([0-9a-fA-F]*)'", m.group(1))).lower()
+
+    for cname, lname in (("NEG_KEYSTREAM", "KEYSTREAM"), ("NEG_GHASH_H", "GHASH_H"),
+                         ("NEG_EJ0", "EJ0"), ("ANKER_GCM_AAD", "AAD")):
+        a, b = c_hex(cname), lua_hex(lname)
+        if not a or not b:
+            return False, f"could not read {cname} / {lname}"
+        if a != b:
+            return False, f"{cname} != the profile's {lname}"
+    return True, "keystream, H, E(J0), AAD"
+
+def t_lua_proto():
+    """The profile's Lua, on a host, against the REAL C bindings and the REAL
+    vendored Lua -- no board, no flash cycle, no charger. This is the dividend
+    of putting the device-specific half in Lua: the frame construction and the
+    telemetry decode, which are the parts most likely to be wrong, are pure
+    functions of bytes and can be checked in milliseconds."""
+    uecc = os.path.expanduser("~/.pico-sdk/sdk/2.3.0/lib/btstack/3rd-party/micro-ecc")
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_luaproto")
+    rc, out = sh(f"gcc -O1 -w -DMAKE_LIB=1 "
+                 f"-Isrc -Itest/host -Ithird_party/tiny-AES-c -Ithird_party/lua -I{uecc} "
+                 f"-o {binp} test/host/luaproto_main.c src/lua/lbind_proto.c "
+                 f"src/codec/anker_frame.c src/codec/anker_tlv.c "
+                 f"src/crypto/ghash.c src/crypto/anker_crypto.c "
+                 f"third_party/tiny-AES-c/aes.c {uecc}/uECC.c "
+                 f"third_party/lua/onelua.c -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "harness build failed"
+    rc, out = sh(f"{binp} test/host/proto_test.lua")
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m:
+        return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+    nchk, nfail = int(m.group(1)), int(m.group(2))
+    if nfail:
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return False, f"{nfail} of {nchk} failed: {first[:70]}"
+    return rc == 0, f"{nchk} checks"
+
+def t_parity():
+    """The frozen protocol vectors. Two of these assertions are regression
+    locks -- the lenient PKCS7 unpad and GCM without tag verification -- and a
+    'fix' to either stops the device talking."""
+    uecc = os.path.expanduser("~/.pico-sdk/sdk/2.3.0/lib/btstack/3rd-party/micro-ecc")
+    binp = "/tmp/btgw_parity"
+    rc, out = sh(f"gcc -O1 -Wall -Wextra -Wno-unused-parameter "
+                 f"-Isrc -Itest/host -Ithird_party/tiny-AES-c -I{uecc} -o {binp} "
+                 f"test/host/parity_main.c src/codec/anker_frame.c src/codec/anker_tlv.c "
+                 f"src/crypto/ghash.c src/crypto/anker_crypto.c "
+                 f"third_party/tiny-AES-c/aes.c {uecc}/uECC.c -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "parity build failed"
+    rc, out = sh(binp)
+    npass = len(re.findall(r"^OK", out, re.M))
+    nfail = len(re.findall(r"^FAIL", out, re.M))
+    nskip = len(re.findall(r"^SKIP", out, re.M))
+    detail = f"{npass} passed"
+    if nskip:
+        detail += f", {nskip} skipped (C1000-only / no ref workspace)"
+    if nfail:
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return False, f"{nfail} failed: {first[:70]}"
+    return rc == 0, detail
 
 def t_registry_transport_neutral():
     return _grep(r"\ble_[a-z]|gatt_|att_", ["src/bt/registry.c"])
@@ -80,14 +190,22 @@ def main():
 
     step(0, "webapp + model unit tests", t_unit)
     step(0, "no device-specific code in the core", t_no_device_in_core)
+    step(0, "protocol binding stays a thin wrapper", t_proto_binding_is_thin)
     step(0, "device registry stays transport-neutral", t_registry_transport_neutral)
+    step(0, "frozen protocol vectors", t_parity)
+    step(0, "neg constants agree with the Lua profile", t_neg_constants_agree)
+    step(0, "protocol Lua on a host", t_lua_proto)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:
         # a module that only ever builds with its neighbours enabled is a
         # module that will not build when you need it off.
         step(1, "build pico2w (everything)", build("pico2w"))
-        step(1, "build pico2w_minimal (no wifi/lua/io)", build("pico2w_minimal"))
+        step(1, "build pico2w_minimal (no wifi/lua/io/anker)", build("pico2w_minimal"))
+        # The combination neither of the other two reaches: Lua present, the
+        # device codec absent. Without it the #if in lbind.c that skips
+        # lbind_proto_open is never once compiled out.
+        step(1, "build pico2w_noanker (lua, no device codec)", build("pico2w_noanker"))
 
     print()
     if FAILS:

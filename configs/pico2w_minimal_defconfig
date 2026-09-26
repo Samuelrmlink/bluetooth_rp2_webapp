@@ -11,3 +11,7 @@ CONFIG_NET_NCM_IP2=8
 CONFIG_LWIP_MEM_SIZE_KB=32
 CONFIG_BT_LE=y
 CONFIG_BT_MAX_LINKS=2
+
+# The Anker codec and its crypto are the whole point of Phase 8, so a build
+# WITHOUT them is what proves they are really optional.
+# CONFIG_PROTO_ANKER is not set

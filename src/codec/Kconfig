@@ -1,0 +1,36 @@
+menu "Device protocol primitives"
+
+config PROTO_ANKER
+    bool "Anker frame/TLV codec and session crypto"
+    default y
+    help
+      The stable, byte-level half of the Anker protocol: the FF09 frame header
+      and its XOR checksum, fragment reassembly, both TLV dialects, and the
+      AES/GCM/ECDH the session cipher needs.
+
+      This is device-named C, which looks like it contradicts the rule that
+      device knowledge stays out of the firmware. It does not. The rule
+      protects the generic Bluetooth core -- src/bt, src/ops, src/api,
+      src/lua -- so the gateway stays useful for any peripheral. A byte codec
+      that has been stable across three independent implementations is a
+      primitive, not a policy. Everything that actually churns (opcodes, field
+      dictionaries, the handshake, the keystream constants) is in lua/.
+
+      Turn this off for a build that will never talk to Anker hardware and
+      reclaim the flash. The Lua bindings disappear with it.
+
+config PROTO_ANKER_CRYPTO
+    bool "Session crypto (P-256 ECDH, AES, GCM)"
+    depends on PROTO_ANKER
+    default y
+    help
+      ECDH runs on the uECC that BTstack already links for LE Secure
+      Connections, so it costs nothing extra; AES comes from a vendored
+      tiny-AES-c at about 3 KB, and GCM is CTR over that plus a GHASH. mbedTLS
+      would have done all of it and cost roughly 80 KB, because the SDK builds
+      it for picotool rather than for the firmware.
+
+      Without this only the frame and TLV codecs are built, which is enough to
+      decode a plaintext capture but not to hold a session.
+
+endmenu

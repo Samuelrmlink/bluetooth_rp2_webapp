@@ -61,6 +61,7 @@ target_include_directories(btgw PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/include
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${CMAKE_CURRENT_LIST_DIR}/src/fs
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/tiny-AES-c
     ${CMAKE_BINARY_DIR}            # autoconf.h
 )
 
@@ -101,9 +102,23 @@ if(CONFIG_IO_PINS)
     endif()
 endif()
 
+if(CONFIG_PROTO_ANKER)
+    target_sources(btgw PRIVATE src/codec/anker_frame.c src/codec/anker_tlv.c)
+    if(CONFIG_PROTO_ANKER_CRYPTO)
+        # uECC comes in with pico_btstack_ble already; we only add the AES.
+        target_sources(btgw PRIVATE
+            src/crypto/ghash.c
+            src/crypto/anker_crypto.c
+            third_party/tiny-AES-c/aes.c)
+    endif()
+endif()
+
 if(CONFIG_LUA_ENABLE)
     add_subdirectory(third_party/lua)
     target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lbind.c src/lua/lops.c)
+    if(CONFIG_PROTO_ANKER)
+        target_sources(btgw PRIVATE src/lua/lbind_proto.c)
+    endif()
     target_link_libraries(btgw lua)
 endif()
 

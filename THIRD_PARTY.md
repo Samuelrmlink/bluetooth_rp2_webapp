@@ -17,6 +17,7 @@ of this project to publish their own changes.
 | **Lua 5.4.8** (`licenses/Lua.LICENSE`) | `third_party/lua/` | MIT | Pristine upstream from lua.org. `lua.c`, `luac.c`, `liolib.c`, `loslib.c`, `loadlib.c` and `ldblib.c` are not built — see that directory's CMakeLists for why. |
 | **kconfiglib** (`licenses/kconfiglib.LICENSE`) | `third_party/kconfiglib.py` | ISC | Ulf Magnusson. Used at configure time only; nothing from it ships in the firmware. |
 | **littlefs v2.10** | `src/fs/littlefs/` | BSD-3-Clause | The littlefs authors. `licenses/littlefs.LICENSE` |
+| **tiny-AES-c** (`licenses/tiny-AES-c.LICENSE`) | `third_party/tiny-AES-c/` | Unlicense (public domain) | kokke. **Locally patched** to make the key length a run-time argument instead of a compile-time macro, so one build serves AES-128 and AES-256; the patch is marked `LOCAL PATCH` in both files and is covered by the FIPS-197 vectors in the tier-0 suite. The Unlicense places no condition on modification or redistribution. |
 
 Linked but not vendored, and supplied by the Raspberry Pi Pico SDK:
 
@@ -27,7 +28,21 @@ Linked but not vendored, and supplied by the Raspberry Pi Pico SDK:
 | lwIP | BSD-3-Clause | `licenses/lwIP.LICENSE` |
 | cyw43-driver (+ radio firmware blobs) | George Robotics + Raspberry Pi grant — see below | `licenses/cyw43-driver.LICENSE`, `licenses/cyw43-driver.LICENSE.RaspberryPi` |
 | TinyUSB | MIT | `licenses/TinyUSB.LICENSE` |
-| mbedTLS | Apache-2.0 | `licenses/mbedTLS.LICENSE` |
+| mbedTLS | Apache-2.0 | `licenses/mbedTLS.LICENSE` | 
+| micro-ecc (uECC) | BSD-2-Clause | `licenses/micro-ecc.LICENSE` |
+
+**micro-ecc is worth a line of its own.** It arrives inside BTstack, which links
+it for LE Secure Connections, but `src/crypto/anker_crypto.c` now calls
+`uECC_shared_secret()` and `uECC_compute_public_key()` **directly**. That makes
+Kenneth MacKay's BSD-2-Clause our obligation and not merely BTstack's, so its
+text is reproduced here like the rest. Clause 2 is the usual "reproduce the
+notice in materials provided with the distribution", which `tools/collect_notices.sh`
+satisfies.
+
+**mbedTLS is listed but is NOT in the firmware.** The SDK builds it for
+picotool only. This project deliberately does not link it: uECC was already in
+the image and tiny-AES-c is about 3 KB, where mbedTLS would have been roughly
+80 KB for the same four operations.
 
 ## BTstack and the cyw43 driver: the two that need reading
 

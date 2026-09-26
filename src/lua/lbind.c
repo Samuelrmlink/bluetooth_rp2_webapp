@@ -377,8 +377,67 @@ static int l_gs_notify(lua_State *L) {
 #endif
 
 /* --- install -------------------------------------------------------------- */
+#if CONFIG_BT_LE
+/* Resolve a UUID pair to the "svc.chr" path the other bindings take. A script
+ * addresses a characteristic by UUID -- a path index is an artefact of
+ * discovery order and means nothing to a protocol -- but resolving once and
+ * reusing the path keeps the write path cheap. */
+static int l_bt_find(lua_State *L) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
+    const char *svc = luaL_checkstring(L, 2);
+    const char *chr = luaL_checkstring(L, 3);
+    lua_Integer inst = luaL_optinteger(L, 4, 0);
+
+    bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
+    if (!d || !d->connected) { lua_pushnil(L); lua_pushstring(L, "not connected"); return 2; }
+    gattdb_t *db = le_db_for(d->con_handle);
+    uint8_t si, ci;
+    if (!db || !db->ready) { lua_pushnil(L); lua_pushstring(L, "discovery not finished"); return 2; }
+    if (!gattdb_find_chr(db, svc, chr, (int)inst, &si, &ci)) {
+        lua_pushnil(L); lua_pushstring(L, "no such characteristic"); return 2;
+    }
+    /* chr_i is a database index; the path wants it relative to its service. */
+    char path[16];
+    snprintf(path, sizeof path, "%u.%u", si, (unsigned)(ci - db->svc[si].first_chr));
+    lua_pushstring(L, path);
+    return 1;
+}
+
+/* Drain one queued notification, non-blocking. nil when the inbox is empty.
+ *
+ * This is the primitive under the profile's link:await(): a Lua helper polls
+ * it and sys.sleep()s between tries, which is why the scheduler needed no new
+ * yield discipline for the handshake to read as straight-line code. The poll
+ * interval costs one coroutine resume every few milliseconds against a device
+ * that takes ~900 ms to answer its key exchange. */
+static int l_bt_notify_take(lua_State *L) {
+    char addr[18], id[8];
+    static uint8_t val[256];
+    int n = le_notify_take(addr, sizeof addr, id, sizeof id, val, sizeof val);
+    if (n < 0) { lua_pushnil(L); return 1; }
+    lua_createtable(L, 0, 3);
+    lua_pushstring(L, addr);                  lua_setfield(L, -2, "addr");
+    lua_pushstring(L, id);                    lua_setfield(L, -2, "id");
+    lua_pushlstring(L, (const char *)val, (size_t)n); lua_setfield(L, -2, "value");
+    return 1;
+}
+
+static int l_bt_notify_dropped(lua_State *L) {
+    lua_pushinteger(L, (lua_Integer)le_notify_dropped());
+    return 1;
+}
+
+static int l_bt_notify_flush(lua_State *L) { (void)L; le_notify_flush(); return 0; }
+
+#endif
+
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
-    luaL_newlib(L, fns);
+    /* Not luaL_newlib: its size hint is sizeof(l)/sizeof(l[0]), which on a
+     * POINTER argument computes 8/32 - 1 = -1 rather than the entry count.
+     * Build the table explicitly instead. */
+    lua_newtable(L);
+    luaL_setfuncs(L, fns, 0);
     lua_setglobal(L, name);
 }
 
@@ -408,7 +467,16 @@ void lbind_open_all(lua_State *L) {
 
     static const luaL_Reg bt[] = {
         { "devices", l_bt_devices }, { "connect", l_bt_connect },
-        { "write", l_bt_write }, { "subscribe", l_bt_subscribe }, { NULL, NULL } };
+        { "write", l_bt_write }, { "subscribe", l_bt_subscribe },
+        { "find", l_bt_find },
+        { "notify_take", l_bt_notify_take },
+        { "notify_dropped", l_bt_notify_dropped },
+        { "notify_flush", l_bt_notify_flush },
+        { NULL, NULL } };
     set_table(L, "bt", bt);
+#endif
+
+#if CONFIG_PROTO_ANKER
+    lbind_proto_open(L);
 #endif
 }

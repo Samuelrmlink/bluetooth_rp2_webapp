@@ -27,6 +27,7 @@
 #include "api/api.h"
 #include "net/ws.h"
 #include "bt/le/bond.h"
+#include "autoconf.h"
 
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
 void le_on_disconnected(uint16_t con_handle);
@@ -526,6 +527,75 @@ bool le_disconnect(const uint8_t *addr) {
  * event is what identifies the characteristic. */
 static gatt_client_notification_t notif_reg[CONFIG_BT_MAX_LINKS];
 
+
+/* --- the notification inbox ------------------------------------------------
+ * See central.h for why this exists alongside the char.value event.
+ *
+ * Sized for the job rather than generously: a handshake exchanges one frame at
+ * a time, and the largest thing that arrives unsolicited is a telemetry report
+ * of ~208 bytes, fragmented across notifications that are each MTU-bounded.
+ * Eight slots of 256 bytes is 2 KB and covers a whole fragmented report
+ * arriving while a script is between resumes.
+ *
+ * Overflow drops the OLDEST. A script that has stopped draining is not coming
+ * back for the backlog, and holding it would only delay the fresh frame it
+ * will actually want. The drop is counted so the condition is visible rather
+ * than silent. */
+#if CONFIG_LUA_ENABLE
+#define NOTIFY_SLOTS 8
+#define NOTIFY_VAL_MAX 256
+
+typedef struct {
+    char     addr[18];
+    char     id[8];
+    uint16_t len;
+    uint8_t  val[NOTIFY_VAL_MAX];
+} notify_slot_t;
+
+static notify_slot_t s_inbox[NOTIFY_SLOTS];
+static uint8_t s_inbox_head;     /* next write */
+static uint8_t s_inbox_count;
+static uint32_t s_inbox_dropped;
+
+static void notify_push(const char *addr, const char *id, const uint8_t *val,
+                        uint16_t len) {
+    if (len > NOTIFY_VAL_MAX) {
+        /* Truncating would hand a script a frame whose checksum cannot pass,
+         * which is a worse failure than never seeing it. */
+        s_inbox_dropped++;
+        return;
+    }
+    notify_slot_t *s = &s_inbox[s_inbox_head];
+    s_inbox_head = (uint8_t)((s_inbox_head + 1) % NOTIFY_SLOTS);
+    if (s_inbox_count < NOTIFY_SLOTS) {
+        s_inbox_count++;
+    } else {
+        s_inbox_dropped++;       /* head just ran over the oldest entry */
+    }
+    snprintf(s->addr, sizeof s->addr, "%s", addr);
+    snprintf(s->id, sizeof s->id, "%s", id);
+    s->len = len;
+    memcpy(s->val, val, len);
+}
+
+int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
+                   uint8_t *val, size_t val_cap) {
+    if (!s_inbox_count) { return -1; }
+    uint8_t tail = (uint8_t)((s_inbox_head + NOTIFY_SLOTS - s_inbox_count) % NOTIFY_SLOTS);
+    notify_slot_t *s = &s_inbox[tail];
+    s_inbox_count--;
+    if (s->len > val_cap) { return -1; }
+    if (addr_out) { snprintf(addr_out, addr_cap, "%s", s->addr); }
+    if (id_out) { snprintf(id_out, id_cap, "%s", s->id); }
+    memcpy(val, s->val, s->len);
+    return (int)s->len;
+}
+
+uint32_t le_notify_dropped(void) { return s_inbox_dropped; }
+
+void le_notify_flush(void) { s_inbox_head = 0; s_inbox_count = 0; }
+#endif /* CONFIG_LUA_ENABLE */
+
 static void emit_char_value(le_link_t *l, uint16_t value_handle,
                             const uint8_t *data, uint16_t len, const char *source) {
     gattdb_t *db = &l->db;
@@ -549,6 +619,19 @@ static void emit_char_value(le_link_t *l, uint16_t value_handle,
             }
             snprintf(ev + n, sizeof(ev) - n, "\"}");
             api_emit("char.value", ev);
+#if CONFIG_LUA_ENABLE
+            /* Only unsolicited values. A read result already has a caller
+             * holding its reply; queueing it too would show up in an awaiting
+             * script as a frame nobody sent. */
+            if (source[0] == 'n' || source[0] == 'i') {
+                char a[18], pid[8];
+                snprintf(a, sizeof a, "%02X:%02X:%02X:%02X:%02X:%02X",
+                         l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4],
+                         l->addr[5]);
+                snprintf(pid, sizeof pid, "%u.%u", si, k);
+                notify_push(a, pid, data, len);
+            }
+#endif
             return;
         }
     }

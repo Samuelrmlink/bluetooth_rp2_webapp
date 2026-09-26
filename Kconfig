@@ -12,5 +12,6 @@ config BOARD_PICO2_W
 
 source "src/net/Kconfig"
 source "src/bt/Kconfig"
+source "src/codec/Kconfig"
 source "src/lua/Kconfig"
 source "src/io/Kconfig"
