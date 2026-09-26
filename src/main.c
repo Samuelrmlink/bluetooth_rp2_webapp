@@ -33,6 +33,7 @@
 #endif
 #if CONFIG_BT_LE
 #include "bt/bt.h"
+#include "bt/le/central.h"
 #endif
 
 int main(void) {
@@ -90,6 +91,9 @@ int main(void) {
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
         cyw43_arch_poll();
 
+#if CONFIG_BT_LE
+        le_central_tick();
+#endif
         cfg_tick();
         /* Coalesce whatever the pass produced into as few segments as possible;
          * the per-line tcp_output() was removed deliberately. */

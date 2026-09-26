@@ -502,10 +502,14 @@ static void ws_reply_line(const char *line, void *ctx) {
     if (!c->pcb || !c->is_ws) {
         return;
     }
-    uint8_t frame[512];
+    /* static: WS_TX_MAX is far too large for core0's stack, and this runs from
+     * an lwIP callback which is already the deepest path we have. Safe because
+     * core0 is single-threaded and the frame is handed to tcp_write here. */
+    static uint8_t frame[WS_TX_MAX];
     size_t n = ws_encode_text_frame((const uint8_t *)line, strlen(line), frame, sizeof(frame));
     if (n == 0) {
-        return; /* line longer than our frame buffer — shouldn't happen for this protocol */
+        c->dropped++;   /* over WS_TX_MAX: counted, never silently discarded */
+        return;
     }
     /* No tcp_output() here, deliberately. Pushing every line out as its own
      * segment meant a follower could have at most TCP_SND_QUEUELEN (16) lines
@@ -569,9 +573,13 @@ void http_send_line(void *ctx, const char *line) {
     }
 }
 
+/* Every WebSocket client gets every event. The `follow` flag this used to gate
+ * on belonged to the old ASCII protocol's FOLLOW ON verb, which nothing in the
+ * JSON API sets -- so gating on it sent events precisely nowhere. Per-topic
+ * subscription (sub.add) replaces it properly in phase 6. */
 void http_broadcast_line(const char *line) {
     for (int i = 0; i < HTTP_CONNS; i++) {
-        if (conns[i].pcb && conns[i].is_ws && conns[i].follow) {
+        if (conns[i].pcb && conns[i].is_ws) {
             ws_reply_line(line, &conns[i]);
         }
     }

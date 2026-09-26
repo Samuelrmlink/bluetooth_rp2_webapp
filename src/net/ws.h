@@ -1,5 +1,12 @@
-#ifndef KM003C_WS_H
-#define KM003C_WS_H
+#ifndef BTGW_WS_H
+#define BTGW_WS_H
+
+/* Largest frame we will send. The JSON API's replies (a GATT tree, a scan
+ * listing) are far larger than the ASCII lines this code was written for,
+ * where 512 bytes was ample -- and an oversized frame is silently DROPPED by
+ * ws_encode_text_frame rather than truncated, which presents as an op that
+ * simply never answers. */
+#define WS_TX_MAX 4096
 
 #include <stddef.h>
 #include <stdint.h>
