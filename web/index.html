@@ -80,6 +80,26 @@
   <!-- The pane the architecture exists for: Lua edited on the device, over
        the same socket that carries everything else. The three tiers are
        shown rather than hidden, because which one you mean is the point. -->
+  <!-- Driven entirely by profile.anker.telemetry, which a LUA script emits.
+       The firmware has no idea this device exists. -->
+  <section class="pane pane-anker" id="pane-anker">
+    <div class="pane-tools">
+      <span id="a-state" class="pill" data-state="none">no data</span>
+      <span id="a-ident" class="muted"></span>
+      <span class="spacer"></span>
+      <strong id="a-total"></strong>
+      <button class="btn" id="a-refresh" title="ask the charger for a full report now">Refresh</button>
+      <button class="btn" id="a-raw-toggle" aria-pressed="false">Raw</button>
+    </div>
+    <div class="scroll">
+      <div id="a-ports" class="ports"></div>
+      <div class="kvbox"><div class="sub-head">settings</div><div id="a-settings"></div></div>
+      <div class="kvbox" hidden><div class="sub-head">tags this webapp does not know yet</div>
+        <div id="a-other"></div></div>
+      <pre id="a-raw" class="mono" hidden></pre>
+    </div>
+  </section>
+
   <section class="pane pane-script" id="pane-script">
     <div class="pane-tools">
       <select id="s-script" title="scripts the device knows about"></select>

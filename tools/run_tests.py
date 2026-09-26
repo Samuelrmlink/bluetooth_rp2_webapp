@@ -164,6 +164,23 @@ def t_parity():
 def t_registry_transport_neutral():
     return _grep(r"\ble_[a-z]|gatt_|att_", ["src/bt/registry.c"])
 
+def t_webapp_dom():
+    """Render the real page in a real browser. Every model test passed while
+    the app opened to an empty workspace nothing could be selected in, because
+    a model test cannot see a wrong argument at the one call site that builds
+    the layout, or a render method nobody called. Both of those shipped."""
+    rc, out = sh("python3 tools/webtest.py")
+    if "SKIP:" in out:
+        return True, "skipped (no chromium)"
+    m = re.search(r"(\d+)/(\d+) DOM checks passed", out)
+    if not m:
+        return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+    good, total = int(m.group(1)), int(m.group(2))
+    if rc or good != total:
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return False, f"{total - good} of {total} failed: {first[:70]}"
+    return True, f"{good} checks in chromium"
+
 # --- tier 1 -------------------------------------------------------------------
 def build(cfg):
     def fn():
@@ -206,6 +223,9 @@ def main():
         # device codec absent. Without it the #if in lbind.c that skips
         # lbind_proto_open is never once compiled out.
         step(1, "build pico2w_noanker (lua, no device codec)", build("pico2w_noanker"))
+
+    if a.tier >= 2:
+        step(2, "webapp renders and panes can be selected", t_webapp_dom)
 
     print()
     if FAILS:

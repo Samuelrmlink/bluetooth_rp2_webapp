@@ -8,6 +8,7 @@ import { DeviceStore, uuidLabel, hexToAscii, shortUuid } from './gattdb.js';
 import { Layout } from './tiles.js';
 import { LayoutManager } from './layout.js';
 import { mountScriptPane } from './panes/script.js';
+import { mountAnkerPane } from './panes/anker.js';
 
 const $ = (id) => document.getElementById(id);
 const api = new WsApi();
@@ -173,17 +174,35 @@ const PANES = [
   { id: 'devices', title: 'Devices',        el: $('pane-devices') },
   { id: 'tree',    title: 'GATT Tree',      el: $('pane-tree') },
   { id: 'char',    title: 'Characteristic', el: $('pane-char') },
+  { id: 'anker',   title: 'Anker',          el: $('pane-anker') },
   { id: 'script',  title: 'Script',         el: $('pane-script') },
   { id: 'log',     title: 'Log',            el: $('pane-log') },
 ];
 
 const STORE_KEY = 'btgw.layout';
+
+/* The arrangement the app opens with when nothing is stored. Note the SHAPE:
+ * Layout.fromJSON takes {tree, floating}, exactly what Layout.toJSON emits,
+ * and a list of the pane ids that may be placed. Hand it a bare tree array
+ * and it finds no .tree, falls back to one empty leaf, and every slot reads
+ * "choose a pane" forever. Hand it a tree but no known-pane list and every
+ * leaf is rejected as unknown, with the same result. Both of those shipped. */
+const DEFAULT_LAYOUT = {
+  tree: ['row', 0.42, 'scanner', ['col', 0.55, 'tree', 'char']],
+  floating: [],
+};
+
+const PANE_IDS = PANES.map((p) => p.id);
+
 function loadLayout() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
-    if (raw?.tree) return Layout.fromJSON(raw.tree, raw.floating);
-  } catch { /* a corrupt record must not stop the app starting */ }
-  return Layout.fromJSON(['row', 0.42, 'scanner', ['col', 0.55, 'tree', 'char']]);
+    // A stored layout predating a new pane simply will not mention it; that
+    // is fine and the pane stays parked until someone places it. A stored
+    // layout that is corrupt must not stop the app starting.
+    if (raw && raw.tree !== undefined) return Layout.fromJSON(raw, PANE_IDS);
+  } catch { /* fall through to the default */ }
+  return Layout.fromJSON(DEFAULT_LAYOUT, PANE_IDS);
 }
 
 const lm = new LayoutManager({
@@ -200,6 +219,12 @@ const lm = new LayoutManager({
 /* Panes that own their own state mount once and manage themselves; renderAll
  * is only for the ones driven by the shared device store. */
 const scriptPane = mountScriptPane({ api, log });
+const ankerPane = mountAnkerPane({ api, log });
+
+/* LayoutManager's constructor builds the tab bar and wires events but does
+ * NOT lay the tiles out -- apply() does, and nothing called it, so the page
+ * opened with an empty workspace until a window resize happened to fire. */
+lm.apply();
 
 function renderAll() { renderScan(); renderDevices(); renderTree(); renderChar(); }
 
