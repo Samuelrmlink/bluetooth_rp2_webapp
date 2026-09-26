@@ -74,7 +74,7 @@ target_link_libraries(btgw
 )
 
 if(CONFIG_BT_LE)
-    target_sources(btgw PRIVATE src/bt/bt.c src/bt/registry.c src/bt/le/central.c)
+    target_sources(btgw PRIVATE src/bt/bt.c src/bt/registry.c src/bt/le/central.c src/bt/le/gattdb.c)
     target_link_libraries(btgw pico_btstack_ble pico_btstack_cyw43 pico_btstack_flash_bank)
 endif()
 if(CONFIG_BT_CLASSIC)

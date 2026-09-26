@@ -38,6 +38,18 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
                 printf("bt: state %u\n", btstack_event_state_get_state(pkt));
             }
             break;
+        case HCI_EVENT_META_GAP:
+            if (hci_event_gap_meta_get_subevent_code(pkt) == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
+                bd_addr_t peer;
+                gap_subevent_le_connection_complete_get_peer_address(pkt, peer);
+                le_on_connected(gap_subevent_le_connection_complete_get_connection_handle(pkt),
+                                peer,
+                                gap_subevent_le_connection_complete_get_peer_address_type(pkt));
+            }
+            break;
+        case HCI_EVENT_DISCONNECTION_COMPLETE:
+            le_on_disconnected(hci_event_disconnection_complete_get_connection_handle(pkt));
+            break;
         default:
             break;
     }
@@ -72,6 +84,10 @@ static void op_bt_state(const char *params, api_reply_fn reply, void *ctx, long 
              s_ready ? "true" : "false", bd_addr_to_str(addr), CONFIG_BT_MAX_LINKS);
     api_reply_ok(reply, ctx, id, result);
 }
+
+/* One scratch buffer, filled and consumed within the call -- core0 is
+ * single-threaded and its stack is small. */
+static char list_buf[3072];
 
 /* Parses the optional filter object. Note what is absent: there is no way to
  * filter on a GATT service UUID, because those are invisible until after a
@@ -141,10 +157,6 @@ static void op_scan_stop(const char *params, api_reply_fn reply, void *ctx, long
     api_reply_ok(reply, ctx, id, "{\"scanning\":false}");
 }
 
-/* One scratch buffer, filled and consumed within the call -- core0 is
- * single-threaded and its stack is small. */
-static char list_buf[4096];
-
 static void op_scan_list(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     size_t n = (size_t)snprintf(list_buf, sizeof(list_buf), "{\"devices\":[");
@@ -168,7 +180,92 @@ static void op_scan_list(const char *params, api_reply_fn reply, void *ctx, long
     api_reply_ok(reply, ctx, id, list_buf);
 }
 
+/* Resolves {"device":"AA:BB:.."} to a registry entry. */
+static bt_device_t *dev_param(const char *params) {
+    char addr[20];
+    if (!api_json_str(params, "device", addr, sizeof(addr))) {
+        return NULL;
+    }
+    return bt_registry_by_str(addr, BT_TRANSPORT_LE);
+}
+
+static void op_dev_connect(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    if (!d) {
+        api_reply_err(reply, ctx, id, "unknown_device",
+                      "address not in the scan table -- scan first, so the "
+                      "address type is known");
+        return;
+    }
+    if (d->connected) {
+        api_reply_ok(reply, ctx, id, "{\"connected\":true,\"already\":true}");
+        return;
+    }
+    /* addr_type comes from the scan record. Assuming public produces a connect
+     * that simply never completes against a random-address peripheral. */
+    if (!le_connect(d->addr, d->addr_type)) {
+        api_reply_err(reply, ctx, id, "busy", "another connect is already in flight");
+        return;
+    }
+    api_reply_ok(reply, ctx, id, "{\"connecting\":true}");
+}
+
+static void op_dev_disconnect(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    if (!d || !le_disconnect(d->addr)) {
+        api_reply_err(reply, ctx, id, "not_connected", "no such open connection");
+        return;
+    }
+    api_reply_ok(reply, ctx, id, "{\"disconnecting\":true}");
+}
+
+static void op_dev_list(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    size_t n = (size_t)snprintf(list_buf, sizeof(list_buf), "{\"devices\":[");
+    bool first = true;
+    for (size_t i = 0; i < bt_registry_count(); i++) {
+        bt_device_t *d = bt_registry_at(i);
+        if (!d || !d->connected) {
+            continue;
+        }
+        char one[512];
+        bt_device_json(d, one, sizeof(one));
+        if (n + strlen(one) + 4 >= sizeof(list_buf)) {
+            break;
+        }
+        n += (size_t)snprintf(list_buf + n, sizeof(list_buf) - n, "%s%s", first ? "" : ",", one);
+        first = false;
+    }
+    snprintf(list_buf + n, sizeof(list_buf) - n, "]}");
+    api_reply_ok(reply, ctx, id, list_buf);
+}
+
+static void op_gatt_tree(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    if (!d || !d->connected) {
+        api_reply_err(reply, ctx, id, "not_connected", "device is not connected");
+        return;
+    }
+    gattdb_t *db = le_db_for(d->con_handle);
+    if (!db) {
+        api_reply_err(reply, ctx, id, "no_database", "no GATT database for this link");
+        return;
+    }
+    if (!db->ready) {
+        /* Discovery spans many callbacks; answering from a half-built table is
+         * how "characteristic not found" becomes intermittent. */
+        api_reply_err(reply, ctx, id, "discovering", "discovery still in progress");
+        return;
+    }
+    gattdb_json(db, list_buf, sizeof(list_buf));
+    api_reply_ok(reply, ctx, id, list_buf);
+}
+
 static const op_def_t bt_ops[] = {
+    { "dev.connect",    op_dev_connect },
+    { "dev.disconnect", op_dev_disconnect },
+    { "dev.list",       op_dev_list },
+    { "gatt.tree",      op_gatt_tree },
     { "bt.state",   op_bt_state },
     { "scan.start", op_scan_start },
     { "scan.stop",  op_scan_stop },

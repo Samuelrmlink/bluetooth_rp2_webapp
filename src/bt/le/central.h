@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "bt/registry.h"
+#include "bt/le/gattdb.h"
 
 typedef struct {
     bool     active;               /* active scan -> peers send SCAN_RSP, which
@@ -22,7 +23,20 @@ bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms);
 void le_scan_stop(void);
 bool le_scanning(void);
 
-/* Called once per main-loop pass; ends a timed scan. */
+/* Connect by address. addr_type comes from the scan table -- you cannot assume
+ * public, and guessing produces a connect that never completes. */
+bool le_connect(const uint8_t *addr, uint8_t addr_type);
+bool le_disconnect(const uint8_t *addr);
+
+/* The database for a connected peer, or NULL. */
+gattdb_t *le_db_for(uint16_t con_handle);
+gattdb_t *le_db_for_addr(const uint8_t *addr);
+
+/* Called once per main-loop pass; ends a timed scan and times out connects. */
 void le_central_tick(void);
+
+/* Called by the HCI event handler in bt.c. */
+void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
+void le_on_disconnected(uint16_t con_handle);
 
 #endif
