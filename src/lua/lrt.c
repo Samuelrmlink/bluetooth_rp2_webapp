@@ -15,6 +15,7 @@
 #include "pico/time.h"
 
 #include "lua/lheap.h"
+#include "lua/lwait.h"
 
 #if CONFIG_LUA_ENABLE
 
@@ -62,6 +63,9 @@ typedef struct {
     char  err[160];
     uint32_t resumes;
     uint32_t wake_at_ms;   /* 0 = runnable now; set by sys.sleep */
+    /* Why this script's last blocking wait ended. The resume ALWAYS carries
+     * this: a coroutine is never woken without being told why. */
+    lwait_reason_t wake_reason;
     uint32_t forced_yields; /* consecutive hook-forced yields; reset by a real one */
     char  *draft;        /* NULL unless a RAM draft exists */
     size_t draft_len;
@@ -97,6 +101,29 @@ static script_t *alloc_script(const char *name) {
         }
     }
     return NULL;
+}
+
+/* --- blocking waits -------------------------------------------------------
+ * The scheduler half of the contract in lwait.h. A script blocked on a token
+ * is not resumed at all until that wait resolves, which is what turns a
+ * profile that polled bt.notify_take() every 5 ms into one that runs when its
+ * data arrives.
+ *
+ * This complements the instruction budget below rather than duplicating it:
+ * the hook catches a coroutine that SPINS, and this catches one that BLOCKS. */
+static int s_current_slot = -1;
+
+int lrt_current_slot(void) { return s_current_slot; }
+
+lwait_reason_t lrt_block_current(uint32_t token, uint8_t link, uint32_t timeout_ms) {
+    if (s_current_slot < 0) { return LWAIT_CANCELLED; }
+    return lwait_arm((uint8_t)s_current_slot, token, link, timeout_ms,
+                     to_ms_since_boot(get_absolute_time()));
+}
+
+lwait_reason_t lrt_wake_reason(void) {
+    if (s_current_slot < 0) { return LWAIT_CANCELLED; }
+    return scripts[s_current_slot].wake_reason;
 }
 
 /* --- the instruction budget ----------------------------------------------
@@ -409,9 +436,28 @@ bool lrt_start(const char *name, const char **err) {
  * A draft is source, not runtime state: destroying it here made reload (which
  * is stop-then-start) lose the very thing it was asked to reload. */
 static void teardown(script_t *s) {
-    if (s->co_ref != LUA_NOREF)  { luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref);  s->co_ref = LUA_NOREF; }
+    /* Release the wait BEFORE the coroutine goes: a script stopped while
+     * blocked must not leave a waiter pointing at a slot that is about to be
+     * reused by the next script to start. */
+    lwait_cancel((uint8_t)(s - scripts));
+
+    if (s->co_ref != LUA_NOREF) {
+        /* Close the thread rather than merely dropping the reference. A
+         * coroutine killed mid-wait -- by a link loss, a stop or a reload --
+         * must still run its to-be-closed variables, or every dropped link
+         * leaks the ops.register entries, subscriptions and loaded modules
+         * its profile took out. lua_closethread makes that guaranteed rather
+         * than best-effort, and gives a profile an idiomatic place to put its
+         * teardown. */
+        lua_rawgeti(L, LUA_REGISTRYINDEX, s->co_ref);
+        lua_State *co = lua_tothread(L, -1);
+        if (co) { lua_closethread(co, L); }
+        lua_pop(L, 1);
+        luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref);  s->co_ref = LUA_NOREF;
+    }
     if (s->env_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->env_ref); s->env_ref = LUA_NOREF; }
     /* Phase 7 releases this script's pin and bus claims here too. */
+    s->wake_reason = LWAIT_PENDING;
     s->running = false;
     s->dead = false;
 }
@@ -530,13 +576,51 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
 /* --- the scheduler -------------------------------------------------------- */
 void lrt_tick(void) {
     if (!s_ready) { return; }
+
+    /* The watchdog half of the wait contract. A coroutine blocked on an event
+     * that never arrives is exactly as stuck as one blocked forever, and
+     * nothing else in the system would ever notice it. */
+    lwait_expire(to_ms_since_boot(get_absolute_time()));
+
     for (int i = 0; i < MAX_SCRIPTS; i++) {
         script_t *s = &scripts[i];
         if (!s->used || !s->running || s->dead || s->co_ref == LUA_NOREF) { continue; }
-        /* sys.sleep yields a wake time rather than busy-waiting, because a
-         * busy-wait here would stall the radio and the network with it. */
-        if (s->wake_at_ms &&
-            (int32_t)(to_ms_since_boot(get_absolute_time()) - s->wake_at_ms) < 0) {
+
+        if (lwait_is_armed((uint8_t)i)) {
+            /* Blocked. This is the line that replaces polling: the script is
+             * not resumed at all until its wait resolves, rather than woken
+             * every pass to ask whether anything has arrived yet. */
+            lwait_reason_t r = lwait_state((uint8_t)i);
+            if (r == LWAIT_PENDING) { continue; }
+
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            uint32_t waited = lwait_waited_ms((uint8_t)i, now);
+            uint8_t  link = lwait_link((uint8_t)i);
+            uint32_t tok  = lwait_token((uint8_t)i);
+            lwait_take((uint8_t)i, &r);
+            s->wake_reason = r;
+
+            if (r != LWAIT_DELIVERED) {
+                /* EVERY non-delivered wake is logged, with what was waited
+                 * for, how long, and which link. This is the diagnostic that
+                 * was missing when GATT discovery stalled silently: the
+                 * script gave up, and nothing anywhere said why. */
+                printf("lua: %s woke %s after %lu ms (token %08lx, link %u)\n",
+                       s->name, lwait_reason_name(r), (unsigned long)waited,
+                       (unsigned long)tok, (unsigned)link);
+                char msg[220];
+                snprintf(msg, sizeof msg,
+                         "{\"script\":\"%s\",\"reason\":\"%s\",\"waited_ms\":%lu,"
+                         "\"link\":%u}",
+                         s->name, lwait_reason_name(r), (unsigned long)waited,
+                         (unsigned)link);
+                api_emit("script.wake", msg);
+            }
+            s->wake_at_ms = 0;
+        } else if (s->wake_at_ms &&
+                   (int32_t)(to_ms_since_boot(get_absolute_time()) - s->wake_at_ms) < 0) {
+            /* sys.sleep yields a wake time rather than busy-waiting, because
+             * a busy-wait here would stall the radio and the network with it. */
             continue;
         }
         s->wake_at_ms = 0;
@@ -551,9 +635,11 @@ void lrt_tick(void) {
          * hook to hand control back after a slow call. */
         lua_sethook(co, hook, LUA_MASKCOUNT, CONFIG_LUA_HOOK_BUDGET);
         s_current_co = co;
+        s_current_slot = i;
         s_slice_start_ms = to_ms_since_boot(get_absolute_time());
         int rc = lua_resume(co, L, 0, &nres);
         s_current_co = NULL;
+        s_current_slot = -1;
         if ((uint32_t)(to_ms_since_boot(get_absolute_time()) - s_slice_start_ms)
                 > SLICE_MAX_MS) {
             /* One slow C binding, not a loop of them: report but do not kill.
@@ -563,6 +649,15 @@ void lrt_tick(void) {
         }
         s->resumes++;
         if (rc == LUA_YIELD) {
+            /* A binding that armed a wait before yielding is BLOCKED, not
+             * spinning: it yields no values, which would otherwise look
+             * exactly like an instruction-hook preemption and eventually get
+             * the script killed for never yielding voluntarily. */
+            if (lwait_is_armed((uint8_t)i)) {
+                s->forced_yields = 0;
+                lua_pop(co, nres);
+                continue;
+            }
             /* A yield carrying one integer is sys.sleep telling us when it
              * wants to run again; a bare yield (the instruction hook) means
              * "resume me next pass". */

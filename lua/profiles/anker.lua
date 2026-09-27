@@ -164,9 +164,15 @@ end
 -- The link object. link:await() is why the handshake below reads as
 -- straight-line code: every call that waits yields the coroutine, so the
 -- natural way to write the protocol is also the way that does not stall the
--- radio. It polls the C notification inbox and sys.sleep()s between tries --
--- the scheduler needed no new yield discipline for that, and a 5 ms poll is
--- nothing against a device that takes ~900 ms to answer its key exchange.
+-- radio.
+--
+-- It BLOCKS rather than polls. The earlier version took the C inbox every
+-- 5 ms and slept between tries, which cost about 190 resumes per second to
+-- deliver one telemetry report per second, and -- worse -- could not tell a
+-- silent device from an absent one: it kept asking a dropped link until some
+-- outer deadline gave up. bt.await hands the wait to the scheduler, which
+-- resumes this coroutine when a frame arrives, when the deadline passes, or
+-- the moment the LINK DROPS, and says which.
 -- ---------------------------------------------------------------------------
 local Link = {}
 Link.__index = Link
@@ -188,11 +194,20 @@ end
 function Link:await(opcode, timeout_ms)
   local deadline = sys.ms() + (timeout_ms or 3000)
   repeat
-    local n = bt.notify_take(self.addr)
+    local left = deadline - sys.ms()
+    if left <= 0 then break end
+    local n, why = bt.await(self.addr, left)
+    if not n then
+      -- A timeout here is OUR deadline and the caller's to interpret. Link
+      -- loss and cancellation are not retryable by anyone, so they are
+      -- returned as-is rather than flattened into "no reply".
+      if why ~= 'timeout' then return nil, why end
+      break
+    end
     -- Read results share this inbox now (the Pinecil has no notify
     -- characteristic and can only be polled), so ignore anything that is not
     -- the device talking on its own.
-    if n and n.id == self.tel and n.source ~= 'read' then
+    if n.id == self.tel and n.source ~= 'read' then
       local f = frame.parse(n.value)
       if f then
         if not f.checksum_ok then
@@ -213,9 +228,8 @@ function Link:await(opcode, timeout_ms)
         end
       end
     end
-    if not n then sys.sleep(5) end
   until sys.ms() > deadline
-  return nil
+  return nil, 'timeout'
 end
 
 -- Decrypt if the frame says so, then strip the status byte -- but only from a

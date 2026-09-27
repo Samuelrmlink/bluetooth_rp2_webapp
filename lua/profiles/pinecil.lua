@@ -96,17 +96,27 @@ function M.link(addr)
   return l
 end
 
--- Ask, then wait for the answer in the inbox. A GATT read is a round trip;
--- blocking on it would stall the radio, so this yields between polls exactly
--- as an await on a notification does.
+-- Ask, then wait for the answer. A GATT read is a round trip; blocking the
+-- cooperative loop on one would stall the radio, so the coroutine yields and
+-- the scheduler resumes it when the answer lands.
+--
+-- This used to poll the inbox every 5 ms. The iron is read once a second, so
+-- that was ~200 wasted resumes per useful value, and a read issued to a link
+-- that had just dropped waited out the full 2 s before saying so. bt.await
+-- ends on the disconnect instead, and says that is what happened.
 function Link:read(id, timeout_ms)
   bt.notify_flush(self.addr)
   if not bt.read(self.addr, id) then return nil, 'read refused' end
   local deadline = sys.ms() + (timeout_ms or 2000)
   repeat
-    local n = bt.notify_take(self.addr)
-    if n and n.id == id and n.source == 'read' then return n.value end
-    if not n then sys.sleep(5) end
+    local left = deadline - sys.ms()
+    if left <= 0 then break end
+    local n, why = bt.await(self.addr, left)
+    if not n then
+      if why ~= 'timeout' then return nil, why end
+      break
+    end
+    if n.id == id and n.source == 'read' then return n.value end
   until sys.ms() > deadline
   return nil, 'read timed out'
 end

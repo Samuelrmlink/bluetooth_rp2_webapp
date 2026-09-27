@@ -79,6 +79,12 @@ void le_register_notifications(uint16_t con_handle);
 int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,
                    char *id_out, size_t id_cap, char *src_out, size_t src_cap,
                    uint8_t *val, size_t val_cap);
+/* The link SLOT for an address (-1 if not connected), and the token a script
+ * blocks on to await that device. Both feed the wait contract in lua/lwait.h:
+ * the slot says which link a wait belongs to, so a disconnect can resolve it. */
+int      le_link_slot(const char *addr);
+uint32_t le_addr_token(const char *addr);
+
 uint32_t le_notify_dropped(void);
 void le_notify_flush(const char *addr_filter);
 #endif

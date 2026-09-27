@@ -27,6 +27,9 @@
 #include "api/api.h"
 #include "net/ws.h"
 #include "bt/le/bond.h"
+#if CONFIG_LUA_ENABLE
+#include "lua/lwait.h"
+#endif
 #include "autoconf.h"
 
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
@@ -277,6 +280,42 @@ typedef struct {
 #define DISC_TIMEOUT_MS 15000
 
 static le_link_t links[CONFIG_BT_MAX_LINKS];
+
+/* A link's SLOT index, which is what the wait contract keys on: it is stable
+ * for the life of a connection and small enough to index a table, where a
+ * con_handle is neither. */
+static int link_index(const le_link_t *l) {
+    return (int)(l - links);
+}
+
+#if CONFIG_LUA_ENABLE
+/*
+ * The token a script blocks on. Today a wait is "any frame from this device",
+ * so the address alone identifies it; the token exists as a separate concept
+ * because awaiting one CHARACTERISTIC is the obvious next step and should not
+ * require changing the contract. FNV-1a, because it needs to be stable and
+ * cheap, not cryptographic.
+ */
+uint32_t le_addr_token(const char *addr) {
+    uint32_t h = 2166136261u;
+    for (const char *p = addr; p && *p; p++) {
+        h = (h ^ (uint8_t)*p) * 16777619u;
+    }
+    return h;
+}
+
+int le_link_slot(const char *addr) {
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        if (!links[i].active) { continue; }
+        char a[18];
+        snprintf(a, sizeof a, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 links[i].addr[0], links[i].addr[1], links[i].addr[2],
+                 links[i].addr[3], links[i].addr[4], links[i].addr[5]);
+        if (strcmp(a, addr) == 0) { return i; }
+    }
+    return -1;
+}
+#endif
 
 static le_link_t *link_by_handle(uint16_t h) {
     for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
@@ -711,6 +750,11 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
         d->con_handle = con_handle;
         d->addr_type = addr_type;
     }
+#if CONFIG_LUA_ENABLE
+    /* A new generation for this slot, so a frame queued by the PREVIOUS
+     * connection can never be delivered to this one. */
+    lwait_link_up((uint8_t)link_index(l));
+#endif
     emit_device_event("dev.connected", addr);
 
     le_register_notifications(con_handle);
@@ -725,6 +769,14 @@ void le_on_disconnected(uint16_t con_handle) {
     uint8_t addr[BT_ADDR_LEN] = {0};
     if (l) {
         memcpy(addr, l->addr, BT_ADDR_LEN);
+#if CONFIG_LUA_ENABLE
+        /* Before the slot is cleared, and before anything else: this is what
+         * unblocks a coroutine waiting on an event that is now never coming.
+         * A deadline alone would leave it blocked for the rest of its
+         * timeout, which for a handshake step is the difference between
+         * failing in 200 ms and failing in 20 s. */
+        lwait_link_down((uint8_t)link_index(l));
+#endif
         memset(l, 0, sizeof(*l));
     }
     bt_device_t *d = bt_registry_by_handle(con_handle);
@@ -868,6 +920,15 @@ static void notify_push(const char *addr, const char *id, const char *source,
     snprintf(s->source, sizeof s->source, "%s", source);
     s->len = len;
     memcpy(s->val, val, len);
+
+    /* Wake whoever is blocked on this device. The inbox still holds the
+     * frame -- the waiter drains it on its next resume -- so a script that
+     * polls and a script that blocks see exactly the same data. */
+    int wslot = le_link_slot(addr);
+    if (wslot >= 0) {
+        lwait_deliver(le_addr_token(addr), (uint8_t)wslot,
+                      lwait_link_generation((uint8_t)wslot));
+    }
 }
 
 int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,

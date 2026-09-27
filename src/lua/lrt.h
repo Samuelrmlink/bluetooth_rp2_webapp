@@ -1,6 +1,7 @@
 #ifndef BTGW_LRT_H
 #define BTGW_LRT_H
 
+#include "lua/lwait.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -69,5 +70,20 @@ bool lrt_eval(const char *name, const char *chunk, char *out, size_t cap);
 
 size_t lrt_list_json(char *dst, size_t cap);
 size_t lrt_stats_json(char *dst, size_t cap);
+
+/* --- blocking waits, for the bindings -------------------------------------
+ * A binding that must wait for an event arms a wait and then yields with no
+ * values. The scheduler will not resume the script until the wait resolves,
+ * and the resume carries WHY it resolved (see lwait.h).
+ *
+ * The shape a binding uses:
+ *
+ *     lwait_reason_t r = lrt_block_current(token, link, timeout_ms);
+ *     if (r != LWAIT_PENDING) { return fail(L, r); }   // resolved already
+ *     return lua_yieldk(L, 0, 0, k);                   // k reads lrt_wake_reason()
+ */
+int            lrt_current_slot(void);
+lwait_reason_t lrt_block_current(uint32_t token, uint8_t link, uint32_t timeout_ms);
+lwait_reason_t lrt_wake_reason(void);
 
 #endif

@@ -111,6 +111,25 @@ def t_neg_constants_agree():
             return False, f"{cname} != the profile's {lname}"
     return True, "keystream, H, E(J0), AAD"
 
+def t_lua_wait():
+    """The wait/wake contract. These are the races -- a disconnect arriving
+    while the coroutine is runnable rather than blocked, a frame from a
+    previous connection arriving after a reconnect, an event that never comes
+    -- and none of them is reachable from a hardware test with any
+    reliability. The state machine is pure logic over an injected clock for
+    exactly that reason."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_wait")
+    rc, out = sh(f"gcc -O1 -Wall -Wextra -Isrc -o {binp} "
+                 f"test/host/wait_test.c src/lua/lwait.c")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "wait harness build failed"
+    rc, out = sh(binp)
+    if rc != 0:
+        first = next((l.strip() for l in out.splitlines() if "FAIL" in l), "")
+        return False, first[:100] or f"wait_test exited {rc}"
+    return True, "delivered / timeout / link_lost / cancelled, and the races"
+
 def t_lua_heap():
     """The Lua arena, on a host, with every structural invariant asserted after
     EVERY operation. This test exists because two attempts at the allocator's
@@ -242,6 +261,7 @@ def main():
     step(0, "neg constants agree with the Lua profile", t_neg_constants_agree)
     step(0, "protocol Lua on a host", t_lua_proto)
     step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
+    step(0, "the wait/wake contract and its races", t_lua_wait)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:

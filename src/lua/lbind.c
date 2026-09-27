@@ -689,6 +689,111 @@ static int l_bt_notify_take(lua_State *L) {
     return 1;
 }
 
+
+/* --- bt.await -------------------------------------------------------------
+ * Block until this device says something, and be told why the wait ended.
+ *
+ *   local frame, why = bt.await(addr, 4000)
+ *   if not frame then ... end          -- why is "timeout" | "link_lost" | ...
+ *
+ * This is bt.notify_take with the polling removed. The old shape --
+ *
+ *   repeat f = bt.notify_take(addr); if not f then sys.sleep(5) end until f
+ *
+ * -- costs a resume every 5 ms whether or not anything has arrived (measured:
+ * about 190 resumes per second to deliver one report per second), and it has
+ * no way to notice that the link died: it simply keeps asking an absent
+ * device until some outer deadline gives up.
+ *
+ * The four outcomes and the rules behind them are in lua/lwait.h. The two
+ * that matter to a profile author: the wait is ALWAYS bounded, and a
+ * disconnect ends it immediately rather than after the full timeout.
+ */
+static int await_result(lua_State *L, lwait_reason_t why);
+
+static int await_k(lua_State *L, int status, lua_KContext ctx) {
+    (void)status; (void)ctx;
+    return await_result(L, lrt_wake_reason());
+}
+
+/* Drain the frame the wake was about. Delivery and draining are separate
+ * steps on purpose: the frame stays in the inbox until the script actually
+ * runs, so a blocking reader and a polling reader see identical data. */
+static int await_drain(lua_State *L, const char *filter) {
+    char addr[18], id[8], src[10];
+    static uint8_t val[256];
+    int n = le_notify_take(filter, addr, sizeof addr, id, sizeof id,
+                           src, sizeof src, val, sizeof val);
+    if (n < 0) { return -1; }
+    lua_createtable(L, 0, 4);
+    lua_pushstring(L, addr);                  lua_setfield(L, -2, "addr");
+    lua_pushstring(L, id);                    lua_setfield(L, -2, "id");
+    lua_pushstring(L, src);                   lua_setfield(L, -2, "source");
+    lua_pushlstring(L, (const char *)val, (size_t)n); lua_setfield(L, -2, "value");
+    return 1;
+}
+
+/* PER SCRIPT, not one buffer. With a single shared filter the second script
+ * to call bt.await overwrites the first's address, and on resume the first
+ * drains the wrong device's inbox -- which showed up as the charger's
+ * handshake failing with "no reply to 0x0003" the moment the iron's profile
+ * was also running. One coroutine per script means one pending await per
+ * script, so slot-indexed is exactly the right width. */
+static char s_await_filter[LWAIT_MAX_OWNERS][18];
+
+static char *await_filter_for_current(void) {
+    int slot = lrt_current_slot();
+    if (slot < 0 || slot >= LWAIT_MAX_OWNERS) { return NULL; }
+    return s_await_filter[slot];
+}
+
+static int await_result(lua_State *L, lwait_reason_t why) {
+    const char *filter = await_filter_for_current();
+    if (why == LWAIT_DELIVERED && filter) {
+        if (await_drain(L, filter) == 1) { return 1; }
+        /* Woken for a frame that is no longer there: another reader on the
+         * same device drained it first. Report it as a timeout rather than
+         * inventing a frame -- the caller's retry is the right response. */
+        lua_pushnil(L);
+        lua_pushstring(L, "timeout");
+        return 2;
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, lwait_reason_name(why));
+    return 2;
+}
+
+static int l_bt_await(lua_State *L) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
+    lua_Integer timeout = luaL_optinteger(L, 2, 0);   /* 0 = the default cap */
+    if (timeout < 0) { timeout = 0; }
+
+    char *filter = await_filter_for_current();
+    if (!filter) { return luaL_error(L, "bt.await is only callable from a script"); }
+    snprintf(filter, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+             a[0], a[1], a[2], a[3], a[4], a[5]);
+
+    /* Already waiting for us? Then there is nothing to block on. */
+    if (await_drain(L, filter) == 1) { return 1; }
+
+    int slot = le_link_slot(filter);
+    if (slot < 0) {
+        /* Not connected at all. Blocking would be a wait on a link that
+         * cannot answer, which is the case a deadline alone handles badly. */
+        lua_pushnil(L);
+        lua_pushstring(L, lwait_reason_name(LWAIT_LINK_LOST));
+        return 2;
+    }
+
+    lwait_reason_t r = lrt_block_current(le_addr_token(filter),
+                                         (uint8_t)slot, (uint32_t)timeout);
+    if (r != LWAIT_PENDING) {
+        return await_result(L, r);      /* resolved without ever blocking */
+    }
+    return lua_yieldk(L, 0, 0, await_k);
+}
+
 /* Ask for a characteristic's value. The answer does NOT come back here -- it
  * arrives in the inbox tagged source="read", because a GATT read is a round
  * trip and blocking the cooperative loop on one would stall the radio. The
@@ -774,6 +879,7 @@ void lbind_open_all(lua_State *L) {
         { "find", l_bt_find },
         { "read", l_bt_read },
         { "notify_take", l_bt_notify_take },
+        { "await", l_bt_await },
         { "notify_dropped", l_bt_notify_dropped },
         { "notify_flush", l_bt_notify_flush },
         { NULL, NULL } };

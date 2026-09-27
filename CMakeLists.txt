@@ -115,7 +115,7 @@ endif()
 
 if(CONFIG_LUA_ENABLE)
     add_subdirectory(third_party/lua)
-    target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lheap.c src/lua/lbind.c src/lua/lops.c)
+    target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lheap.c src/lua/lwait.c src/lua/lbind.c src/lua/lops.c)
     if(CONFIG_PROTO_ANKER)
         target_sources(btgw PRIVATE src/lua/lbind_proto.c)
     endif()
