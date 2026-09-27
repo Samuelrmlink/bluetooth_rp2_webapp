@@ -1,7 +1,13 @@
 #ifndef BTGW_API_H
 #define BTGW_API_H
 
+#include <stdbool.h>
 #include <stddef.h>
+
+/* True when THIS boot followed a watchdog reset, i.e. the previous boot's main
+ * loop stopped running. Set once in main() and reported by sys.info, because a
+ * device reached over WireGuard has no RTT for anyone to read. */
+extern bool boot_after_watchdog;
 
 /* Reply sink: exactly http.c's ws_reply_line, passed in so the API layer never
  * includes the transport. */

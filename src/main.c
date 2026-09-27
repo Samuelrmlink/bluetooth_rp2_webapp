@@ -18,6 +18,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
+#include "hardware/watchdog.h"
 
 #include "autoconf.h"
 #include "app_config.h"
@@ -40,10 +41,20 @@
 #include "bt/le/central.h"
 #endif
 
+/* Set while the previous boot ended in a watchdog reset, so the fact survives
+ * into sys.info. A wedge on a device reached over WireGuard is otherwise
+ * invisible: it reboots, comes back, and nobody ever learns it happened. */
+bool boot_after_watchdog;
+
 int main(void) {
     stdio_init_all();
     sleep_ms(200);                       /* let RTT attach before the first line */
     printf("\n--- bluetooth_rp2_webapp ---\n");
+
+    boot_after_watchdog = watchdog_caused_reboot();
+    if (boot_after_watchdog) {
+        printf("main: REBOOTED BY WATCHDOG -- the previous boot's loop stopped running\n");
+    }
 
     /* Nothing here is fatal. A board with a corrupt filesystem should still
      * come up far enough to be talked to and fixed, so every failure is a log
@@ -107,7 +118,30 @@ int main(void) {
 #define LOOP_STALL_MS 250
     uint32_t last_pass_ms = 0;
 
+    /*
+     * The loop below is the only thing pumping USB, WiFi, BLE and Lua, and a
+     * call inside it CAN block indefinitely: a board was found parked in
+     * sem_acquire_block_until, unreachable on both USB-NCM and WiFi, and only
+     * a debugger-driven reset brought it back. The stall detector at the
+     * bottom of the pass cannot report that, because it only runs when the
+     * pass completes -- the one case it most needs to catch is the one where
+     * it never runs.
+     *
+     * So the loop is watchdogged. This does not fix whatever blocks; it
+     * bounds the damage to one reboot, which matters because the device is
+     * reachable over WireGuard from somewhere nobody can power-cycle it.
+     *
+     * 8 s: a flash erase inside flash_safe_execute() is allowed 2 s, and a
+     * legitimate pass must never trip this. pause_on_debug stops a target
+     * halted under openocd from resetting itself mid-inspection -- without it
+     * every attempt to examine a wedge destroys the evidence.
+     */
+#define WATCHDOG_TIMEOUT_MS 8000
+    watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
+    printf("main: watchdog armed at %d ms\n", WATCHDOG_TIMEOUT_MS);
+
     while (true) {
+        watchdog_update();
 #if CONFIG_NET_USB_NCM
         tud_task();
         usb_ncm_poll();
