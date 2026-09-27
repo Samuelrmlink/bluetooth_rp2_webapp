@@ -14,6 +14,7 @@
 #include "lua/lrt.h"
 #include "lua/lbind.h"
 #include "net/ws.h"
+#include "fs/fs.h"
 #include "autoconf.h"
 
 #if CONFIG_LUA_ENABLE
@@ -26,12 +27,108 @@ static bool name_of(const char *params, char *out, size_t cap) {
            api_json_str(params, "name", out, cap);
 }
 
+/* --- the file listing ------------------------------------------------------
+ * script.list used to report only the runtime's script SLOTS, and a slot is
+ * created solely by script.start or script.draft. So a committed .lua file
+ * that had never been started was invisible: the editor's dropdown showed one
+ * of three runnable scripts and none of the modules. The source side already
+ * worked -- script.source resolves lua/<name>.lua for any name, including a
+ * slashed one -- so the whole gap was enumeration.
+ *
+ * Walks lua/ and staged/ one level, then one level into each subdirectory of
+ * lua/, which is enough for lua/profiles/ and stops well short of an
+ * unbounded recursion over flash.
+ */
+typedef struct {
+    char  *out;
+    size_t cap;
+    size_t n;
+    bool   first;
+    const char *dir;      /* "lua" or "staged" */
+    const char *sub;      /* subdirectory within lua/, or NULL */
+    bool   want_dirs;     /* collect subdirectory names instead of emitting */
+    char   subs[4][24];   /* subdirectories found, for the second pass */
+    int    n_subs;
+} flist_t;
+
+static bool ends_lua(const char *name) {
+    size_t n = strlen(name);
+    return n > 4 && strcmp(name + n - 4, ".lua") == 0;
+}
+
+static void flist_cb(const char *name, bool is_dir, size_t size, void *ctx) {
+    flist_t *f = ctx;
+    if (is_dir) {
+        /* Remembered for a second pass rather than recursed into here: fs_walk
+         * holds the directory open, and opening another inside the callback is
+         * not something littlefs should be asked to do. */
+        if (f->want_dirs && f->n_subs < (int)(sizeof f->subs / sizeof f->subs[0])) {
+            snprintf(f->subs[f->n_subs], sizeof f->subs[0], "%s", name);
+            f->n_subs++;
+        }
+        return;
+    }
+    if (!ends_lua(name)) {
+        return;
+    }
+    if (f->n + 128 >= f->cap) {
+        return;
+    }
+    /* The name is what script.source takes: no directory for a top-level
+     * script, "<sub>/<stem>" for a module. */
+    char stem[40];
+    snprintf(stem, sizeof stem, "%.*s", (int)(strlen(name) - 4), name);
+
+    bool staged = strcmp(f->dir, "staged") == 0;
+    f->n += (size_t)snprintf(f->out + f->n, f->cap - f->n,
+                             "%s{\"name\":\"%s%s%s\",\"kind\":\"%s\","
+                             "\"tier\":\"%s\",\"bytes\":%u}",
+                             f->first ? "" : ",",
+                             f->sub ? f->sub : "", f->sub ? "/" : "", stem,
+                             f->sub ? "module" : (staged ? "staged" : "script"),
+                             staged ? "staged" : "committed",
+                             (unsigned)size);
+    f->first = false;
+}
+
+static size_t files_json(char *out, size_t cap) {
+    flist_t f;
+    memset(&f, 0, sizeof f);
+    f.out = out; f.cap = cap; f.first = true;
+    f.n = (size_t)snprintf(out, cap, "[");
+
+    /* lua/ -- top level scripts, and note its subdirectories */
+    f.dir = "lua"; f.sub = NULL; f.want_dirs = true;
+    fs_walk("lua", flist_cb, &f);
+
+    /* lua/<sub>/ -- modules */
+    f.want_dirs = false;
+    int n_subs = f.n_subs;
+    for (int i = 0; i < n_subs; i++) {
+        char path[64];
+        snprintf(path, sizeof path, "lua/%s", f.subs[i]);
+        f.sub = f.subs[i];
+        fs_walk(path, flist_cb, &f);
+    }
+
+    /* staged/ -- the middle tier. A name here outranks the committed copy,
+     * because staged is what would actually run; the webapp shows the tier so
+     * that is visible rather than surprising. */
+    f.dir = "staged"; f.sub = NULL;
+    fs_walk("staged", flist_cb, &f);
+
+    f.n += (size_t)snprintf(out + f.n, cap - f.n, "]");
+    return f.n;
+}
+
 static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     size_t n = (size_t)snprintf(buf, BUF_SZ, "{\"scripts\":");
     n += lrt_list_json(buf + n, BUF_SZ - n);
     n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"ops\":");
     n += lbind_ops_json(buf + n, BUF_SZ - n);
+    n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"files\":");
+    n += files_json(buf + n, BUF_SZ - n);
     n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"runtime\":");
     n += lrt_stats_json(buf + n, BUF_SZ - n);
     snprintf(buf + n, BUF_SZ - n, "}");

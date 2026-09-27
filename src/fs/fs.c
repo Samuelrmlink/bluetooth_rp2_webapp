@@ -223,6 +223,34 @@ bool fs_init(void) {
     return true;
 }
 
+int fs_walk(const char *dir, fs_walk_fn cb, void *ctx) {
+    if (!mounted || !cb) {
+        return -1;
+    }
+    const char *open_path = "/";
+    if (dir && dir[0] && strcmp(dir, "/") != 0) {
+        if (!fs_is_dir(dir)) {
+            return -1;
+        }
+        open_path = dir;
+    }
+    lfs_dir_t ldir;
+    if (lfs_dir_open(&lfs, &ldir, open_path) < 0) {
+        return -1;
+    }
+    struct lfs_info info;
+    int n = 0;
+    while (lfs_dir_read(&lfs, &ldir, &info) > 0) {
+        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) {
+            continue;
+        }
+        cb(info.name, info.type == LFS_TYPE_DIR, (size_t)info.size, ctx);
+        n++;
+    }
+    lfs_dir_close(&lfs, &ldir);
+    return n;
+}
+
 int fs_list_json(const char *dir, char *buf, size_t cap) {
     if (!mounted || !buf || cap < 16) {
         return -1;

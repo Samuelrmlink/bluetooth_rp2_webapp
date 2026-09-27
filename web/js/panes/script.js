@@ -15,7 +15,7 @@
  * Renderer only. The paging in both directions lives in scriptio.js, where it
  * is tested.
  */
-import { ScriptIO } from '../scriptio.js';
+import { ScriptIO, mergeScripts, isStartable } from '../scriptio.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -37,31 +37,70 @@ export function mountScriptPane({ api, log }) {
   }
 
   /* ---- listing ---------------------------------------------------------- */
+  let entries = [];
+
+  function entryFor(name) { return entries.find((e) => e.name === name); }
+
+  /* Start/Stop must not be offered for a module. It is required by a script,
+   * has no runtime slot, and the button could only ever fail. */
+  function syncButtons() {
+    const e = entryFor(current || el.sel.value);
+    const startable = isStartable(e);
+    for (const id of ['s-start', 's-stop']) {
+      const b = $(id);
+      b.disabled = !startable;
+      b.title = startable ? '' : 'a module is required by a script, not started on its own';
+    }
+  }
+
   async function refresh() {
     let r;
     try { r = await api.call('script.list'); }
     catch (e) { setStatus(e.message, 'err'); return; }
 
-    const names = (r.scripts || []).map(s => s.name);
-    // Keep whatever is typed in: the list is what the DEVICE knows about, and
-    // a new script has no entry until its first draft.
-    const want = current || el.sel.value;
-    el.sel.replaceChildren(...names.map(n => {
-      const o = document.createElement('option');
-      o.value = n; o.textContent = n;
-      return o;
-    }));
-    if (names.includes(want)) el.sel.value = want;
+    // Everything on the filesystem, merged with whatever is live. Before this
+    // the dropdown listed only the runtime's slots, so a committed script that
+    // had never been started -- which is most of them -- was invisible.
+    entries = mergeScripts(r);
 
-    const s = (r.scripts || []).find(x => x.name === (current || el.sel.value));
+    const want = current || el.sel.value;
+    const groups = [
+      ['scripts', entries.filter((e) => e.kind === 'script')],
+      ['modules', entries.filter((e) => e.kind === 'module')],
+    ];
+    el.sel.replaceChildren(...groups
+      .filter(([, list]) => list.length)
+      .map(([label, list]) => {
+        const g = document.createElement('optgroup');
+        g.label = label;
+        g.append(...list.map((e) => {
+          const o = document.createElement('option');
+          o.value = e.name;
+          // The tier is the point of the overlay, so it is on every row
+          // rather than hidden behind a selection.
+          const marks = [e.tier];
+          if (e.running) marks.push('running');
+          if (e.dead) marks.push('dead');
+          o.textContent = `${e.name}  (${marks.join(', ')})`;
+          return o;
+        }));
+        return g;
+      }));
+    if (entries.some((e) => e.name === want)) el.sel.value = want;
+    syncButtons();
+
+    const e = entryFor(current || el.sel.value);
     const rt = r.runtime || {};
     const bits = [];
-    if (s) {
-      bits.push(s.dead ? 'dead' : s.running ? 'running' : 'stopped');
-      if (s.draft) bits.push('has draft');
-      bits.push(`${s.resumes} resumes`);
-      if (s.error) pushError(s.name, s.error);
+    if (e) {
+      if (e.kind === 'module') bits.push('module');
+      else bits.push(e.dead ? 'dead' : e.running ? 'running' : 'stopped');
+      bits.push(`tier ${e.tier}`);
+      if (e.bytes != null) bits.push(`${e.bytes} B`);
+      if (e.resumes) bits.push(`${e.resumes} resumes`);
+      if (e.error) pushError(e.name, e.error);
     }
+    bits.push(`${entries.length} files`);
     if (rt.arena_bytes) {
       const pct = Math.round(100 * (rt.used || 0) / rt.arena_bytes);
       bits.push(`arena ${Math.round((rt.used || 0) / 1024)}/${Math.round(rt.arena_bytes / 1024)} KB (${pct}%)`);
@@ -165,7 +204,7 @@ export function mountScriptPane({ api, log }) {
     el.tier.textContent = lastLoadedTier ? `${lastLoadedTier} (edited)` : 'edited';
     el.tier.dataset.tier = 'edited';
   });
-  el.sel.onchange = () => load(el.sel.value);
+  el.sel.onchange = () => { syncButtons(); load(el.sel.value); };
   $('s-new').onclick = () => {
     const n = prompt('New script name (letters, digits, _ and - only):');
     if (!n) return;

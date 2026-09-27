@@ -40,6 +40,18 @@ bool fs_valid_path(const char *path);
 bool fs_is_dir(const char *path);
 
 int fs_list_json(const char *dir, char *buf, size_t cap);
+
+/* Iterate one directory, one level deep, the same reach as fs_list_json.
+ *
+ * fs_list_json already walks a directory but emits JSON, and the lfs handle
+ * is a file-scope static in fs.c, so a caller that wants to build its own
+ * answer -- the Lua layer listing every script on the filesystem -- has no
+ * way in. This is that way in, and nothing more: still one level, because an
+ * unbounded recursive walk over flash is not something to do casually.
+ *
+ * Returns the number of entries visited, or -1 if `dir` is not a directory. */
+typedef void (*fs_walk_fn)(const char *name, bool is_dir, size_t size, void *ctx);
+int fs_walk(const char *dir, fs_walk_fn cb, void *ctx);
 int fs_delete(const char *name);
 int fs_rename(const char *from, const char *to);
 bool fs_stat(const char *name, size_t *size);

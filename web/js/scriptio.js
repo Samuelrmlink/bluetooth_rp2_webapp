@@ -66,3 +66,62 @@ export class ScriptIO {
     return { source: out, tier };
   }
 }
+
+/* Merge what the device HAS with what it is RUNNING.
+ *
+ * script.list answers both halves separately and they overlap: a name can be
+ * a committed file, a staged copy, and a live runtime slot holding a RAM
+ * draft, all at once. The tier that wins is the tier that would actually run,
+ * which is the precedence resolve_src() applies on the device:
+ *
+ *     draft  >  staged  >  committed
+ *
+ * Getting this wrong is not cosmetic. Showing "committed" while a draft is in
+ * effect means the editor loads one thing and the board runs another, which
+ * is the single worst failure this UI can have.
+ *
+ * A MODULE is not startable. It is required by a script, has no runtime slot
+ * of its own, and offering Start for one would produce a button that can only
+ * fail.
+ */
+export function mergeScripts(list) {
+  const byName = new Map();
+  const rank = { committed: 0, staged: 1, draft: 2 };
+
+  for (const f of list?.files || []) {
+    const prev = byName.get(f.name);
+    const entry = {
+      name: f.name,
+      kind: f.kind === 'module' ? 'module' : 'script',
+      tier: f.tier,
+      bytes: f.bytes,
+      running: false, dead: false, draft: false, resumes: 0, error: '',
+    };
+    // staged/<name>.lua and lua/<name>.lua are the same script at two tiers.
+    if (!prev || rank[f.tier] > rank[prev.tier]) {
+      byName.set(f.name, prev ? { ...prev, tier: f.tier, bytes: f.bytes } : entry);
+    }
+  }
+
+  for (const s of list?.scripts || []) {
+    const prev = byName.get(s.name);
+    const merged = {
+      ...(prev || { name: s.name, kind: 'script', tier: 'committed', bytes: null }),
+      running: !!s.running, dead: !!s.dead, draft: !!s.draft,
+      resumes: s.resumes ?? 0, error: s.error || '',
+    };
+    // A live draft outranks anything on flash, and a runtime slot for a name
+    // with no file at all is a draft that has never been staged.
+    if (s.draft || !prev) merged.tier = s.draft ? 'draft' : merged.tier;
+    byName.set(s.name, merged);
+  }
+
+  const order = { script: 0, module: 1 };
+  return [...byName.values()].sort((a, b) =>
+    (order[a.kind] - order[b.kind]) || a.name.localeCompare(b.name));
+}
+
+/** Only a top-level script can be started; a module is required, not run. */
+export function isStartable(entry) {
+  return !!entry && entry.kind === 'script';
+}
