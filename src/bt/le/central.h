@@ -24,6 +24,15 @@ bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms);
 void le_scan_stop(void);
 bool le_scanning(void);
 
+/*
+ * Is the BLE side using the radio right now -- scanning, or holding a link?
+ *
+ * Exists because WiFi has to ask. The CYW43439 carries WiFi and Bluetooth
+ * over one interface, and a WiFi join issued while BLE is active wedges the
+ * driver hard enough to need a reset (see src/net/wifi.c).
+ */
+bool le_radio_busy(void);
+
 /* Connect by address. addr_type comes from the scan table -- you cannot assume
  * public, and guessing produces a connect that never completes. */
 bool le_connect(const uint8_t *addr, uint8_t addr_type);

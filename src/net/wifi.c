@@ -37,6 +37,9 @@
 #if CONFIG_NET_USB_NCM
 #include "usb_ncm.h"
 #endif
+#if CONFIG_BT_LE
+#include "bt/le/central.h"
+#endif
 #include "config/config.h"
 
 /* 192.168.4.1 is the convention the reference uses and what most phones
@@ -84,6 +87,7 @@ static wifi_state_t state = ST_IDLE;
 
 static uint32_t join_start, last_fail, down_since, boot_start, scan_start, last_rescan;
 static uint32_t last_scan_end;   /* when the most recent scan stopped */
+static bool deferred_for_bt;     /* so the deferral is logged once, not per pass */
 static char ip_str[16] = "0.0.0.0";
 static char last_error[56] = "";
 static char cur_ssid[CFG_SSID_MAX + 1] = "";
@@ -312,7 +316,30 @@ static void begin_join(const char *ssid, const char *psk) {
         state = ST_IDLE;
         return;
     }
+#if CONFIG_BT_LE
+    /*
+     * The same one-radio rule wifi_connect() enforces, applied to the paths
+     * the STATE MACHINE takes -- a reconnect after a drop, or a known network
+     * reappearing in a scan. Guarding only the user-facing call would leave
+     * the device able to wedge itself unattended, which is worse than doing
+     * it on request.
+     *
+     * Deferred rather than failed: the machine will come back. If BLE is busy
+     * forever then WiFi waits forever, which is the right way round -- a
+     * degraded network path beats a board that needs a power cycle.
+     */
+    if (le_radio_busy()) {
+        if (!deferred_for_bt) {
+            printf("wifi: deferring the join, Bluetooth has the radio\n");
+            deferred_for_bt = true;
+        }
+        state = ST_IDLE;
+        return;
+    }
+    deferred_for_bt = false;
+#endif
     stop_ap();
+
     cyw43_arch_enable_sta_mode();
     apply_radio_power();
 
@@ -390,7 +417,36 @@ bool wifi_scan_start(void) {
 
 bool wifi_scanning(void) { return scanning; }
 
+/*
+ * ONE RADIO, AND THE JOIN LOSES.
+ *
+ * The CYW43439 carries WiFi and Bluetooth over a single interface. A WiFi
+ * join issued while the BLE side is active wedges the driver: measured
+ * repeatedly, the call never returns, the main loop never runs again, USB-NCM
+ * drops because tud_task() stops being pumped, and RTT goes quiet too. Only a
+ * reset recovers it, and halting the target each time put the PC in
+ * timer_time_reached -- a busy-wait inside the driver, below anything this
+ * layer can reach.
+ *
+ * Two orderings were tried and both wedged: stopping the BLE scan inline
+ * before the join, and stopping it one pass earlier with a settle window.
+ * gap_stop_scan() is itself an HCI command over the same bus, so "stop then
+ * join" is not the serialisation it looks like.
+ *
+ * So the join is REFUSED while BLE is busy, rather than attempted and hoped
+ * for. A clear error the caller can act on beats a device that falls off the
+ * network and needs a power cycle. Idle, the same join takes 10-34 ms and is
+ * completely reliable -- including at boot, which is why a saved network
+ * still comes up by itself.
+ *
+ * The underlying contention is unresolved; see the task notes. Fixing it
+ * properly means either finding the blocking wait in the driver or moving off
+ * the poll arch, and neither belongs in a bug fix.
+ */
 bool wifi_connect(const char *ssid, const char *psk) {
+#if CONFIG_BT_LE
+    if (le_radio_busy()) { return false; }
+#endif
     if (!cfg_net_put(ssid, psk)) return false;
     snprintf(pending_ssid, sizeof(pending_ssid), "%s", ssid);
     pending_join = true;
@@ -414,6 +470,7 @@ void wifi_poll(void) {
         return;
     }
     if (pending_join) {
+
         /* NOT while a scan is in flight.
          *
          * begin_join issues a burst of ioctls and the driver cannot service

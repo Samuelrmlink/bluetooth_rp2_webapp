@@ -21,6 +21,10 @@
 #include "config/config.h"
 #include "net/wifi.h"
 #include "autoconf.h"
+/* After autoconf.h: CONFIG_BT_LE has to be defined before it is tested. */
+#if CONFIG_BT_LE
+#include "bt/le/central.h"
+#endif
 
 #if CONFIG_NET_WIFI
 
@@ -74,8 +78,14 @@ static void op_wifi_connect(const char *params, api_reply_fn reply, void *ctx, l
      * rejoined without the UI having to hold the password. */
     bool have_psk = api_json_str(params, "psk", psk, sizeof psk);
     if (!wifi_connect(ssid, have_psk ? psk : NULL)) {
+        /* Two reasons, and the caller can act on only one of them, so say
+         * which. A join while BLE holds the radio wedges the driver, so it is
+         * refused rather than attempted -- see the comment on wifi_connect. */
         api_reply_err(reply, ctx, id, "rejected",
-                      "the credential store refused that ssid/psk");
+                      le_radio_busy()
+                        ? "Bluetooth is using the shared radio; stop scanning "
+                          "and disconnect devices, then join"
+                        : "the credential store refused that ssid/psk");
         return;
     }
     snprintf(buf, sizeof buf, "{\"joining\":true,\"ssid\":\"%s\"}", ssid);

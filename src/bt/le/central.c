@@ -369,6 +369,16 @@ int le_link_slot(const char *addr) {
 }
 #endif
 
+/* Defined here rather than beside le_scanning() because it needs links[],
+ * which is declared just above. */
+bool le_radio_busy(void) {
+    if (s_scanning || s_connecting) { return true; }
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        if (links[i].active) { return true; }
+    }
+    return false;
+}
+
 static le_link_t *link_by_handle(uint16_t h) {
     for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
         if (links[i].active && links[i].con_handle == h) {

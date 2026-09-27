@@ -101,6 +101,12 @@ int main(void) {
     ops_init_all();
     printf("http: listening on :80  (ws at /ws)\n");
 
+    /* A pass longer than this means USB went unserviced long enough to
+     * matter. TinyUSB tolerates a few tens of ms; the host starts giving up
+     * in the hundreds. */
+#define LOOP_STALL_MS 250
+    uint32_t last_pass_ms = 0;
+
     while (true) {
 #if CONFIG_NET_USB_NCM
         tud_task();
@@ -133,5 +139,25 @@ int main(void) {
         /* Coalesce whatever the pass produced into as few segments as possible;
          * the per-line tcp_output() was removed deliberately. */
         http_flush_ws();
+
+        /*
+         * How long did that pass take?
+         *
+         * This loop is the only thing pumping tud_task(), so a pass that takes
+         * long enough stops servicing USB and the host drops the device --
+         * which presents as "the board fell off the network" with nothing
+         * anywhere saying why. The cyw43 driver can do exactly that: a WiFi
+         * join blocks inside it, and poll mode's wait is a bare sleep_until()
+         * that never services the async context.
+         *
+         * Reported rather than fixed here, because knowing a stall happened
+         * and how long it was is the thing that was missing.
+         */
+        uint32_t pass_end = to_ms_since_boot(get_absolute_time());
+        if (last_pass_ms && (uint32_t)(pass_end - last_pass_ms) > LOOP_STALL_MS) {
+            printf("main: loop stalled %lu ms -- USB was not serviced\n",
+                   (unsigned long)(pass_end - last_pass_ms));
+        }
+        last_pass_ms = pass_end;
     }
 }
