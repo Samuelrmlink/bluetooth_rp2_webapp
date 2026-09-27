@@ -25,6 +25,7 @@
 #include "fs/fs.h"
 #include "net/http.h"
 #include "net/ws.h"
+#include "net/cyw43_wait.h"
 #include "pico/time.h"
 #include "autoconf.h"
 #if CONFIG_LUA_ENABLE
@@ -212,13 +213,19 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
     char result[768];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
-             "\"watchdog_reboot\":%s,"
+             "\"watchdog_reboot\":%s,\"radio_wait_max_us\":%lu,"
+             "\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
               * because a device reached over WireGuard has no RTT, and a
               * wedge that silently reboots is a wedge nobody learns about. */
              boot_after_watchdog ? "true" : "false",
+             /* The one wedge seen was inside the cyw43 ioctl wait. A single
+              * wait of more than a few ms means the radio stopped answering,
+              * which is the shape of that failure. */
+             (unsigned long)cyw43_wait_max_us(),
+             (unsigned long)(cyw43_wait_total_us() / 1000u),
 #if CONFIG_BT_CLASSIC
              ",\"classic\"",
 #else

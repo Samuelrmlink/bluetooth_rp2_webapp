@@ -49,6 +49,7 @@ add_executable(btgw
     src/main.c
     src/api/api.c
     src/api/json_escape.c
+    src/net/cyw43_wait.c
     src/api/ops.c
     src/net/http.c
     src/net/ws.c
@@ -74,6 +75,16 @@ target_link_libraries(btgw
     pico_cyw43_arch_lwip_poll
     pico_lwip
 )
+
+# The cyw43 driver blocks inside cyw43_await_background_or_timeout_us() waiting
+# for an ioctl response, and this firmware's single loop is the only thing
+# pumping TinyUSB -- so a radio that stops answering takes USB down with it,
+# which is exactly how the board was found unreachable on both interfaces at
+# once. src/net/cyw43_wait.c services USB before delegating to the real wait,
+# and records how long the driver waited. See that file for why tud_task() is
+# safe to call there and usb_ncm_poll() is not.
+target_link_options(btgw PRIVATE
+    -Wl,--wrap=cyw43_await_background_or_timeout_us)
 
 if(CONFIG_BT_LE)
     target_sources(btgw PRIVATE src/bt/bt.c src/bt/registry.c src/bt/le/central.c src/bt/le/gattdb.c src/bt/le/bond.c src/bt/le/gattserver.c)

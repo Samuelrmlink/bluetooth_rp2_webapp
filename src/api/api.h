@@ -6,7 +6,9 @@
 
 /* True when THIS boot followed a watchdog reset, i.e. the previous boot's main
  * loop stopped running. Set once in main() and reported by sys.info, because a
- * device reached over WireGuard has no RTT for anyone to read. */
+ * device reached over WireGuard has no RTT for anyone to read. A debugger
+ * reset sets it too, so it only means something when the board rebooted on
+ * its own. */
 extern bool boot_after_watchdog;
 
 /* Reply sink: exactly http.c's ws_reply_line, passed in so the API layer never

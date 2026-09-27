@@ -43,7 +43,11 @@
 
 /* Set while the previous boot ended in a watchdog reset, so the fact survives
  * into sys.info. A wedge on a device reached over WireGuard is otherwise
- * invisible: it reboots, comes back, and nobody ever learns it happened. */
+ * invisible: it reboots, comes back, and nobody ever learns it happened.
+ *
+ * Read it with one caveat: a debugger-driven reset can set the same flag, so
+ * `true` immediately after a flash or an openocd `reset run` means nothing.
+ * It is evidence only when the board rebooted on its own. */
 bool boot_after_watchdog;
 
 int main(void) {
