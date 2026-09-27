@@ -15,9 +15,13 @@ sat at 0 forever, because it is a USB port's output power.
 The names below come from the vendor Android app instead, where three
 independent derivations agree:
 
-  1. Tags ARE field indices. BleIndex.indexString(n) (ble_zx/constant/
-     ble_index.dart:10) renders the byte n as two hex digits, and every PPS
-     parser looks its fields up by that string. So tag "d1" is index 0xD1.
+  1. BleIndex.indexString(n) (ble_zx/constant/ble_index.dart:10) renders the
+     byte n as two hex digits, and every PPS parser looks its fields up by
+     that string. So a tag maps to a known device-object field offset. NOTE:
+     a third pass showed the offsets INTERLEAVE -- d2..d6 sit between a3 and
+     a4 -- so the tag number is the device's own numbering, NOT the Dart
+     class's declaration order. tag -> offset holds; "0xA0 + Nth field" does
+     not.
   2. A1771DeviceCommands.parseDeviceAllInfo (ble/device/A1771/
      a1771_device_commands.dart:10) is the 0x0840 parser, and maps each tag to
      a device-object field offset. A1753 -- the C1000's controller -- calls it
@@ -39,6 +43,17 @@ self-consistent with a healthy idle unit.
 field by field against hardware; only the values named above are corroborated
 by the device itself. Do not promote the flag without changing a setting on the
 device and watching the matching tag move.
+
+THREE INDEPENDENT PASSES were made over the decompiled app, and where they
+disagreed the field is named `unknown_*` rather than guessed. The d0..de
+settings block and the a5..b0 power block are unanimous. The b3..b8 run is
+NOT: one pass called them mcu/inverter/MPPT/PD/BMS versions, another found
+ZERO consumers for any of them anywhere in the app. Only ba is corroborated by
+a consumer -- it is fed to getMainVersion() and becomes the firmware string on
+the Settings page -- so ba is named and b3..b8 are not. Likewise c3 reads 99
+and is tempting to call state-of-health, but no code reads it; the app's real
+charge/discharge limits are the d5 byte pair. A confident wrong name is worse
+than an admitted gap.
 
 THE PORT LAYOUT IS FAMILY-SPECIFIC, and this bit off a first attempt. The
 A1781 family parses the SAME tag range into a DIFFERENT set of fields -- its a9
@@ -100,30 +115,29 @@ return {
 
     -- Identity and firmware. These are VERSIONS, not measurements: the old
     -- table read b3 as a temperature and b5/b6 as battery statistics.
-    b1 = { 'device_name_hex',       'u16' },
-    b2 = { 'device_capacity',       'u16' },
-    b3 = { 'main_version',          'u16' },
-    b4 = { 'mcu_version',           'u16' },
-    b5 = { 'inverter_version',      'u16' },
-    b6 = { 'mppt_version',          'u16' },
-    b7 = { 'pd_version',            'u16' },
-    b8 = { 'bms_version_major',     'u16' },
-    b9 = { 'bms_version_minor',     'u16' },
-    ba = { 'version',               'u16' },
+    b1 = { 'unknown_b1',            'u16' },   -- stored as hex; no consumer
+    b2 = { 'ac_cable_plugged',      'u16' },   -- ==2 means plugged
+    b3 = { 'unknown_b3',            'u16' },   -- reads 166, same as ba
+    b4 = { 'unknown_b4',            'u16' },
+    b5 = { 'unknown_b5',            'u16' },   -- reads 115, same as b6
+    b6 = { 'unknown_b6',            'u16' },
+    b7 = { 'unknown_b7',            'u16' },
+    b8 = { 'unknown_b8',            'u16' },
+    b9 = { 'sub_package_version',   'u16' },   -- feeds the OTA SubPackageModel
+    ba = { 'firmware_version',      'u16' },   -- 166 -> v1.6.6, the real one
 
     -- Working state ---------------------------------------------------------
-    bb = { 'ac_output_state',       'u16' },
-    bc = { 'ac_dc_work_state',      'u16' },   -- 0 idle 1 discharge 2 charge
-                                               -- 3 sleep 4 shutdown
+    bb = { 'unknown_bb',            'u16' },   -- bool-ish; no consumer found
+    bc = { 'charge_source_state',   'u16' },   -- 2 = DC/solar in, 4 = AC in
     bd = { 'bms_temp_major_c',      'u8'  },   -- was wrongly "current_hour"
     be = { 'bms_temp_minor_c',      'u8'  },
-    bf = { 'bms_state_major',       'u8'  },
+    bf = { 'bms_state_major',       'u8'  },   -- ==4 charging
     c0 = { 'bms_state_minor',       'u8'  },
     c1 = { 'battery_pct',           'u8'  },   -- bmsEleMajor: the real SOC
     c2 = { 'battery_pct_minor',     'u8'  },
-    c3 = { 'battery_health_pct',    'u8'  },   -- bmsHealthMajor: the real SoH
-    c4 = { 'battery_health_minor',  'u8'  },
-    c5 = { 'bms_connect_state',     'u8'  },
+    c3 = { 'unknown_c3',            'u8'  },   -- reads 99; SoH is a GUESS
+    c4 = { 'unknown_c4',            'u8'  },
+    c5 = { 'sub_battery_present',   'u8'  },
     c6 = { 'pd1_work_state',        'u8'  },
     c7 = { 'pd2_work_state',        'u8'  },
     c8 = { 'usb1_work_state',       'u8'  },
@@ -131,9 +145,9 @@ return {
     ca = { 'usb3_work_state',       'u8'  },
     cb = { 'usb4_work_state',       'u8'  },
     cc = { 'car1_work_state',       'u8'  },
-    cd = { 'ac_insert_switch',      'u8'  },
-    ce = { 'device_error_code',     'u8'  },   -- also the temp-warning state
-    cf = { 'overload_state',        'u8'  },
+    cd = { 'fault_minor',           'u8'  },   -- sub-battery fault / AC insert
+    ce = { 'device_error_code',     'u8'  },   -- 27,32 over-temp; 28,33 under
+    cf = { 'fault_major',           'u8'  },   -- main-battery fault / overload
 
     -- Settings. This run IS the settings struct, and the setter opcodes
     -- 0x44..0x52 follow it in the same order.
@@ -152,7 +166,7 @@ return {
     dc = { 'ambient_light',         'u8'  },   -- 0 off,1 low,2 med,3 high,4 SOS
     dd = { 'temp_unit',             'u8'  },   -- 0 = Celsius, 1 = Fahrenheit
     de = { 'screen_enabled',        'u8'  },
-    e3 = { 'is_ota',                'u8'  },
+    e3 = { 'unknown_e3',            'u8'  },   -- gates an SoC mirror + OTA nav
     e5 = { 'ultra_fast_charging',   'u8'  },
 
     -- Trailer ---------------------------------------------------------------
