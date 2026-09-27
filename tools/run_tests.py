@@ -69,7 +69,11 @@ def t_proto_binding_is_thin():
             and "anker_enc_t" not in l and "anker_frame_t" not in l
             and "anker_reasm_t" not in l and "ANKER_ENC_" not in l
             and "ANKER_TLV_" not in l and "CONFIG_PROTO_ANKER" not in l
-            and not re.search(r"\banker_(frame|tlv|reasm|pubkey|ecdh|aes)\w*\(", l)]
+            # Calls INTO the codec are the whole job of a wrapper. kdf and
+            # derive_account_key joined the list with the C1000; they are
+            # entry points, not protocol knowledge living in the binding.
+            and not re.search(
+                r"\banker_(frame|tlv|reasm|pubkey|ecdh|aes|kdf|derive_account_key)\w*\(", l)]
     return (len(hits) == 0), (hits[0][:90] if hits else "")
 
 def t_neg_constants_agree():
@@ -167,7 +171,7 @@ def t_lua_proto():
                  f"-Isrc -Itest/host -Ithird_party/tiny-AES-c -Ithird_party/lua -I{uecc} "
                  f"-o {binp} test/host/luaproto_main.c src/lua/lbind_proto.c "
                  f"src/codec/anker_frame.c src/codec/anker_tlv.c "
-                 f"src/crypto/ghash.c src/crypto/anker_crypto.c "
+                 f"src/crypto/ghash.c src/crypto/anker_crypto.c src/crypto/sha256.c "
                  f"third_party/tiny-AES-c/aes.c {uecc}/uECC.c "
                  f"third_party/lua/onelua.c -lm")
     if rc:
@@ -192,7 +196,7 @@ def t_parity():
     rc, out = sh(f"gcc -O1 -Wall -Wextra -Wno-unused-parameter "
                  f"-Isrc -Itest/host -Ithird_party/tiny-AES-c -I{uecc} -o {binp} "
                  f"test/host/parity_main.c src/codec/anker_frame.c src/codec/anker_tlv.c "
-                 f"src/crypto/ghash.c src/crypto/anker_crypto.c "
+                 f"src/crypto/ghash.c src/crypto/anker_crypto.c src/crypto/sha256.c "
                  f"third_party/tiny-AES-c/aes.c {uecc}/uECC.c -lm")
     if rc:
         errs = [l for l in out.splitlines() if "error:" in l]

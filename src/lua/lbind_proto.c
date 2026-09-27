@@ -459,6 +459,33 @@ static int l_crypto_cbc(lua_State *L) {
     return 1;
 }
 
+/* kdf(Z, outlen) -> bytes. The C1000's AES-256-CBC key/iv come from this;
+ * the A2687 never calls it. */
+static int l_crypto_kdf(lua_State *L) {
+    const uint8_t *Z = checkbuf(L, 1, 32, NULL);
+    lua_Integer n = luaL_optinteger(L, 2, 64);
+    if (n < 1 || (size_t)n > sizeof s_scratch) {
+        lua_pushnil(L); lua_pushstring(L, "bad kdf length"); return 2;
+    }
+    if (anker_kdf(Z, s_scratch, (size_t)n) != 0) {
+        lua_pushnil(L); lua_pushstring(L, "kdf failed"); return 2;
+    }
+    lua_pushlstring(L, (const char *)s_scratch, (size_t)n);
+    return 1;
+}
+
+/* account_key(id) -> key(32), iv(16). AesConferV1. */
+static int l_crypto_account_key(lua_State *L) {
+    const char *id = luaL_checkstring(L, 1);
+    uint8_t key[32], iv[16];
+    if (anker_derive_account_key(id, key, iv) != 0) {
+        lua_pushnil(L); lua_pushstring(L, "account key failed"); return 2;
+    }
+    lua_pushlstring(L, (const char *)key, sizeof key);
+    lua_pushlstring(L, (const char *)iv, sizeof iv);
+    return 2;
+}
+
 static int l_crypto_ghash(lua_State *L) {
     size_t an = 0, cn = 0;
     const uint8_t *H = checkbuf(L, 1, 16, NULL);
@@ -515,6 +542,8 @@ void lbind_proto_open(lua_State *L) {
         { "gcm_decrypt", l_crypto_gcm_decrypt },
         { "gcm_tag", l_crypto_gcm_tag },
         { "cbc", l_crypto_cbc },
+        { "kdf", l_crypto_kdf },
+        { "account_key", l_crypto_account_key },
         { "ghash", l_crypto_ghash },
         { NULL, NULL }
     };

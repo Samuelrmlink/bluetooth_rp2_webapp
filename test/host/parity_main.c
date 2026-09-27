@@ -400,7 +400,9 @@ static void test_crypto(void) {
     for (int i = 0; i < ECDH_N; i++) {
         const ecdh_case_t *c = &ECDH_CASES[i];
         if (!have_d) { skip(c->name, "private key not in the reference workspace"); continue; }
-        if (c->mode == 0) { skip(c->name, "mode ecdh needs HMAC-SHA256; C1000 only"); continue; }
+        /* mode 0 in the vector table is the app's default "ecdh" -- the C1000's
+         * AES-256-CBC path. It skipped only while the KDF was missing. */
+        anker_mode_t m = (c->mode == 0) ? ANKER_MODE_ECDH : (anker_mode_t)c->mode;
 
         uint8_t Z[32], key[32], iv[16];
         size_t kl = 0, il = 0;
@@ -408,7 +410,7 @@ static void test_crypto(void) {
         if (anker_ecdh_z(d, c->peer, (size_t)c->peer_len, Z) != 0) { ok(c->name, 0); continue; }
         snprintf(nm, sizeof nm, "%s : Z", c->name);
         if (!eq_bytes(nm, Z, 32, c->Z, 32)) { continue; }
-        if (anker_derive_keys(Z, (anker_mode_t)c->mode, key, &kl, iv, &il) != 0) {
+        if (anker_derive_keys(Z, m, key, &kl, iv, &il) != 0) {
             ok(c->name, 0); continue;
         }
         snprintf(nm, sizeof nm, "%s : key", c->name);
@@ -418,10 +420,16 @@ static void test_crypto(void) {
     }
 
     for (int i = 0; i < KDF_N; i++) {
-        skip(KDF_CASES[i].name, "ECIES KDF needs HMAC-SHA256; C1000 only");
+        const kdf_case_t *c = &KDF_CASES[i];
+        uint8_t out[64];
+        if (anker_kdf(c->Z, out, (size_t)c->outlen) != 0) { ok(c->name, 0); continue; }
+        eq_bytes(c->name, out, c->outlen, c->want, c->outlen);
     }
     for (int i = 0; i < ACCT_N; i++) {
-        skip(ACCT_CASES[i].name, "account key path is C1000 only");
+        const acct_case_t *c = &ACCT_CASES[i];
+        uint8_t key[32], iv[16];
+        if (anker_derive_account_key(c->id, key, iv) != 0) { ok(c->name, 0); continue; }
+        eq_bytes(c->name, key, 32, c->key, 32);
     }
 
     for (int i = 0; i < CBC_N; i++) {

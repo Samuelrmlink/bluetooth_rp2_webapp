@@ -1,4 +1,5 @@
 #include "crypto/anker_crypto.h"
+#include "crypto/sha256.h"
 
 #include <string.h>
 
@@ -52,9 +53,66 @@ int anker_derive_keys(const uint8_t Z[32], anker_mode_t mode, uint8_t key[32],
             memcpy(iv, Z + 16, 12);
             *ivlen = 12;
             return 0;
+        case ANKER_MODE_ECDH: {
+            /* The C1000 path: 64 bytes of KDF output, of which the first 32
+             * are an AES-256 key and the next 16 the IV. The last 16 are
+             * unused by the cipher -- the app derives 64 and throws them
+             * away, and matching that exactly is what the vectors pin. */
+            uint8_t kdf[64];
+            if (anker_kdf(Z, kdf, sizeof kdf) != 0) { return -1; }
+            memcpy(key, kdf, 32);
+            *keylen = 32;
+            memcpy(iv, kdf + 32, 16);
+            *ivlen = 16;
+            return 0;
+        }
         default:
             return -1;
     }
+}
+
+/* --- the ECIES KDF and the account key ------------------------------------ */
+
+int anker_kdf(const uint8_t Z[32], uint8_t *out, size_t outlen) {
+    static const char INFO[] = "ECIES";
+    const size_t info_len = sizeof(INFO) - 1;
+    if (!Z || !out || outlen == 0) { return -1; }
+
+    uint8_t h[SHA256_DIGEST_LEN];
+    hmac_sha256(Z, 32, INFO, info_len, h);
+
+    size_t done = 0;
+    while (done < outlen) {
+        uint8_t msg[SHA256_DIGEST_LEN + 8];
+        memcpy(msg, h, SHA256_DIGEST_LEN);
+        memcpy(msg + SHA256_DIGEST_LEN, INFO, info_len);
+
+        uint8_t blk[SHA256_DIGEST_LEN];
+        hmac_sha256(Z, 32, msg, SHA256_DIGEST_LEN + info_len, blk);
+
+        size_t take = outlen - done;
+        if (take > SHA256_DIGEST_LEN) { take = SHA256_DIGEST_LEN; }
+        memcpy(out + done, blk, take);
+        done += take;
+
+        if (done < outlen) {
+            uint8_t next[SHA256_DIGEST_LEN];
+            hmac_sha256(Z, 32, h, SHA256_DIGEST_LEN, next);
+            memcpy(h, next, SHA256_DIGEST_LEN);
+        }
+    }
+    return 0;
+}
+
+int anker_derive_account_key(const char *account_id, uint8_t key[32], uint8_t iv[16]) {
+    if (!key || !iv) { return -1; }
+    memset(key, 0, 32);
+    memset(iv, 0, 16);
+    if (!account_id) { return 0; }        /* no id == an all-zero key, as upstream */
+    size_t n = strlen(account_id);
+    if (n > 32) { n = 32; }
+    memcpy(key, account_id, n);
+    return 0;
 }
 
 /* --- AES-CBC -------------------------------------------------------------- */

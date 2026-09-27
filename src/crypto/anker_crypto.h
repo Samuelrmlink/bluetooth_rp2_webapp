@@ -16,8 +16,9 @@
  *   whatever public key arrives in 0x0021 -- so a per-deployment key is both
  *   safer and no harder.
  *
- *   HMAC-SHA256 and the "ECIES" KDF. Those serve the C1000's AES-256-CBC path
- *   only; the A2687 needs neither. They arrive with the C1000.
+ *   (HMAC-SHA256 and the "ECIES" KDF used to be missing here. They serve the
+ *   C1000's AES-256-CBC path, which the A2687 needs not at all, and they
+ *   arrived with the C1000 as promised -- see anker_kdf below.)
  *
  * TWO BEHAVIOURS THAT LOOK LIKE BUGS AND ARE NOT. Both are pinned by frozen
  * vectors (test/host/vectors_data.h cases 74 and 79) and "fixing" either one
@@ -56,10 +57,32 @@ int anker_ecdh_z(const uint8_t d[32], const uint8_t *peer, size_t peer_len,
 typedef enum {
     ANKER_MODE_ECDH_LEGACY = 1, /* AES-128-CBC, key = Z[0:16], iv = Z[16:32] */
     ANKER_MODE_GCM = 2,         /* AES-128-GCM, key = Z[0:16], nonce = Z[16:28] */
+    ANKER_MODE_ECDH = 3,        /* AES-256-CBC; key/iv from anker_kdf(Z, 64).
+                                 * The C1000 (product type B105), and what the
+                                 * current Anker app does. */
+    ANKER_MODE_ACCOUNT = 4,     /* AES-256-CBC, key = utf8(accountId[:32]),
+                                 * iv = 16 zero bytes. AesConferV1. */
 } anker_mode_t;
 
-/* Slice Z into an AES key and an IV per `mode`. 0 on success.
- * (ANKER_MODE_ECDH, the C1000's KDF path, is absent -- see the header note.) */
+/*
+ * The Anker "ECIES" KDF: a counter-free HMAC-SHA256 chain keyed by Z, with
+ * the literal info string "ECIES" both mixed into every block and used to
+ * seed the chain. Not X9.63, not HKDF -- it is its own thing, and the frozen
+ * vectors (KDF_CASES) are the specification, not this comment.
+ *
+ *   h = HMAC(Z, "ECIES")
+ *   block i = HMAC(Z, h || "ECIES");  h = HMAC(Z, h) between blocks
+ *
+ * outlen may be any length; the stream is prefix-stable, so asking for 48
+ * bytes gives the first 48 of what 64 would give. 0 on success. */
+int anker_kdf(const uint8_t Z[32], uint8_t *out, size_t outlen);
+
+/* AesConferV1 / account-key mode: key = the account id's UTF-8 bytes,
+ * truncated or zero-padded to 32, and an all-zero IV. No hashing at all --
+ * which is worth stating plainly, because it looks like an omission. */
+int anker_derive_account_key(const char *account_id, uint8_t key[32], uint8_t iv[16]);
+
+/* Slice Z into an AES key and an IV per `mode`. 0 on success. */
 int anker_derive_keys(const uint8_t Z[32], anker_mode_t mode, uint8_t key[32],
                       size_t *keylen, uint8_t iv[16], size_t *ivlen);
 

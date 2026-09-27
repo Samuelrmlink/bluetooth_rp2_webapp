@@ -109,6 +109,7 @@ if(CONFIG_PROTO_ANKER)
         target_sources(btgw PRIVATE
             src/crypto/ghash.c
             src/crypto/anker_crypto.c
+            src/crypto/sha256.c
             third_party/tiny-AES-c/aes.c)
     endif()
 endif()
