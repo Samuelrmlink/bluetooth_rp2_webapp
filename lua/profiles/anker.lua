@@ -237,7 +237,11 @@ function Link:decode(f, body)
 end
 
 function Link:on_unsolicited(f, dec)
-  if f.opcode == 0x0300 then
+  -- 0x0300 is the push and 0x0a00 the answer to a refresh; they carry the
+  -- IDENTICAL field set and differ only by the status byte, which decode()
+  -- has already stripped. Publishing only the push meant a 0x0a00 the loop
+  -- happened to pick up was parsed and thrown away.
+  if f.opcode == 0x0300 or f.opcode == 0x0a00 then
     M.publish(self, dec.body)
   end
 end
@@ -336,21 +340,40 @@ function M.run(addr, cfg)
     return nil, err
   end
 
+  -- An op handler MAY NOT AWAIT. Ops are dispatched with lua_pcall on the
+  -- main Lua state, not inside this script's coroutine, and yielding across
+  -- that pcall fails -- so the obvious version of this (call cmd_gcm, wait
+  -- for 0x0a00, publish) returned script_error every single time. It is a
+  -- trap for every future op, not a typo here.
+  --
+  -- So the op only raises a flag and returns; the loop below, which IS a
+  -- coroutine and may yield, does the exchange. It also means the request
+  -- cannot race the loop for the same reply.
+  local want_refresh = false
   ops.register('anker.a2687.refresh', function()
-    local dec = link:cmd_gcm(FT_CHARGING, 0x0200, tlv.build{
+    want_refresh = true
+    return { queued = true }
+  end)
+
+  local function do_refresh()
+    want_refresh = false
+    local dec, err = link:cmd_gcm(FT_CHARGING, 0x0200, tlv.build{
       { tag = 0xa1, enc = 'u8',  value = 0x21, type_byte = false },
       { tag = 0xf0, enc = 'u32', value = 1,    type_byte = 0x03 },
       { tag = 0xfe, enc = 'bytes', value = le32(now_epoch()), type_byte = false },
     }, 0x0a00)
-    if not dec then return { ok = false } end
-    M.publish(link, dec.body)
-    return { ok = true }
-  end)
+    if dec then
+      M.publish(link, dec.body)
+    else
+      log.warn('a2687: refresh failed: ' .. tostring(err))
+    end
+  end
 
   -- Steady state: the device pushes 0x0300 on its own. No keepalive, and none
   -- should be added -- the notes are explicit that the app does no re-poll.
   local quiet = 0
   while true do
+    if want_refresh then do_refresh() end
     local f, dec = link:await(nil, 5000)
     if f and dec then
       quiet = 0

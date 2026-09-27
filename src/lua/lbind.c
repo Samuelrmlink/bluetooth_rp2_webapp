@@ -289,6 +289,15 @@ static void push_params(lua_State *L, const char *json) {
     }
 }
 
+/* An op handler runs here, on the MAIN Lua state, not inside the registering
+ * script's coroutine. It therefore MAY NOT YIELD: no sys.sleep, no awaiting a
+ * reply, nothing that suspends. Yielding across this pcall fails, and the
+ * handler returns script_error with no obvious cause.
+ *
+ * A handler that needs to wait should set a flag that its script's own loop
+ * reads and acts on. The loop IS a coroutine and may yield; the handler is
+ * not and may not.
+ */
 bool lbind_dispatch(const char *name, const char *params_json,
                     void (*reply)(const char *, void *), void *ctx, long id) {
     if (!gL) { return false; }

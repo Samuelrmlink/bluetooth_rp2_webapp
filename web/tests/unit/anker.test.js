@@ -109,3 +109,63 @@ test('freshness decays from streaming to stalled', () => {
   assert.equal(freshness(t0, t0 + 30000).state, 'lost');
   assert.equal(freshness(0).state, 'none');
 });
+
+/* ---- the structured tags, decoded from the protocol docs ---------------- */
+
+test('an error code reads as a sentence, not an integer', () => {
+  const n = normalizeTelemetry({ error_code: 6 });
+  assert.equal(n.error, 6);
+  assert.equal(n.errorText, 'stale timestamp');
+  // An unknown code must still say something useful.
+  assert.equal(normalizeTelemetry({ error_code: 99 }).errorText, 'status 99');
+});
+
+test('ability bits are named, not left as a bitmask', () => {
+  const n = normalizeTelemetry({
+    ability_info: { raw: '0x48', screensaver_custom: true, custom_protocol: true,
+                    tomato_clock: false },
+  });
+  const a = n.structs.find((s) => s.key === 'ability_info');
+  assert.match(a.value, /screensaver custom/);
+  assert.match(a.value, /custom protocol/);
+  assert.doesNotMatch(a.value, /tomato/);
+});
+
+test('per-port VID/PID shows the unknown sentinel as unknown', () => {
+  const n = normalizeTelemetry({
+    identify_device: { c1: { vid: 1234, pid: 5678 },
+                       c2: { vid: 'unknown', pid: 'unknown' },
+                       c3: { vid: 0, pid: 0 } },
+  });
+  const v = n.structs.find((s) => s.key === 'identify_device').value;
+  assert.match(v, /C1 1234:5678/);
+  assert.match(v, /C2 unknown:unknown/);
+});
+
+test('a port with nothing identified says none', () => {
+  const n = normalizeTelemetry({
+    connected_device: { c1: 'none', c2: { brand: 5, model: 9 }, c3: 'none' },
+  });
+  const v = n.structs.find((s) => s.key === 'connected_device').value;
+  assert.match(v, /C1 none/);
+  assert.match(v, /C2 brand 5 model 9/);
+});
+
+test('the structured tags leave the unknown bucket, which is the point', () => {
+  // All four used to fall through to raw JSON under "other".
+  const n = normalizeTelemetry({
+    custom_power: { mode: 0, auto_exit: true, c1_w: 106, c2_w: 43, c3_w: 0 },
+    identify_device: { c1: { vid: 1, pid: 2 } },
+    connected_device: { c1: 'none' },
+    ability_info: { raw: '0x0' },
+    screensaver: { enabled: false, theme: 0, start_min: 0, end_min: 0, rest: '' },
+  });
+  assert.deepEqual(n.other, []);
+  assert.equal(n.structs.length, 5);
+});
+
+test('a struct whose shape changed does not blank the pane', () => {
+  const n = normalizeTelemetry({ identify_device: 'surprise', ability_info: 42 });
+  assert.ok(Array.isArray(n.structs));
+  assert.ok(Array.isArray(n.other));
+});

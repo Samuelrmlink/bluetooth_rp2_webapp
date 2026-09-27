@@ -64,7 +64,7 @@ export function mountAnkerPane({ api, log }) {
 
   function renderSettings(n) {
     const frag = document.createDocumentFragment();
-    for (const s of n.settings) {
+    for (const s of [...n.structs, ...n.settings]) {
       const row = document.createElement('div');
       row.className = 'kv';
       row.append(cell('k', s.label), cell('v', s.value));
@@ -101,7 +101,7 @@ export function mountAnkerPane({ api, log }) {
     const bits = [last.serial, last.firmware, last.addr].filter(Boolean);
     el.ident.textContent = bits.join(' · ');
     if (last.error) {
-      el.ident.textContent += `  · error ${last.error}`;
+      el.ident.textContent += `  · error ${last.error} (${last.errorText})`;
     }
     el.total.textContent = last.totalWatts > 0 ? `${last.totalWatts.toFixed(1)} W total` : '';
     renderPorts(last);

@@ -59,10 +59,46 @@ const SETTINGS = [
   ['ability_info',       'abilities',   v => '0x' + Number(v).toString(16)],
 ];
 
+/* The 17 status codes the profile knows, so an error reads as a sentence
+ * rather than as an integer nobody can look up. */
+export const ERRORS = {
+  0: 'ok', 1: 'failed', 2: 'unsupported opcode', 3: 'bad parameter', 4: 'busy',
+  5: 'not authenticated', 6: 'stale timestamp', 7: 'unknown user',
+  8: 'permission denied', 9: 'device locked', 10: 'crc/length error',
+  11: 'not ready', 12: 'out of range', 13: 'write protected', 14: 'timeout',
+  15: 'internal error', 16: 'not bound',
+};
+
+/* Fields the Lua dictionary decodes into structures. Flattened for display
+ * rather than dumped as JSON into the "unknown" bucket, which is where all
+ * four used to land. */
+function describePorts(obj, fmt) {
+  if (!obj || typeof obj !== 'object') return null;
+  return ['c1', 'c2', 'c3']
+    .map((k) => (obj[k] === undefined ? null : `${k.toUpperCase()} ${fmt(obj[k])}`))
+    .filter(Boolean).join('   ') || null;
+}
+
+const STRUCTS = [
+  ['custom_power', 'custom mode', (v) =>
+    `mode ${v.mode}, ${v.c1_w}/${v.c2_w}/${v.c3_w} W` + (v.auto_exit ? ', auto-exit' : '')],
+  ['identify_device', 'port VID/PID', (v) =>
+    describePorts(v, (p) => `${p.vid}:${p.pid}`)],
+  ['connected_device', 'connected', (v) =>
+    describePorts(v, (p) => (p === 'none' ? 'none' : `brand ${p.brand} model ${p.model}`))],
+  ['ability_info', 'abilities', (v) =>
+    Object.entries(v).filter(([k, on]) => on === true).map(([k]) => k.replace(/_/g, ' '))
+      .join(', ') || v.raw],
+  ['screensaver', 'screensaver', (v) =>
+    (typeof v === 'string' ? v
+      : `${v.enabled ? 'on' : 'off'}, theme ${v.theme}, ${v.start_min}-${v.end_min}`)],
+];
+
 const KNOWN = new Set([
   'addr', 'serial', 'truncated', 'package_version', 'error_code',
   ...PORTS.flatMap(p => [p.power, p.control]),
   ...SETTINGS.map(s => s[0]),
+  ...STRUCTS.map(s => s[0]),
 ]);
 
 /**
@@ -91,6 +127,16 @@ export function normalizeTelemetry(t, now = Date.now()) {
     };
   });
 
+  const structs = STRUCTS
+    .filter(([k]) => t[k] !== undefined && t[k] !== null)
+    .map(([k, label, fmt]) => {
+      let value;
+      // A firmware revision that changes a struct must not blank the pane.
+      try { value = fmt(t[k]); } catch { value = JSON.stringify(t[k]); }
+      return value ? { key: k, label, value } : null;
+    })
+    .filter(Boolean);
+
   const settings = SETTINGS
     .filter(([k]) => t[k] !== undefined && t[k] !== null)
     .map(([k, label, fmt]) => {
@@ -111,9 +157,11 @@ export function normalizeTelemetry(t, now = Date.now()) {
     serial: t.serial ?? null,
     firmware: firmwareLabel(t.package_version),
     error: typeof t.error_code === 'number' ? t.error_code : null,
+    errorText: typeof t.error_code === 'number'
+      ? (ERRORS[t.error_code] || `status ${t.error_code}`) : null,
     truncated: t.truncated === true,
     totalWatts: ports.reduce((a, p) => a + (typeof p.watts === 'number' ? p.watts : 0), 0),
-    ports, settings, other,
+    ports, settings, structs, other,
     at: now,
   };
 }

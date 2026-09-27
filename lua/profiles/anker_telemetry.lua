@@ -39,8 +39,16 @@ local LANGUAGE = { [0] = 'en', [1] = 'zh', [2] = 'ja', [3] = 'de' }
 local function raw(it) return it.raw and it.raw:sub(2) or '' end
 local function num(it)
   if type(it.value) == 'number' then return it.value end
+  -- It used to fall back to raw(it):byte(1) -- the FIRST byte only. A u16 or
+  -- u32 arriving with an unexpected type byte then silently lost its high
+  -- bytes: packageVersion 1606 would read as 70 and the E0 bitmask would be
+  -- truncated to its low 8 bits, both looking entirely plausible. Decode by
+  -- the width actually present, or report nothing.
   local b = raw(it)
-  return #b >= 1 and b:byte(1) or nil
+  if #b == 1 then return b:byte(1) end
+  if #b == 2 then return u16(b, 1) end
+  if #b == 4 then return u32(b, 1) end
+  return nil
 end
 
 -- [cPowerStatus u8][mV u16][mA u16][cW u16] -- 7 bytes
@@ -106,10 +114,60 @@ T.FIELDS = {
          end },
   b2 = { 'gyroscope', num },                -- u8 auto-rotate
   b3 = { 'custom_mode_number', num },       -- u8, 255 = none
-  b4 = { 'identify_device', function(it) return bytes.hex(raw(it)) end },
-  b5 = { 'connected_device', function(it) return bytes.hex(raw(it)) end },
-  e0 = { 'ability_info', num },             -- u32 bitmask
-  e1 = { 'screensaver', function(it) return bytes.hex(raw(it)) end },
+  -- 6x u16 LE: c1VID c1PID c2VID c2PID c3VID c3PID. 65530/65531 are the
+  -- documented "unknown" sentinels, not real ids.
+  b4 = { 'identify_device', function(it)
+           local v = raw(it)
+           if #v < 12 then return nil end
+           local out = {}
+           for i = 0, 2 do
+             local vid, pid = u16(v, i * 4 + 1), u16(v, i * 4 + 3)
+             out['c' .. (i + 1)] = {
+               vid = (vid == 65530 or vid == 65531) and 'unknown' or vid,
+               pid = (pid == 65530 or pid == 65531) and 'unknown' or pid,
+             }
+           end
+           return out
+         end },
+  -- 6x u16 LE: Brand,Model per port. 65535 = nothing identified.
+  b5 = { 'connected_device', function(it)
+           local v = raw(it)
+           if #v < 12 then return nil end
+           local out = {}
+           for i = 0, 2 do
+             local brand, model = u16(v, i * 4 + 1), u16(v, i * 4 + 3)
+             out['c' .. (i + 1)] = (brand == 65535 and model == 65535) and 'none'
+               or { brand = brand, model = model }
+           end
+           return out
+         end },
+  -- u32 bitmask. Bit order is the doc's parse order, so b0 is the lowest bit.
+  e0 = { 'ability_info', function(it)
+           local n = num(it)
+           if not n then return nil end
+           local bits = { 'screensaver_local', 'screensaver_text', 'screensaver_network',
+                          'screensaver_custom', 'screensaver_holiday', 'tomato_clock',
+                          'custom_protocol' }
+           local out = { raw = ('0x%x'):format(n) }
+           for i, name in ipairs(bits) do
+             out[name] = (n & (1 << (i - 1))) ~= 0
+           end
+           return out
+         end },
+  -- 11 B. Only the leading fields are pinned by the notes; the tail is
+  -- carried as hex rather than guessed at.
+  e1 = { 'screensaver', function(it)
+           local v = raw(it)
+           if #v < 11 then return bytes.hex(v) end
+           return {
+             enabled = v:byte(1) ~= 0,
+             theme = v:byte(2),
+             time_format = v:byte(3),
+             start_min = u16(v, 4),
+             end_min = u16(v, 6),
+             rest = bytes.hex(v:sub(8)),
+           }
+         end },
 }
 
 -- a1 is a selector echo (always 0x31) and fe is the anti-replay stamp, zero in
