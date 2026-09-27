@@ -14,5 +14,18 @@ What was left:   src/crypto/cortex/* -- Cortex-M0 Thumb-1 assembly for
                  worth the risk of hand-written assembly for the wrong core.
                  example/ -- an lwIP port we do not use.
 
-Local changes: none to the vendored sources. The platform hooks that
-wireguard-platform.h declares are implemented in src/net/wg.c.
+Local changes: ONE, in src/wireguardif.c. Where it delivered a decrypted
+               packet with ip_input(pbuf, device->netif) it now calls
+               device->netif->input(pbuf, device->netif). netif->input is
+               lwIP's documented entry point and what its own drivers use;
+               calling ip_input() directly skips whatever the port installed
+               there. For us that was the receive byte counter, so a tunnel
+               that was demonstrably carrying traffic reported rx_bytes 0
+               for its whole life -- and wg.status is the only way to
+               diagnose the tunnel remotely, so a status that under-reports
+               a healthy tunnel is worse than no status.
+
+               Search for "LOCAL CHANGE" to find it when rebasing.
+
+The platform hooks that wireguard-platform.h declares are implemented in
+src/net/wg.c.

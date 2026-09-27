@@ -398,7 +398,12 @@ size_t wg_status_json(char *dst, size_t cap) {
      * far end -- which is exactly what you cannot get when the tunnel is
      * the thing that is broken. last_initiation_tx answers it directly.
      */
-    bool peer_active = false, hs_valid = false, keypair_valid = false;
+    /* handshake.valid means a handshake is IN FLIGHT, not that the tunnel has
+     * one -- it goes false the moment a keypair is derived. Reported as
+     * handshake_valid it read as "this tunnel is broken" on a tunnel that was
+     * carrying traffic perfectly well. The field that answers "is there a
+     * usable session" is the keypair. */
+    bool peer_active = false, hs_in_progress = false, session_valid = false;
     uint32_t last_init_tx = 0, last_rx = 0;
     if (netif_added && wg_netif.state) {
         const struct wireguard_device *dev =
@@ -406,8 +411,8 @@ size_t wg_status_json(char *dst, size_t cap) {
         const struct wireguard_peer *pr = &dev->peers[0];
         if (pr->valid) {
             peer_active    = pr->active;
-            hs_valid       = pr->handshake.valid;
-            keypair_valid  = pr->curr_keypair.valid;
+            hs_in_progress = pr->handshake.valid;
+            session_valid  = pr->curr_keypair.valid || pr->prev_keypair.valid;
             last_init_tx   = pr->last_initiation_tx;
             last_rx        = pr->last_rx;
         }
@@ -420,7 +425,7 @@ size_t wg_status_json(char *dst, size_t cap) {
         "\"handshakes\":%lu,\"connect_attempts\":%lu,"
         "\"last_handshake_age_ms\":%lu,"
         "\"rx_bytes\":%llu,\"tx_bytes\":%llu,"
-        "\"peer_active\":%s,\"handshake_valid\":%s,\"keypair_valid\":%s,"
+        "\"peer_active\":%s,\"handshake_in_progress\":%s,\"session_valid\":%s,"
         "\"initiation_sent_ms_ago\":%ld,\"last_rx_ms_ago\":%ld,"
         "\"is_default_route\":%s}",
         cfg.present ? "true" : "false",
@@ -435,8 +440,8 @@ size_t wg_status_json(char *dst, size_t cap) {
         (unsigned long)(handshakes ? now - last_handshake_ms : 0),
         (unsigned long long)rx_bytes, (unsigned long long)tx_bytes,
         peer_active ? "true" : "false",
-        hs_valid ? "true" : "false",
-        keypair_valid ? "true" : "false",
+        hs_in_progress ? "true" : "false",
+        session_valid ? "true" : "false",
         last_init_tx ? (long)(now - last_init_tx) : -1L,
         last_rx ? (long)(now - last_rx) : -1L,
         /* Reported so a monitor can assert it, not just trust the comment

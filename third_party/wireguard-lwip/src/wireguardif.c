@@ -335,7 +335,16 @@ static void wireguardif_process_data_message(struct wireguard_device *device, st
 								// 5. If the plaintext packet has not been dropped, it is inserted into the receive queue of the wg0 interface.
 								if (src_ok) {
 									// Send packet to be process by LWIP
-									ip_input(pbuf, device->netif);
+									// LOCAL CHANGE: go through the netif's own
+									// input hook rather than calling ip_input()
+									// directly. netif->input is the documented
+									// entry point and every lwIP driver uses
+									// it; bypassing it means anything the port
+									// installs there -- in our case the byte
+									// counter behind wg.status -- never sees a
+									// single inbound packet, so a working
+									// tunnel reported rx_bytes 0 forever.
+									device->netif->input(pbuf, device->netif);
 									// pbuf is owned by IP layer now
 									pbuf = NULL;
 								}
