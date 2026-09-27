@@ -77,10 +77,14 @@ def t_neg_constants_agree():
     keeps a fixture copy so it can prove the generalised GHASH still matches
     the tags the Anker-specific original produced. Two copies can drift, and a
     drift here would be invisible until a charger stopped answering, so assert
-    they are identical."""
+    they are identical.
+
+    Repointed at lua/profiles/anker_cipher.lua when the profile was split into
+    modules. A guard that quietly stops matching anything is worse than no
+    guard, so the missing-file case below fails rather than skips."""
     import pathlib
     fix = pathlib.Path(ROOT, "test/host/neg_fixture.h")
-    prof = pathlib.Path(ROOT, "lua/profiles/anker_a2687.lua")
+    prof = pathlib.Path(ROOT, "lua/profiles/anker_cipher.lua")
     if not fix.exists() or not prof.exists():
         return False, "fixture or profile missing"
     ftxt, ptxt = fix.read_text(), prof.read_text()

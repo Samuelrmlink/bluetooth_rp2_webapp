@@ -18,6 +18,7 @@
 #include "lauxlib.h"
 
 #include "lua/lbind.h"
+#include "lua/lrt.h"
 #include "api/api.h"
 #include "api/ops.h"
 #include "bt/registry.h"
@@ -402,6 +403,25 @@ static int l_sys_secret(lua_State *L) {
     return 1;
 }
 
+/* sys.unload(name) -- forget a required module so the arena can reclaim it.
+ * Returns the live heap size afterwards, so a caller can see what it bought.
+ * Clearing the cache is only half the job: drop your own references first, or
+ * the module stays reachable and nothing is freed. */
+static int l_sys_unload(lua_State *L) {
+    const char *name = luaL_checkstring(L, 1);
+    bool had = lrt_unload_module(name);
+    size_t after = lrt_collect();
+    lua_pushboolean(L, had);
+    lua_pushinteger(L, (lua_Integer)after);
+    return 2;
+}
+
+/* sys.collect() -- full collection, returns the live heap size. */
+static int l_sys_collect(lua_State *L) {
+    lua_pushinteger(L, (lua_Integer)lrt_collect());
+    return 1;
+}
+
 static int l_sys_ms(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)to_ms_since_boot(get_absolute_time()));
     return 1;
@@ -634,10 +654,22 @@ static int l_bt_find(lua_State *L) {
  * yield discipline for the handshake to read as straight-line code. The poll
  * interval costs one coroutine resume every few milliseconds against a device
  * that takes ~900 ms to answer its key exchange. */
+/* bt.notify_take([addr]) -- with an address, takes only that device's oldest
+ * entry and leaves everyone else's queued. Two profiles sharing one FIFO
+ * silently ate each other's replies; passing the address is how a profile
+ * stays out of another's way. */
 static int l_bt_notify_take(lua_State *L) {
     char addr[18], id[8], src[10];
+    const char *filter = NULL;
+    uint8_t fa[6];
+    char fbuf[18];
+    if (!lua_isnoneornil(L, 1) && addr_from_lua(L, 1, fa)) {
+        snprintf(fbuf, sizeof fbuf, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 fa[0], fa[1], fa[2], fa[3], fa[4], fa[5]);
+        filter = fbuf;
+    }
     static uint8_t val[256];
-    int n = le_notify_take(addr, sizeof addr, id, sizeof id, src, sizeof src,
+    int n = le_notify_take(filter, addr, sizeof addr, id, sizeof id, src, sizeof src,
                            val, sizeof val);
     if (n < 0) { lua_pushnil(L); return 1; }
     lua_createtable(L, 0, 4);
@@ -675,7 +707,20 @@ static int l_bt_notify_dropped(lua_State *L) {
     return 1;
 }
 
-static int l_bt_notify_flush(lua_State *L) { (void)L; le_notify_flush(); return 0; }
+/* bt.notify_flush([addr]) -- scoped the same way. A global flush from one
+ * profile used to wipe another's pending key exchange. */
+static int l_bt_notify_flush(lua_State *L) {
+    uint8_t fa[6];
+    char fbuf[18];
+    if (!lua_isnoneornil(L, 1) && addr_from_lua(L, 1, fa)) {
+        snprintf(fbuf, sizeof fbuf, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 fa[0], fa[1], fa[2], fa[3], fa[4], fa[5]);
+        le_notify_flush(fbuf);
+    } else {
+        le_notify_flush(NULL);
+    }
+    return 0;
+}
 
 #endif
 
@@ -703,7 +748,8 @@ void lbind_open_all(lua_State *L) {
 
     static const luaL_Reg sys[] = {
         { "ms", l_sys_ms }, { "sleep", l_sys_sleep },
-        { "secret", l_sys_secret }, { NULL, NULL } };
+        { "secret", l_sys_secret },
+        { "unload", l_sys_unload }, { "collect", l_sys_collect }, { NULL, NULL } };
     set_table(L, "sys", sys);
 
 #if CONFIG_BT_LE

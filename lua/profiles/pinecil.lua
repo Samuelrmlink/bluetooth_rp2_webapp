@@ -100,11 +100,11 @@ end
 -- blocking on it would stall the radio, so this yields between polls exactly
 -- as an await on a notification does.
 function Link:read(id, timeout_ms)
-  bt.notify_flush()
+  bt.notify_flush(self.addr)
   if not bt.read(self.addr, id) then return nil, 'read refused' end
   local deadline = sys.ms() + (timeout_ms or 2000)
   repeat
-    local n = bt.notify_take()
+    local n = bt.notify_take(self.addr)
     if n and n.id == id and n.source == 'read' then return n.value end
     if not n then sys.sleep(5) end
   until sys.ms() > deadline

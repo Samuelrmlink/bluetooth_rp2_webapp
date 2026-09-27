@@ -28,6 +28,12 @@ void lrt_tick(void);
  * for a loop over P-256, with the runaway killer never firing. */
 void lrt_yield_soon(void);
 
+/* Drop one cached module so its memory can be reclaimed, and force a full
+ * collection. A profile uses these to release its handshake once the session
+ * is established -- see lrt.c for what the caller must also do. */
+bool lrt_unload_module(const char *name);
+size_t lrt_collect(void);
+
 /* --- script lifecycle ---------------------------------------------------- */
 /* Source resolution, in order: RAM draft, staged/<name>.lua, lua/<name>.lua.
  * A draft that fails to load falls back to the tier beneath and reports, so a

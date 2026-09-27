@@ -135,8 +135,17 @@ eq('recomputed tag matches the one encrypt produced',
 
 -- ---------------------------------------------------------------------------
 print('\n== the profile ==')
-package.path = 'lua/profiles/?.lua;' .. package.path
-local a = dofile('lua/profiles/anker_a2687.lua')
+-- The profile is four modules now (see cipher.lua for why). The host harness
+-- has no require(), so load them the way the device's loader would and stitch
+-- the pieces this test needs.
+local function mod(name)
+  local chunk = assert(loadfile('lua/profiles/' .. name .. '.lua'))
+  return chunk()
+end
+package.loaded['profiles.anker_cipher'] = mod('anker_cipher')
+package.loaded['profiles.anker_handshake'] = mod('anker_handshake')
+package.loaded['profiles.anker_telemetry'] = mod('anker_telemetry')
+local a = mod('anker')
 
 eq('profile exposes the service uuid', a.SVC, '8c850001-0302-41c5-b46e-cf057c562025')
 eq('opcode table names 0x0821', a.OPCODE[0x0821], 'getPublicKey.resp')

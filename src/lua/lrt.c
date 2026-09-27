@@ -355,6 +355,45 @@ static void flush_modules(void) {
     lua_setfield(L, LUA_REGISTRYINDEX, MODULE_CACHE);
 }
 
+/* Drop ONE module from the cache, so its memory can be reclaimed.
+ *
+ * A profile's handshake is dead weight the moment the session is up: several
+ * kilobytes of compiled chunk that will not be called again unless the link
+ * drops. Clearing the cache entry is only half of it -- anything still
+ * holding a reference to the module table keeps it alive, so the caller must
+ * drop its own references too and then collect. Returns true if there was an
+ * entry to remove.
+ *
+ * The trade is worth stating: re-requiring later re-reads the source from
+ * flash and recompiles it, and compiling is the expensive part. Unloading
+ * buys steady-state room at the cost of a peak on reconnect. */
+bool lrt_unload_module(const char *name) {
+    if (!L || !name) { return false; }
+    if (lua_getfield(L, LUA_REGISTRYINDEX, MODULE_CACHE) != LUA_TTABLE) {
+        lua_pop(L, 1);
+        return false;
+    }
+    bool had = lua_getfield(L, -1, name) != LUA_TNIL;
+    lua_pop(L, 1);
+    if (had) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, name);
+    }
+    lua_pop(L, 1);
+    return had;
+}
+
+/* Bytes the Lua heap is actually holding, after a full collection. The arena
+ * allocator's own figure includes blocks on its free list, which is the right
+ * number for "will the next allocation fit" and the wrong one for "how much
+ * is live". */
+size_t lrt_collect(void) {
+    if (!L) { return 0; }
+    lua_gc(L, LUA_GCCOLLECT);
+    lua_gc(L, LUA_GCCOLLECT);   /* twice: finalizers can free more */
+    return heap_used;
+}
+
 /* --- start / stop --------------------------------------------------------- */
 static bool load_tier(script_t *s, const char *src, size_t len, const char *tier,
                       const char **err) {

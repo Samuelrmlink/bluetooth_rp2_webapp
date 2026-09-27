@@ -59,16 +59,21 @@ void le_register_notifications(uint16_t con_handle);
  *
  * So arriving values are ALSO queued here, briefly, for a script to drain.
  * The queue is small and drops oldest-first: it is a rendezvous buffer for a
- * script that is actively listening, not a log. Nothing else consumes it, and
- * a build with no Lua does not have it.
+ * script that is actively listening, not a log. A build with no Lua does not
+ * have it.
+ *
+ * `addr_filter` scopes both take and flush to ONE device. Two profiles ran
+ * against one global FIFO exactly once: each drained or flushed the other's
+ * replies and both failed in ways that pointed nowhere near the cause.
  *
  * `addr_out` gets "AA:BB:..", `id_out` the "svc.chr" path -- no handles, same
  * rule as everywhere else -- and `src_out` "notify", "indicate" or "read".
  * Read results are queued too: a script has no other way to see one, and a
  * peripheral with no notify characteristic (the Pinecil has none) can only be
  * polled. Returns the value length, or -1 when empty. */
-int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
-                   char *src_out, size_t src_cap, uint8_t *val, size_t val_cap);
+int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,
+                   char *id_out, size_t id_cap, char *src_out, size_t src_cap,
+                   uint8_t *val, size_t val_cap);
 uint32_t le_notify_dropped(void);
-void le_notify_flush(void);
+void le_notify_flush(const char *addr_filter);
 #endif

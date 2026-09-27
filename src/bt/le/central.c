@@ -545,7 +545,21 @@ static gatt_client_notification_t notif_reg[CONFIG_BT_MAX_LINKS];
 #define NOTIFY_SLOTS 8
 #define NOTIFY_VAL_MAX 256
 
+/* Entries are addressed by DEVICE, not taken blindly off the front.
+ *
+ * They used to be a plain FIFO that any script could drain. With one profile
+ * running that is fine; with two it is not, and the failure was ugly in both
+ * directions -- the charger's profile discarded the iron's read results, so
+ * those timed out, while the iron's profile called a global flush before every
+ * read and so wiped the charger's pending key exchange. The handshake failed
+ * at "no reply to 0x0021" with nothing obviously wrong at either end.
+ *
+ * So a slot is a slot, not a ring position: take() finds the oldest entry for
+ * the address asked for and frees only that one, leaving everyone else's
+ * alone. Ordering comes from a monotonic sequence rather than from position. */
 typedef struct {
+    bool     used;
+    uint32_t seq;
     char     addr[18];
     char     id[8];
     char     source[10];   /* notify | indicate | read */
@@ -554,9 +568,18 @@ typedef struct {
 } notify_slot_t;
 
 static notify_slot_t s_inbox[NOTIFY_SLOTS];
-static uint8_t s_inbox_head;     /* next write */
-static uint8_t s_inbox_count;
+static uint32_t s_inbox_seq;
 static uint32_t s_inbox_dropped;
+
+static int oldest_slot(const char *addr) {
+    int best = -1;
+    for (int i = 0; i < NOTIFY_SLOTS; i++) {
+        if (!s_inbox[i].used) { continue; }
+        if (addr && strcmp(s_inbox[i].addr, addr) != 0) { continue; }
+        if (best < 0 || s_inbox[i].seq < s_inbox[best].seq) { best = i; }
+    }
+    return best;
+}
 
 static void notify_push(const char *addr, const char *id, const char *source,
                         const uint8_t *val, uint16_t len) {
@@ -566,13 +589,21 @@ static void notify_push(const char *addr, const char *id, const char *source,
         s_inbox_dropped++;
         return;
     }
-    notify_slot_t *s = &s_inbox[s_inbox_head];
-    s_inbox_head = (uint8_t)((s_inbox_head + 1) % NOTIFY_SLOTS);
-    if (s_inbox_count < NOTIFY_SLOTS) {
-        s_inbox_count++;
-    } else {
-        s_inbox_dropped++;       /* head just ran over the oldest entry */
+    int slot = -1;
+    for (int i = 0; i < NOTIFY_SLOTS; i++) {
+        if (!s_inbox[i].used) { slot = i; break; }
     }
+    if (slot < 0) {
+        /* Full: drop the oldest of ANY device. A script that has stopped
+         * draining is not coming back for the backlog, and holding it would
+         * only delay the fresh frame someone does want. */
+        slot = oldest_slot(NULL);
+        if (slot < 0) { return; }
+        s_inbox_dropped++;
+    }
+    notify_slot_t *s = &s_inbox[slot];
+    s->used = true;
+    s->seq = ++s_inbox_seq;
     snprintf(s->addr, sizeof s->addr, "%s", addr);
     snprintf(s->id, sizeof s->id, "%s", id);
     snprintf(s->source, sizeof s->source, "%s", source);
@@ -580,23 +611,32 @@ static void notify_push(const char *addr, const char *id, const char *source,
     memcpy(s->val, val, len);
 }
 
-int le_notify_take(char *addr_out, size_t addr_cap, char *id_out, size_t id_cap,
-                   char *src_out, size_t src_cap, uint8_t *val, size_t val_cap) {
-    if (!s_inbox_count) { return -1; }
-    uint8_t tail = (uint8_t)((s_inbox_head + NOTIFY_SLOTS - s_inbox_count) % NOTIFY_SLOTS);
-    notify_slot_t *s = &s_inbox[tail];
-    s_inbox_count--;
-    if (s->len > val_cap) { return -1; }
+int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,
+                   char *id_out, size_t id_cap, char *src_out, size_t src_cap,
+                   uint8_t *val, size_t val_cap) {
+    int i = oldest_slot(addr_filter && addr_filter[0] ? addr_filter : NULL);
+    if (i < 0) { return -1; }
+    notify_slot_t *s = &s_inbox[i];
+    if (s->len > val_cap) { s->used = false; return -1; }
     if (addr_out) { snprintf(addr_out, addr_cap, "%s", s->addr); }
     if (id_out) { snprintf(id_out, id_cap, "%s", s->id); }
     if (src_out) { snprintf(src_out, src_cap, "%s", s->source); }
     memcpy(val, s->val, s->len);
+    s->used = false;
     return (int)s->len;
 }
 
 uint32_t le_notify_dropped(void) { return s_inbox_dropped; }
 
-void le_notify_flush(void) { s_inbox_head = 0; s_inbox_count = 0; }
+/* NULL or "" flushes everything; an address flushes only that device's, which
+ * is what a profile wants before it starts an exchange. */
+void le_notify_flush(const char *addr_filter) {
+    for (int i = 0; i < NOTIFY_SLOTS; i++) {
+        if (!s_inbox[i].used) { continue; }
+        if (addr_filter && addr_filter[0] && strcmp(s_inbox[i].addr, addr_filter) != 0) { continue; }
+        s_inbox[i].used = false;
+    }
+}
 #endif /* CONFIG_LUA_ENABLE */
 
 static void emit_char_value(le_link_t *l, uint16_t value_handle,

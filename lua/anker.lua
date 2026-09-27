@@ -21,7 +21,7 @@ the official app's keypair -- the charger does ECDH against whatever public
 key arrives in 0x0021 -- so generate a fresh one and keep it on the device.
 ]]
 
-local a2687 = require 'profiles.anker_a2687'
+local a2687 = require 'profiles.anker'
 
 local function load_cfg()
   local uid = sys.secret('anker', 'user_id')
@@ -74,25 +74,45 @@ until addr
 local adv = a2687.decode_adv(dev.mfg_data)
 log.info(('anker: found %s (%s, sku %s, %s)'):format(
   addr, adv.product_type, adv.sku, adv.bound and 'bound' or 'unbound'))
-if not dev.connected then
-  log.info('anker: connecting')
-  if not bt.connect(addr) then
-    log.error('anker: connect failed')
-    return
-  end
+-- Connect, then wait for each step separately so a failure says WHICH step.
+-- bt.connect only reports that the attempt was STARTED; at the edge of range
+-- -- this charger sits around -70 to -85 dBm -- the link can fail to come up
+-- at all, and the old code then blamed discovery for it.
+local function wait_for(what, pred, timeout_ms)
+  local deadline = sys.ms() + timeout_ms
+  repeat
+    if pred() then return true end
+    sys.sleep(250)
+  until sys.ms() > deadline
+  log.error('anker: timed out waiting for ' .. what)
+  return false
 end
 
--- Wait for DISCOVERY, not for a stopwatch. A fixed sleep is the classic way
--- to write something that passes on the bench and fails on a busy radio or a
--- slower peer; bt.find only resolves once the database is ready, so poll it.
-local deadline = sys.ms() + 15000
-local cmd
-repeat
-  cmd = bt.find(addr, a2687.SVC, a2687.CMD)
-  if not cmd then sys.sleep(250) end
-until cmd or sys.ms() > deadline
-if not cmd then
-  log.error('anker: the Anker service never appeared -- discovery did not finish')
+local function is_connected()
+  for _, d in ipairs(bt.devices()) do
+    if d.addr == addr and d.connected then return true end
+  end
+  return false
+end
+
+if not is_connected() then
+  log.info('anker: connecting to ' .. addr)
+  if not bt.connect(addr) then
+    log.error('anker: connect was refused outright')
+    return
+  end
+  if not wait_for('the link', is_connected, 12000) then
+    -- One retry: a first connect at the edge of range often just misses.
+    log.info('anker: retrying the connect')
+    bt.connect(addr)
+    if not wait_for('the link (retry)', is_connected, 12000) then return end
+  end
+end
+log.info('anker: link up')
+
+if not wait_for('discovery', function()
+      return bt.find(addr, a2687.SVC, a2687.CMD) ~= nil
+    end, 20000) then
   return
 end
 log.info('anker: discovery ready')
