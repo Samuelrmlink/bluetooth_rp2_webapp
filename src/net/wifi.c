@@ -18,11 +18,24 @@
  * runs before the HTTP server exists — and a misbehaving join took down the
  * whole board with no way to see why.
  *
- *     boot -> scan -+- a known SSID is visible -> join -> STA
- *                   +- none visible, or the budget expires -> SoftAP
+ * TWO THINGS live here, and they used to be one state machine.
  *
- * AP is the resting state and every failure path returns to it, so a wrong
- * password can never lock you out of the device that holds it.
+ *   - The STATION machine: ST_IDLE -> scan -> a known SSID -> ST_JOIN -> ST_UP,
+ *     back to ST_IDLE on loss. Runs in auto, sta and both.
+ *   - The SoftAP, a SERVICE rather than a state: wifi_poll() drives ap_up
+ *     toward ap_wanted() once per pass. It exists so a device with no working
+ *     station can still be configured -- see ap_wanted() for the policy.
+ *
+ * The CYW43439 nominally runs AP and STA at once ("apsta" is set in the
+ * driver; each interface has its own itf_state bit and netif), and this file
+ * no longer forbids it: start_ap() does not take the station down and
+ * begin_join() does not stop the AP. But the SDK's poll-mode driver does NOT
+ * survive it in practice -- the measurements are at start_ap() -- so `auto`
+ * never has both on the air at once: the station is parked while the AP
+ * serves, and a rejoin stops the AP first. Only the experimental `both`
+ * attempts true concurrency. What the AP-as-a-service still buys is care
+ * about lwIP's default route (fix_default_route), a DHCP server per
+ * interface (dhcpserver.c), and hold timers between radio transitions.
  */
 #include "net/wifi.h"
 
@@ -34,10 +47,9 @@
 #include "lwip/ip4_addr.h"
 #include "net/mdns.h"
 #include "dhcpserver.h"
-#if CONFIG_NET_USB_NCM
-#include "usb_ncm.h"
-#endif
+#include "net/wg.h"
 #if CONFIG_BT_LE
+#include "bt/bt.h"
 #include "bt/le/central.h"
 #endif
 #include "config/config.h"
@@ -54,7 +66,7 @@
 #define WIFI_RETRY_MS 10000  /* backoff after a failure */
 #define WIFI_LOST_MS 2000    /* a link must stay down this long to count */
 #define WIFI_SCAN_MS 8000    /* a scan that never completes is abandoned */
-#define WIFI_BOOT_MS 45000   /* give up looking and become an AP */
+#define WIFI_BOOT_MS 45000   /* scan eagerly this long after boot, then settle */
 /*
  * How often to re-scan once the boot budget is spent and we are only waiting
  * for a known network to appear.
@@ -69,11 +81,45 @@
  * during the boot budget, then settle. An explicit wifi.scan is unaffected.
  */
 #define WIFI_IDLE_RESCAN_MS 60000
-#define WIFI_RESCAN_MS 30000 /* while in AP, look for a known network again */
+/*
+ * The SoftAP policy, see ap_wanted().
+ *
+ * GRACE: in auto, how long after boot the AP is held back so that the scan,
+ * join and DHCP get a chance to bring the station up before a fallback is
+ * offered. Measured: the station is up at 20-25 s on the bench (the AP's own
+ * boot floor and the Bluetooth core come first), so 30 s covers it. The cost
+ * falls on a device with no network in range: it waits 30 s for its AP.
+ *
+ * HOLD: the minimum spacing between AP transitions. Each one is a burst of
+ * ioctls on the shared radio; a policy that flips twice a second would be a
+ * DoS on ourselves. A user's explicit mode change clears the hold.
+ */
+#define WIFI_AP_GRACE_MS 30000
+#define WIFI_AP_HOLD_MS  15000
+/*
+ * SETTLE: no join and no scan for this long after the AP comes up, and a short
+ * gap between taking the station down and starting the AP. The committed code
+ * scanned straight after bss-up for months without incident, so 5 s is
+ * caution rather than measurement. (25 s was tried here to make a join OVER
+ * the AP survive; it did not -- see start_ap.)
+ */
+#define WIFI_AP_SETTLE_MS 5000
+#define WIFI_LEAVE_GAP_MS 5000
+/*
+ * BOOT FLOOR: the AP is never started in the first seconds of a boot, in any
+ * mode. Measured: an AP init at 2-3 s after boot wedged the driver on every
+ * attempt (watchdog loop), with the station interface down and idle; the
+ * same init at 17 s and later always succeeded. The one thing happening on
+ * the shared SPI bus in those first seconds is BTstack bringing the Bluetooth
+ * core up -- firmware download and HCI init -- and the AP's ioctl burst on
+ * top of it is what does not come back. A scan or a join at ~10 s survives
+ * it; the AP does not. 15 s is generous by measurement, not by theory.
+ */
+#define WIFI_AP_BOOT_MIN_MS 15000
 
 #define SCAN_MAX 24
 
-typedef enum { ST_IDLE = 0, ST_JOIN, ST_UP, ST_AP } wifi_state_t;
+typedef enum { ST_IDLE = 0, ST_JOIN, ST_UP } wifi_state_t;
 
 typedef struct {
     char ssid[CFG_SSID_MAX + 1];
@@ -85,7 +131,7 @@ typedef struct {
 static bool driver_up = false;
 static wifi_state_t state = ST_IDLE;
 
-static uint32_t join_start, last_fail, down_since, boot_start, scan_start, last_rescan;
+static uint32_t join_start, last_fail, down_since, boot_start, scan_start;
 static uint32_t last_scan_end;   /* when the most recent scan stopped */
 static bool deferred_for_bt;     /* so the deferral is logged once, not per pass */
 static char ip_str[16] = "0.0.0.0";
@@ -99,10 +145,16 @@ static bool scan_done = false;
 
 static dhcp_server_t ap_dhcp;
 static bool ap_up = false;
+static uint32_t ap_changed;         /* now_ms() at the last AP transition; 0 = act at once */
+static uint32_t ap_started_ms;      /* when the AP last came up: joins/scans wait WIFI_AP_SETTLE_MS */
+static uint32_t left_ms;            /* when park_sta() ran: the AP starts WIFI_LEAVE_GAP_MS later */
+static bool     sta_parked;         /* station interface taken down for an AP start; re-enable after settle */
+static int      ap_clients_cached;  /* one ioctl every 2 s, not one per status call */
+static uint32_t ap_clients_at;
+static bool     ap_deferred_for_bt; /* so the deferral is logged once */
 
 /* Deferred work — see the header. */
 static bool pending_scan = false;
-static bool pending_ap = false;
 static bool pending_join = false;
 static char pending_ssid[CFG_SSID_MAX + 1] = "";
 
@@ -177,23 +229,14 @@ static void apply_radio_power(void) {
 static void stop_ap(void) {
     if (!ap_up) return;
     ap_up = false;
+    ap_clients_cached = 0;
     mdns_remove_netif(ap_netif());
     dhcp_server_deinit(&ap_dhcp);
+    printf("wifi: AP down begin @%lu ms\n", (unsigned long)now_ms());
     cyw43_arch_disable_ap_mode();
-    printf("wifi: AP down\n");
+    printf("wifi: AP down end   @%lu ms\n", (unsigned long)now_ms());
 }
 
-/*
- * Is there already a way to reach this device?
- *
- * The SoftAP exists so a device with no other route can still be configured.
- * When USB-NCM is up there IS another route, and the AP is not free: it wants
- * DHCP on port 67, which NCM already serves, and bringing it up over a live
- * NCM link killed that link outright -- measured, reproducibly, about 42
- * seconds after every boot. Trading a working path for a worse one is not a
- * fallback, so "auto" now only falls back when there is nothing to fall back
- * from. An explicit mode of "ap" still starts it unconditionally.
- */
 /* Scan eagerly while the boot budget lasts, then only occasionally -- see
  * WIFI_IDLE_RESCAN_MS for why a continuous scan is not free. */
 static bool want_idle_scan(uint32_t now) {
@@ -201,24 +244,86 @@ static bool want_idle_scan(uint32_t now) {
     return timed_out(now, last_scan_end, WIFI_IDLE_RESCAN_MS);
 }
 
-static bool have_other_route(void) {
-#if CONFIG_NET_USB_NCM
-    struct netif *n = usb_ncm_netif();
-    return n && netif_is_up(n) && netif_is_link_up(n);
-#else
-    return false;
-#endif
+/*
+ * cyw43_cb_tcpip_init() calls netif_set_default() for WHICHEVER interface it
+ * is bringing up (SDK cyw43_lwip.c:212). Enable the AP after the station and
+ * lwIP's default route becomes the AP netif -- and WireGuard's UDP pcb is
+ * bound to ANY (wg.c), so the tunnel would leave through the AP. The station
+ * is the only interface that reaches the Internet; it owns the default.
+ *
+ * Pointing the default at a station that is down is safe: ip4_route() tries
+ * every up netif by subnet first (NCM and the AP keep working) and uses the
+ * default only when it is up, linked and addressed. Otherwise ERR_RTE, which
+ * is the honest answer while the station is away.
+ */
+static void fix_default_route(void) {
+    if (cyw43_state.itf_state & (1 << CYW43_ITF_STA)) {
+        netif_set_default(sta_netif());
+    }
 }
 
+/*
+ * THE AP POLICY. Evaluated every pass; wifi_poll() drives ap_up toward it.
+ *
+ *   ap, both  -> always.
+ *   sta, off  -> never.
+ *   auto      -> after WIFI_AP_GRACE_MS, whenever the station is NOT
+ *                associated. Not "unless WireGuard is confirmed", as first
+ *                specified: that policy assumed the AP could run beside an
+ *                associated station, and on this driver it cannot (see
+ *                start_ap). Keeping the AP up would mean dropping the LAN, so
+ *                an associated station wins. wg_is_confirmed() is still
+ *                computed and reported (wg.status, wg.state); making the
+ *                tunnel gate the AP again is one line here, if wanted.
+ *                USB-NCM is deliberately absent from this decision (owner's
+ *                call): the AP behaves the same on the bench as in the field.
+ */
+static bool ap_wanted(uint32_t now) {
+    if (!timed_out(now, boot_start, WIFI_AP_BOOT_MIN_MS)) return false;   /* see WIFI_AP_BOOT_MIN_MS */
+#if CONFIG_BT_LE
+    /* And not until the Bluetooth core has finished coming up on the shared
+     * bus (HCI_STATE_WORKING) -- the time floor is the measurement, this is
+     * the mechanism it stands in for. */
+    if (!bt_ready()) return false;
+#endif
+    const char *m = cfg_mode();
+    if (strcmp(m, "ap") == 0 || strcmp(m, "both") == 0) return true;
+    if (strcmp(m, "auto") != 0) return false;
+    if (!timed_out(now, boot_start, WIFI_AP_GRACE_MS)) return false;
+    return state != ST_UP;
+}
+
+/*
+ * ORDER MATTERS, and the bench decided it -- three times over.
+ *
+ * cyw43_ll_wifi_ap_init() writes bsscfg:ssid, WLC_SET_CHANNEL, bsscfg:wsec
+ * and bss-up through the STATION interface. With the station interface
+ * ENABLED -- associated, joining, or merely idle -- those ioctls stop being
+ * answered (waits of 150, 310, 504, 648 ms, then nothing) and the watchdog
+ * reboots the board. Measured on every attempt, including one where the AP
+ * started 2 s after boot with the station idle. With the station interface
+ * DISABLED the same init completes in ~370 ms.
+ *
+ * The other half -- re-enabling the station and joining it OVER the running
+ * AP -- works only sometimes. One boot in four came up with both interfaces
+ * (and 1-2 s ioctl overruns while it lasted); the other three timed out an
+ * ioctl mid-join ("[CYW43] do_ioctl(2, 263, 23): timeout"), stopped answering,
+ * and the watchdog rebooted the board. 5 s and 25 s of AP settle alike.
+ *
+ * So start_ap() is only ever called with the station interface down: the
+ * policy step calls park_sta() one pass earlier (never during a join --
+ * disassociating under an outstanding connect_async is the other thing that
+ * wedges), waits a short gap, then starts the AP. In auto the station then
+ * STAYS parked while the AP is up, and a rejoin begins with stop_ap() -- the
+ * order the old AP state used for months. Only `both` re-enables the
+ * station under a live AP, as the experiment it is.
+ */
 static void start_ap(void) {
     if (ap_up) return;
-    /* Always disassociate first: bringing the AP up on top of a half-finished
-     * join leaves the radio in a state the reference documents as needing a
-     * DISASSOC every time. */
-    cyw43_arch_disable_sta_mode();
 
     const char *ssid = cfg_ap_ssid();
     const char *psk = cfg_ap_psk();
+    printf("wifi: AP up begin @%lu ms\n", (unsigned long)now_ms());
     cyw43_arch_enable_ap_mode(ssid, psk[0] ? psk : NULL,
                               psk[0] ? CYW43_AUTH_WPA2_AES_PSK : CYW43_AUTH_OPEN);
     apply_radio_power();
@@ -230,25 +335,58 @@ static void start_ap(void) {
     netif_set_addr(nif, &gw, &mask, &gw);
     netif_set_up(nif);
     netif_set_link_up(nif);
+    fix_default_route();
 
     dhcp_server_init(&ap_dhcp, nif, (const ip_addr_t *)&gw, (const ip_addr_t *)&mask);
     mdns_add_netif(nif);
 
     ap_up = true;
-    state = ST_AP;
-    cur_ssid[0] = 0;
-    snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", AP_IP0, AP_IP1, AP_IP2, AP_IP3);
-    last_rescan = now_ms();
-    printf("wifi: AP '%s' up, http://%s/\n", ssid, ip_str);
+    ap_clients_cached = 0;
+    ap_clients_at = now_ms();
+    ap_started_ms = now_ms();
+    printf("wifi: AP up end   @%lu ms -- '%s' at %d.%d.%d.%d\n",
+           (unsigned long)now_ms(), ssid, AP_IP0, AP_IP1, AP_IP2, AP_IP3);
 }
 
-static int ap_clients(void) {
-    if (!ap_up) return 0;
+/* Take the station interface down so the AP can start (see start_ap).
+ * Bookkeeping mirrors on_lost(), but last_fail is NOT set: the rejoin should
+ * happen as soon as the AP has settled, not after the failure backoff. */
+static void park_sta(void) {
+    if (state == ST_UP) { mdns_remove_netif(sta_netif()); }
+    printf("wifi: parking the station (%s) so the AP can start\n",
+           cur_ssid[0] ? cur_ssid : "idle");
+    cyw43_arch_disable_sta_mode();
+    strcpy(ip_str, "0.0.0.0");
+    down_since = 0;
+    state = ST_IDLE;
+    scan_done = false;          /* rescan once the AP has settled */
+    sta_parked = true;
+    left_ms = now_ms();
+}
+
+static bool sta_enabled(void) { return (cyw43_state.itf_state & (1 << CYW43_ITF_STA)) != 0; }
+
+/* The radio has just brought the AP up; give it a moment before a join or a
+ * scan asks it to do something else on the other interface. */
+static bool ap_settling(uint32_t now) {
+    return ap_up && ap_started_ms && !timed_out(now, ap_started_ms, WIFI_AP_SETTLE_MS);
+}
+
+/* cyw43_wifi_ap_get_stas() is an ioctl. It used to run once per status poll
+ * AND once per loop pass while the AP was a state; now once per 2 s. */
+static void refresh_ap_clients(uint32_t now) {
+    if (!ap_up) { ap_clients_cached = 0; return; }
+    if (!timed_out(now, ap_clients_at, 2000)) return;
+    ap_clients_at = now;
     int n = 0;
     uint8_t macs[32 * 6];
     cyw43_wifi_ap_get_stas(&cyw43_state, &n, macs);
-    return n;
+    ap_clients_cached = n;
 }
+
+/* Someone is on the AP, possibly mid-way through configuring us. A scan hops
+ * the radio off-channel and drops them, which is the worst possible moment. */
+static bool ap_busy(void) { return ap_up && ap_clients_cached > 0; }
 
 /* --- scanning ------------------------------------------------------------- */
 
@@ -338,7 +476,6 @@ static void begin_join(const char *ssid, const char *psk) {
     }
     deferred_for_bt = false;
 #endif
-    stop_ap();
 
     cyw43_arch_enable_sta_mode();
     apply_radio_power();
@@ -369,6 +506,7 @@ static void on_up(void) {
     /* Registered here, not at init: the responder announces the netif's
      * address and there isn't one until DHCP completes. */
     mdns_add_netif(nif);
+    fix_default_route();
     printf("wifi: up as '%s', http://%s/ and http://%s.local/\n",
            cur_ssid, ip_str, mdns_hostname());
 }
@@ -411,7 +549,7 @@ bool wifi_init(void) {
 static void go_off(void) {
     stop_ap();
     if (scanning) { scanning = false; }
-    pending_scan = pending_join = pending_ap = false;
+    pending_scan = pending_join = false;
     if (state == ST_UP) { mdns_remove_netif(sta_netif()); }
     printf("wifi: off: disable_sta_mode begin @%lu ms\n", (unsigned long)now_ms());
     cyw43_arch_disable_sta_mode();
@@ -420,6 +558,7 @@ static void go_off(void) {
     cur_ssid[0] = 0;
     last_error[0] = 0;
     down_since = 0;
+    sta_parked = false;
     state = ST_IDLE;
     printf("wifi: off -- the radio is Bluetooth's now\n");
 }
@@ -432,21 +571,35 @@ void wifi_apply_mode(void) {
         return;
     }
 
-    /* Coming back from "off", the station interface is still disabled --
-     * go_off() handed it to Bluetooth and nothing else turns it on again.
-     * A scan issued against a disabled station finds nothing, so the machine
-     * sat at "idle 0.0.0.0" forever and off became a one-way door. */
+    /* A user asked for this arrangement; do not make them wait out the hold
+     * that protects against the POLICY flapping. */
+    ap_changed = 0;
+
+    if (strcmp(cfg_mode(), "ap") == 0) {
+        /* AP only: the station is deliberately down. This is the one place
+         * that still disables it, and it is a user's explicit choice. */
+        if (state == ST_UP) { mdns_remove_netif(sta_netif()); }
+        cyw43_arch_disable_sta_mode();
+        strcpy(ip_str, "0.0.0.0");
+        cur_ssid[0] = 0;
+        state = ST_IDLE;
+        sta_parked = false;
+        pending_scan = pending_join = false;
+        return;
+    }
+
+    /* Coming back from "off" or "ap", the station interface is disabled and
+     * nothing else turns it on again. A scan issued against a disabled
+     * station finds nothing, so the machine sat at "idle 0.0.0.0" forever and
+     * off became a one-way door. */
     printf("wifi: on: enable_sta_mode begin @%lu ms\n", (unsigned long)now_ms());
     cyw43_arch_enable_sta_mode();
     printf("wifi: on: enable_sta_mode end   @%lu ms\n", (unsigned long)now_ms());
     apply_radio_power();
+    fix_default_route();
 
-    if (strcmp(cfg_mode(), "ap") == 0) {
-        pending_ap = true;
-    } else {
-        /* "sta" and "auto" both start by looking at what's on the air. */
-        pending_scan = true;
-    }
+    /* sta, auto and both all start by looking at what's on the air. */
+    pending_scan = true;
 }
 
 bool wifi_scan_start(void) {
@@ -507,15 +660,11 @@ void wifi_poll(void) {
     if (wifi_is_off()) { return; }
 
     uint32_t now = now_ms();
+    refresh_ap_clients(now);
 
     /* Deferred work first, one action per pass so a request can never
      * re-enter the radio on top of itself. */
-    if (pending_ap) {
-        pending_ap = false;
-        start_ap();
-        return;
-    }
-    if (pending_join) {
+    if (pending_join && !ap_settling(now)) {
 
         /* NOT while a scan is in flight.
          *
@@ -549,7 +698,7 @@ void wifi_poll(void) {
         begin_join(pending_ssid, k ? k->psk : NULL);
         return;
     }
-    if (pending_scan && !scanning) {
+    if (pending_scan && !scanning && !ap_settling(now)) {
         pending_scan = false;
         begin_scan();
         return;
@@ -570,32 +719,111 @@ void wifi_poll(void) {
 
     const bool ap_only = strcmp(cfg_mode(), "ap") == 0;
 
+    /*
+     * The AP, driven toward the policy. One radio action per pass, never on
+     * top of a scan, and never twice inside WIFI_AP_HOLD_MS. Bring-up is
+     * deferred while Bluetooth has the radio, for the same reason begin_join
+     * defers: it is the same class of ioctl burst, and a degraded network path
+     * beats a board that needs a power cycle. Tear-down is never deferred --
+     * it is two ioctls, and it is the safe direction.
+     */
+    /*
+     * ap_changed == 0 means "no hold": at boot, and after a user's mode change.
+     * It has to be tested explicitly -- timed_out(now, 0, HOLD) is false for
+     * the first HOLD ms of uptime, and that silent 15 s hold let the station's
+     * first join race ahead of the AP on every boot in `both`, so the AP
+     * request landed mid-join. Which is the one thing that must not happen:
+     */
+    bool want = ap_wanted(now);
+    bool hold_ok = (ap_changed == 0) || timed_out(now, ap_changed, WIFI_AP_HOLD_MS);
+    if (want != ap_up && !scanning && hold_ok && state != ST_JOIN) {
+        /* state != ST_JOIN: NEVER take the station down under an in-flight
+         * join -- cyw43_wifi_leave with connect_async outstanding, followed by
+         * the AP init, stopped the driver answering ioctls and the watchdog
+         * rebooted the board, every boot, at the same second. And do not
+         * `return` while waiting: that skipped the machine below and left the
+         * join unable to resolve, ever ("connecting" for a full minute). */
+#if CONFIG_BT_LE
+        if (want && le_radio_busy()) {
+            if (!ap_deferred_for_bt) {
+                printf("wifi: deferring the AP, Bluetooth has the radio\n");
+                ap_deferred_for_bt = true;
+            }
+        } else
+#endif
+        {
+            ap_deferred_for_bt = false;
+            if (want && sta_enabled()) {
+                park_sta();             /* this pass; the AP starts after the gap */
+                return;
+            }
+            if (!(want && left_ms && !timed_out(now, left_ms, WIFI_LEAVE_GAP_MS))) {
+                if (want) { start_ap(); } else { stop_ap(); }
+                ap_changed = now;
+                return;
+            }
+            /* else: let the interface go down first, then start next pass */
+        }
+    }
+
     switch (state) {
     case ST_IDLE:
-        if (ap_only) {
-            pending_ap = true;
-            break;
+        if (ap_only) break;                 /* the station stays down on purpose */
+        if (ap_settling(now)) break;        /* the AP just came up; see WIFI_AP_SETTLE_MS */
+        if (sta_parked) {
+            /* Parked for an AP start. Stay down until the AP is actually UP
+             * and settled -- re-enabling as soon as we were merely "not
+             * settling" (i.e. still inside the leave gap, AP not yet started)
+             * parked and unparked the station every pass, never let the AP
+             * start, and the ioctl churn tripped the watchdog. */
+            if (!ap_up) break;
+            if (strcmp(cfg_mode(), "both") == 0) {
+                /* EXPERIMENTAL, and the reason `both` exists: the station
+                 * comes back under the live AP and joins over it. It wedges
+                 * the driver more often than not (see start_ap); the
+                 * watchdog brings the board back. */
+                printf("wifi: station back up over the AP (both: experimental)\n");
+                cyw43_arch_enable_sta_mode();
+                apply_radio_power();
+                fix_default_route();
+                sta_parked = false;
+                pending_scan = true;
+                break;
+            }
+            /* auto: the station STAYS parked while the AP serves. The rescan
+             * below runs on the AP interface alone (the driver needs some
+             * interface up, not the station), and a known network triggers
+             * the flip in the order that works: AP down, then join. */
         }
         if (!timed_out(now, last_fail, WIFI_RETRY_MS)) break;
+        /* AP FIRST when the mode wants it unconditionally. Joining and THEN
+         * making room for the AP means a disassociation followed by the AP
+         * init, and that pair is flaky (it wedged one boot in three). The AP
+         * on a never-associated station, then a join over it, has not failed
+         * once since Bluetooth is up. So in `both` the first join waits. */
+        if (strcmp(cfg_mode(), "both") == 0 && !ap_up) break;
         if (scan_done && !scanning) {
             scan_done = false;
             const cfg_net_t *k = known_in_scan();
             if (k) {
+                if (sta_parked) {
+                    /* The flip. stop_ap() and begin_join() in the same pass
+                     * is exactly what the old AP state did, and it never
+                     * wedged. ap_changed starts the hold so a failed join
+                     * does not slam the AP straight back up. */
+                    printf("wifi: '%s' in range, AP down for the rejoin\n", k->ssid);
+                    stop_ap();
+                    ap_changed = now;
+                    sta_parked = false;
+                }
                 begin_join(k->ssid, k->psk);
-            } else if (strcmp(cfg_mode(), "auto") == 0 &&
-                       timed_out(now, boot_start, WIFI_BOOT_MS) &&
-                       !have_other_route()) {
-                /* Nothing we know is on the air and the budget is spent. An
-                 * AP you can reach beats a station that never arrives --
-                 * UNLESS there is already a way in, which have_other_route()
-                 * decides. See its comment: starting the AP over a live
-                 * USB-NCM link took the working path away and offered a
-                 * worse one in exchange. */
-                pending_ap = true;
-            } else if (want_idle_scan(now)) {
+            } else if (want_idle_scan(now) && !ap_busy()) {
                 pending_scan = true;
             }
-        } else if (!scanning && want_idle_scan(now)) {
+        } else if (!scanning && want_idle_scan(now) && !ap_busy()) {
+            /* With the AP up and idle this is the old AP-state rescan, at the
+             * idle cadence (60 s) rather than the old 30 s: the AP is no
+             * longer a state that has to be escaped, just a service. */
             pending_scan = true;
         }
         break;
@@ -637,26 +865,10 @@ void wifi_poll(void) {
         }
         break;
     }
-
-    case ST_AP:
-        if (ap_only) break;
-        /* Keep looking for a known network, but not while someone is using
-         * the AP: a scan hops the radio off-channel and drops AP clients —
-         * which, if they are mid-way through configuring WiFi, is the worst
-         * possible moment. */
-        if (!scanning && ap_clients() == 0 && timed_out(now, last_rescan, WIFI_RESCAN_MS)) {
-            last_rescan = now;
-            if (scan_done) {
-                scan_done = false;
-                const cfg_net_t *k = known_in_scan();
-                if (k) begin_join(k->ssid, k->psk);
-            } else {
-                pending_scan = true;
-            }
-        }
-        break;
     }
 }
+
+bool wifi_ap_up(void) { return ap_up; }
 
 bool wifi_is_up(void) { return state == ST_UP; }
 
@@ -674,24 +886,29 @@ static const char *auth_name(uint32_t a) {
     }
 }
 
+/* The STATION's state. The AP is reported separately as "ap": true|false,
+ * because they are independent now; "ap" as a MODE name survives only for the
+ * ap-only arrangement, where it is the whole story. */
 static const char *mode_name(void) {
     if (!driver_up) return "down";
     switch (state) {
     case ST_UP: return "sta";
     case ST_JOIN: return "connecting";
-    case ST_AP: return "ap";
-    default: return "idle";
+    default: return (ap_up && (strcmp(cfg_mode(), "ap") == 0 || sta_parked)) ? "ap" : "idle";
     }
 }
 
 int wifi_status_json(char *buf, size_t cap) {
     return snprintf(buf, cap,
                     "{\"ok\":true,\"driver\":%s,\"mode\":\"%s\",\"want\":\"%s\","
-                    "\"ssid\":\"%s\",\"ip\":\"%s\",\"ap_ssid\":\"%s\",\"ap_psk\":\"%s\","
+                    "\"ssid\":\"%s\",\"ip\":\"%s\",\"ap\":%s,\"ap_ip\":\"%s\","
+                    "\"ap_ssid\":\"%s\",\"ap_psk\":\"%s\","
                     "\"ap_clients\":%d,\"scanning\":%s,\"error\":\"%s\"}",
                     driver_up ? "true" : "false", mode_name(), cfg_mode(),
-                    cur_ssid, ip_str, cfg_ap_ssid(), cfg_ap_psk(),
-                    ap_clients(), scanning ? "true" : "false", last_error);
+                    cur_ssid, ip_str,
+                    ap_up ? "true" : "false", ap_up ? "192.168.4.1" : "",
+                    cfg_ap_ssid(), cfg_ap_psk(),
+                    ap_clients_cached, scanning ? "true" : "false", last_error);
 }
 
 int wifi_networks_json(char *buf, size_t cap) {

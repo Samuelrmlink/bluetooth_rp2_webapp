@@ -138,6 +138,95 @@ def t_wireguard_is_never_default():
         return False, "wg.status no longer reports is_default_route"
     return True, "tunnel is additive, and says so at runtime"
 
+def _fn_body(src, name):
+    """The text of C function `name` in `src`, from its signature to the first
+    line that is exactly '}'. Enough for a grep guard; not a parser."""
+    i = src.find(f"static void {name}(")
+    if i < 0: i = src.find(f"void {name}(")
+    if i < 0: return None
+    j = src.find("\n}\n", i)
+    return src[i:j] if j > 0 else src[i:]
+
+def t_wifi_ap_is_independent():
+    """The SoftAP is a parallel service, not a state the station has to leave.
+
+    The two used to be exclusive by construction: start_ap() disabled the
+    station and begin_join() stopped the AP. Removing that is the whole
+    point of mode `both` and of the WireGuard-gated `auto`, and either call
+    creeping back would silently restore the exclusivity while everything
+    still compiled. The default-route rule is guarded here too: WireGuard's
+    ANY-bound pcb follows netif_default, and the SDK points it at whichever
+    interface came up LAST, so wifi.c must only ever point it at the station."""
+    src = open(os.path.join(ROOT, "src/net/wifi.c")).read()
+    for fn, bad in (("start_ap", "cyw43_arch_disable_sta_mode"),
+                    ("begin_join", "stop_ap("),
+                    ("stop_ap", "cyw43_arch_disable_sta_mode")):
+        body = _fn_body(src, fn)
+        if body is None:
+            return False, f"wifi.c no longer has {fn}()"
+        if bad in body:
+            return False, f"{fn}() calls {bad}: the AP and station are exclusive again"
+    for tok in ("ST_AP", "pending_ap", "have_other_route"):
+        if re.search(r"\b" + tok + r"\b", src):
+            return False, f"wifi.c still has {tok}"
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith(("*", "/*", "//")):
+            continue                      # prose about the SDK, not a call
+        if "netif_set_default(" in line and "sta_netif()" not in line:
+            return False, f"netif_set_default not aimed at the station: {s[:60]}"
+    if "netif_set_default(sta_netif())" not in src:
+        return False, "wifi.c never re-asserts the station as the default route"
+    return True, "AP and station decoupled; default route pinned to the station"
+
+def t_wifi_mode_both_everywhere():
+    """A mode that the config accepts must also be offered by the UI and named
+    in the API's error text, or it exists in one place and is undiscoverable
+    from the others -- exactly how `off` sat advertised-but-rejected before."""
+    cfg = open(os.path.join(ROOT, "src/config/config.c")).read()
+    if 'strcmp(m, "both") == 0' not in cfg:
+        return False, "config.c valid_mode() does not accept both"
+    ops = open(os.path.join(ROOT, "src/net/wifi_ops.c")).read()
+    if "auto, sta, ap, both, off" not in ops:
+        return False, "wifi_ops.c error text does not list both"
+    html = open(os.path.join(ROOT, "web/wifi/index.html")).read()
+    if 'value="both"' not in html:
+        return False, "web/wifi/index.html has no both option"
+    return True, "both: config, API text and UI agree"
+
+def t_wg_confirmed_exists():
+    """wifi.c's AP policy keys on wg_is_confirmed(); if it were removed or its
+    stub dropped, the AP would be permanently on (or the build would fail only
+    with WireGuard enabled). Both header branches must declare it and the
+    status must report it, so a monitor can see what the policy sees."""
+    h = open(os.path.join(ROOT, "src/net/wg.h")).read()
+    if h.count("wg_is_confirmed(void)") < 2:
+        return False, "wg.h must declare wg_is_confirmed in both #if branches"
+    c = open(os.path.join(ROOT, "src/net/wg.c")).read()
+    if "bool wg_is_confirmed(void)" not in c:
+        return False, "wg.c does not define wg_is_confirmed"
+    if '\\"confirmed\\"' not in c:
+        return False, "wg.status does not report confirmed"
+    w = open(os.path.join(ROOT, "src/net/wifi.c")).read()
+    if "wg_is_confirmed()" not in w:
+        return False, "wifi.c's AP policy no longer consults wg_is_confirmed"
+    return True, "declared, defined, reported, and consulted"
+
+def t_dhcp_binds_specific_ip():
+    """Two DHCP servers share :67 only because each binds its own address;
+    lwIP refuses a second ANY bind. Bound as ANY the SoftAP silently had no
+    DHCP at all. The dead LWIP_SO_REUSE option must stay gone too, or the
+    next reader will believe it makes ANY binds shareable -- it never did."""
+    d = open(os.path.join(ROOT, "src/net/dhcpserver.c")).read()
+    if "udp_bind(d->udp, IP4_ADDR_ANY" in d:
+        return False, "dhcpserver.c binds ANY:67 again"
+    if "udp_bind(d->udp, ip, PORT_DHCP_SERVER)" not in d:
+        return False, "dhcpserver.c does not bind the netif's own address"
+    o = open(os.path.join(ROOT, "include/lwipopts.h")).read()
+    if re.search(r"^\s*#define\s+LWIP_SO_REUSE\b", o, re.M):
+        return False, "lwipopts.h defines LWIP_SO_REUSE, which is not an lwIP option"
+    return True, "per-interface :67 binds; no dead reuse option"
+
 def t_anker_model_schemas():
     """Every per-model schema must satisfy the contract the loader assumes.
 
@@ -362,6 +451,10 @@ def main():
     step(0, "the wait/wake contract and its races", t_lua_wait)
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
+    step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
+    step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
+    step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
+    step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
 
     if a.tier >= 1:

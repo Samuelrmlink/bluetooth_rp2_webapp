@@ -229,17 +229,31 @@ void dhcp_server_init(dhcp_server_t *d, struct netif *nif, const ip_addr_t *ip, 
     }
     ip_set_option(d->udp, SOF_BROADCAST);
     ip_set_option(d->udp, SOF_REUSEADDR);
-    err_t err = udp_bind(d->udp, IP4_ADDR_ANY, PORT_DHCP_SERVER);
+    /*
+     * Bind to THIS interface's address, not ANY.
+     *
+     * Two servers must share port 67 -- USB-NCM's at 192.168.8.1 and the
+     * SoftAP's at 192.168.4.1 -- and lwIP's udp_bind() refuses a second ANY
+     * bind (ERR_USE) while it accepts two different specific addresses on the
+     * same port (udp.c: the collision check is ip_addr_eq || either is ANY).
+     * SOF_REUSEADDR is irrelevant to that: the real option is SO_REUSE, which
+     * this build leaves at lwIP's default of 0 -- LWIP_SO_REUSE in lwipopts.h
+     * was never an lwIP symbol and has been deleted.
+     *
+     * A specific-address pcb still receives the client's DISCOVER: it is sent
+     * to 255.255.255.255 and udp_input_local_match() delivers broadcasts to
+     * any pcb on the port, filtered to the input netif by udp_bind_netif()
+     * below. Replies already go out via udp_sendto_if() on d->nif.
+     *
+     * Bound as ANY, the SoftAP silently had no DHCP server at all: every phone
+     * that joined it sat there without an address. */
+    err_t err = udp_bind(d->udp, ip, PORT_DHCP_SERVER);
     if (err != ERR_OK) {
-        /* Port 67 is already served -- USB-NCM takes it at boot, and the
-         * SoftAP then asks for it too. SOF_REUSEADDR does not make lwIP share
-         * a port between two pcbs, so the second bind fails with ERR_USE.
-         *
-         * Registering a receive callback on an UNBOUND pcb anyway is what the
+        /* Registering a receive callback on an UNBOUND pcb anyway is what the
          * code used to do, and that is not a harmless no-op: it leaves a live
          * pcb in lwIP's chain with local_port 0. Fail loudly and free it. */
-        printf("dhcp: :67 already served; not starting a second server "
-               "for %s (err %d)\n", ip4addr_ntoa(ip_2_ip4(ip)), (int)err);
+        printf("dhcp: bind %s:67 failed (err %d); not starting a server for it\n",
+               ip4addr_ntoa(ip_2_ip4(ip)), (int)err);
         udp_remove(d->udp);
         d->udp = NULL;
         return;

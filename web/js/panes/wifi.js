@@ -74,10 +74,15 @@ export function mountWifiPane({ api, log }) {
       el.grid.replaceChildren();
       return;
     }
+    // `mode` is the STATION's state; the SoftAP is reported separately as
+    // `ap`, because in auto and both the two run at once. A pill that only
+    // knew "sta or ap" would have to lie about one of them.
     const up = status.mode === 'sta' && status.ip && status.ip !== '0.0.0.0';
-    el.state.textContent = up ? 'connected' : (status.mode || 'idle');
-    el.state.dataset.state = up ? 'good' : (status.mode === 'ap' ? 'warn' : 'none');
-    el.ident.textContent = [status.ssid, up ? status.ip : null]
+    const ap = status.ap === true;
+    el.state.textContent = up ? (ap ? 'connected + ap' : 'connected')
+                              : (ap ? 'ap' : (status.mode || 'idle'));
+    el.state.dataset.state = up ? 'good' : (ap ? 'warn' : 'none');
+    el.ident.textContent = [status.ssid, up ? status.ip : null, ap ? `AP ${status.ap_ip}` : null]
       .filter(Boolean).join(' · ') || 'not joined';
 
     el.error.hidden = !status.error;
@@ -89,8 +94,9 @@ export function mountWifiPane({ api, log }) {
     kv(g, 'ssid', status.ssid || '—');
     kv(g, 'ip', status.ip || '—');
     kv(g, 'radio', status.driver ? 'up' : 'down');
+    kv(g, 'ap', ap ? `up · ${status.ap_ip}` : 'down');
     kv(g, 'ap ssid', status.ap_ssid || '—');
-    if (status.mode === 'ap') kv(g, 'ap clients', String(status.ap_clients ?? 0));
+    if (ap) kv(g, 'ap clients', String(status.ap_clients ?? 0));
     el.grid.replaceChildren(g);
 
     if (!modeDirty && status.want) el.mode.value = status.want;

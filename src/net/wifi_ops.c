@@ -108,7 +108,7 @@ static void op_wifi_mode(const char *params, api_reply_fn reply, void *ctx, long
     if (api_json_str(params, "mode", mode, sizeof mode)) {
         if (!cfg_set_mode(mode)) {
             api_reply_err(reply, ctx, id, "bad_request",
-                          "mode must be one of auto, sta, ap, off");
+                          "mode must be one of auto, sta, ap, both, off");
             return;
         }
         /* Asks for the arrangement; wifi_poll() is what moves the radio. */

@@ -11,6 +11,8 @@
 #include "lwip/netif.h"
 #include "lwip/ip_addr.h"
 #include "lwip/sys.h"
+#include "lwip/udp.h"
+#include "lwip/pbuf.h"
 
 #include "wireguardif.h"
 #include "wireguard.h"
@@ -83,6 +85,7 @@ typedef struct {
     uint16_t endpoint_port;
     uint16_t listen_port;
     uint16_t keepalive;
+    ip_addr_t probe_ip;      /* liveness probe target inside the tunnel; ANY = disabled */
 } wg_cfg_t;
 
 static wg_cfg_t cfg;
@@ -102,7 +105,12 @@ static uint64_t rx_bytes, tx_bytes;
 static uint32_t connect_attempts, handshakes;
 static uint32_t last_handshake_ms;
 static bool was_connected;
+static bool was_confirmed;
 static netif_output_fn inner_output;
+
+/* The liveness probe -- see wg_is_confirmed() for why it has to exist. */
+static struct udp_pcb *probe_pcb;
+static uint32_t last_probe_ms;
 
 static int b64_val(char c) {
     if (c >= 'A' && c <= 'Z') { return c - 'A'; }
@@ -200,6 +208,27 @@ static bool load_cfg(void) {
     cfg.listen_port = api_json_int(buf, "listen_port", &v) ? (uint16_t)v
                                                            : WIREGUARDIF_DEFAULT_PORT;
     cfg.keepalive = api_json_int(buf, "keepalive", &v) ? (uint16_t)v : 25;
+
+    /* Where the liveness probe goes: by default the first host of our own
+     * tunnel subnet, which on a conventional server is the server itself. It
+     * must be inside allowed_ip or wireguardif_output() drops it silently. If
+     * that works out to our own address the probe is pointless; disable it. */
+    {
+        ip4_addr_t d;
+        ip4_addr_set_u32(&d, (ip4_addr_get_u32(ip_2_ip4(&cfg.address)) &
+                              ip4_addr_get_u32(ip_2_ip4(&cfg.netmask))) | PP_HTONL(1u));
+        char dflt[IP4ADDR_STRLEN_MAX];
+        ip4addr_ntoa_r(&d, dflt, sizeof dflt);
+        ip_field(buf, "probe_ip", &cfg.probe_ip, dflt);
+        if (ip_addr_cmp(&cfg.probe_ip, &cfg.address)) {
+            printf("wg: probe_ip equals our own address; liveness probe disabled\n");
+            ip_addr_set_any(false, &cfg.probe_ip);
+        }
+    }
+    if (cfg.keepalive == 0) {
+        printf("wg: keepalive 0 -- nothing periodic proves the server is there, so "
+               "the tunnel is never CONFIRMED and auto mode keeps its AP\n");
+    }
     cfg.present = true;
     return true;
 }
@@ -244,6 +273,7 @@ void wg_down(void) {
     peer_index = WIREGUARDIF_INVALID_INDEX;
     netif_set_down(&wg_netif);
     was_connected = false;
+    was_confirmed = false;
     printf("wg: peer disconnected (the netif stays; see wg.c)\n");
 }
 
@@ -295,6 +325,12 @@ bool wg_up(void) {
         inner_output = wg_netif.output;
         wg_netif.output = wg_count_output;
 
+        /* One pcb for the liveness probe, for the life of the boot, like the
+         * netif. Bound to ANY:0; udp_sendto_if() pins the egress netif, so
+         * the probe never depends on lwIP's default route. */
+        probe_pcb = udp_new();
+        if (probe_pcb) { udp_bind(probe_pcb, IP_ADDR_ANY, 0); }
+
         /*
          * DELIBERATELY NOT netif_set_default(&wg_netif).
          *
@@ -340,23 +376,118 @@ bool wg_is_connected(void) {
     return wireguardif_peer_is_up(&wg_netif, peer_index, NULL, NULL) == ERR_OK;
 }
 
+/* The one peer, reached through the device struct the netif carries. */
+static const struct wireguard_peer *peer0(void) {
+    if (!netif_added || !wg_netif.state) { return NULL; }
+    const struct wireguard_device *dev = (const struct wireguard_device *)wg_netif.state;
+    const struct wireguard_peer *pr = &dev->peers[0];
+    return pr->valid ? pr : NULL;
+}
+
+/*
+ * CONFIRMED: the server has proven itself recently.
+ *
+ * wg_is_connected() is not that. It is true whenever a keypair exists, and a
+ * keypair lives 180 s (540 s counting prev_keypair) after the last handshake
+ * with no traffic at all. Confirmation needs evidence the far end is alive
+ * and holds our keys:
+ *
+ *   - peer->last_rx, which the library sets ONLY after a transport message
+ *     authenticates and decrypts (wireguardif.c, process_data_message) --
+ *     including zero-length keepalives from the server; or
+ *   - curr_keypair.keypair_millis, set by wireguard_start_session() once the
+ *     server's static key has authenticated a handshake response. Counting
+ *     it means a fresh boot confirms at the handshake instead of waiting for
+ *     the first data reply.
+ *
+ * Whichever is newer must be inside the window.
+ *
+ * THE WINDOW, and why there is a probe. A standard server does NOT answer a
+ * keepalive with a keepalive: Linux and wireguard-go take the "length 0"
+ * branch before timers_data_received(), the only thing that arms the 10 s
+ * passive keepalive. A client that only ever sends keepalives therefore
+ * receives nothing between handshakes, and last_rx would stall. So when the
+ * tunnel has been silent for one keepalive interval we send one byte of DATA
+ * through it (send_probe); the server answers at once with a tunnelled ICMP
+ * unreachable or, if that is firewalled, with its passive keepalive within
+ * 10 s. Either advances last_rx. The window is therefore
+ * keepalive + 10 s + 3 s margin: tighter than that reads false for part of
+ * every cycle on a healthy tunnel, and each false edge is an AP transition.
+ *
+ * keepalive == 0 disables the persistent keepalive, so nothing periodic can
+ * prove anything; the honest answer is "never confirmed", not a window that
+ * tracks the user's own traffic.
+ */
+#define WG_PASSIVE_KEEPALIVE_S 10
+#define WG_CONFIRM_MARGIN_S     3
+
+bool wg_is_confirmed(void) {
+    if (!wg_is_configured() || peer_index == WIREGUARDIF_INVALID_INDEX) { return false; }
+    if (cfg.keepalive == 0) { return false; }
+    const struct wireguard_peer *pr = peer0();
+    if (!pr) { return false; }
+    uint32_t last = pr->last_rx;
+    if (pr->curr_keypair.valid && (int32_t)(pr->curr_keypair.keypair_millis - last) > 0) {
+        last = pr->curr_keypair.keypair_millis;
+    }
+    if (!last) { return false; }
+    uint32_t window = ((uint32_t)cfg.keepalive + WG_PASSIVE_KEEPALIVE_S + WG_CONFIRM_MARGIN_S) * 1000u;
+    return (uint32_t)(sys_now() - last) < window;   /* sys_now() is the library's clock too */
+}
+
+static void send_probe(void) {
+    if (!probe_pcb || ip_addr_isany(&cfg.probe_ip)) { return; }
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, 1, PBUF_RAM);
+    if (!p) { return; }
+    ((uint8_t *)p->payload)[0] = 0;
+    /* Port 9 (discard). A closed port is fine -- the ICMP that comes back is
+     * itself tunnelled data, which is the whole point. */
+    udp_sendto_if(probe_pcb, p, &cfg.probe_ip, 9, &wg_netif);
+    pbuf_free(p);
+}
+
+static void emit_state(bool connected, bool confirmed) {
+    char buf[64];
+    snprintf(buf, sizeof buf, "{\"connected\":%s,\"confirmed\":%s}",
+             connected ? "true" : "false", confirmed ? "true" : "false");
+    api_emit("wg.state", buf);
+}
+
 #define WG_RETRY_MS 15000
 
 void wg_tick(void) {
     if (!netif_added || peer_index == WIREGUARDIF_INVALID_INDEX) { return; }
 
     bool up = wg_is_connected();
+    bool confirmed = wg_is_confirmed();
     if (up && !was_connected) {
         handshakes++;
         last_handshake_ms = to_ms_since_boot(get_absolute_time());
         printf("wg: handshake complete with %s:%u\n",
                ipaddr_ntoa(&cfg.endpoint), (unsigned)cfg.endpoint_port);
-        api_emit("wg.state", "{\"connected\":true}");
     } else if (!up && was_connected) {
         printf("wg: peer went away\n");
-        api_emit("wg.state", "{\"connected\":false}");
     }
+    if (confirmed != was_confirmed) {
+        printf("wg: %s\n", confirmed ? "CONFIRMED -- the server is answering"
+                                     : "no longer confirmed -- nothing valid received in the window");
+    }
+    if (up != was_connected || confirmed != was_confirmed) { emit_state(up, confirmed); }
     was_connected = up;
+    was_confirmed = confirmed;
+
+    /* Probe when the tunnel has been quiet for a keepalive interval, at most
+     * once per interval. No traffic while data is already flowing. */
+    uint32_t now_sys = sys_now();
+    if (up && cfg.keepalive) {
+        const struct wireguard_peer *pr = peer0();
+        uint32_t ka = (uint32_t)cfg.keepalive * 1000u;
+        if (pr && (uint32_t)(now_sys - pr->last_rx) >= ka &&
+            (uint32_t)(now_sys - last_probe_ms) >= ka) {
+            last_probe_ms = now_sys;
+            send_probe();
+        }
+    }
 
     /* Nudge a peer that has never come up. wireguardif retries its own
      * handshake, but a connect that was refused outright needs re-issuing,
@@ -419,7 +550,7 @@ size_t wg_status_json(char *dst, size_t cap) {
     }
 
     return (size_t)snprintf(dst, cap,
-        "{\"configured\":%s,\"netif_up\":%s,\"connected\":%s,"
+        "{\"configured\":%s,\"netif_up\":%s,\"connected\":%s,\"confirmed\":%s,"
         "\"address\":\"%s\",\"endpoint\":\"%s\",\"endpoint_port\":%u,"
         "\"current_endpoint\":\"%s\",\"current_port\":%u,"
         "\"handshakes\":%lu,\"connect_attempts\":%lu,"
@@ -431,6 +562,7 @@ size_t wg_status_json(char *dst, size_t cap) {
         cfg.present ? "true" : "false",
         (netif_added && netif_is_up(&wg_netif)) ? "true" : "false",
         up ? "true" : "false",
+        wg_is_confirmed() ? "true" : "false",
         cfg.present ? s_addr : "",
         cfg.present ? s_ep : "",
         (unsigned)cfg.endpoint_port,

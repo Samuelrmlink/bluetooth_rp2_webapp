@@ -61,4 +61,8 @@ void wifi_apply_mode(void);
  * run in this mode -- its idle rescan would put the radio back on the air. */
 bool wifi_is_off(void);
 
+/* Is the SoftAP up right now? Independent of the station's state: in auto and
+ * both the two coexist, so neither mode name nor wifi_is_up() answers this. */
+bool wifi_ap_up(void);
+
 #endif /* KM003C_NET_WIFI_H */

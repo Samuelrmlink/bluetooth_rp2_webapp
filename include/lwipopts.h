@@ -54,7 +54,10 @@
 #define CHECKSUM_CHECK_IP           0
 #define IP_SOF_BROADCAST            1
 #define IP_SOF_BROADCAST_RECV       0
-#define LWIP_SO_REUSE               1
+/* No SO_REUSE here, on purpose. A LWIP_SO_REUSE line sat in this file for a
+ * long time and was never an lwIP symbol (lwIP's is SO_REUSE, default 0), so it
+ * did nothing while looking like it allowed two DHCP servers to share :67. They
+ * share it by binding to their own addresses instead -- see dhcpserver.c. */
 #define ETHARP_SUPPORT_STATIC_ENTRIES 1
 #define DHCP_OPTIONS_LEN            312
 /* DNS is only needed to reach an ntfy server or MQTT broker by name; the

@@ -133,9 +133,12 @@ static bool valid_ssid(const char *s) {
 static bool valid_mode(const char *m) {
     /* "off" was advertised by wifi.mode's own error message and by the UI but
      * was rejected here and handled nowhere, so the one mode that frees the
-     * shared radio for Bluetooth did not exist. */
+     * shared radio for Bluetooth did not exist. "both" forces SoftAP and
+     * station together, unconditionally; in "auto" the AP is a fallback that
+     * hides once WireGuard is confirmed (wifi.c ap_wanted). */
     return m && (strcmp(m, "auto") == 0 || strcmp(m, "sta") == 0 ||
-                 strcmp(m, "ap") == 0   || strcmp(m, "off") == 0);
+                 strcmp(m, "ap") == 0   || strcmp(m, "both") == 0 ||
+                 strcmp(m, "off") == 0);
 }
 
 static bool valid_psk(const char *s) {

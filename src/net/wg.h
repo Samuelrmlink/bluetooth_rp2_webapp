@@ -27,7 +27,8 @@
  *     "allowed_ip":      "0.0.0.0",
  *     "allowed_mask":    "0.0.0.0",
  *     "keepalive":       25,
- *     "listen_port":     51820
+ *     "listen_port":     51820,
+ *     "probe_ip":        "10.9.0.1"      // optional; default: first host of our subnet
  *   }
  *
  * The implementation is third_party/wireguard-lwip (BSD-3, Daniel Hope),
@@ -54,7 +55,14 @@ bool wg_up(void);        /* (re)read config and connect */
 void wg_down(void);      /* disconnect; the other routes are untouched */
 
 bool wg_is_configured(void);
-bool wg_is_connected(void);   /* a handshake has completed with the peer */
+bool wg_is_connected(void);   /* a keypair exists -- NOT proof the server is there */
+
+/* The server has proven itself within keepalive + 13 s: a validly decrypted
+ * transport message or an authenticated handshake response. This is what the
+ * WiFi policy keys on to hide the SoftAP. Unconfigured, or keepalive 0, is
+ * never confirmed. See wg.c for the probe that makes it work against a
+ * standard server. */
+bool wg_is_confirmed(void);
 
 /* Everything the websocket monitors: configured, link state, peer endpoint,
  * time since the last handshake, bytes in and out, and the failure count. */
@@ -68,6 +76,7 @@ static inline bool wg_up(void) { return false; }
 static inline void wg_down(void) {}
 static inline bool wg_is_configured(void) { return false; }
 static inline bool wg_is_connected(void) { return false; }
+static inline bool wg_is_confirmed(void) { return false; }
 static inline size_t wg_status_json(char *dst, size_t cap) { (void)dst; (void)cap; return 0; }
 
 #endif
