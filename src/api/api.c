@@ -48,29 +48,8 @@ size_t api_scratch_size(void) { return sizeof(scratch); }
 /* Results must leave room for the envelope around them. */
 _Static_assert(WS_TX_MAX >= 1024, "reply buffer too small for a GATT tree");
 
-size_t api_json_escape(char *dst, size_t cap, const char *src) {
-    size_t n = 0;
-    for (; *src && n + 7 < cap; src++) {
-        unsigned char ch = (unsigned char)*src;
-        switch (ch) {
-            case '"':  n += (size_t)snprintf(dst + n, cap - n, "\\\""); break;
-            case '\\': n += (size_t)snprintf(dst + n, cap - n, "\\\\"); break;
-            case '\n': n += (size_t)snprintf(dst + n, cap - n, "\\n");  break;
-            case '\r': n += (size_t)snprintf(dst + n, cap - n, "\\r");  break;
-            case '\t': n += (size_t)snprintf(dst + n, cap - n, "\\t");  break;
-            default:
-                if (ch < 0x20) {
-                    n += (size_t)snprintf(dst + n, cap - n, "\\u%04x", ch);
-                } else {
-                    dst[n++] = (char)ch;
-                }
-        }
-    }
-    if (n < cap) {
-        dst[n] = 0;
-    }
-    return n;
-}
+/* api_json_escape lives in json_escape.c so test/host can link it without the
+ * filesystem, the transports and the pico headers this file needs. */
 
 /* Finds "key" at the top level and returns the first byte of its value. */
 static const char *json_find(const char *json, const char *key) {
@@ -233,8 +212,13 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
     char result[768];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
+             "\"watchdog_reboot\":%s,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
+             /* The previous boot's loop stopped running. Reported here
+              * because a device reached over WireGuard has no RTT, and a
+              * wedge that silently reboots is a wedge nobody learns about. */
+             boot_after_watchdog ? "true" : "false",
 #if CONFIG_BT_CLASSIC
              ",\"classic\"",
 #else

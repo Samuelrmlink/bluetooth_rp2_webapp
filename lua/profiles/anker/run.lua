@@ -246,6 +246,16 @@ function R.run(target_override)
       t = { raw = bytes.hex(dec.body:sub(1, 128)) }
     end
     if not t then return end
+    -- The first report of a session carries its own raw body. Every schema
+    -- here is empirical -- there is no tag dictionary in the vendor app, which
+    -- has been checked -- so authoring or re-checking one means getting the
+    -- plaintext off the device, and without this the only route is a firmware
+    -- change, which is the loop this overlay exists to avoid.
+    --
+    -- Once per session: ~700 characters is cheap once and a leak every five
+    -- seconds. It is also what made the JSON encoder's buffer overrun visible,
+    -- since this is the field that first pushed an event past 1536 bytes.
+    if first then t.body_hex = bytes.hex(dec.body) end
     first = false
     t.addr = addr
     t.product_type = a.product_type

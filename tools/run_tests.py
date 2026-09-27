@@ -224,6 +224,35 @@ def t_lua_heap():
         detail += f"; doubling to {peak.group(1)} B peaked at {peak.group(2)} B"
     return True, detail
 
+def t_lua_json():
+    """The Lua -> JSON encoder, on a host, with the output buffer backed onto a
+    guard page.
+
+    This exists because the encoder shipped with an out-of-bounds write: every
+    append accumulated what snprintf WOULD have written, so a table that
+    outgrew the buffer pushed the cursor past the end, and the unconditional
+    closing brace was then written out of bounds through a wrapped size_t
+    length. An ordinary Anker telemetry report reached it.
+
+    Asserting on the output text would not catch that -- the visible symptom is
+    only truncated JSON -- so the buffer ends flush against a PROT_NONE page
+    and an overrun is a SIGSEGV. Restoring the old idiom makes this test crash,
+    which is how it was checked."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_json")
+    rc, out = sh(f"gcc -O1 -w -DMAKE_LIB=1 -Isrc -Ithird_party/lua -o {binp} "
+                 f"test/host/json_test.c src/lua/ljson.c src/api/json_escape.c "
+                 f"third_party/lua/onelua.c -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "json harness build failed"
+    rc, out = sh(binp)
+    if rc != 0:
+        if rc >= 128 or rc < 0:
+            return False, f"the encoder wrote past its buffer (signal {abs(rc) & 0x7f})"
+        first = next((l.strip() for l in out.splitlines() if "FAIL" in l), "")
+        return False, first[:100] or f"json_test exited {rc}"
+    return True, "bounded under a guard page; truncation always reported"
+
 def t_lua_proto():
     """The profile's Lua, on a host, against the REAL C bindings and the REAL
     vendored Lua -- no board, no flash cycle, no charger. This is the dividend
@@ -331,6 +360,7 @@ def main():
     step(0, "protocol Lua on a host", t_lua_proto)
     step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
     step(0, "the wait/wake contract and its races", t_lua_wait)
+    step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
 

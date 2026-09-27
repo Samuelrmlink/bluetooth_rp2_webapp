@@ -10,6 +10,8 @@
  *   ops.register(name, fn) -> a new entry in the API's dispatch table
  *   log.info/warn/error    -> {"evt":"log","data":{"src":"lua",...}}
  */
+#include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -24,6 +26,8 @@
 #include "bt/registry.h"
 #include "fs/fs.h"
 #include "net/mdns.h"
+#include "net/ws.h"
+#include "lua/ljson.h"
 #include "pico/time.h"
 #include "autoconf.h"
 
@@ -40,75 +44,11 @@ static lua_op_t lua_ops[MAX_LUA_OPS];
 static int n_lua_ops;
 static lua_State *gL;
 
-/* --- table -> JSON --------------------------------------------------------
- * Arrays (1..n with no holes) become [], everything else {}. Strings are
- * escaped through the same function the C side uses, because a value from a
- * script is no more trustworthy than one from the air. */
-static void enc(lua_State *L, int idx, char *dst, size_t cap, size_t *n, int depth) {
-    if (depth > 6 || *n + 8 >= cap) {
-        *n += (size_t)snprintf(dst + *n, cap - *n, "null");
-        return;
-    }
-    switch (lua_type(L, idx)) {
-        case LUA_TNIL:
-            *n += (size_t)snprintf(dst + *n, cap - *n, "null"); return;
-        case LUA_TBOOLEAN:
-            *n += (size_t)snprintf(dst + *n, cap - *n, lua_toboolean(L, idx) ? "true" : "false");
-            return;
-        case LUA_TNUMBER: {
-            if (lua_isinteger(L, idx)) {
-                *n += (size_t)snprintf(dst + *n, cap - *n, "%lld",
-                                       (long long)lua_tointeger(L, idx));
-            } else {
-                *n += (size_t)snprintf(dst + *n, cap - *n, "%g", (double)lua_tonumber(L, idx));
-            }
-            return;
-        }
-        case LUA_TSTRING: {
-            const char *s = lua_tostring(L, idx);
-            *n += (size_t)snprintf(dst + *n, cap - *n, "\"");
-            *n += api_json_escape(dst + *n, cap - *n, s);
-            *n += (size_t)snprintf(dst + *n, cap - *n, "\"");
-            return;
-        }
-        case LUA_TTABLE: {
-            lua_Integer len = luaL_len(L, idx);
-            bool is_array = len > 0;
-            if (is_array) {
-                *n += (size_t)snprintf(dst + *n, cap - *n, "[");
-                for (lua_Integer i = 1; i <= len && *n + 4 < cap; i++) {
-                    if (i > 1) { *n += (size_t)snprintf(dst + *n, cap - *n, ","); }
-                    lua_geti(L, idx, i);
-                    enc(L, lua_gettop(L), dst, cap, n, depth + 1);
-                    lua_pop(L, 1);
-                }
-                *n += (size_t)snprintf(dst + *n, cap - *n, "]");
-            } else {
-                *n += (size_t)snprintf(dst + *n, cap - *n, "{");
-                bool first = true;
-                lua_pushnil(L);
-                int t = lua_absindex(L, idx);
-                while (lua_next(L, t) != 0) {
-                    if (lua_type(L, -2) == LUA_TSTRING && *n + 8 < cap) {
-                        if (!first) { *n += (size_t)snprintf(dst + *n, cap - *n, ","); }
-                        *n += (size_t)snprintf(dst + *n, cap - *n, "\"");
-                        *n += api_json_escape(dst + *n, cap - *n, lua_tostring(L, -2));
-                        *n += (size_t)snprintf(dst + *n, cap - *n, "\":");
-                        enc(L, lua_gettop(L), dst, cap, n, depth + 1);
-                        first = false;
-                    }
-                    lua_pop(L, 1);
-                }
-                *n += (size_t)snprintf(dst + *n, cap - *n, "}");
-            }
-            return;
-        }
-        default:
-            *n += (size_t)snprintf(dst + *n, cap - *n, "null");
-    }
-}
-
-static char enc_buf[1536];
+/* Sized like api.c's scratch, and for the same reason: this holds one event's
+ * `data` value, and the envelope around it has to fit the same frame. 1536 was
+ * enough until a telemetry report grew past it. The encoder itself is in
+ * ljson.c, where a host test can drive it. */
+static char enc_buf[WS_TX_MAX - 256];
 
 /* --- bus ------------------------------------------------------------------ */
 static int l_bus_emit(lua_State *L) {
@@ -117,10 +57,28 @@ static int l_bus_emit(lua_State *L) {
      * core event such as dev.connected. */
     char full[72];
     snprintf(full, sizeof(full), "profile.%s", topic);
-    size_t n = 0;
+    bool enc_trunc = false;
     enc_buf[0] = 0;
-    if (lua_gettop(L) >= 2) { enc(L, 2, enc_buf, sizeof(enc_buf), &n, 0); }
-    else { snprintf(enc_buf, sizeof(enc_buf), "null"); }
+    if (lua_gettop(L) >= 2) {
+        ljson_encode(L, 2, enc_buf, sizeof(enc_buf), &enc_trunc);
+    } else {
+        snprintf(enc_buf, sizeof(enc_buf), "null");
+    }
+    if (enc_trunc) {
+        /* Emitting the clamped text would put an unterminated string on the
+         * wire; the browser throws on it and points at nothing. Name the topic
+         * instead, so the profile that outgrew the buffer is the one the log
+         * identifies. */
+        snprintf(enc_buf, sizeof(enc_buf),
+                 "{\"truncated\":true,\"message\":\"event too large to encode\"}");
+        char esc[72];
+        api_json_escape(esc, sizeof(esc), full);
+        char line[220];
+        snprintf(line, sizeof(line),
+                 "{\"level\":\"error\",\"src\":\"lua\",\"message\":"
+                 "\"%s dropped: does not fit %u bytes\"}", esc, (unsigned)sizeof(enc_buf));
+        api_emit("log", line);
+    }
     api_emit(full, enc_buf);
     return 0;
 }
@@ -330,12 +288,24 @@ bool lbind_dispatch(const char *name, const char *params_json,
             lua_pop(gL, 1);
             return true;
         }
-        size_t n = 0;
+        bool enc_trunc = false;
         enc_buf[0] = 0;
-        enc(gL, lua_gettop(gL), enc_buf, sizeof(enc_buf), &n, 0);
+        ljson_encode(gL, lua_gettop(gL), enc_buf, sizeof(enc_buf), &enc_trunc);
         lua_pop(gL, 1);
-        char out[1700];
-        snprintf(out, sizeof(out), "{\"id\":%ld,\"ok\":true,\"result\":%s}", id, enc_buf);
+        /* Static for the same reason api.c's buffers are: every caller runs
+         * from the single cooperative loop and consumes this within the call,
+         * and core0's stack is too small to hold a whole frame. It has to be
+         * able to hold enc_buf plus the envelope, or a large result is
+         * truncated here after surviving the encoder. */
+        static char out[WS_TX_MAX];
+        if (enc_trunc) {
+            snprintf(out, sizeof(out),
+                     "{\"id\":%ld,\"ok\":false,\"error\":{\"code\":\"result_too_large\","
+                     "\"message\":\"op result does not fit %u bytes\"}}",
+                     id, (unsigned)sizeof(enc_buf));
+        } else {
+            snprintf(out, sizeof(out), "{\"id\":%ld,\"ok\":true,\"result\":%s}", id, enc_buf);
+        }
         reply(out, ctx);
         return true;
     }
