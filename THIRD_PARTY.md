@@ -89,3 +89,18 @@ for Lua and TinyUSB, and Apache-2.0's for mbedTLS.
 build of Lua. Its sources are **not** used: it patches `lauxlib.c` to read files
 through FatFs, and this project vendors pristine upstream Lua instead, so
 nothing here derives from it.
+
+## wireguard-lwip
+
+`third_party/wireguard-lwip/` is Daniel Hope's WireGuard implementation for
+lwIP (BSD-3-Clause), vendored from `smartalock/wireguard-lwip`. It is taken
+directly rather than out of MicroLink -- the ESP32 Tailscale client that
+prompted this work -- because MicroLink vendors this same code, and we want
+neither Tailscale nor FreeRTOS, only the WireGuard layer against lwIP.
+
+The X25519 implementation inside it carries its own MIT licence from
+Cryptography Research, reproduced as `licenses/x25519-cryptography-research
+.LICENSE`. Both notices ship in the generated NOTICES.txt.
+
+`third_party/wireguard-lwip/VENDORED.txt` records the upstream commit, what
+was taken and what was left behind.

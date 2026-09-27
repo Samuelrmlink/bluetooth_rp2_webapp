@@ -1,0 +1,18 @@
+c54f20dbe76ac8b3411ad21e0ed7deea6f0cfd4d 2026-08-14 20:41:42 +1200
+
+Vendored from https://github.com/smartalock/wireguard-lwip at the commit
+above. Taken directly rather than out of MicroLink (the ESP32 Tailscale
+client that prompted this), because MicroLink vendors this same code and we
+want neither Tailscale nor FreeRTOS -- only the WireGuard layer, hooked
+straight to lwIP.
+
+What was taken:  src/{wireguard,wireguardif,crypto}.{c,h},
+                 src/wireguard-platform.h, src/crypto/refc/*
+What was left:   src/crypto/cortex/* -- Cortex-M0 Thumb-1 assembly for
+                 X25519. This part is a Cortex-M33, and X25519 runs once per
+                 handshake (every ~2 minutes), so portable C costs nothing
+                 worth the risk of hand-written assembly for the wrong core.
+                 example/ -- an lwIP port we do not use.
+
+Local changes: none to the vendored sources. The platform hooks that
+wireguard-platform.h declares are implemented in src/net/wg.c.

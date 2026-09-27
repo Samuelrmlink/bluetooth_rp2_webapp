@@ -33,6 +33,7 @@
 #endif
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
+#include "net/wg.h"
 #endif
 #if CONFIG_BT_LE
 #include "bt/bt.h"
@@ -90,6 +91,12 @@ int main(void) {
     printf("ncm: device %d.%d.%d.%d\n", USB_IP0, USB_IP1, USB_IP2, USB_IP3);
 #endif
 
+#if CONFIG_NET_WIREGUARD
+    /* After the interfaces, because the tunnel rides on one of them -- and
+     * it is additive: if this fails, everything above still works. */
+    wg_init();
+#endif
+
     http_server_start();
     ops_init_all();
     printf("http: listening on :80  (ws at /ws)\n");
@@ -118,6 +125,9 @@ int main(void) {
 #endif
 #if CONFIG_LUA_ENABLE
         lrt_tick();
+#endif
+#if CONFIG_NET_WIREGUARD
+        wg_tick();
 #endif
         cfg_tick();
         /* Coalesce whatever the pass produced into as few segments as possible;

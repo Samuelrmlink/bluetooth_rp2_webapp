@@ -126,6 +126,37 @@ endif()
 if(CONFIG_NET_WIFI)
     target_sources(btgw PRIVATE src/net/wifi.c src/net/wifi_ops.c)
 endif()
+if(CONFIG_NET_WIREGUARD)
+    # Vendored from smartalock/wireguard-lwip; see third_party/wireguard-lwip/
+    # VENDORED.txt for what was taken and what was left behind.
+    target_sources(btgw PRIVATE
+        src/net/wg.c
+        src/net/wg_ops.c
+        third_party/wireguard-lwip/src/wireguard.c
+        third_party/wireguard-lwip/src/wireguardif.c
+        third_party/wireguard-lwip/src/crypto.c
+        third_party/wireguard-lwip/src/crypto/refc/blake2s.c
+        third_party/wireguard-lwip/src/crypto/refc/chacha20.c
+        third_party/wireguard-lwip/src/crypto/refc/chacha20poly1305.c
+        third_party/wireguard-lwip/src/crypto/refc/poly1305-donna.c
+        third_party/wireguard-lwip/src/crypto/refc/x25519.c)
+    target_include_directories(btgw PRIVATE third_party/wireguard-lwip/src)
+    target_link_libraries(btgw pico_rand)
+    # wireguardif.h opens with "lwip/arch.h", and lwIP's arch.h includes
+    # arch/cc.h WITHOUT first including lwipopts.h. The pico_lwip port
+    # typedefs sys_prot_t only "#if NO_SYS", so on that path it is not
+    # defined, cc.h's include guard then blocks the later correct include,
+    # and lwip/sys.h fails on a type nobody declared. Our own sources never
+    # hit it because they include lwip/netif.h (which does pull in opt.h)
+    # first. Forcing opt.h ahead of everything fixes it for the vendored
+    # translation units without editing them -- see VENDORED.txt, which says
+    # they carry no local changes, and should go on being able to say so.
+    set_source_files_properties(
+        third_party/wireguard-lwip/src/wireguard.c
+        third_party/wireguard-lwip/src/wireguardif.c
+        PROPERTIES COMPILE_OPTIONS "-include;lwip/opt.h")
+endif()
+
 if(CONFIG_NET_USB_NCM)
     target_sources(btgw PRIVATE src/net/usb_ncm.c src/net/dhcpserver.c src/usb/usb_descriptors.c)
     target_link_libraries(btgw tinyusb_device tinyusb_board)

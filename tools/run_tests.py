@@ -115,6 +115,29 @@ def t_neg_constants_agree():
             return False, f"{cname} != the profile's {lname}"
     return True, "keystream, H, E(J0), AAD"
 
+def t_wireguard_is_never_default():
+    """The tunnel must never become lwIP's default route.
+
+    This is the whole safety property of the feature: WireGuard is an
+    ADDITIONAL way in, and a remote-access path that can strand the device
+    when it misbehaves is worse than no remote access. A single
+    netif_set_default() on the tunnel netif would undo that, quietly, and
+    the symptom would be a device that is unreachable exactly when the
+    tunnel is broken -- which is when you need to reach it.
+
+    The firmware also reports is_default_route in wg.status so a monitor can
+    assert it at runtime; this catches it at build time."""
+    rc, out = sh("grep -n 'netif_set_default' src/net/wg.c 2>/dev/null")
+    hits = [l for l in out.splitlines() if l.strip() and "DELIBERATELY NOT" not in l]
+    if hits:
+        return False, f"wg.c calls netif_set_default: {hits[0][:70]}"
+    # And the status must keep reporting it, so the runtime check cannot be
+    # dropped without this failing too.
+    rc, out = sh("grep -c 'is_default_route' src/net/wg.c 2>/dev/null")
+    if not out.strip() or int(out.strip() or 0) < 1:
+        return False, "wg.status no longer reports is_default_route"
+    return True, "tunnel is additive, and says so at runtime"
+
 def t_lua_wait():
     """The wait/wake contract. These are the races -- a disconnect arriving
     while the coroutine is runnable rather than blocked, a frame from a
@@ -266,6 +289,7 @@ def main():
     step(0, "protocol Lua on a host", t_lua_proto)
     step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
     step(0, "the wait/wake contract and its races", t_lua_wait)
+    step(0, "wireguard is never the default route", t_wireguard_is_never_default)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:
