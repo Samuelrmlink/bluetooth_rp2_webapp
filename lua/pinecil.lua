@@ -22,12 +22,21 @@ if not connected then
   if not bt.connect(addr) then log.error('pinecil: connect failed'); return end
 end
 
--- Wait for discovery rather than a stopwatch.
+-- Wait for discovery rather than a stopwatch -- and give up the moment the
+-- link drops, because a dropped link will never finish discovering and
+-- waiting out the full 15 s to say so helps nobody.
 local deadline = sys.ms() + 15000
 local ready
 repeat
   ready = bt.find(addr, pinecil.SVC_BULK, pinecil.CHR_BULK_LIVE)
-  if not ready then sys.sleep(250) end
+  if not ready then
+    local up = false
+    for _, d in ipairs(bt.devices()) do
+      if d.addr == addr and d.connected then up = true end
+    end
+    if not up then log.error('pinecil: link dropped before discovery finished'); return end
+    sys.sleep(250)
+  end
 until ready or sys.ms() > deadline
 if not ready then log.error('pinecil: discovery never finished'); return end
 

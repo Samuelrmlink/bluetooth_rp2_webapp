@@ -79,6 +79,7 @@ static uint32_t s_hook_kills;
 bool lrt_ready(void) { return s_ready; }
 
 static void teardown(script_t *s);
+static void release_modules(int slot);
 
 static script_t *find(const char *name) {
     for (int i = 0; i < MAX_SCRIPTS; i++) {
@@ -229,6 +230,66 @@ static const char *resolve_src(script_t *s, const char *name,
  * cannot reach another script's globals. */
 #define MODULE_CACHE "btgw.modules"
 
+/* --- who is using which module -------------------------------------------
+ * require() caches globally, which is right -- two scripts sharing a codec
+ * should share one copy -- but it means nothing is ever released. A profile's
+ * modules stayed resident after its device disconnected and its script
+ * exited, and on a 128 KB arena that is the difference between the second
+ * profile loading and failing with "not enough memory".
+ *
+ * So each cached module records which script slots required it, as a bitmask.
+ * When a script goes -- exits, is stopped, is killed, or loses its link --
+ * its bit is cleared, and a module nobody is left using is dropped from the
+ * cache. This is the "unload when the LAST device using them disconnects"
+ * rule: it falls out of reference counting rather than needing a device
+ * model, because a script is what owns a device in the first place.
+ *
+ * A module required from outside a script (an ops handler, script.eval) is
+ * PINNED: there is no slot to attribute it to and no later event that would
+ * release it, so it stays until sys.unload asks for it by name. */
+#define MAX_TRACKED_MODULES 24
+#define MODULE_PINNED       0x80000000u
+
+typedef struct {
+    char     name[48];
+    uint32_t users;          /* bit per script slot, plus MODULE_PINNED */
+} module_use_t;
+
+static module_use_t s_mod_use[MAX_TRACKED_MODULES];
+
+static void module_note_user(const char *name, int slot) {
+    uint32_t bit = (slot >= 0 && slot < MAX_SCRIPTS)
+                 ? (1u << slot) : MODULE_PINNED;
+    int free_i = -1;
+    for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
+        if (s_mod_use[i].name[0] == 0) {
+            if (free_i < 0) { free_i = i; }
+            continue;
+        }
+        if (strcmp(s_mod_use[i].name, name) == 0) {
+            s_mod_use[i].users |= bit;
+            return;
+        }
+    }
+    if (free_i < 0) {
+        /* Out of tracking slots: pin it rather than risk unloading a module
+         * that someone is using. Losing memory beats losing correctness. */
+        return;
+    }
+    snprintf(s_mod_use[free_i].name, sizeof s_mod_use[free_i].name, "%s", name);
+    s_mod_use[free_i].users = bit;
+}
+
+static void module_forget(const char *name) {
+    for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
+        if (s_mod_use[i].name[0] && strcmp(s_mod_use[i].name, name) == 0) {
+            memset(&s_mod_use[i], 0, sizeof s_mod_use[i]);
+            return;
+        }
+    }
+}
+
+
 static bool read_module_src(const char *name, const char **src, size_t *len) {
     /* dots -> slashes, and nothing else: no "..", no leading slash, so a
      * module name cannot climb out of lua/. */
@@ -264,7 +325,13 @@ static int l_require(lua_State *Ls) {
         lua_pushvalue(Ls, -1);
         lua_setfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE);
     }
-    if (lua_getfield(Ls, -1, name) != LUA_TNIL) { return 1; }   /* cached */
+    if (lua_getfield(Ls, -1, name) != LUA_TNIL) {
+        /* A cache HIT still adds this script to the users. Missing this is
+         * how a module shared by two profiles gets dropped when the first of
+         * them exits, leaving the second holding a stale reference. */
+        module_note_user(name, lrt_current_slot());
+        return 1;
+    }
     lua_pop(Ls, 1);
 
     const char *src = NULL;
@@ -295,6 +362,7 @@ static int l_require(lua_State *Ls) {
     lua_setupvalue(Ls, -2, 1);                  /* chunk's _ENV := that env */
 
     lua_call(Ls, 0, 1);
+    module_note_user(name, lrt_current_slot());
     if (lua_isnil(Ls, -1)) {
         lua_pop(Ls, 1);
         lua_pushboolean(Ls, 1);      /* a module that returns nothing is still loaded */
@@ -333,8 +401,35 @@ static void flush_modules(void) {
  * The trade is worth stating: re-requiring later re-reads the source from
  * flash and recompiles it, and compiling is the expensive part. Unloading
  * buys steady-state room at the cost of a peak on reconnect. */
+/*
+ * Release every module this script was the last user of. Called whenever a
+ * script stops for ANY reason -- a clean exit, an error, a stop, a reload or
+ * a lost link -- because all five leave the same modules resident otherwise.
+ */
+static void release_modules(int slot) {
+    if (slot < 0 || slot >= MAX_SCRIPTS) { return; }
+    uint32_t bit = 1u << slot;
+    size_t before = lheap_used();
+    int freed = 0;
+    for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
+        if (!s_mod_use[i].name[0]) { continue; }
+        if (!(s_mod_use[i].users & bit)) { continue; }
+        s_mod_use[i].users &= ~bit;
+        if (s_mod_use[i].users != 0) { continue; }   /* someone else has it */
+        char nm[48];
+        snprintf(nm, sizeof nm, "%s", s_mod_use[i].name);
+        if (lrt_unload_module(nm)) { freed++; }
+    }
+    if (freed) {
+        lrt_collect();
+        printf("lua: released %d module(s) with no users left, heap %u -> %u B\n",
+               freed, (unsigned)before, (unsigned)lheap_used());
+    }
+}
+
 bool lrt_unload_module(const char *name) {
     if (!L || !name) { return false; }
+    module_forget(name);
     if (lua_getfield(L, LUA_REGISTRYINDEX, MODULE_CACHE) != LUA_TTABLE) {
         lua_pop(L, 1);
         return false;
@@ -436,6 +531,9 @@ bool lrt_start(const char *name, const char **err) {
  * A draft is source, not runtime state: destroying it here made reload (which
  * is stop-then-start) lose the very thing it was asked to reload. */
 static void teardown(script_t *s) {
+    /* Anything this script was the last user of goes with it. */
+    release_modules((int)(s - scripts));
+
     /* Release the wait BEFORE the coroutine goes: a script stopped while
      * blocked must not leave a waiter pointing at a slot that is about to be
      * reused by the next script to start. */
@@ -674,6 +772,7 @@ void lrt_tick(void) {
                     s->running = false;
                     s->dead = true;
                     s_hook_kills++;
+                    release_modules(i);
                     snprintf(s->err, sizeof(s->err),
                              "killed: %lu consecutive slices without yielding "
                              "(add a sys.sleep, or yield)",
@@ -691,7 +790,11 @@ void lrt_tick(void) {
             lua_pop(co, nres);
             continue;
         }
+        /* The script has finished, cleanly or not. Either way it is no longer
+         * a user of anything it required, and on a 128 KB arena holding a
+         * dead profile's modules is what stops the next one loading. */
         s->running = false;
+        release_modules(i);
         if (rc != LUA_OK) {
             s->dead = true;
             snprintf(s->err, sizeof(s->err), "%s",

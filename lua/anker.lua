@@ -78,20 +78,30 @@ log.info(('anker: found %s (%s, sku %s, %s)'):format(
 -- bt.connect only reports that the attempt was STARTED; at the edge of range
 -- -- this charger sits around -70 to -85 dBm -- the link can fail to come up
 -- at all, and the old code then blamed discovery for it.
-local function wait_for(what, pred, timeout_ms)
-  local deadline = sys.ms() + timeout_ms
-  repeat
-    if pred() then return true end
-    sys.sleep(250)
-  until sys.ms() > deadline
-  log.error('anker: timed out waiting for ' .. what)
-  return false
-end
-
 local function is_connected()
   for _, d in ipairs(bt.devices()) do
     if d.addr == addr and d.connected then return true end
   end
+  return false
+end
+
+-- need_link: once the link is up, a step that is waiting on the CHARGER can
+-- never be satisfied by a link that has dropped. Waiting out the full timeout
+-- to discover that is the exact failure the wait contract exists to prevent,
+-- and it is not hypothetical: a drop during discovery used to cost 20 s of
+-- polling before the script gave up, with the real cause (the link died)
+-- nowhere in the log.
+local function wait_for(what, pred, timeout_ms, need_link)
+  local deadline = sys.ms() + timeout_ms
+  repeat
+    if pred() then return true end
+    if need_link and not is_connected() then
+      log.error('anker: link dropped while waiting for ' .. what)
+      return false
+    end
+    sys.sleep(250)
+  until sys.ms() > deadline
+  log.error('anker: timed out waiting for ' .. what)
   return false
 end
 
@@ -112,7 +122,7 @@ log.info('anker: link up')
 
 if not wait_for('discovery', function()
       return bt.find(addr, a2687.SVC, a2687.CMD) ~= nil
-    end, 20000) then
+    end, 20000, true) then
   return
 end
 log.info('anker: discovery ready')
