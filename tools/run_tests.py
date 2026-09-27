@@ -138,6 +138,48 @@ def t_wireguard_is_never_default():
         return False, "wg.status no longer reports is_default_route"
     return True, "tunnel is additive, and says so at runtime"
 
+def t_anker_model_schemas():
+    """Every per-model schema must satisfy the contract the loader assumes.
+
+    The loader does require('profiles.anker.models.' .. product_code), so a
+    file whose name and product_code disagree is a schema that never loads --
+    silently, because a missing model is a legitimate state that just falls
+    back to raw hex. That is the failure this catches.
+
+    It also insists on an explicit `verified` flag. Schemas mined from the
+    decompiled app cannot be checked against hardware we do not have, and a
+    confident-looking wrong field name is worse than a missing one, so saying
+    which is which is not optional."""
+    import pathlib
+    d = pathlib.Path(ROOT, "lua/profiles/anker/models")
+    if not d.is_dir():
+        return False, "lua/profiles/anker/models is missing"
+    files = sorted(d.glob("*.lua"))
+    if not files:
+        return False, "no model schemas at all"
+    unverified = []
+    for f in files:
+        src = f.read_text()
+        m = re.search(r"product_code\s*=\s*'([A-Z0-9]+)'", src)
+        if not m:
+            return False, f"{f.name} declares no product_code"
+        if m.group(1) != f.stem:
+            return False, (f"{f.name} declares product_code '{m.group(1)}' -- "
+                           f"the loader would look for {m.group(1)}.lua")
+        if not re.search(r"\bfamily\s*=\s*'(pps|scp)'", src):
+            return False, f"{f.name} has no family = 'pps' or 'scp'"
+        if not re.search(r"\bfields\s*=", src):
+            return False, f"{f.name} has no fields table"
+        vm = re.search(r"\bverified\s*=\s*(true|false)", src)
+        if not vm:
+            return False, f"{f.name} does not say whether it is verified"
+        if vm.group(1) == "false":
+            unverified.append(f.stem)
+    detail = f"{len(files)} schema(s)"
+    if unverified:
+        detail += f", {len(unverified)} unverified ({', '.join(sorted(unverified))})"
+    return True, detail
+
 def t_lua_wait():
     """The wait/wake contract. These are the races -- a disconnect arriving
     while the coroutine is runnable rather than blocked, a frame from a
@@ -290,6 +332,7 @@ def main():
     step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
     step(0, "the wait/wake contract and its races", t_lua_wait)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
+    step(0, "anker model schemas match their filenames", t_anker_model_schemas)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:
