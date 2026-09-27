@@ -114,26 +114,16 @@ function M.link(addr)
   return l
 end
 
--- A write can be REFUSED while the link is busy with another GATT operation,
--- and bt.write reports that by returning false. Ignoring it is a silent
--- failure that looks exactly like a device that did not answer: the very
--- first frame of the handshake went out immediately after the CCCD write
--- from bt.subscribe, was refused, and every stage then "timed out" against a
--- charger that had been given nothing to reply to.
---
--- Retrying here is a workaround. The real fix is a per-link operation queue
--- in C so a refusal cannot happen at all -- bt.read/write/subscribe should
--- enqueue and return a token rather than failing.
+-- Writes are QUEUED in C now (see src/bt/le/central.h): one gatt_client
+-- procedure runs at a time per link and the rest wait their turn, so a write
+-- issued immediately after bt.subscribe is no longer refused. This used to be
+-- a 2 s retry loop, which is what cost the original bring-up -- the very
+-- first handshake frame went out while the CCCD write was still in flight,
+-- was refused, and every stage then "timed out" against a charger that had
+-- been given nothing to answer.
 function Link:send(ft, opcode, payload, encrypted)
   local f = assert(frame.build(ft, opcode, encrypted and true or false, 0, payload))
-  local hex = bytes.hex(f)
-  local deadline = sys.ms() + 2000
-  repeat
-    if bt.write(self.addr, self.cmd, hex, true) then return true end
-    sys.sleep(20)
-  until sys.ms() > deadline
-  log.warn(('c1000: write of 0x%04x refused for 2 s (link busy?)'):format(opcode))
-  return false
+  return bt.write(self.addr, self.cmd, bytes.hex(f), true)
 end
 
 function Link:decode(f, body)

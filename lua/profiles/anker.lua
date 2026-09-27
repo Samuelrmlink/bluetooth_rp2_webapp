@@ -320,11 +320,13 @@ function M.run(addr, cfg)
   if not bt.subscribe(addr, link.tel, 'notify') then
     return nil, 'could not subscribe to the telemetry characteristic'
   end
-  -- Let the CCCD write land before sending anything. Without this the first
-  -- stage goes out before the charger has been told we want notifications,
-  -- its reply is dropped by the peer stack, and the symptom is a flat
-  -- "no reply to 0x0001" that looks like a dead device.
-  sys.sleep(400)
+  -- No sleep here any more. This used to wait 400 ms for the CCCD write to
+  -- land, because the first stage going out before the charger had been told
+  -- we wanted notifications produced a flat "no reply to 0x0001" that looks
+  -- like a dead device. GATT operations are now QUEUED per link in C (see
+  -- src/bt/le/central.h): the subscribe must complete before the next write
+  -- is even issued, so the ordering is guaranteed by construction rather
+  -- than hoped for with a timer.
   bt.notify_flush(addr)
 
   local ok, err = M.negotiate_only(link, cfg)

@@ -201,8 +201,15 @@ void le_scan_stop(void) {
     api_emit("scan.done", "{\"reason\":\"stopped\"}");
 }
 
-/* Defined after the cascade it re-issues. */
+/* Defined after the cascade they drive. */
 static void discovery_tick(void);
+static void op_tick(void);
+
+/* The operation queue: the pump runs from the tick, the completion from the
+ * packet handler, and both are defined below beside the rest of the queue. */
+struct le_link;
+static void op_pump(struct le_link *l);
+static void op_complete(struct le_link *l, uint8_t att_status);
 
 void le_central_tick(void) {
     if (s_connecting && (int32_t)(now_ms() - s_connect_deadline_ms) >= 0) {
@@ -221,6 +228,7 @@ void le_central_tick(void) {
     }
 
     discovery_tick();
+    op_tick();
 }
 
 /* ===================== connect, and the discovery chain =====================
@@ -233,7 +241,39 @@ void le_central_tick(void) {
  * intermittent "characteristic not found" rather than as an obvious error.
  */
 
+/* --- the per-link operation queue -----------------------------------------
+ *
+ * BTstack runs ONE gatt_client procedure at a time per connection, and until
+ * now a read/write/subscribe that arrived while one was outstanding was
+ * simply REFUSED -- le_* returned LE_BUSY and the caller had to cope. Nobody
+ * coped well. The C1000 bring-up lost a day to it: the first handshake frame
+ * went out immediately after bt.subscribe, was refused, and every stage then
+ * "timed out" against a charger that had been handed nothing to answer. The
+ * Lua workaround was a 2 s retry loop, which is a queue with worse manners.
+ *
+ * So the queue lives here, where the constraint is. Callers enqueue and the
+ * tick issues one at a time, which makes "busy" unrepresentable rather than
+ * merely unlikely.
+ */
+#define OP_QUEUE_DEPTH 4
+#define OP_DATA_MAX    244      /* an ATT_MTU 247 write, less the 3-byte header */
+#define OP_TIMEOUT_MS  5000     /* covers queued time AND time in flight */
+
+#define OP_READ      1
+#define OP_WRITE     2
+#define OP_SUBSCRIBE 3
+
 typedef struct {
+    uint8_t  kind;
+    uint8_t  chr_i;
+    uint8_t  mode;             /* subscribe: 0 off, 1 notify, 2 indicate */
+    bool     with_response;    /* write */
+    uint16_t len;
+    uint32_t deadline_ms;
+    uint8_t  data[OP_DATA_MAX];
+} le_op_t;
+
+typedef struct le_link {
     bool     active;
     uint16_t con_handle;
     uint8_t  addr[BT_ADDR_LEN];
@@ -257,6 +297,18 @@ typedef struct {
     uint8_t  disc_err;              /* last ATT error seen during the cascade */
     uint8_t  disc_inflight;         /* DISC_IN_*; which query is outstanding */
     uint32_t disc_deadline_ms;      /* 0 = not discovering */
+
+    /* The operation queue. head+count rather than head+tail so "empty" and
+     * "full" cannot be confused. */
+    le_op_t  opq[OP_QUEUE_DEPTH];
+    uint8_t  op_head;
+    uint8_t  op_count;
+    bool     op_inflight;
+    /* Completions still owed by procedures we gave up waiting for. A timeout
+     * dequeues the op, but BTstack may still deliver its QUERY_COMPLETE
+     * afterwards -- and if that were taken at face value it would complete
+     * whichever op had since reached the head. Swallow that many first. */
+    uint8_t  op_stale;
 } le_link_t;
 
 /* What the tick should re-issue for a link whose last attempt was refused. */
@@ -731,6 +783,12 @@ void le_on_link_secured(uint16_t con_handle, bool ok) {
     l->disc_stage = (l->db.n_svc == 0) ? DISC_PRIMARY : DISC_NEXT;
 }
 
+static void op_tick(void) {
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        op_pump(&links[i]);
+    }
+}
+
 /* Called from bt.c's HCI handler. */
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type) {
     s_connecting = false;
@@ -1024,6 +1082,15 @@ static void value_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size
             }
             break;
         }
+        /* The completion of one of OUR value procedures. Discovery has its
+         * own callback (gatt_handler), so this can only be an op. */
+        case GATT_EVENT_QUERY_COMPLETE: {
+            le_link_t *l = link_by_handle(gatt_event_query_complete_get_handle(pkt));
+            if (l) {
+                op_complete(l, gatt_event_query_complete_get_att_status(pkt));
+            }
+            break;
+        }
         case GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT: {
             le_link_t *l = link_by_handle(gatt_event_characteristic_value_query_result_get_handle(pkt));
             if (l) {
@@ -1048,57 +1115,191 @@ void le_register_notifications(uint16_t con_handle) {
     }
 }
 
-/* BTstack runs ONE gatt_client procedure at a time per connection. Issuing a
- * second while the first is outstanding fails in a way that looks like the
- * peripheral refused it, so check first and say plainly that we are busy. */
-#define LE_BUSY (-4)
+/* Queue full. LE_BUSY is gone: the whole point of the queue is that a caller
+ * can no longer be told "not now" for a reason it cannot act on. */
+#define LE_QUEUE_FULL (-5)
 
-int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i) {
+static const char *op_kind_name(uint8_t kind) {
+    switch (kind) {
+        case OP_READ:      return "read";
+        case OP_WRITE:     return "write";
+        case OP_SUBSCRIBE: return "subscribe";
+        default:           return "?";
+    }
+}
+
+/* Resolve and validate the caller's arguments once, for all three entry
+ * points. chr_i indexes the FLAT characteristic table and used to be taken on
+ * trust -- an out-of-range index read past the end of db.chr[]. */
+static int op_link_for(const uint8_t *addr, uint8_t chr_i, le_link_t **out) {
     bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
     if (!d || !d->connected) { return -1; }
     le_link_t *l = link_by_handle(d->con_handle);
     if (!l || !l->db.ready) { return -2; }
-    if (!gatt_client_is_ready(l->con_handle)) { return LE_BUSY; }
+    if (chr_i >= l->db.n_chr) { return -2; }
+    *out = l;
+    return 0;
+}
+
+static int op_enqueue(le_link_t *l, const le_op_t *op) {
+    if (l->op_count >= OP_QUEUE_DEPTH) {
+        printf("bt: op queue full on %s, dropping %s\n",
+               bd_addr_to_str(l->addr), op_kind_name(op->kind));
+        return LE_QUEUE_FULL;
+    }
+    l->opq[(l->op_head + l->op_count) % OP_QUEUE_DEPTH] = *op;
+    l->op_count++;
+    return 0;
+}
+
+static void op_pop(le_link_t *l) {
+    if (l->op_count == 0) { return; }
+    l->op_head = (uint8_t)((l->op_head + 1) % OP_QUEUE_DEPTH);
+    l->op_count--;
+    l->op_inflight = false;
+}
+
+/*
+ * A procedure finished. Before this existed, value_handler ignored
+ * GATT_EVENT_QUERY_COMPLETE entirely: a write had NO completion at all and a
+ * read that failed at ATT level produced nothing -- no event, no inbox entry,
+ * no error, just a waiter that eventually timed out. Now a failure says so.
+ */
+static void op_complete(struct le_link *l, uint8_t att_status) {
+    if (l->op_stale) { l->op_stale--; return; }   /* owed by an abandoned op */
+    if (l->op_count == 0) { return; }
+
+    le_op_t *op = &l->opq[l->op_head];
+    if (att_status != ATT_ERROR_SUCCESS) {
+        printf("bt: %s of chr %u on %s failed, att 0x%02x\n",
+               op_kind_name(op->kind), op->chr_i, bd_addr_to_str(l->addr),
+               att_status);
+        char ev[160];
+        snprintf(ev, sizeof ev,
+                 "{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"op\":\"%s\","
+                 "\"chr\":%u,\"att_error\":%u}",
+                 l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4],
+                 l->addr[5], op_kind_name(op->kind), op->chr_i, att_status);
+        api_emit("gatt.op_failed", ev);
+    }
+    op_pop(l);
+}
+
+static void op_issue(le_link_t *l) {
+    le_op_t *op = &l->opq[l->op_head];
+    gdb_char_t *ch = &l->db.chr[op->chr_i];
+    uint8_t rc = 0;
+
+    switch (op->kind) {
+        case OP_READ:
+            rc = gatt_client_read_value_of_characteristic_using_value_handle(
+                     value_handler, l->con_handle, ch->value_handle);
+            break;
+
+        case OP_WRITE:
+            if (op->with_response) {
+                rc = gatt_client_write_value_of_characteristic(
+                         value_handler, l->con_handle, ch->value_handle,
+                         op->len, op->data);
+            } else {
+                rc = gatt_client_write_value_of_characteristic_without_response(
+                         l->con_handle, ch->value_handle, op->len, op->data);
+                /* The without-response form takes no callback and produces no
+                 * completion event, so there is nothing to wait for. It is
+                 * the one kind whose delivery we cannot confirm -- say so
+                 * here rather than let a reader assume otherwise. */
+                if (rc == 0) { op_pop(l); return; }
+            }
+            break;
+
+        case OP_SUBSCRIBE: {
+            uint16_t cccd = ch->cccd_handle;
+            if (cccd == 0) {
+                /* Discovery does not always report the CCC descriptor even
+                 * when the characteristic is notifiable. The declaration,
+                 * value and CCCD are consecutive in every implementation that
+                 * gets this wrong, so the next handle is the right guess --
+                 * and a wrong guess fails as an ATT error rather than
+                 * silently doing nothing. */
+                cccd = (uint16_t)(ch->value_handle + 1);
+                printf("bt: no CCCD discovered for chr %u, trying "
+                       "value_handle+1 (0x%04x)\n", op->chr_i, cccd);
+            }
+            uint8_t v[2] = { op->mode, 0x00 };
+            rc = gatt_client_write_characteristic_descriptor_using_descriptor_handle(
+                     value_handler, l->con_handle, cccd, sizeof v, v);
+            break;
+        }
+
+        default:
+            op_pop(l);
+            return;
+    }
+
+    if (rc != 0) {
+        /* Refused after all our checks passed. Leave it at the head and try
+         * again next pass; its deadline is what stops that being forever. */
+        return;
+    }
+    l->op_inflight = true;
+}
+
+/* Called once per pass per link, beside discovery_tick(). */
+static void op_pump(struct le_link *l) {
+    if (!l->active || l->op_count == 0) { return; }
+
+    le_op_t *op = &l->opq[l->op_head];
+    if ((int32_t)(now_ms() - op->deadline_ms) >= 0) {
+        printf("bt: %s of chr %u on %s timed out after %u ms\n",
+               op_kind_name(op->kind), op->chr_i, bd_addr_to_str(l->addr),
+               (unsigned)OP_TIMEOUT_MS);
+        if (l->op_inflight) {
+            /* The procedure is still running somewhere in BTstack; its
+             * completion will arrive after we have moved on. */
+            l->op_stale++;
+        }
+        op_pop(l);
+        return;
+    }
+
+    if (l->op_inflight) { return; }
+    /* Not while the discovery cascade owns this connection's gatt_client.
+     * discovery_tick() skips links whose db is ready, so the two never
+     * contend -- which is the whole reason value ops were being refused. */
+    if (!l->db.ready) { return; }
+    if (!gatt_client_is_ready(l->con_handle)) { return; }
+    op_issue(l);
+}
+
+int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i) {
     (void)svc_i;
-    return gatt_client_read_value_of_characteristic_using_value_handle(
-               value_handler, l->con_handle, l->db.chr[chr_i].value_handle) == 0 ? 0 : -3;
+    le_link_t *l = NULL;
+    int rc = op_link_for(addr, chr_i, &l);
+    if (rc) { return rc; }
+    le_op_t op = { .kind = OP_READ, .chr_i = chr_i,
+                   .deadline_ms = now_ms() + OP_TIMEOUT_MS };
+    return op_enqueue(l, &op);
 }
 
 int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
              const uint8_t *data, uint16_t len, bool with_response) {
-    bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
-    if (!d || !d->connected) { return -1; }
-    le_link_t *l = link_by_handle(d->con_handle);
-    if (!l || !l->db.ready) { return -2; }
-    if (!gatt_client_is_ready(l->con_handle)) { return LE_BUSY; }
     (void)svc_i;
-    uint16_t vh = l->db.chr[chr_i].value_handle;
-    uint8_t rc = with_response
-        ? gatt_client_write_value_of_characteristic(value_handler, l->con_handle, vh, len, (uint8_t *)data)
-        : gatt_client_write_value_of_characteristic_without_response(l->con_handle, vh, len, (uint8_t *)data);
-    return rc == 0 ? 0 : -3;
+    le_link_t *l = NULL;
+    int rc = op_link_for(addr, chr_i, &l);
+    if (rc) { return rc; }
+    if (len > OP_DATA_MAX) { return -3; }
+    le_op_t op = { .kind = OP_WRITE, .chr_i = chr_i, .with_response = with_response,
+                   .len = len, .deadline_ms = now_ms() + OP_TIMEOUT_MS };
+    if (len) { memcpy(op.data, data, len); }
+    return op_enqueue(l, &op);
 }
 
 int le_subscribe(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i, int mode) {
-    bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
-    if (!d || !d->connected) { return -1; }
-    le_link_t *l = link_by_handle(d->con_handle);
-    if (!l || !l->db.ready) { return -2; }
-    if (!gatt_client_is_ready(l->con_handle)) { return LE_BUSY; }
     (void)svc_i;
-    gdb_char_t *c = &l->db.chr[chr_i];
-
-    uint16_t cccd = c->cccd_handle;
-    if (cccd == 0) {
-        /* Discovery does not always report the CCC descriptor even when the
-         * characteristic is notifiable. The declaration, value and CCCD are
-         * consecutive in every implementation that gets this wrong, so the
-         * next handle is the right guess -- and a wrong guess fails as an ATT
-         * error rather than silently doing nothing. */
-        cccd = (uint16_t)(c->value_handle + 1);
-        printf("bt: no CCCD discovered for chr %u, trying value_handle+1 (0x%04x)\n", chr_i, cccd);
-    }
-    uint8_t v[2] = { (uint8_t)mode, 0x00 };   /* 1 notify, 2 indicate, 0 off */
-    return gatt_client_write_characteristic_descriptor_using_descriptor_handle(
-               value_handler, l->con_handle, cccd, sizeof(v), v) == 0 ? 0 : -3;
+    le_link_t *l = NULL;
+    int rc = op_link_for(addr, chr_i, &l);
+    if (rc) { return rc; }
+    le_op_t op = { .kind = OP_SUBSCRIBE, .chr_i = chr_i, .mode = (uint8_t)mode,
+                   .deadline_ms = now_ms() + OP_TIMEOUT_MS };
+    return op_enqueue(l, &op);
 }

@@ -430,9 +430,12 @@ static void op_gatt_read(const char *params, api_reply_fn reply, void *ctx, long
         api_reply_err(reply, ctx, id, "bad_target", err); return;
     }
     int rc = le_read(d->addr, si, ci);
-    if (rc == -4) {
-        api_reply_err(reply, ctx, id, "busy",
-                      "another GATT procedure is in flight on this link; retry");
+    if (rc == -5) {
+        /* Not "busy" any more: operations are queued, so the only way to be
+         * refused is a queue that is genuinely full -- which means the
+         * caller is issuing faster than the link can drain. */
+        api_reply_err(reply, ctx, id, "queue_full",
+                      "this link's GATT operation queue is full");
         return;
     }
     if (rc != 0) {
@@ -460,9 +463,12 @@ static void op_gatt_write(const char *params, api_reply_fn reply, void *ctx, lon
     bool with_response = true;
     (void)api_json_bool(params, "response", &with_response);
     int rc = le_write(d->addr, si, ci, buf, (uint16_t)n, with_response);
-    if (rc == -4) {
-        api_reply_err(reply, ctx, id, "busy",
-                      "another GATT procedure is in flight on this link; retry");
+    if (rc == -5) {
+        /* Not "busy" any more: operations are queued, so the only way to be
+         * refused is a queue that is genuinely full -- which means the
+         * caller is issuing faster than the link can drain. */
+        api_reply_err(reply, ctx, id, "queue_full",
+                      "this link's GATT operation queue is full");
         return;
     }
     if (rc != 0) {
@@ -482,9 +488,12 @@ static void op_gatt_subscribe(const char *params, api_reply_fn reply, void *ctx,
     api_json_str(params, "mode", mode, sizeof(mode));
     int m = strcmp(mode, "indicate") == 0 ? 2 : strcmp(mode, "off") == 0 ? 0 : 1;
     int rc = le_subscribe(d->addr, si, ci, m);
-    if (rc == -4) {
-        api_reply_err(reply, ctx, id, "busy",
-                      "another GATT procedure is in flight on this link; retry");
+    if (rc == -5) {
+        /* Not "busy" any more: operations are queued, so the only way to be
+         * refused is a queue that is genuinely full -- which means the
+         * caller is issuing faster than the link can drain. */
+        api_reply_err(reply, ctx, id, "queue_full",
+                      "this link's GATT operation queue is full");
         return;
     }
     if (rc != 0) {

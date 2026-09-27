@@ -47,8 +47,31 @@ void le_on_link_secured(uint16_t con_handle, bool ok);
 
 
 
-/* Value operations. svc_i is accepted for symmetry and future Classic
- * dispatch; chr_i is the index into the device's characteristic table. */
+/*
+ * Value operations. svc_i is accepted for symmetry and future Classic
+ * dispatch; chr_i is the index into the device's characteristic table.
+ *
+ * THESE ENQUEUE. They do not talk to the radio.
+ *
+ * BTstack runs one gatt_client procedure at a time per connection, and these
+ * used to return LE_BUSY when one was already outstanding -- leaving every
+ * caller to invent its own retry. They did so badly: the C1000 profile grew a
+ * 2 s retry loop, and the A2687 profile papered over the same race with a
+ * sleep. Now the link owns a short queue and the tick issues one operation at
+ * a time, so "busy" is no longer a state a caller can observe.
+ *
+ * Returns 0 when queued, or:
+ *   -1  the device is unknown or not connected
+ *   -2  no link, discovery has not finished, or chr_i is out of range
+ *   -3  bad arguments (a write longer than the ATT MTU)
+ *   -5  the queue is full -- the caller is issuing faster than the link drains
+ *
+ * Completion is asynchronous. A read's value arrives as a char.value event
+ * and in the notification inbox below; a failure of any kind now emits
+ * gatt.op_failed, where previously a failed write was entirely silent. A
+ * write WITHOUT response is the one exception: the ATT layer defines no
+ * completion for it, so it is reported as issued and never confirmed.
+ */
 int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i);
 int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
              const uint8_t *data, uint16_t len, bool with_response);

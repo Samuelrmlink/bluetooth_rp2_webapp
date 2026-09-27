@@ -52,6 +52,20 @@
 #define WIFI_LOST_MS 2000    /* a link must stay down this long to count */
 #define WIFI_SCAN_MS 8000    /* a scan that never completes is abandoned */
 #define WIFI_BOOT_MS 45000   /* give up looking and become an AP */
+/*
+ * How often to re-scan once the boot budget is spent and we are only waiting
+ * for a known network to appear.
+ *
+ * This is not politeness, it is a shared-bus constraint. The CYW43439 carries
+ * WiFi and Bluetooth over one interface, and before this the idle path
+ * re-armed a scan the instant the previous one finished -- a continuous scan
+ * loop for the whole life of the device. Run alongside BLE that eventually
+ * wedged a cyw43 ioctl ("do_ioctl(2, 263, 82): timeout"), and because poll
+ * mode's wait is a bare sleep_until() that never services the async context,
+ * the main loop went with it and took USB-NCM down until a reset. Try hard
+ * during the boot budget, then settle. An explicit wifi.scan is unaffected.
+ */
+#define WIFI_IDLE_RESCAN_MS 60000
 #define WIFI_RESCAN_MS 30000 /* while in AP, look for a known network again */
 
 #define SCAN_MAX 24
@@ -69,6 +83,7 @@ static bool driver_up = false;
 static wifi_state_t state = ST_IDLE;
 
 static uint32_t join_start, last_fail, down_since, boot_start, scan_start, last_rescan;
+static uint32_t last_scan_end;   /* when the most recent scan stopped */
 static char ip_str[16] = "0.0.0.0";
 static char last_error[56] = "";
 static char cur_ssid[CFG_SSID_MAX + 1] = "";
@@ -175,6 +190,13 @@ static void stop_ap(void) {
  * fallback, so "auto" now only falls back when there is nothing to fall back
  * from. An explicit mode of "ap" still starts it unconditionally.
  */
+/* Scan eagerly while the boot budget lasts, then only occasionally -- see
+ * WIFI_IDLE_RESCAN_MS for why a continuous scan is not free. */
+static bool want_idle_scan(uint32_t now) {
+    if (!timed_out(now, boot_start, WIFI_BOOT_MS)) { return true; }
+    return timed_out(now, last_scan_end, WIFI_IDLE_RESCAN_MS);
+}
+
 static bool have_other_route(void) {
 #if CONFIG_NET_USB_NCM
     struct netif *n = usb_ncm_netif();
@@ -410,9 +432,11 @@ void wifi_poll(void) {
             if (!cyw43_wifi_scan_active(&cyw43_state)) {
                 scanning = false;
                 scan_done = true;
+                last_scan_end = now;
             } else if (timed_out(now, scan_start, WIFI_SCAN_MS)) {
                 scanning = false;
                 scan_done = true;
+                last_scan_end = now;
                 snprintf(last_error, sizeof(last_error), "scan timed out");
             }
             return;
@@ -432,9 +456,11 @@ void wifi_poll(void) {
         if (!cyw43_wifi_scan_active(&cyw43_state)) {
             scanning = false;
             scan_done = true;
+            last_scan_end = now;
         } else if (timed_out(now, scan_start, WIFI_SCAN_MS)) {
             scanning = false;
             scan_done = true;
+            last_scan_end = now;
             snprintf(last_error, sizeof(last_error), "scan timed out");
         }
     }
@@ -463,10 +489,10 @@ void wifi_poll(void) {
                  * USB-NCM link took the working path away and offered a
                  * worse one in exchange. */
                 pending_ap = true;
-            } else {
+            } else if (want_idle_scan(now)) {
                 pending_scan = true;
             }
-        } else if (!scanning) {
+        } else if (!scanning && want_idle_scan(now)) {
             pending_scan = true;
         }
         break;
