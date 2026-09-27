@@ -14,79 +14,18 @@
 #include "autoconf.h"
 #include "pico/time.h"
 
+#include "lua/lheap.h"
+
 #if CONFIG_LUA_ENABLE
 
-/* --- the arena -----------------------------------------------------------
- * A dedicated static block, not the system heap. A runaway script then hits
- * its own ceiling and gets an ordinary Lua out-of-memory error, instead of
- * starving lwIP or BTstack and taking the whole device down. Static so the
- * link-time RAM check can see every byte of it. */
-#define ARENA_BYTES (CONFIG_LUA_HEAP_KB * 1024)
-static uint8_t arena[ARENA_BYTES] __attribute__((aligned(8)));
+/* The arena lives in lheap.c so it can be tested on a host: see the comment
+ * there, and test/host/heap_test.c, which asserts the invariants that two
+ * reverted attempts at its in-place realloc broke. */
 
-/* A first-fit free list. Lua's allocation pattern is many small, short-lived
- * blocks, which this handles adequately; the point is the hard ceiling, not
- * peak allocator performance. */
-typedef struct blk { size_t size; struct blk *next; bool free; } blk_t;
-#define HDR ((size_t)((sizeof(blk_t) + 7u) & ~7u))
-static blk_t *heap_head;
-static size_t heap_used, heap_peak;
-
-static void heap_init(void) {
-    heap_head = (blk_t *)arena;
-    heap_head->size = ARENA_BYTES - HDR;
-    heap_head->next = NULL;
-    heap_head->free = true;
-    heap_used = 0;
-    heap_peak = 0;
-}
-
-static void *arena_alloc(size_t want) {
-    want = (want + 7u) & ~7u;
-    for (blk_t *b = heap_head; b; b = b->next) {
-        if (!b->free || b->size < want) {
-            continue;
-        }
-        if (b->size >= want + HDR + 32) {           /* split */
-            blk_t *n = (blk_t *)((uint8_t *)b + HDR + want);
-            n->size = b->size - want - HDR;
-            n->next = b->next;
-            n->free = true;
-            b->size = want;
-            b->next = n;
-        }
-        b->free = false;
-        heap_used += b->size;
-        if (heap_used > heap_peak) { heap_peak = heap_used; }
-        return (uint8_t *)b + HDR;
-    }
-    return NULL;
-}
-
-static void arena_free(void *p) {
-    if (!p) {
-        return;
-    }
-    blk_t *b = (blk_t *)((uint8_t *)p - HDR);
-    b->free = true;
-    heap_used -= b->size;
-    for (blk_t *c = heap_head; c; c = c->next) {     /* coalesce forward */
-        while (c->free && c->next && c->next->free) {
-            c->size += HDR + c->next->size;
-            c->next = c->next->next;
-        }
-    }
-}
-
+/* Lua's allocator hook. The work is in lheap_realloc; this only drops `ud`. */
 static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     (void)ud;
-    if (nsize == 0) { arena_free(ptr); return NULL; }
-    void *np = arena_alloc(nsize);
-    if (np && ptr) {
-        memcpy(np, ptr, osize < nsize ? osize : nsize);
-    }
-    if (np && ptr) { arena_free(ptr); }
-    return np;
+    return lheap_realloc(ptr, osize, nsize);
 }
 
 /* --- state --------------------------------------------------------------- */
@@ -391,7 +330,7 @@ size_t lrt_collect(void) {
     if (!L) { return 0; }
     lua_gc(L, LUA_GCCOLLECT);
     lua_gc(L, LUA_GCCOLLECT);   /* twice: finalizers can free more */
-    return heap_used;
+    return lheap_used();
 }
 
 /* --- start / stop --------------------------------------------------------- */
@@ -726,13 +665,13 @@ size_t lrt_stats_json(char *dst, size_t cap) {
     return (size_t)snprintf(dst, cap,
         "{\"arena_bytes\":%u,\"used\":%u,\"peak\":%u,\"hook_kills\":%lu,"
         "\"budget\":%d,\"slice_overruns\":%lu,\"slice_max_ms\":%d}",
-        (unsigned)ARENA_BYTES, (unsigned)heap_used, (unsigned)heap_peak,
+        (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)lheap_peak(),
         (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET,
         (unsigned long)s_slice_overruns, SLICE_MAX_MS);
 }
 
 void lrt_init(void) {
-    heap_init();
+    lheap_init();
     L = lua_newstate(lrt_alloc, NULL);
     if (!L) {
         printf("lua: could not create state in a %u KB arena\n", CONFIG_LUA_HEAP_KB);

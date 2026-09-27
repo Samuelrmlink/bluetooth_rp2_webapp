@@ -111,6 +111,31 @@ def t_neg_constants_agree():
             return False, f"{cname} != the profile's {lname}"
     return True, "keystream, H, E(J0), AAD"
 
+def t_lua_heap():
+    """The Lua arena, on a host, with every structural invariant asserted after
+    EVERY operation. This test exists because two attempts at the allocator's
+    in-place realloc shipped to hardware and had to be reverted; each is
+    reproduced as a deliberate defect in the test's own comments, and each is
+    caught by a named assertion rather than by a wrapped byte counter.
+
+    A small arena is used so the fuzz reaches exhaustion and the refused-grow
+    paths actually run."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_heap")
+    rc, out = sh(f"gcc -O1 -Wall -Wextra -Isrc -DLHEAP_KB=64 -o {binp} "
+                 f"test/host/heap_test.c src/lua/lheap.c")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "heap harness build failed"
+    rc, out = sh(binp)
+    if rc != 0:
+        first = next((l.strip() for l in out.splitlines() if "FAIL" in l), "")
+        return False, first[:100] or f"heap_test exited {rc}"
+    peak = re.search(r"growth: final (\d+) B, peak (\d+) B", out)
+    detail = "invariants hold after every op"
+    if peak:
+        detail += f"; doubling to {peak.group(1)} B peaked at {peak.group(2)} B"
+    return True, detail
+
 def t_lua_proto():
     """The profile's Lua, on a host, against the REAL C bindings and the REAL
     vendored Lua -- no board, no flash cycle, no charger. This is the dividend
@@ -216,6 +241,7 @@ def main():
     step(0, "frozen protocol vectors", t_parity)
     step(0, "neg constants agree with the Lua profile", t_neg_constants_agree)
     step(0, "protocol Lua on a host", t_lua_proto)
+    step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:

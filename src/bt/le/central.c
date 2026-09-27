@@ -198,6 +198,9 @@ void le_scan_stop(void) {
     api_emit("scan.done", "{\"reason\":\"stopped\"}");
 }
 
+/* Defined after the cascade it re-issues. */
+static void discovery_tick(void);
+
 void le_central_tick(void) {
     if (s_connecting && (int32_t)(now_ms() - s_connect_deadline_ms) >= 0) {
         /* gap_connect has no timeout of its own; without this a peer that has
@@ -213,6 +216,8 @@ void le_central_tick(void) {
         s_scan_until_ms = 0;
         api_emit("scan.done", "{\"reason\":\"timeout\"}");
     }
+
+    discovery_tick();
 }
 
 /* ===================== connect, and the discovery chain =====================
@@ -236,7 +241,40 @@ typedef struct {
     uint8_t  chr_i;                 /* characteristic whose descriptors we want */
     gatt_client_service_t        bt_svc;
     gatt_client_characteristic_t bt_chr;
+
+    /* Retry state. Every gatt_client call in the cascade can be refused --
+     * most often because that handle's client is not ready yet, which is
+     * exactly what happens when a SECOND link is being discovered while a
+     * first is mid-operation. The cascade used to ignore those returns, so a
+     * single refusal stopped the state machine dead: db.ready never became
+     * true, nothing retried, and nothing reported. The symptom was a link that
+     * connected and then never finished discovering. */
+    uint8_t  svc_issued;            /* services whose chr query has been issued */
+    uint8_t  disc_stage;            /* DISC_* below; what to re-issue */
+    uint8_t  disc_err;              /* last ATT error seen during the cascade */
+    uint8_t  disc_inflight;         /* DISC_IN_*; which query is outstanding */
+    uint32_t disc_deadline_ms;      /* 0 = not discovering */
 } le_link_t;
+
+/* What the tick should re-issue for a link whose last attempt was refused. */
+#define DISC_IDLE    0
+#define DISC_PRIMARY 1              /* gatt_client_discover_primary_services */
+#define DISC_NEXT    2              /* resume the characteristic/descriptor walk */
+#define DISC_SECURITY 3             /* parked until pairing completes */
+
+/* Which query is outstanding. A GATT_EVENT_QUERY_COMPLETE carries a status but
+ * no indication of WHAT it completed, and the right recovery differs per step:
+ * a failed primary-service query leaves nothing usable, while a failed
+ * descriptor query costs one characteristic's descriptors and no more. */
+#define DISC_IN_NONE    0
+#define DISC_IN_PRIMARY 1
+#define DISC_IN_CHR     2
+#define DISC_IN_DSC     3
+
+/* A cascade that never progresses must fail loudly rather than hang. Generous
+ * because a real peripheral with 65 characteristics takes a couple of seconds
+ * and a busy radio can stretch that. */
+#define DISC_TIMEOUT_MS 15000
 
 static le_link_t links[CONFIG_BT_MAX_LINKS];
 
@@ -283,18 +321,98 @@ static void emit_device_event(const char *topic, const uint8_t *addr) {
 static void discover_next(le_link_t *l);
 static void gatt_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size);
 
-/* Characteristics of svc_i, then descriptors of each, then the next service. */
+/* Undo whatever the outstanding query had already recorded, and rewind the
+ * cursor to it, so that re-issuing the same step cannot append a second copy
+ * of a partial result. Every assignment is a no-op when nothing was recorded,
+ * which is the case when the stack refused the call outright. */
+static void disc_drop_partial(le_link_t *l) {
+    gattdb_t *db = &l->db;
+    switch (l->disc_inflight) {
+        case DISC_IN_PRIMARY:
+            db->n_svc = 0; db->n_chr = 0; db->n_dsc = 0;
+            l->svc_i = 0; l->chr_i = 0; l->svc_issued = 0;
+            break;
+        case DISC_IN_CHR: {
+            if (l->svc_i >= db->n_svc) { break; }
+            gdb_service_t *s = &db->svc[l->svc_i];
+            db->n_chr = s->first_chr;
+            s->n_chr  = 0;
+            l->svc_issued = l->svc_i;      /* ask for this service again */
+            break;
+        }
+        case DISC_IN_DSC: {
+            /* discover_next advances chr_i BEFORE issuing, so the in-flight
+             * characteristic is the one behind the cursor. */
+            if (l->chr_i == 0 || l->svc_i >= db->n_svc) { break; }
+            gdb_service_t *s = &db->svc[l->svc_i];
+            l->chr_i--;
+            gdb_char_t *ch = &db->chr[s->first_chr + l->chr_i];
+            db->n_dsc = ch->first_dsc;
+            ch->n_dsc = 0;
+            ch->cccd_handle = 0;
+            break;
+        }
+        default: break;
+    }
+    l->disc_inflight = DISC_IN_NONE;
+}
+
+/* A cascade that cannot finish must say so. Leaving db.ready false with no
+ * event is what made the original bug invisible: the script waited out its
+ * own timeout with nothing in the log to say why. */
+static void discovery_failed(le_link_t *l, const char *reason, uint8_t att_status) {
+    printf("bt: discovery failed on %s: %s (att 0x%02x)\n",
+           bd_addr_to_str(l->addr), reason, att_status);
+    char ev[144];
+    snprintf(ev, sizeof ev,
+             "{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+             "\"reason\":\"%s\",\"att_error\":%u}",
+             l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4], l->addr[5],
+             reason, att_status);
+    api_emit("gatt.failed", ev);
+    l->disc_stage    = DISC_IDLE;
+    l->disc_inflight = DISC_IN_NONE;
+    l->disc_deadline_ms = 0;
+}
+
+/* Characteristics of svc_i, then descriptors of each, then the next service.
+ *
+ * NOTE on svc_issued: every service arrives with n_chr == 0, so the old loop
+ * tested "chr_i < s->n_chr" as its first act, found 0 < 0 false, and advanced
+ * svc_i -- meaning service 0's characteristics were NEVER requested. It went
+ * unnoticed only because index 0 is usually GAP. On a device with a single
+ * primary service the cascade "completed" in one round trip with 0 chr, which
+ * is indistinguishable from a stall from Lua's side. svc_issued records how
+ * many services have had their characteristic query issued, so service 0 is
+ * asked for like any other.
+ */
 static void discover_next(le_link_t *l) {
     gattdb_t *db = &l->db;
 
-    /* Descriptors pending for the current characteristic? */
     while (l->svc_i < db->n_svc) {
         gdb_service_t *s = &db->svc[l->svc_i];
+
+        if (l->svc_issued <= l->svc_i) {
+            l->bt_svc.start_group_handle = s->start_handle;
+            l->bt_svc.end_group_handle   = s->end_handle;
+            s->first_chr = db->n_chr;
+            s->n_chr = 0;
+            l->svc_issued = (uint8_t)(l->svc_i + 1);
+            l->disc_inflight = DISC_IN_CHR;
+            uint8_t st = gatt_client_discover_characteristics_for_service(
+                             gatt_handler, l->con_handle, &l->bt_svc);
+            if (st != ERROR_CODE_SUCCESS) {
+                disc_drop_partial(l);        /* rewinds svc_issued to svc_i */
+                l->disc_stage = DISC_NEXT;
+            }
+            return;
+        }
+
         if (l->chr_i < s->n_chr) {
             uint8_t ci = (uint8_t)(s->first_chr + l->chr_i);
-            gdb_char_t *c = &db->chr[ci];
-            l->bt_chr.start_handle = c->value_handle;   /* set below at capture */
-            l->bt_chr.value_handle = c->value_handle;
+            gdb_char_t *ch = &db->chr[ci];
+            l->bt_chr.start_handle = ch->value_handle;
+            l->bt_chr.value_handle = ch->value_handle;
             /* Descriptors of characteristic k run from its value handle + 1 up
              * to just before the NEXT characteristic's DECLARATION, which sits
              * one handle below that characteristic's value handle. Stopping at
@@ -303,29 +421,38 @@ static void discover_next(le_link_t *l) {
             l->bt_chr.end_handle   = (uint8_t)(l->chr_i + 1) < s->n_chr
                                    ? (uint16_t)(db->chr[ci + 1].value_handle - 2)
                                    : s->end_handle;
-            l->bt_chr.properties   = c->properties;
-            c->first_dsc = db->n_dsc;
+            l->bt_chr.properties   = ch->properties;
+            ch->first_dsc = db->n_dsc;
             l->chr_i++;
             if (l->bt_chr.end_handle > l->bt_chr.value_handle) {
-                gatt_client_discover_characteristic_descriptors(gatt_handler, l->con_handle, &l->bt_chr);
+                l->disc_inflight = DISC_IN_DSC;
+                uint8_t st = gatt_client_discover_characteristic_descriptors(
+                                 gatt_handler, l->con_handle, &l->bt_chr);
+                if (st != ERROR_CODE_SUCCESS) {
+                    disc_drop_partial(l);        /* rewinds chr_i to this one */
+                    l->disc_stage = DISC_NEXT;
+                }
                 return;
             }
+            l->disc_inflight = DISC_IN_NONE;
             continue;   /* no room for descriptors between this and the next */
         }
-        /* Service done; move to the next one's characteristics. */
+
         l->svc_i++;
         l->chr_i = 0;
-        if (l->svc_i < db->n_svc) {
-            gdb_service_t *ns = &db->svc[l->svc_i];
-            l->bt_svc.start_group_handle = ns->start_handle;
-            l->bt_svc.end_group_handle   = ns->end_handle;
-            ns->first_chr = db->n_chr;
-            gatt_client_discover_characteristics_for_service(gatt_handler, l->con_handle, &l->bt_svc);
-            return;
-        }
     }
 
-    /* Whole cascade complete. */
+    /* Whole cascade complete. A real peripheral always exposes at least GAP
+     * (0x1800), so zero services means the cascade fell through rather than
+     * finished -- the exact false success this bug produced. Refuse to mark
+     * an empty database ready. */
+    if (db->n_svc == 0) {
+        discovery_failed(l, "no services", l->disc_err);
+        return;
+    }
+    l->disc_stage = DISC_IDLE;
+    l->disc_inflight = DISC_IN_NONE;
+    l->disc_deadline_ms = 0;
     db->ready = true;
     gatt_client_get_mtu(l->con_handle, &db->mtu);
 
@@ -388,7 +515,7 @@ static void gatt_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size)
             g->cccd_handle  = 0;
             g->first_dsc = db->n_dsc;
             g->n_dsc = 0;
-            db->svc[l->svc_i].n_chr++;
+            db->svc[l->svc_issued - 1].n_chr++;   /* the service we asked about */
             break;
         }
         case GATT_EVENT_ALL_CHARACTERISTIC_DESCRIPTORS_QUERY_RESULT: {
@@ -426,8 +553,53 @@ static void gatt_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size)
                     printf("bt: att 0x%02x wants security; requesting pairing\n", att_status);
                     bond_request(h);
                 }
-                return;   /* the caller retries once the link is secured */
+                /* Park the cascade rather than abandon it. The old comment
+                 * here said "the caller retries once the link is secured" and
+                 * nothing did: the cascade simply stopped. le_on_link_secured
+                 * (called from bond.c) resumes it, and the deadline still
+                 * runs, so a pairing that never completes fails loudly. */
+                disc_drop_partial(l);
+                l->disc_err   = att_status;
+                l->disc_stage = DISC_SECURITY;
+                return;
             }
+            if (att_status != ATT_ERROR_SUCCESS) {
+                /* Any other error used to fall straight through to
+                 * discover_next(), which is how a failed primary-service query
+                 * produced an EMPTY database that was then marked ready:
+                 * 0 services, 0 characteristics, ready = true, and bt.find
+                 * failing forever with nothing logged. An error is not
+                 * progress. Note BTstack maps ATTRIBUTE_NOT_FOUND -- the normal
+                 * end of a discovery walk -- to SUCCESS for exactly these
+                 * queries (gatt_client.c), so anything non-zero here is real.
+                 *
+                 * How bad it is depends on the step. Losing the service list
+                 * leaves nothing usable, and an ATT timeout means the link is
+                 * gone; either is fatal. Losing one characteristic's
+                 * descriptors costs a CCCD at worst, so skip that unit and
+                 * keep the rest of the database. */
+                uint8_t step = l->disc_inflight;
+                l->disc_err = att_status;
+                printf("bt: att error 0x%02x on discovery step %u for %s\n",
+                       att_status, step, bd_addr_to_str(l->addr));
+                if (step == DISC_IN_PRIMARY || att_status == ATT_ERROR_TIMEOUT) {
+                    discovery_failed(l,
+                        step == DISC_IN_PRIMARY ? "primary services" : "att timeout",
+                        att_status);
+                    return;
+                }
+                disc_drop_partial(l);
+                if (step == DISC_IN_CHR) {
+                    l->svc_i++;                        /* skip the whole service */
+                    l->chr_i = 0;
+                    l->svc_issued = l->svc_i;
+                } else {
+                    l->chr_i++;                        /* skip just this one */
+                }
+                discover_next(l);
+                return;
+            }
+            l->disc_inflight = DISC_IN_NONE;
             if (!l->db.ready) {
                 discover_next(l);
             }
@@ -442,7 +614,82 @@ static void start_discovery(le_link_t *l) {
     gattdb_reset(&l->db, l->con_handle);
     l->svc_i = 0;
     l->chr_i = 0;
-    gatt_client_discover_primary_services(gatt_handler, l->con_handle);
+    l->svc_issued = 0;
+    l->disc_err = 0;
+    l->disc_inflight = DISC_IN_PRIMARY;
+    l->disc_deadline_ms = now_ms() + DISC_TIMEOUT_MS;
+
+    /* Guarded like the value operations are (see le_read/le_write), because
+     * this is called straight out of le_on_connected and that handle's client
+     * is not necessarily ready yet. Refusal is an ordinary outcome, not an
+     * error: the tick re-issues it. */
+    if (!gatt_client_is_ready(l->con_handle) ||
+        gatt_client_discover_primary_services(gatt_handler, l->con_handle)
+            != ERROR_CODE_SUCCESS) {
+        l->disc_stage = DISC_PRIMARY;
+        return;
+    }
+    /* IDLE means "nothing to re-issue": from here the packet handler drives
+     * the cascade. Only a REFUSAL arms a retry stage -- setting one here would
+     * have the tick call discover_next behind the callbacks' backs and walk
+     * the cursor twice. */
+    l->disc_stage = DISC_IDLE;
+}
+
+static void discovery_tick(void) {
+    /* Re-issue any discovery step that was refused, and fail loudly if a
+     * cascade stops progressing. Both halves matter: without the retry a
+     * second link never finishes discovering, and without the deadline a
+     * cascade that cannot proceed hangs silently until a script gives up. */
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        le_link_t *l = &links[i];
+        if (!l->active || l->db.ready) { continue; }
+        if (!l->disc_deadline_ms) { continue; }
+
+        if ((int32_t)(now_ms() - l->disc_deadline_ms) >= 0) {
+            discovery_failed(l,
+                             l->disc_stage == DISC_SECURITY ? "pairing timeout"
+                                                            : "stalled",
+                             l->disc_err);
+            continue;
+        }
+        /* DISC_SECURITY is waiting on pairing, not on the client being free:
+         * re-issuing would just earn the same refusal. le_on_link_secured
+         * moves it on, and the deadline above still applies if that never
+         * comes. */
+        if (l->disc_stage == DISC_IDLE || l->disc_stage == DISC_SECURITY ||
+            !gatt_client_is_ready(l->con_handle)) {
+            continue;
+        }
+        if (l->disc_stage == DISC_PRIMARY) {
+            l->disc_inflight = DISC_IN_PRIMARY;
+            if (gatt_client_discover_primary_services(gatt_handler, l->con_handle)
+                    == ERROR_CODE_SUCCESS) {
+                l->disc_stage = DISC_IDLE;   /* callbacks take it from here */
+            }
+        } else {
+            /* DISC_NEXT with a pending retry: discover_next re-arms the stage
+             * itself if it is refused again. */
+            l->disc_stage = DISC_IDLE;
+            discover_next(l);
+        }
+    }
+}
+
+/* Called from bond.c when pairing finishes, either way. This is the signal
+ * the parked cascade waits for: without it a peripheral that refuses
+ * discovery until the link is encrypted is discovered exactly never. */
+void le_on_link_secured(uint16_t con_handle, bool ok) {
+    le_link_t *l = link_by_handle(con_handle);
+    if (!l || l->disc_stage != DISC_SECURITY) { return; }
+    if (!ok) {
+        discovery_failed(l, "pairing failed", l->disc_err);
+        return;
+    }
+    /* Re-issue the step the peripheral refused. disc_drop_partial already
+     * rewound the cursor to it, so DISC_NEXT resumes exactly there -- unless
+     * it was the service list, which has to start over. */
+    l->disc_stage = (l->db.n_svc == 0) ? DISC_PRIMARY : DISC_NEXT;
 }
 
 /* Called from bt.c's HCI handler. */
@@ -486,6 +733,18 @@ void le_on_disconnected(uint16_t con_handle) {
         d->con_handle = 0;
         memcpy(addr, d->addr, BT_ADDR_LEN);
     }
+#if CONFIG_LUA_ENABLE
+    /* Drop anything still queued for this device. Without it a reconnect to
+     * the same address is handed frames from the previous connection, which a
+     * profile has no way to tell apart from fresh ones. (A generation counter
+     * is the fuller answer; this closes the common case now.) */
+    {
+        char a[18];
+        snprintf(a, sizeof a, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+        le_notify_flush(a);
+    }
+#endif
     emit_device_event("dev.disconnected", addr);
 }
 

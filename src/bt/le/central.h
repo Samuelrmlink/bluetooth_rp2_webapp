@@ -40,6 +40,11 @@ void le_central_tick(void);
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
 void le_on_disconnected(uint16_t con_handle);
 
+/* Called from bond.c when pairing on a link finishes (ok = success). A
+ * cascade parked by an ATT security refusal resumes here; nothing else did,
+ * which is why such a peripheral was never discovered at all. */
+void le_on_link_secured(uint16_t con_handle, bool ok);
+
 
 
 /* Value operations. svc_i is accepted for symmetry and future Classic

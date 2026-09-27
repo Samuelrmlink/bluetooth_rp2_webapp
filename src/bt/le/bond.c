@@ -3,6 +3,7 @@
 
 #include "btstack.h"
 #include "bt/le/bond.h"
+#include "bt/le/central.h"
 #include "bt/registry.h"
 #include "api/api.h"
 
@@ -90,6 +91,8 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
         case SM_EVENT_PAIRING_COMPLETE: {
             h = sm_event_pairing_complete_get_handle(pkt);
             uint8_t status = sm_event_pairing_complete_get_status(pkt);
+            /* Discovery may be parked waiting for exactly this. */
+            le_on_link_secured(h, status == ERROR_CODE_SUCCESS);
             if (status == ERROR_CODE_SUCCESS) {
                 emit_sec("security.bonded", h, NULL);
                 printf("bt: bonded\n");
