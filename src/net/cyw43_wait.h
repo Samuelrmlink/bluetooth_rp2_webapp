@@ -10,7 +10,10 @@
  * than a few milliseconds means the radio stopped answering an ioctl, which
  * is the shape of the failure that took USB and WiFi down together. See
  * cyw43_wait.c. */
-uint32_t cyw43_wait_max_us(void);
+uint32_t cyw43_wait_max_us(void);        /* longest single REAL wait */
+uint32_t cyw43_wait_max_at_ms(void);     /* when, ms since boot */
+uint32_t cyw43_wait_max_asked_us(void);  /* the timeout it was given */
+uint32_t cyw43_wait_usb_max_us(void);    /* longest tud_task() from inside */
 uint64_t cyw43_wait_total_us(void);
 uint32_t cyw43_wait_calls(void);
 void     cyw43_wait_reset_stats(void);

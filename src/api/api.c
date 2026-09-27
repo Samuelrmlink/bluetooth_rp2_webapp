@@ -214,7 +214,8 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
              "\"watchdog_reboot\":%s,\"radio_wait_max_us\":%lu,"
-             "\"radio_wait_total_ms\":%lu,"
+             "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
+             "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
@@ -225,6 +226,9 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
               * wait of more than a few ms means the radio stopped answering,
               * which is the shape of that failure. */
              (unsigned long)cyw43_wait_max_us(),
+             (unsigned long)cyw43_wait_max_at_ms(),
+             (unsigned long)cyw43_wait_max_asked_us(),
+             (unsigned long)cyw43_wait_usb_max_us(),
              (unsigned long)(cyw43_wait_total_us() / 1000u),
 #if CONFIG_BT_CLASSIC
              ",\"classic\"",

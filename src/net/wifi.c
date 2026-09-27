@@ -413,7 +413,9 @@ static void go_off(void) {
     if (scanning) { scanning = false; }
     pending_scan = pending_join = pending_ap = false;
     if (state == ST_UP) { mdns_remove_netif(sta_netif()); }
+    printf("wifi: off: disable_sta_mode begin @%lu ms\n", (unsigned long)now_ms());
     cyw43_arch_disable_sta_mode();
+    printf("wifi: off: disable_sta_mode end   @%lu ms\n", (unsigned long)now_ms());
     strcpy(ip_str, "0.0.0.0");
     cur_ssid[0] = 0;
     last_error[0] = 0;
@@ -434,7 +436,9 @@ void wifi_apply_mode(void) {
      * go_off() handed it to Bluetooth and nothing else turns it on again.
      * A scan issued against a disabled station finds nothing, so the machine
      * sat at "idle 0.0.0.0" forever and off became a one-way door. */
+    printf("wifi: on: enable_sta_mode begin @%lu ms\n", (unsigned long)now_ms());
     cyw43_arch_enable_sta_mode();
+    printf("wifi: on: enable_sta_mode end   @%lu ms\n", (unsigned long)now_ms());
     apply_radio_power();
 
     if (strcmp(cfg_mode(), "ap") == 0) {

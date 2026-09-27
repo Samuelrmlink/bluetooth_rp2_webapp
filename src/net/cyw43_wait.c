@@ -45,6 +45,7 @@
  */
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "pico/time.h"
 #include "hardware/exception.h"
@@ -54,41 +55,63 @@
 
 void __real_cyw43_await_background_or_timeout_us(uint32_t timeout_us);
 
-static uint32_t wait_max_us;
+/* Two clocks, kept apart on purpose. The first version of this file timed
+ * tud_task() and the real wait together, so a 2.75 s reading could have been
+ * either -- and they mean opposite things. USB time is our own doing; radio
+ * time is the driver waiting on the chip. */
+static uint32_t wait_max_us;          /* longest single REAL wait */
+static uint32_t wait_max_at_ms;       /* when it happened, ms since boot */
+static uint32_t wait_max_asked_us;    /* the timeout that wait was given */
+static uint32_t usb_max_us;           /* longest tud_task() from in here */
 static uint64_t wait_total_us;
 static uint32_t wait_calls;
 static bool     in_wrap;
 
+/* A wait that overruns its own deadline by this much is reported at once,
+ * because the deadline is 1 ms and the one seen was 2.75 s: that is not a
+ * slow radio, it is the wake-up mechanism failing to wake us. */
+#define WAIT_REPORT_US 20000u
+
 void __wrap_cyw43_await_background_or_timeout_us(uint32_t timeout_us) {
-    /* In an exception the real function takes a different path and tud_task()
-     * must not run at all. Re-entry would mean the driver called itself
-     * through us, which it should not, but guard rather than assume. */
     if (__get_current_exception() || in_wrap) {
         __real_cyw43_await_background_or_timeout_us(timeout_us);
         return;
     }
-
     in_wrap = true;
-    absolute_time_t start = get_absolute_time();
 
-    /* Answer the host BEFORE blocking, so a long wait starts with USB
-     * already serviced rather than already overdue. */
+    absolute_time_t t0 = get_absolute_time();
     tud_task();
+    absolute_time_t t1 = get_absolute_time();
     __real_cyw43_await_background_or_timeout_us(timeout_us);
+    absolute_time_t t2 = get_absolute_time();
 
-    uint32_t us = (uint32_t)absolute_time_diff_us(start, get_absolute_time());
-    if (us > wait_max_us) { wait_max_us = us; }
-    wait_total_us += us;
+    uint32_t usb_us  = (uint32_t)absolute_time_diff_us(t0, t1);
+    uint32_t wait_us = (uint32_t)absolute_time_diff_us(t1, t2);
+    if (usb_us > usb_max_us) { usb_max_us = usb_us; }
+    if (wait_us > wait_max_us) {
+        wait_max_us       = wait_us;
+        wait_max_at_ms    = to_ms_since_boot(t1);
+        wait_max_asked_us = timeout_us;
+    }
+    if (wait_us >= WAIT_REPORT_US && wait_us > timeout_us * 4u) {
+        printf("cyw43: radio wait OVERRAN -- asked %lu us, took %lu us, at %lu ms\n",
+               (unsigned long)timeout_us, (unsigned long)wait_us,
+               (unsigned long)to_ms_since_boot(t1));
+    }
+    wait_total_us += wait_us;
     wait_calls++;
     in_wrap = false;
 }
 
-uint32_t cyw43_wait_max_us(void)    { return wait_max_us; }
-uint64_t cyw43_wait_total_us(void)  { return wait_total_us; }
-uint32_t cyw43_wait_calls(void)     { return wait_calls; }
+uint32_t cyw43_wait_max_us(void)        { return wait_max_us; }
+uint32_t cyw43_wait_max_at_ms(void)     { return wait_max_at_ms; }
+uint32_t cyw43_wait_max_asked_us(void)  { return wait_max_asked_us; }
+uint32_t cyw43_wait_usb_max_us(void)    { return usb_max_us; }
+uint64_t cyw43_wait_total_us(void)      { return wait_total_us; }
+uint32_t cyw43_wait_calls(void)         { return wait_calls; }
 
 void cyw43_wait_reset_stats(void) {
-    wait_max_us = 0;
+    wait_max_us = wait_max_at_ms = wait_max_asked_us = usb_max_us = 0;
     wait_total_us = 0;
     wait_calls = 0;
 }
