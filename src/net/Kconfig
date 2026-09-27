@@ -44,7 +44,11 @@ config NET_MDNS
 
 config NET_HOSTNAME
     string "mDNS / DHCP hostname"
-    default "btgw"
+    default "bluetooth-rp2-webapp"
+    help
+      The project name, spelled as a DNS label: a hostname may contain only
+      letters, digits and hyphens, so the underscores in "bluetooth_rp2_webapp"
+      become hyphens. Reachable as <name>.local once mDNS is up.
 
 config LWIP_MEM_SIZE_KB
     int "lwIP heap (KB)"

@@ -23,6 +23,7 @@
 #include "api/ops.h"
 #include "bt/registry.h"
 #include "fs/fs.h"
+#include "net/mdns.h"
 #include "pico/time.h"
 #include "autoconf.h"
 
@@ -838,6 +839,112 @@ static int l_bt_notify_flush(lua_State *L) {
 
 #endif
 
+
+/* --- mdns ----------------------------------------------------------------
+ * The device's name and what it advertises are deployment facts, not
+ * firmware facts, so they are set from Lua rather than compiled in. lwIP
+ * emits the records; these choose what goes in them.
+ *
+ *   mdns.hostname()            -> "bluetooth-rp2-webapp"
+ *   mdns.hostname('lab-gw')    -> true            (A, and every SRV target)
+ *   mdns.service{ type = '_http', port = 80,      (PTR + SRV + TXT)
+ *                 txt = { 'path=/', 'role=gw' } }
+ *   mdns.remove('_http')
+ *   mdns.list()                -> { hostname=..., services={...} }
+ */
+static int l_mdns_hostname(lua_State *L) {
+    if (lua_isnoneornil(L, 1)) {
+        lua_pushstring(L, mdns_hostname());
+        return 1;
+    }
+    const char *name = luaL_checkstring(L, 1);
+    if (!mdns_set_hostname(name)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "a hostname may contain only letters, digits and hyphens");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_mdns_service(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    lua_getfield(L, 1, "type");
+    const char *type = luaL_optstring(L, -1, NULL);
+    if (!type) { return luaL_error(L, "mdns.service needs a type, e.g. '_http'"); }
+    char type_buf[24];
+    snprintf(type_buf, sizeof type_buf, "%s", type);
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "instance");
+    const char *inst = luaL_optstring(L, -1, NULL);
+    char inst_buf[48];
+    inst_buf[0] = 0;
+    if (inst) { snprintf(inst_buf, sizeof inst_buf, "%s", inst); }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "port");
+    lua_Integer port = luaL_optinteger(L, -1, 0);
+    lua_pop(L, 1);
+    if (port <= 0 || port > 65535) { return luaL_error(L, "mdns.service needs a port"); }
+
+    lua_getfield(L, 1, "proto");
+    const char *proto = luaL_optstring(L, -1, "tcp");
+    bool udp = strcmp(proto, "udp") == 0;
+    lua_pop(L, 1);
+
+    /* Copied out of Lua before the call: lwIP asks for the TXT items later,
+     * at announce time, long after this stack is gone. */
+    char txt[MDNS_TXT_MAX][MDNS_TXT_LEN + 1];
+    const char *txtp[MDNS_TXT_MAX];
+    int n_txt = 0;
+    lua_getfield(L, 1, "txt");
+    if (lua_istable(L, -1)) {
+        lua_Integer n = (lua_Integer)lua_rawlen(L, -1);
+        for (lua_Integer i = 1; i <= n && n_txt < MDNS_TXT_MAX; i++) {
+            lua_rawgeti(L, -1, i);
+            const char *item = lua_tostring(L, -1);
+            if (item && item[0]) {
+                snprintf(txt[n_txt], sizeof txt[n_txt], "%s", item);
+                txtp[n_txt] = txt[n_txt];
+                n_txt++;
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    if (!mdns_service_add(inst_buf[0] ? inst_buf : NULL, type_buf, udp,
+                          (uint16_t)port, txtp, n_txt)) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "no free service slot, or a bad type");
+        return 2;
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_mdns_remove(lua_State *L) {
+    const char *type = luaL_checkstring(L, 1);
+    const char *proto = luaL_optstring(L, 2, "tcp");
+    lua_pushboolean(L, mdns_service_remove(type, strcmp(proto, "udp") == 0));
+    return 1;
+}
+
+static int l_mdns_announce(lua_State *L) {
+    (void)L;
+    mdns_announce_all();
+    return 0;
+}
+
+static int l_mdns_list(lua_State *L) {
+    static char js[512];
+    size_t n = mdns_status_json(js, sizeof js);
+    lua_pushlstring(L, js, n);
+    return 1;
+}
+
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
     /* Not luaL_newlib: its size hint is sizeof(l)/sizeof(l[0]), which on a
      * POINTER argument computes 8/32 - 1 = -1 rather than the entry count.
@@ -849,6 +956,12 @@ static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
 
 void lbind_open_all(lua_State *L) {
     gL = L;
+
+    static const luaL_Reg mdns_fns[] = {
+        { "hostname", l_mdns_hostname }, { "service", l_mdns_service },
+        { "remove", l_mdns_remove }, { "announce", l_mdns_announce },
+        { "list", l_mdns_list }, { NULL, NULL } };
+    set_table(L, "mdns", mdns_fns);
 
     static const luaL_Reg bus[] = { { "emit", l_bus_emit }, { NULL, NULL } };
     set_table(L, "bus", bus);

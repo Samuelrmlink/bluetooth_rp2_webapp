@@ -68,6 +68,18 @@ int main(void) {
 #endif
     }
 
+#if CONFIG_NET_MDNS
+    /* BEFORE any interface is brought up.
+     *
+     * usb_ncm_init() and wifi register their netifs with mdns_add_netif() as
+     * they come up, and mdns_start() calls mdns_resp_init() and clears the
+     * table of bound interfaces. Running it afterwards therefore threw away
+     * the registration that had just been made -- the responder answered
+     * nothing at all, on an interface it believed it had never been given.
+     * lwIP is up as soon as cyw43_arch_init() has run, which is above. */
+    mdns_start();
+#endif
+
 #if CONFIG_NET_USB_NCM
     /* Explicit, because pico_stdio_usb is off: nothing else brings TinyUSB up,
      * and without this the host sees the pull-up but every control transfer
@@ -76,9 +88,6 @@ int main(void) {
     tud_init(0);
     usb_ncm_init();
     printf("ncm: device %d.%d.%d.%d\n", USB_IP0, USB_IP1, USB_IP2, USB_IP3);
-#endif
-#if CONFIG_NET_MDNS
-    mdns_start();
 #endif
 
     http_server_start();
