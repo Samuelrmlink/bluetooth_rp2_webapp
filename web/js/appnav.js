@@ -15,6 +15,7 @@ export const APPS = [
   { path: '/anker/',   id: 'anker',    title: 'Anker',    hint: 'A2687 telemetry' },
   { path: '/pinecil/', id: 'pinecil',  title: 'Pinecil',  hint: 'soldering iron' },
   { path: '/hw/',      id: 'hw',       title: 'Hardware', hint: 'pins, ADC, I2C' },
+  { path: '/wifi/',    id: 'wifi',     title: 'WiFi',     hint: 'scan, join, saved networks' },
   { path: '/script/',  id: 'script',   title: 'Script',   hint: 'edit Lua on the device' },
 ];
 

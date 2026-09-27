@@ -124,7 +124,7 @@ if(CONFIG_LUA_ENABLE)
 endif()
 
 if(CONFIG_NET_WIFI)
-    target_sources(btgw PRIVATE src/net/wifi.c)
+    target_sources(btgw PRIVATE src/net/wifi.c src/net/wifi_ops.c)
 endif()
 if(CONFIG_NET_USB_NCM)
     target_sources(btgw PRIVATE src/net/usb_ncm.c src/net/dhcpserver.c src/usb/usb_descriptors.c)

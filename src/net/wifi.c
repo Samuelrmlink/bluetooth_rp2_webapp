@@ -34,6 +34,9 @@
 #include "lwip/ip4_addr.h"
 #include "net/mdns.h"
 #include "dhcpserver.h"
+#if CONFIG_NET_USB_NCM
+#include "usb_ncm.h"
+#endif
 #include "config/config.h"
 
 /* 192.168.4.1 is the convention the reference uses and what most phones
@@ -159,6 +162,26 @@ static void stop_ap(void) {
     dhcp_server_deinit(&ap_dhcp);
     cyw43_arch_disable_ap_mode();
     printf("wifi: AP down\n");
+}
+
+/*
+ * Is there already a way to reach this device?
+ *
+ * The SoftAP exists so a device with no other route can still be configured.
+ * When USB-NCM is up there IS another route, and the AP is not free: it wants
+ * DHCP on port 67, which NCM already serves, and bringing it up over a live
+ * NCM link killed that link outright -- measured, reproducibly, about 42
+ * seconds after every boot. Trading a working path for a worse one is not a
+ * fallback, so "auto" now only falls back when there is nothing to fall back
+ * from. An explicit mode of "ap" still starts it unconditionally.
+ */
+static bool have_other_route(void) {
+#if CONFIG_NET_USB_NCM
+    struct netif *n = usb_ncm_netif();
+    return n && netif_is_up(n) && netif_is_link_up(n);
+#else
+    return false;
+#endif
 }
 
 static void start_ap(void) {
@@ -369,6 +392,31 @@ void wifi_poll(void) {
         return;
     }
     if (pending_join) {
+        /* NOT while a scan is in flight.
+         *
+         * begin_join issues a burst of ioctls and the driver cannot service
+         * them on top of an active scan: the ioctl times out
+         * ("[CYW43] do_ioctl(2, 263, 27): timeout"), the call does not
+         * return, and because poll mode's wait is a bare sleep_until() --
+         * it does NOT service the async context -- the main loop is stuck
+         * with it. tud_task() then stops being pumped and the host drops
+         * USB-NCM, so the device goes off the network entirely and does not
+         * come back without a reset.
+         *
+         * ST_IDLE rescans continuously, so a scan is nearly always in
+         * flight when someone presses Join. This is the common case, not a
+         * race. Let the scan finish and take the join on a later pass. */
+        if (scanning) {
+            if (!cyw43_wifi_scan_active(&cyw43_state)) {
+                scanning = false;
+                scan_done = true;
+            } else if (timed_out(now, scan_start, WIFI_SCAN_MS)) {
+                scanning = false;
+                scan_done = true;
+                snprintf(last_error, sizeof(last_error), "scan timed out");
+            }
+            return;
+        }
         pending_join = false;
         const cfg_net_t *k = cfg_net_find(pending_ssid);
         begin_join(pending_ssid, k ? k->psk : NULL);
@@ -406,9 +454,14 @@ void wifi_poll(void) {
             if (k) {
                 begin_join(k->ssid, k->psk);
             } else if (strcmp(cfg_mode(), "auto") == 0 &&
-                       timed_out(now, boot_start, WIFI_BOOT_MS)) {
+                       timed_out(now, boot_start, WIFI_BOOT_MS) &&
+                       !have_other_route()) {
                 /* Nothing we know is on the air and the budget is spent. An
-                 * AP you can reach beats a station that never arrives. */
+                 * AP you can reach beats a station that never arrives --
+                 * UNLESS there is already a way in, which have_other_route()
+                 * decides. See its comment: starting the AP over a live
+                 * USB-NCM link took the working path away and offered a
+                 * worse one in exchange. */
                 pending_ap = true;
             } else {
                 pending_scan = true;

@@ -230,6 +230,20 @@ void dhcp_server_init(dhcp_server_t *d, struct netif *nif, const ip_addr_t *ip, 
     ip_set_option(d->udp, SOF_BROADCAST);
     ip_set_option(d->udp, SOF_REUSEADDR);
     err_t err = udp_bind(d->udp, IP4_ADDR_ANY, PORT_DHCP_SERVER);
+    if (err != ERR_OK) {
+        /* Port 67 is already served -- USB-NCM takes it at boot, and the
+         * SoftAP then asks for it too. SOF_REUSEADDR does not make lwIP share
+         * a port between two pcbs, so the second bind fails with ERR_USE.
+         *
+         * Registering a receive callback on an UNBOUND pcb anyway is what the
+         * code used to do, and that is not a harmless no-op: it leaves a live
+         * pcb in lwIP's chain with local_port 0. Fail loudly and free it. */
+        printf("dhcp: :67 already served; not starting a second server "
+               "for %s (err %d)\n", ip4addr_ntoa(ip_2_ip4(ip)), (int)err);
+        udp_remove(d->udp);
+        d->udp = NULL;
+        return;
+    }
     if (nif) {
         udp_bind_netif(d->udp, nif);
     }

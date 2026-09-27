@@ -92,7 +92,17 @@ int main(void) {
         usb_ncm_recover_tick();
 #endif
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
+#if CONFIG_NET_WIFI
+        /* wifi_poll() makes that same call and THEN advances the station/AP
+         * state machine. Calling only cyw43_arch_poll() here left the machine
+         * frozen: the radio came up, reported mode "idle" and "0 known
+         * network(s)", and then never scanned, never joined and never started
+         * the fallback AP -- for the whole life of the firmware. Nothing
+         * complained, because every individual piece was working. */
+        wifi_poll();
+#else
         cyw43_arch_poll();
+#endif
 
 #if CONFIG_BT_LE
         le_central_tick();

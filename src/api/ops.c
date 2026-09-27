@@ -20,6 +20,9 @@ extern const op_module_t op_module_lua;
 #if CONFIG_IO_PINS
 extern const op_module_t op_module_io;
 #endif
+#if CONFIG_NET_WIFI
+extern const op_module_t op_module_wifi;
+#endif
 
 static const op_module_t *const modules[] = {
     &op_module_sys,
@@ -31,6 +34,9 @@ static const op_module_t *const modules[] = {
 #endif
 #if CONFIG_IO_PINS
     &op_module_io,
+#endif
+#if CONFIG_NET_WIFI
+    &op_module_wifi,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

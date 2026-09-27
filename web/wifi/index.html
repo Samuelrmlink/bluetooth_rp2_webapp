@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WiFi</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<header id="bar">
+  <span id="brand">WiFi</span>
+  <nav id="appnav"></nav>
+  <span id="link" class="pill" data-state="down">connecting…</span>
+  <span id="fw" class="muted"></span>
+  <span class="spacer"></span>
+</header>
+
+<main id="solo">
+  <section class="pane pane-wifi solo" id="pane-wifi">
+    <div class="pane-tools">
+      <span id="w-state" class="pill" data-state="none">unknown</span>
+      <span id="w-ident" class="muted"></span>
+      <span class="spacer"></span>
+      <label>mode
+        <select id="w-mode">
+          <option value="auto">auto</option>
+          <option value="sta">sta</option>
+          <option value="ap">ap</option>
+          <option value="off">off</option>
+        </select>
+      </label>
+      <button class="btn" id="w-scan">Scan</button>
+    </div>
+
+    <div class="scroll">
+      <div id="w-error" class="muted" hidden></div>
+
+      <div class="kvbox">
+        <div class="sub-head">this device</div>
+        <div id="w-grid"></div>
+      </div>
+
+      <div class="kvbox">
+        <div class="sub-head">
+          in range <span id="w-scanning" class="muted"></span>
+        </div>
+        <div id="w-aps"></div>
+      </div>
+
+      <div class="kvbox">
+        <div class="sub-head">saved</div>
+        <div id="w-saved"></div>
+      </div>
+
+      <div class="kvbox">
+        <div class="sub-head">join a network</div>
+        <div class="pane-tools">
+          <label>ssid <input id="w-ssid" type="text" size="18" autocomplete="off"></label>
+          <label>password <input id="w-psk" type="password" size="18" autocomplete="off"></label>
+          <button class="btn" id="w-join">Join</button>
+        </div>
+        <div id="w-join-note" class="muted"></div>
+      </div>
+
+      <div class="kvbox">
+        <div class="sub-head">fallback access point</div>
+        <div class="pane-tools">
+          <label>ssid <input id="w-ap-ssid" type="text" size="18" autocomplete="off"></label>
+          <label>password <input id="w-ap-psk" type="text" size="18" autocomplete="off"></label>
+          <button class="btn" id="w-ap-save">Save</button>
+        </div>
+        <div id="w-ap-note" class="muted"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/js/wifi-app.js"></script>
+</body>
+</html>
