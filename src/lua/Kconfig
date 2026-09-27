@@ -11,7 +11,7 @@ config LUA_ENABLE
 config LUA_HEAP_KB
     int "Lua arena (KB)"
     depends on LUA_ENABLE
-    default 128
+    default 160
     help
       A dedicated static arena, not the system heap, so a runaway script hits
       its own ceiling with an ordinary Lua out-of-memory error instead of
@@ -24,10 +24,21 @@ config LUA_HEAP_KB
       failed with "not enough memory" the moment any other script was also
       loaded -- which is the normal state of a board being worked on.
 
-      The cost is bss, which this part has to spare. If a future profile
-      approaches this again, the answer is to split it into modules rather
-      than to keep raising the ceiling: peak cost tracks the size of the
-      largest single chunk being compiled, not the total.
+      The cost is bss, which this part has to spare.
+
+      Raised again to 160 for the advertisement-driven Anker stack, and this
+      time the earlier advice -- split it into modules rather than raise the
+      ceiling -- had already been taken and was not enough. That stack loads
+      one module per stage and unloads each before the next compiles, so the
+      COMPILE peak is well under control. What is left is steady residency:
+      the driver, the link, the schema decoder and one per-model table come
+      to about 74 KB live while streaming.
+
+      The failure at 128 KB was not exhaustion but FRAGMENTATION -- roughly
+      56 KB free and still no block large enough, after a report that builds
+      ~68 TLV item tables every few seconds. Live heap was flat across polls,
+      which is how you tell the two apart. A first-fit arena cannot do much
+      about that except have room to breathe.
 
 config LUA_HOOK_BUDGET
     int "Instructions per scheduler slice before a script is forced to yield"

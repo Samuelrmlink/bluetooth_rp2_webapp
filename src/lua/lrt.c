@@ -346,19 +346,35 @@ static int l_require(lua_State *Ls) {
         return luaL_error(Ls, "module '%s': %s", name, lua_tostring(Ls, -1));
     }
 
-    /* Run it in the CALLER's environment so a module sees the same bindings
-     * and the same sandbox as the script that asked for it. */
+    /*
+     * Run it in the CALLER's environment so a module sees the same bindings
+     * and the same sandbox as the script that asked for it.
+     *
+     * Find the upvalue actually NAMED "_ENV" rather than assuming it is
+     * upvalue 1. It is upvalue 1 only for a MAIN CHUNK; an ordinary function
+     * captures whatever it references, in reference order, and _ENV lands
+     * wherever it lands. Every require in this codebase used to sit at the
+     * top level of a script or a module, where the assumption held -- the
+     * first require from inside a function handed the new module a captured
+     * local as its environment, and it died on the first global it touched
+     * with "attempt to index a function value (upvalue '_ENV')".
+     */
     lua_Debug ar;
+    bool have_env = false;
     if (lua_getstack(Ls, 1, &ar) && lua_getinfo(Ls, "f", &ar)) {
-        if (lua_getupvalue(Ls, -1, 1)) {        /* pushes the caller's _ENV */
-            lua_remove(Ls, -2);                 /* drop the caller function */
-        } else {
-            lua_pop(Ls, 1);
-            lua_pushglobaltable(Ls);
+        for (int i = 1; ; i++) {
+            const char *upname = lua_getupvalue(Ls, -1, i);
+            if (!upname) { break; }
+            if (strcmp(upname, "_ENV") == 0) {
+                lua_remove(Ls, -2);             /* drop the caller function */
+                have_env = true;
+                break;
+            }
+            lua_pop(Ls, 1);                     /* not this one */
         }
-    } else {
-        lua_pushglobaltable(Ls);
+        if (!have_env) { lua_pop(Ls, 1); }      /* drop the caller function */
     }
+    if (!have_env) { lua_pushglobaltable(Ls); }
     lua_setupvalue(Ls, -2, 1);                  /* chunk's _ENV := that env */
 
     lua_call(Ls, 0, 1);

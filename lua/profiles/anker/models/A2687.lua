@@ -1,23 +1,20 @@
 --[[
-The telemetry field dictionary.
+Anker Prime 160W 3-Port GaN Charger -- productType B405, SCP family.
 
-Split from the profile for the arena reason in cipher.lua, and it is the
-natural seam anyway: this is 24 tags whose meanings were recovered
-empirically and which will keep moving, sitting on top of a TLV codec that
-has been stable across three implementations.
+Field map recovered empirically (live dumps plus toggle correlation); the
+decoders below are carried over verbatim from the profile that was verified
+against this charger on the bench, because retyping a dozen struct decoders
+is exactly how a transcription error gets in.
 
-0x0300 (report) and 0x0a00 (response) carry the identical payload; only the
-leading status byte differs, and that is stripped by the caller before the
-body reaches here.
+SCP devices differ from the power stations in kind, not degree: instead of
+aggregate per-group output tags they carry structured per-port objects, so
+several fields decode to tables rather than numbers. That is why a field's
+reader may be a function here and a type name in A1761.lua.
+
+Telemetry arrives unsolicited as 0x0300 at about 1 Hz once authenticated;
+0x0a00 is the polled response and carries the identical tag set.
 ]]
 
-local T = {}
-
--- ---------------------------------------------------------------------------
--- Telemetry. 0x0300 (report, no status byte -- trap 3) and 0x0a00 (response,
--- status byte) carry the identical 24-tag set. Recovered empirically, so this
--- is the table most likely to keep moving, which is exactly why it is in Lua.
--- ---------------------------------------------------------------------------
 local function u16(s, i) return s:byte(i) | (s:byte(i + 1) << 8) end
 local function u32(s, i)
   return s:byte(i) | (s:byte(i+1) << 8) | (s:byte(i+2) << 16) | (s:byte(i+3) << 24)
@@ -83,7 +80,7 @@ local function lookup(tbl)
   end
 end
 
-T.FIELDS = {
+local FIELDS = {
   a2 = { 'package_version', num },          -- u16, 1606 <-> v1.6.0.6
   a3 = { 'support_function', num },         -- u16 capability bitmap
   a4 = { 'error_code', num },               -- u8, 0 = OK
@@ -170,30 +167,24 @@ T.FIELDS = {
          end },
 }
 
--- a1 is a selector echo (always 0x31) and fe is the anti-replay stamp, zero in
--- device->app frames. Neither is a data field, so neither is in FIELDS.
-function T.decode_report(body)
-  local t = tlv.parse(body, false)
-  local out = {}
-  if t.truncated then
-    log.warn('a2687: telemetry had more items than the parser holds')
-    out.truncated = true
-  end
-  for i = 1, t.n do
-    local it = t[i]
-    local spec = T.FIELDS[it.hex]
-    if spec then
-      -- One bad field must not cost the whole report: a firmware revision
-      -- that widens a struct would otherwise blank the telemetry pane.
-      local ok, v = pcall(spec[2], it)
-      if ok then
-        out[spec[1]] = v
-      else
-        log.warn(('a2687: tag %s did not decode: %s'):format(it.hex, tostring(v)))
-      end
-    end
-  end
-  return out
-end
+return {
+  product_code = 'A2687',
+  name         = 'Anker Prime 160W 3-Port GaN Charger (smart display)',
+  family       = 'scp',
+  verified     = true,       -- decoded against this charger on the bench
 
-return T
+  -- Needs the post-auth burst before it will say anything: bindUser and
+  -- setPortTimers are what flip its state machine into reporting. The power
+  -- stations neither need nor implement those opcodes.
+  post_auth = true,
+
+  -- It pushes; there is nothing to poll.
+  report = 0x0300,
+  also   = { [0x0a00] = true },
+
+  -- a1 is a selector echo (always 0x31); fe is the anti-replay stamp and is
+  -- zero in device->app frames. Neither is a data field.
+  ignore = { a1 = true, fe = true },
+
+  fields = FIELDS,
+}
