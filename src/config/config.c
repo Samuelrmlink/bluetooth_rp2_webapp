@@ -131,7 +131,11 @@ static bool valid_ssid(const char *s) {
 }
 
 static bool valid_mode(const char *m) {
-    return m && (strcmp(m, "auto") == 0 || strcmp(m, "sta") == 0 || strcmp(m, "ap") == 0);
+    /* "off" was advertised by wifi.mode's own error message and by the UI but
+     * was rejected here and handled nowhere, so the one mode that frees the
+     * shared radio for Bluetooth did not exist. */
+    return m && (strcmp(m, "auto") == 0 || strcmp(m, "sta") == 0 ||
+                 strcmp(m, "ap") == 0   || strcmp(m, "off") == 0);
 }
 
 static bool valid_psk(const char *s) {

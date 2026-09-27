@@ -400,7 +400,43 @@ bool wifi_init(void) {
     return true;
 }
 
+/* Put the WiFi side of the radio down and leave it down.
+ *
+ * This exists because the CYW43439 carries WiFi and Bluetooth on one
+ * interface: with WiFi associated or scanning there are windows where a BLE
+ * operation has to wait, and until now there was no way to give the radio
+ * back short of forgetting the network or rebooting. "off" was named in
+ * wifi.mode's own error message and in the UI the whole time, and did
+ * nothing. */
+static void go_off(void) {
+    stop_ap();
+    if (scanning) { scanning = false; }
+    pending_scan = pending_join = pending_ap = false;
+    if (state == ST_UP) { mdns_remove_netif(sta_netif()); }
+    cyw43_arch_disable_sta_mode();
+    strcpy(ip_str, "0.0.0.0");
+    cur_ssid[0] = 0;
+    last_error[0] = 0;
+    down_since = 0;
+    state = ST_IDLE;
+    printf("wifi: off -- the radio is Bluetooth's now\n");
+}
+
+bool wifi_is_off(void) { return strcmp(cfg_mode(), "off") == 0; }
+
 void wifi_apply_mode(void) {
+    if (wifi_is_off()) {
+        go_off();
+        return;
+    }
+
+    /* Coming back from "off", the station interface is still disabled --
+     * go_off() handed it to Bluetooth and nothing else turns it on again.
+     * A scan issued against a disabled station finds nothing, so the machine
+     * sat at "idle 0.0.0.0" forever and off became a one-way door. */
+    cyw43_arch_enable_sta_mode();
+    apply_radio_power();
+
     if (strcmp(cfg_mode(), "ap") == 0) {
         pending_ap = true;
     } else {
@@ -459,6 +495,12 @@ void wifi_poll(void) {
     /* Drives the cyw43 async context, which also runs lwIP's timers in poll
      * mode — this stands in for sys_check_timeouts(). */
     cyw43_arch_poll();
+
+    /* Mode "off" still polls the context above -- lwIP's timers and the
+     * Bluetooth side both ride on it -- but the station/AP machine below
+     * must not run, or the idle rescan would put the radio straight back on
+     * the air and undo the whole point. */
+    if (wifi_is_off()) { return; }
 
     uint32_t now = now_ms();
 

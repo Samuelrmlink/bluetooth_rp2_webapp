@@ -56,4 +56,9 @@ bool wifi_connect(const char *ssid, const char *psk);
  * changing the mode or the AP credentials. */
 void wifi_apply_mode(void);
 
+/* True in mode "off": the WiFi side of the shared radio is down on purpose,
+ * so the CYW43439 is Bluetooth's alone. The station/AP state machine must not
+ * run in this mode -- its idle rescan would put the radio back on the air. */
+bool wifi_is_off(void);
+
 #endif /* KM003C_NET_WIFI_H */
