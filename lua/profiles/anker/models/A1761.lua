@@ -40,10 +40,27 @@ field by field against hardware; only the values named above are corroborated
 by the device itself. Do not promote the flag without changing a setting on the
 device and watching the matching tag move.
 
-Known gap: d9 (lcdLight, "Screen Brightness") reads 128 here, but the app only
-understands 1=Low, 2=Mid, 3=High and silently displays "Mid" for anything else.
-128 = 0x80 looks like a raw backlight PWM value or a sentinel. Changing the
-brightness in the app and re-reading d9 would settle it.
+THE PORT LAYOUT IS FAMILY-SPECIFIC, and this bit off a first attempt. The
+A1781 family parses the SAME tag range into a DIFFERENT set of fields -- its a9
+is pd3OutputPower and its ad is car2OutputPower. The C1000 is A1753 family, so
+the layout below follows A1771DeviceCommands.parseWorkInfo
+(a1771_device_commands.dart:2017), whose field offsets run 0x1e7, 0x1eb, then
+skip to 0x1f3: two USB-C ports, then four USB-A slots, then one car port. Do
+NOT copy this table to another product code without re-deriving it from that
+product's own *_device_commands.dart.
+
+Known gaps, deliberately not papered over:
+  * a1 is genuinely unknown. No handler in the A1753/A1771/A1781 path reads
+    tag "a1" for this opcode, so it is in `ignore` rather than named.
+  * d9 (lcdLight, "Screen Brightness") reads 128 here, but the app understands
+    only 1=Low, 2=Mid, 3=High and silently shows "Mid" for anything else.
+    0x80 looks like a raw backlight PWM value or a flag bit. Changing the
+    brightness in the app and re-reading d9 would settle it.
+  * d5/d6 are byte arrays, not scalars -- charge limit and discharge limit
+    packed together -- so they are kept raw rather than decoded to a number.
+  * ab/ac (usb3/usb4) and ca/cb are named from the A1771 sibling, which really
+    does render four USB-A tiles. A C1000 has two, so they read 0 forever and
+    cannot be confirmed on this hardware.
 ]]
 return {
   product_code = 'A1761',
@@ -64,19 +81,19 @@ return {
     -- Countdown timers and BMS uptime ---------------------------------------
     a2 = { 'ac_countdown_s',        'u32' },
     a3 = { 'car_countdown_s',       'u32' },
-    a4 = { 'bms_last_time',         'u32' },   -- was wrongly "wifi_rssi"
+    a4 = { 'remaining_time_h',      'u32', 0.1 },  -- bmsLastTime; was "wifi_rssi"
 
-    -- Power flow. Note the real port grouping: three PD (USB-C), two USB-A,
-    -- two car/DC. The old table invented a different set of totals.
+    -- Power flow. A1753-family port grouping: two USB-C (PD), four USB-A
+    -- slots (a C1000 populates two), one car/DC port, then the totals.
     a5 = { 'ac_input_power_w',      'u16' },
     a6 = { 'ac_output_power_w',     'u16' },
     a7 = { 'pd1_output_power_w',    'u16' },
     a8 = { 'pd2_output_power_w',    'u16' },
-    a9 = { 'pd3_output_power_w',    'u16' },
-    aa = { 'usb1_output_power_w',   'u16' },
-    ab = { 'usb2_output_power_w',   'u16' },   -- was wrongly "battery_pct"
-    ac = { 'car1_output_power_w',   'u16' },
-    ad = { 'car2_output_power_w',   'u16' },   -- was wrongly "battery_voltage"
+    a9 = { 'usb1_output_power_w',   'u16' },
+    aa = { 'usb2_output_power_w',   'u16' },
+    ab = { 'usb3_output_power_w',   'u16' },   -- was wrongly "battery_pct"
+    ac = { 'usb4_output_power_w',   'u16' },
+    ad = { 'car1_output_power_w',   'u16' },   -- was wrongly "battery_voltage"
     ae = { 'solar_input_power_w',   'u16' },
     af = { 'total_input_power_w',   'u16' },
     b0 = { 'total_output_power_w',  'u16' },
@@ -96,7 +113,8 @@ return {
 
     -- Working state ---------------------------------------------------------
     bb = { 'ac_output_state',       'u16' },
-    bc = { 'ac_dc_work_state',      'u16' },
+    bc = { 'ac_dc_work_state',      'u16' },   -- 0 idle 1 discharge 2 charge
+                                               -- 3 sleep 4 shutdown
     bd = { 'bms_temp_major_c',      'u8'  },   -- was wrongly "current_hour"
     be = { 'bms_temp_minor_c',      'u8'  },
     bf = { 'bms_state_major',       'u8'  },
@@ -108,13 +126,13 @@ return {
     c5 = { 'bms_connect_state',     'u8'  },
     c6 = { 'pd1_work_state',        'u8'  },
     c7 = { 'pd2_work_state',        'u8'  },
-    c8 = { 'pd3_work_state',        'u8'  },
-    c9 = { 'usb1_work_state',       'u8'  },
-    ca = { 'usb2_work_state',       'u8'  },
-    cb = { 'car1_work_state',       'u8'  },
-    cc = { 'car2_work_state',       'u8'  },
+    c8 = { 'usb1_work_state',       'u8'  },
+    c9 = { 'usb2_work_state',       'u8'  },
+    ca = { 'usb3_work_state',       'u8'  },
+    cb = { 'usb4_work_state',       'u8'  },
+    cc = { 'car1_work_state',       'u8'  },
     cd = { 'ac_insert_switch',      'u8'  },
-    ce = { 'temp_warning_state',    'u8'  },   -- 0 normal, 1 high, 2 low
+    ce = { 'device_error_code',     'u8'  },   -- also the temp-warning state
     cf = { 'overload_state',        'u8'  },
 
     -- Settings. This run IS the settings struct, and the setter opcodes
@@ -134,7 +152,7 @@ return {
     dc = { 'ambient_light',         'u8'  },   -- 0 off,1 low,2 med,3 high,4 SOS
     dd = { 'temp_unit',             'u8'  },   -- 0 = Celsius, 1 = Fahrenheit
     de = { 'screen_enabled',        'u8'  },
-    e3 = { 'is_upgrading',          'u8'  },
+    e3 = { 'is_ota',                'u8'  },
     e5 = { 'ultra_fast_charging',   'u8'  },
 
     -- Trailer ---------------------------------------------------------------
