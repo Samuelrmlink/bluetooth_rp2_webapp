@@ -20,6 +20,16 @@ local function eq(name, got, want)
   end
 end
 
+local function check(name, cond)
+  checks = checks + 1
+  if not cond then
+    fails = fails + 1
+    print(('FAIL %s\n       condition was false'):format(name))
+  else
+    print('OK   ' .. name)
+  end
+end
+
 local function hex(s) return bytes.hex(s) end
 local function le32(v)
   return string.char(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff)
@@ -190,6 +200,65 @@ eq('matches() survives no mfg data at all', a.matches({}), false)
 local v1 = a.decode_adv('ffff017ce913601fd800b405444a5704')
 eq('adv v1 sku is 3 chars', v1 and v1.sku, 'DJW')
 eq('adv v1 unbound', v1 and v1.bound, false)
+
+-- ---------------------------------------------------------------------------
+-- C1000 (A1761) 0x0840 DeviceAllBaseInfo
+--
+-- A REAL decrypted status body, captured from the unit on the bench after the
+-- ecdh-legacy session was established. Frozen here so the field map can be
+-- corrected without a charger in the room, and so the two mistakes that made
+-- it through hardware testing cannot come back:
+--
+--   1. parsing a report with the NEGOTIATION dialect, which shifts every
+--      scalar by one byte and turns min_soc 60 into 15361 -- a plausible
+--      number, which is the dangerous kind of wrong;
+--   2. reading a field's width from the map instead of from the bytes.
+-- ---------------------------------------------------------------------------
+local C1000_STATUS = table.concat{
+  'a10131a2050300000000a3050300000000a40302c30da503020000a603020000a703020000a803020000a903020000aa',
+  '03020000ab03020000ac03020000ad03020000ae03020000af03020000b003020000b103020000b203020100b30302a6',
+  '00b403020000b503027300b603027300b703020000b803029a00b903020000ba0302a600bb03020100bc020100bd0201',
+  '29be020100bf020100c0020100c1020164c2020100c3020163c4020100c5020100c6020100c7020100c8020100c90201',
+  '00ca020100cb020100cc020101cd020100ce020100cf020100d0110041504335595830443433323030313138d1030258',
+  '02d20302d002d303020807d403023c00d503020000d603020000d7020101d8020101d9020180da02013cdb020100dc02',
+  '0100dd020101de020100e3020100e5020100f7050301000000f815040201010100010000000000000000000000000000',
+  'f9020101fd0b0041313736315f33304168',
+}
+
+do
+  local T = mod('c1000_telemetry')
+  local body = bytes.unhex(C1000_STATUS)
+  check('c1000 status body is 353 bytes', #body == 353)
+
+  local t = assert(T.decode(body, true))
+  check('c1000 tlv count', t.tlv_count == 68)
+
+  -- Anchored to values readable off the unit itself, not to the reference
+  -- table: these are the ones we can be sure of.
+  eq('c1000 model_name',   t.model_name,   'A1761_30Ah')
+  eq('c1000 serial',       t.serial_number, 'APC5YX0D43200118')
+
+  -- Values that agree with the reference capture in the protocol notes.
+  eq('c1000 min_soc_pct',           t.min_soc_pct, 60)
+  eq('c1000 max_discharge_soc_pct', t.max_discharge_soc_pct, 99)
+  eq('c1000 max_charge_soc_pct',    t.max_charge_soc_pct, 100)
+  eq('c1000 battery_health_pct',    t.battery_health_pct, 115)
+  eq('c1000 hw_version',            t.hw_version, 1)
+  eq('c1000 idle_timeout_min',      t.idle_timeout_min, 60)
+  eq('c1000 max_ac_input_w',        t.max_ac_input_w, 720)
+  eq('c1000 ac_enabled',            t.ac_enabled, 1)
+  eq('c1000 dc_enabled',            t.dc_enabled, 1)
+  eq('c1000 error_code',            t.error_code, 0)
+
+  -- The regression this locks: with the negotiation dialect these read 15361,
+  -- 25345 and 257 respectively. All three look like real numbers.
+  check('c1000 u8 fields are not byte-shifted',
+        t.min_soc_pct < 256 and t.max_discharge_soc_pct < 256 and t.ac_enabled < 256)
+
+  -- Unknown tags are passed through rather than dropped: this firmware emits
+  -- tags the reference table does not have, and they are what to identify next.
+  check('c1000 unknown tags are reported', t.unknown ~= nil and t.unknown.f8 ~= nil)
+end
 
 -- ---------------------------------------------------------------------------
 print(('\n%d checks, %d failed'):format(checks, fails))
