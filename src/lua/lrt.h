@@ -1,6 +1,11 @@
 #ifndef BTGW_LRT_H
 #define BTGW_LRT_H
 
+/* Before anything that tests a CONFIG_ symbol: this header is included by
+ * translation units that pull in autoconf.h only later, and a guard evaluated
+ * with the symbol undefined silently drops the declarations behind it. */
+#include "autoconf.h"
+
 #include "lua/lwait.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -83,6 +88,16 @@ size_t lrt_stats_json(char *dst, size_t cap);
  *     return lua_yieldk(L, 0, 0, k);                   // k reads lrt_wake_reason()
  */
 int            lrt_current_slot(void);
+
+#if CONFIG_BT_LE
+/* Record/forget a BLE link against the script that is running right now, so
+ * teardown() can drop it. A script is the only thing that can open a link --
+ * the JSON API has no connect op -- so if a dying script does not release
+ * them, nothing does, and an orphaned link keeps le_radio_busy() true, which
+ * makes the one-radio guard refuse every WiFi join until a reboot. */
+void lrt_note_link(const uint8_t *addr);
+void lrt_forget_link(const uint8_t *addr);
+#endif
 lwait_reason_t lrt_block_current(uint32_t token, uint8_t link, uint32_t timeout_ms);
 lwait_reason_t lrt_wake_reason(void);
 

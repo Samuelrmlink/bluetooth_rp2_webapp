@@ -476,7 +476,50 @@ static int l_bt_connect(lua_State *L) {
     if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
     bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
     if (!d) { lua_pushboolean(L, 0); lua_pushstring(L, "not in the scan table"); return 2; }
-    lua_pushboolean(L, le_connect(d->addr, d->addr_type));
+    bool ok = le_connect(d->addr, d->addr_type);
+    /* Remember who opened it. A script that dies without releasing its links
+     * leaves them up forever, and an orphaned link keeps le_radio_busy()
+     * true, which makes the one-radio guard refuse every WiFi join. */
+    if (ok) { lrt_note_link(d->addr); }
+    lua_pushboolean(L, ok);
+    return 1;
+}
+
+/* bt.scan(on [, duration_ms]) -> bool
+ *
+ * A profile could read bt.devices() but could not make the radio LOOK, which
+ * is a trap rather than a limitation: the scan table is whatever was last
+ * seen, so a profile whose discovery loop polls bt.devices() spins forever,
+ * silently, whenever nothing else happens to be scanning. That is exactly
+ * what happened after a scan.stop -- the Anker profile sat at "looking for an
+ * Anker device" with both chargers advertising a metre away.
+ *
+ * Defaults to an active scan with no duration: passive scanning misses the
+ * SCAN_RSP that usually carries the name, and a profile wants the scan to
+ * last as long as its search does. */
+static int l_bt_scan(lua_State *L) {
+    bool on = lua_isnoneornil(L, 1) ? true : lua_toboolean(L, 1);
+    if (!on) { le_scan_stop(); lua_pushboolean(L, 1); return 1; }
+    /* Idempotent on purpose. A discovery loop calls this every pass, and
+     * le_scan_start() issues gap_start_scan() unconditionally -- restarting
+     * the scan twice a second would keep tearing down the very window in
+     * which a peer's advertisement arrives. */
+    if (le_scanning()) { lua_pushboolean(L, 1); return 1; }
+    uint32_t ms = (uint32_t)luaL_optinteger(L, 2, 0);
+    le_scan_filter_t f = { .active = true };
+    lua_pushboolean(L, le_scan_start(&f, ms));
+    return 1;
+}
+
+/* The counterpart, which did not exist: a script could open a link but had no
+ * way to close one. Teardown drops whatever is left, but a profile that is
+ * finished with a device should be able to say so while still running. */
+static int l_bt_disconnect(lua_State *L) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
+    bool ok = le_disconnect(a);
+    lrt_forget_link(a);
+    lua_pushboolean(L, ok);
     return 1;
 }
 
@@ -958,6 +1001,7 @@ void lbind_open_all(lua_State *L) {
 
     static const luaL_Reg bt[] = {
         { "devices", l_bt_devices }, { "connect", l_bt_connect },
+        { "disconnect", l_bt_disconnect }, { "scan", l_bt_scan },
         { "write", l_bt_write }, { "subscribe", l_bt_subscribe },
         { "find", l_bt_find },
         { "read", l_bt_read },

@@ -70,6 +70,15 @@ function R.run(target_override)
                        or 'anker: looking for an Anker device')
   local addr, a
   repeat
+    -- Make the radio actually look. bt.devices() is the scan TABLE, not a
+    -- scan: it returns whatever was last seen, so polling it without
+    -- scanning spins here forever and says nothing. That is not
+    -- hypothetical -- this loop sat at "looking for an Anker device" with
+    -- both chargers advertising a metre away, because an earlier scan.stop
+    -- had left the radio idle. Asking every pass is harmless: bt.scan()
+    -- returns immediately when a scan is already running, rather than
+    -- restarting one and losing the window an advertisement arrives in.
+    bt.scan(true)
     for _, d in ipairs(bt.devices()) do
       if not addr then
         local got = adv.identify(d)
@@ -78,6 +87,11 @@ function R.run(target_override)
     end
     if not addr then sys.sleep(500) end
   until addr
+
+  -- Stop scanning before connecting. The radio is shared with WiFi and with
+  -- the other launcher, and a scan left running is the thing that makes
+  -- le_radio_busy() true for no reason.
+  bt.scan(false)
 
   log.info(('anker: %s is productType %s, sku %s, v%d, %s, capability 0x%02x (%s)')
            :format(addr, a.product_type, tostring(a.sku), a.version,

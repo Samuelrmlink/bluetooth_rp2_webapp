@@ -14,6 +14,10 @@
 #include "autoconf.h"
 #include "pico/time.h"
 
+#if CONFIG_BT_LE
+#include "bt/le/central.h"
+#endif
+
 #include "lua/lheap.h"
 #include "lua/lwait.h"
 
@@ -69,6 +73,17 @@ typedef struct {
     uint32_t forced_yields; /* consecutive hook-forced yields; reset by a real one */
     char  *draft;        /* NULL unless a RAM draft exists */
     size_t draft_len;
+#if CONFIG_BT_LE
+    /* Links this script opened, so teardown can drop them.
+     *
+     * Without this a script that dies -- and "not enough memory" kills one
+     * readily -- leaves its BLE connection up with nothing to close it. That
+     * is not merely untidy: le_radio_busy() counts any active link, so the
+     * one-radio guard then refuses EVERY WiFi join, permanently, and the only
+     * way out is a reboot. Two dead scripts did exactly that. */
+    uint8_t owned[CONFIG_BT_MAX_LINKS][6];
+    uint8_t n_owned;
+#endif
 } script_t;
 
 static lua_State *L;
@@ -115,6 +130,34 @@ static script_t *alloc_script(const char *name) {
 static int s_current_slot = -1;
 
 int lrt_current_slot(void) { return s_current_slot; }
+
+#if CONFIG_BT_LE
+/* Record/forget a link against the script that opened it. Called from the
+ * bt.connect and bt.disconnect bindings, which are the only way a link is
+ * ever opened -- the JSON API has no connect op. */
+void lrt_note_link(const uint8_t *addr) {
+    if (s_current_slot < 0 || s_current_slot >= MAX_SCRIPTS) { return; }
+    script_t *s = &scripts[s_current_slot];
+    for (int i = 0; i < s->n_owned; i++) {
+        if (memcmp(s->owned[i], addr, 6) == 0) { return; }
+    }
+    if (s->n_owned >= CONFIG_BT_MAX_LINKS) { return; }
+    memcpy(s->owned[s->n_owned++], addr, 6);
+}
+
+void lrt_forget_link(const uint8_t *addr) {
+    if (s_current_slot < 0 || s_current_slot >= MAX_SCRIPTS) { return; }
+    script_t *s = &scripts[s_current_slot];
+    for (int i = 0; i < s->n_owned; i++) {
+        if (memcmp(s->owned[i], addr, 6) == 0) {
+            /* Order does not matter, so fill the hole from the end. */
+            memcpy(s->owned[i], s->owned[s->n_owned - 1], 6);
+            s->n_owned--;
+            return;
+        }
+    }
+}
+#endif
 
 lwait_reason_t lrt_block_current(uint32_t token, uint8_t link, uint32_t timeout_ms) {
     if (s_current_slot < 0) { return LWAIT_CANCELLED; }
@@ -422,6 +465,25 @@ static void flush_modules(void) {
  * script stops for ANY reason -- a clean exit, an error, a stop, a reload or
  * a lost link -- because all five leave the same modules resident otherwise.
  */
+#if CONFIG_BT_LE
+/* Drop the BLE links a script opened.
+ *
+ * Called from teardown() AND from both paths where a script dies on its own
+ * -- a runaway killed by the instruction hook, and a coroutine that ended
+ * with an error. Those two do not go through teardown(), which is why an
+ * out-of-memory death used to leave its connection up with nothing to close
+ * it: le_radio_busy() then stayed true and the one-radio guard refused every
+ * WiFi join until the board was rebooted. */
+static void drop_links(script_t *s) {
+    for (int i = 0; i < s->n_owned; i++) {
+        le_disconnect(s->owned[i]);
+    }
+    s->n_owned = 0;
+}
+#else
+#define drop_links(s) ((void)0)
+#endif
+
 static void release_modules(int slot) {
     if (slot < 0 || slot >= MAX_SCRIPTS) { return; }
     uint32_t bit = 1u << slot;
@@ -549,6 +611,10 @@ bool lrt_start(const char *name, const char **err) {
 static void teardown(script_t *s) {
     /* Anything this script was the last user of goes with it. */
     release_modules((int)(s - scripts));
+
+    /* Including its BLE links: a script is the only thing that can open one,
+     * so if it is going away and nothing closes them, nothing ever will. */
+    drop_links(s);
 
     /* Release the wait BEFORE the coroutine goes: a script stopped while
      * blocked must not leave a waiter pointing at a slot that is about to be
@@ -789,6 +855,7 @@ void lrt_tick(void) {
                     s->dead = true;
                     s_hook_kills++;
                     release_modules(i);
+                    drop_links(s);
                     snprintf(s->err, sizeof(s->err),
                              "killed: %lu consecutive slices without yielding "
                              "(add a sys.sleep, or yield)",
@@ -811,6 +878,7 @@ void lrt_tick(void) {
          * dead profile's modules is what stops the next one loading. */
         s->running = false;
         release_modules(i);
+        drop_links(s);
         if (rc != LUA_OK) {
             s->dead = true;
             snprintf(s->err, sizeof(s->err), "%s",
