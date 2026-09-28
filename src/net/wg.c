@@ -75,6 +75,7 @@ void wireguard_random_bytes(void *bytes, size_t size) {
 #define WG_EPOCH_SHIFT 26
 
 static uint64_t tai64n_offset_s;
+static uint32_t wg_boot_count;   /* exposed in wg.status so the epoch can be checked without an SWD probe */
 
 static void wg_bump_epoch(void) {
     uint32_t count = 0;
@@ -95,6 +96,7 @@ static void wg_bump_epoch(void) {
          * be rejected for one window; the tunnel this boot still works. */
         printf("wg: could not persist boot counter (tai64n offset still applied)\n");
     }
+    wg_boot_count = count;
     tai64n_offset_s = (uint64_t)count << WG_EPOCH_SHIFT;
     printf("wg: boot #%lu, tai64n epoch offset %llu s\n",
            (unsigned long)count, (unsigned long long)tai64n_offset_s);
@@ -615,6 +617,7 @@ size_t wg_status_json(char *dst, size_t cap) {
         "\"rx_bytes\":%llu,\"tx_bytes\":%llu,"
         "\"peer_active\":%s,\"handshake_in_progress\":%s,\"session_valid\":%s,"
         "\"initiation_sent_ms_ago\":%ld,\"last_rx_ms_ago\":%ld,"
+        "\"boot_count\":%lu,\"tai64n_offset_s\":%llu,"
         "\"is_default_route\":%s}",
         cfg.present ? "true" : "false",
         (netif_added && netif_is_up(&wg_netif)) ? "true" : "false",
@@ -633,6 +636,13 @@ size_t wg_status_json(char *dst, size_t cap) {
         session_valid ? "true" : "false",
         last_init_tx ? (long)(now - last_init_tx) : -1L,
         last_rx ? (long)(now - last_rx) : -1L,
+        /* The persisted boot counter and the TAI64N epoch offset it produces.
+         * boot_count must INCREMENT across reboots (proof the counter file
+         * persists) and tai64n_offset_s must equal boot_count << 26. If the
+         * count is stuck or these read 0, the anti-lockout fix is not in
+         * force and WireGuard will be slow to re-handshake after a reboot. */
+        (unsigned long)wg_boot_count,
+        (unsigned long long)tai64n_offset_s,
         /* Reported so a monitor can assert it, not just trust the comment
          * in wg_up(). If this is ever true, something regressed badly. */
         (netif_added && netif_default == &wg_netif) ? "true" : "false");
