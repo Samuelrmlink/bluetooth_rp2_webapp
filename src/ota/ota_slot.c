@@ -9,6 +9,11 @@
 #include "hardware/watchdog.h"
 #include "hardware/flash.h"
 #include "pico/time.h"
+#include "pico/cyw43_arch.h"
+#include "autoconf.h"
+#if CONFIG_BT_LE
+#include "btstack.h"
+#endif
 #include "pico/platform.h"
 
 static ota_part_t slot[2];
@@ -271,15 +276,44 @@ int ota_slot_program_page(int which, uint32_t off, const uint8_t page[256]) {
     return fop(false, slot[which].start + off, page);
 }
 
+/*
+ * Quiesce the shared CYW43 radio before ANY reboot we issue.
+ *
+ * rom_reboot() and watchdog_reboot() are WARM resets: they reset the RP2350
+ * but NOT the external CYW43, which sits on the SPI/PIO bus with its own power
+ * domain. Rebooting while the chip is mid-transfer (or with its IRQ asserted)
+ * left it in a state the next cyw43_arch_init() could not recover -- the bus
+ * wedged so hard the core could not even be halted over SWD, and only a COLD
+ * power-cycle cleared it. The SDK's own OTA example deinits the radio right
+ * before its flash-update reboot for exactly this reason; we did not, and it
+ * bit intermittently on the update boot. Bring BT down, drop both interfaces,
+ * and deinit the driver (which resets/powers down the chip) so the next boot
+ * starts from a clean radio.
+ */
+static void reboot_quiesce(void) {
+#if CONFIG_BT_LE
+    hci_power_control(HCI_POWER_OFF);
+    for (int i = 0; i < 50 && hci_get_state() != HCI_STATE_OFF; i++) {
+        cyw43_arch_poll();
+        sleep_ms(2);
+    }
+#endif
+    cyw43_arch_disable_ap_mode();
+    cyw43_arch_disable_sta_mode();
+    cyw43_arch_deinit();
+    sleep_ms(20);
+}
+
 void ota_reboot(bool flash_update_other) {
     int me = ota_slot_active();
+    reboot_quiesce();
     if (flash_update_other && me >= 0) {
         uint32_t base = XIP_BASE + slot[me ^ 1].start;
         printf("ota: flash-update reboot into slot %c @%08lx\n", "AB"[me ^ 1], (unsigned long)base);
-        rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE, 100, base, 0);
+        rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE, 500, base, 0);
     } else {
         printf("ota: reboot\n");
-        watchdog_reboot(0, 0, 50);
+        watchdog_reboot(0, 0, 100);
     }
     for (;;) { __asm volatile("wfi"); }
 }
