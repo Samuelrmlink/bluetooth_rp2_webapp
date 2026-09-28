@@ -45,18 +45,74 @@ void wireguard_random_bytes(void *bytes, size_t size) {
 }
 
 /*
+ * A boot counter, persisted, turned into a TAI64N offset.
+ *
+ * See wireguard_tai64n_now() for why the timestamp must never go backwards
+ * for a given peer, and why a clockless device otherwise restarts it low on
+ * every boot -- locking itself out of the tunnel for as long as its PREVIOUS
+ * uptime, which is exactly what an OTA reboot of a long-running gateway
+ * triggers. The fix: each configured boot reads a counter from flash,
+ * increments it, and offsets the epoch by count << SHIFT, so a fresh boot
+ * always starts strictly above where any earlier boot could have reached.
+ *
+ * SHIFT = 26 gives each boot a 2^26 s (~2.1 year) window before its
+ * timestamps could overrun the next boot's start -- longer than any
+ * plausible continuous uptime -- and 2^(62-26) = ~68 billion boots before
+ * the seconds field is exhausted. A single boot that ran past 2.1 years, or
+ * a wiped filesystem resetting the counter, would cost one rejection window;
+ * both are self-healing and not worth more code.
+ *
+ * The counter is a 4-byte file, which LittleFS stores INLINE in a directory's
+ * metadata (cache_size 256 >= 4): no data block, so nothing to fragment, and
+ * each bump is a small metadata-log COMMIT (a page program), with a full
+ * sector erase only when the log compacts -- ~once per 50-100 boots, then
+ * wear-levelled by block_cycles. It lives in its OWN directory (var/), not
+ * cfg/, so that churn does not compact the config directory's metadata; and
+ * on the LittleFS partition, which is shared by both OTA slots, so it
+ * survives an update.
+ */
+#define WG_EPOCH_PATH  "var/wg_epoch.bin"
+#define WG_EPOCH_SHIFT 26
+
+static uint64_t tai64n_offset_s;
+
+static void wg_bump_epoch(void) {
+    uint32_t count = 0;
+    int h = fs_begin_read(WG_EPOCH_PATH, NULL);
+    if (h >= 0) {
+        uint8_t b[4];
+        if (fs_read(h, b, 4) == 4) {
+            count = (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+        }
+        fs_end_read(h);
+    }
+    count++;
+    uint8_t b[4] = { (uint8_t)count, (uint8_t)(count >> 8), (uint8_t)(count >> 16), (uint8_t)(count >> 24) };
+    if (fs_begin_write(WG_EPOCH_PATH) == 0 && fs_write(b, 4) == 0) {
+        fs_end_write();
+    } else {
+        /* A write failure only means the NEXT boot may reuse this count and
+         * be rejected for one window; the tunnel this boot still works. */
+        printf("wg: could not persist boot counter (tai64n offset still applied)\n");
+    }
+    tai64n_offset_s = (uint64_t)count << WG_EPOCH_SHIFT;
+    printf("wg: boot #%lu, tai64n epoch offset %llu s\n",
+           (unsigned long)count, (unsigned long long)tai64n_offset_s);
+}
+
+/*
  * TAI64N, used by the peer for handshake replay detection. It does not have
  * to be the real time -- it has to never go backwards for a given peer. We
- * have no RTC, so this is boot time plus an epoch: monotonic within a boot,
- * which is what replay detection needs. Across a REBOOT it restarts, and the
- * peer will reject initiations until our counter passes the old value; that
- * is a known limitation of a clockless device and is why the peer's
- * handshake may take a moment after a power cycle.
+ * have no RTC, so this is boot time plus an epoch. Within a boot it is
+ * monotonic, which is what replay detection needs; ACROSS a reboot the
+ * persisted boot counter (wg_bump_epoch) lifts the epoch so it stays
+ * monotonic there too, instead of restarting low and locking us out for the
+ * length of the previous uptime.
  */
 void wireguard_tai64n_now(uint8_t *output) {
     /* 2^62 + seconds since 1970, per the TAI64 label format. */
     uint64_t millis = (uint64_t)to_ms_since_boot(get_absolute_time());
-    uint64_t seconds = 0x400000000000000aULL + (millis / 1000u);
+    uint64_t seconds = 0x400000000000000aULL + tai64n_offset_s + (millis / 1000u);
     uint32_t nanos = (uint32_t)((millis % 1000u) * 1000000u);
     for (int i = 0; i < 8; i++) { output[i] = (uint8_t)(seconds >> (56 - 8 * i)); }
     for (int i = 0; i < 4; i++) { output[8 + i] = (uint8_t)(nanos >> (24 - 8 * i)); }
@@ -366,6 +422,7 @@ bool wg_init(void) {
         printf("wg: no %s, tunnel not configured\n", WG_CFG_PATH);
         return false;
     }
+    wg_bump_epoch();
     return wg_up();
 }
 
