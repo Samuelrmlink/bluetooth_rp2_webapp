@@ -179,25 +179,22 @@ int ota_buy(void) {
     watchdog_update();
     /* Runs the ROM against flash with XIP off for the duration; the same
      * guard fs.c uses for its writes. */
+    /* Time the interrupts-off blackout: it was never measured, and its length
+     * during the bring-up storm was the suspected radio-wedge trigger (now
+     * avoided by only buying on an operator confirm, when the radio is idle). */
+    uint64_t t0 = time_us_64();
     int fs = flash_safe_execute(do_buy, &rc, 2000);
+    uint32_t took_us = (uint32_t)(time_us_64() - t0);
     if (fs != PICO_OK) rc = fs;
     if (rc == 0) {
         bought = true;
         rom_get_boot_info(&boot);
-        /* A downgrade: the other slot still holds a HIGHER version, which the
-         * ROM would prefer on the next normal boot. Erase its first sector so
-         * the slot we just proved is the one that boots. (The ROM's own
-         * bookkeeping for this is what the wrapped pick function above
-         * stopped relying on.) */
-        int me = ota_slot_active();
-        uint16_t ma, mi, oa, oi;
-        if (me >= 0 && ota_slot_version(me, &ma, &mi) && ota_slot_version(me ^ 1, &oa, &oi) &&
-            ((oa << 16) | oi) > ((ma << 16) | mi)) {
-            printf("ota: other slot is v%u.%u > ours v%u.%u: erasing it after the buy\n", oa, oi, ma, mi);
-            ota_slot_erase_sector(me ^ 1, 0);
-        }
+        /* The ROM's explicit_buy already erases the other slot's first sector
+         * on a version downgrade (RP2350 datasheet 5.1.17), so we do NOT do it
+         * again here -- that was a redundant second flash blackout. */
     }
-    printf("ota: explicit_buy -> %d (tbyb now %02x)\n", rc, boot.tbyb_and_update_info);
+    printf("ota: explicit_buy -> %d in %lu us (tbyb now %02x)\n",
+           rc, (unsigned long)took_us, boot.tbyb_and_update_info);
     return rc;
 }
 

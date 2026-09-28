@@ -61,18 +61,32 @@ void ota_init(void) {
     printf("smp: listening on udp :%d (os, image, stat, fs)\n", SMP_PORT);
 }
 
-/* The boot-health gate for a try-before-you-buy image. The ROM's own
- * ~16.7 s watchdog is running from reset; our init takes ~2 s, so buying on
- * the 50th loop pass (a few hundred ms after the HTTP server is up) leaves
- * a wide margin and proves the loop runs. Waiting for a network condition
- * instead was rejected: a slow WireGuard re-handshake must not cost a slot. */
-static uint32_t passes;
-
+/*
+ * NO auto-buy. A try-before-you-buy image is committed ONLY by an explicit
+ * `image state-write --confirm` over MCUmgr (img_mgmt.c -> ota_buy()).
+ *
+ * Why not buy on a boot-health gate: the buy is an interrupts-off flash
+ * blackout of tens-to-hundreds of ms, and firing it a few hundred ms into
+ * the boot (WiFi join + BT enable + WireGuard handshake all in flight)
+ * intermittently desynced the shared CYW43 host interface and wedged the
+ * radio until a power-cycle. An operator-driven confirm moves the buy well
+ * clear of that storm AND only commits firmware the operator has verified is
+ * reachable. Holding "buy pending" open indefinitely is supported by the
+ * silicon: the ROM's 16.7 s TBYB deadline IS the watchdog, and main() already
+ * owns and feeds an 8 s watchdog every loop pass, so a healthy image runs
+ * pending until confirmed. A reboot before the confirm -- a hang that stops
+ * feeding the watchdog, a power-cycle, or any normal reboot -- reverts to the
+ * previous slot, which stays intact until the buy. (RP2350 datasheet 5.1.17.)
+ */
 void ota_tick(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (ota_buy_pending() && ++passes == 50) {
-        printf("ota: try-before-you-buy image is healthy, buying\n");
-        ota_buy();
+    static bool announced;
+    if (!announced && ota_buy_pending()) {
+        announced = true;
+        int me = ota_slot_active();
+        printf("ota: running a try-before-you-buy image (slot %c) -- awaiting "
+               "'image state-write --confirm'; any reboot before that reverts\n",
+               me < 0 ? '?' : (char)("AB"[me]));
     }
     if (req_pending) {
         size_t n = smp_process(req_buf, req_len, rsp_buf, sizeof rsp_buf);

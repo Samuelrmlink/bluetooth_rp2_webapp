@@ -156,17 +156,25 @@ smpmgr --ip $ADDR image state-write <hash-from-step-2>
 
 # 4. Reboot into it (a flash-update boot).
 smpmgr --ip $ADDR os reset
-```
 
-The device brings the new image up and, once it has started cleanly,
-**buys itself automatically** (a boot-health gate a few hundred ms into the
-loop). So after step 4, `ota.status` should show the new slot `active` with
-`bought:true`, and `image state-read` show it `confirmed`. A belt-and-braces
-explicit confirm is also honoured and is a no-op once bought:
-
-```sh
+# 5. Verify the new image is up and REACHABLE, then commit it:
 smpmgr --ip $ADDR image state-write --confirm
 ```
+
+The new image boots **try-before-you-buy and does NOT commit itself.** It runs
+"buy pending" indefinitely (it owns and feeds the watchdog), waiting for the
+explicit `--confirm` in step 5. This is deliberate: the commit (a brief
+interrupts-off flash write) is kept well clear of the boot-time radio storm,
+and — more importantly — an image is only made permanent once you have
+confirmed it is actually reachable. **Until you send step 5, any reboot
+(a hang, a power-cycle, or `os reset`) reverts to the previous slot**, which
+stays intact until the buy. So verify connectivity first (`ota.status`,
+`wg.status`, a ping), *then* confirm. After step 5, `ota.status` shows the new
+slot `bought:true` and `image state-read` shows it `confirmed`.
+
+If the update broke networking, you simply never send step 5: power-cycle and
+the device comes back on the old firmware. Recovering a wedged board still
+needs a power-cycle, but you never lose the known-good slot.
 
 Notes on the hash in step 3: use the hash `state-read` prints for the slot
 you just uploaded (it is the SHA-256 of the whole release file). The device
@@ -176,9 +184,10 @@ hashed `btgw.bin` alone works too. The signature is verified during
 signature never becomes bootable and step 3 refuses it with
 `HASH_NOT_FOUND`.
 
-`smpmgr … upgrade --format any <file>` bundles steps 1–4 into one command;
-the explicit sequence is documented here because it makes each stage
-(and any failure) visible, which is what you want the first few times.
+`smpmgr … upgrade --format any <file>` bundles the upload + test + reset, but
+it does NOT replace step 5: this firmware never auto-buys, so you still send
+`image state-write --confirm` yourself once you've verified the new image is
+reachable. The explicit sequence above is the one to use.
 
 ---
 
