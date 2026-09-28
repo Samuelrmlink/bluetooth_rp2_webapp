@@ -2,8 +2,8 @@
  * src/rp2_common/pico_standard_link/pico_flash_region.template.ld), which
  * normally sizes this region from PICO_FLASH_SIZE_BYTES (the board's true
  * 4MiB on a Pico 2 W). We deliberately shrink *only* what the linker is
- * allowed to place code/rodata/data in, to the first 2MiB — LittleFS owns
- * most of the rest and BTstack's NVM owns the last 16KiB (see src/fs/fs.h's
+ * allowed to place code/rodata/data in, to one A/B slot (864 KiB; see
+ * partitions.json) — LittleFS owns 0x200000 on and BTstack's NVM the last 16KiB (see src/fs/fs.h's
  * FS_FLASH_OFF/FS_SIZE/FS_BT_TAIL, which must match this file's LENGTH).
  *
  * PICO_FLASH_SIZE_BYTES itself is left untouched at the board's true
@@ -16,4 +16,4 @@
  * to link ("region FLASH overflowed") instead of silently overlapping
  * LittleFS once flashed.
  */
-FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 2 * 1024 * 1024
+FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 864 * 1024

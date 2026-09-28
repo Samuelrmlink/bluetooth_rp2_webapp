@@ -35,6 +35,9 @@
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
 #include "net/wg.h"
+#if CONFIG_OTA
+#include "ota/smp.h"
+#endif
 #endif
 #if CONFIG_BT_LE
 #include "bt/bt.h"
@@ -56,6 +59,18 @@ int main(void) {
     printf("\n--- bluetooth_rp2_webapp ---\n");
 
     boot_after_watchdog = watchdog_caused_reboot();
+
+    /* Armed BEFORE the radio and the filesystem, not after init. Init is ~2 s
+     * and nothing in it should wait: a cyw43_arch_init() that never returns
+     * (seen on a try-before-you-buy boot fed the wrong firmware partition)
+     * used to sit forever with the debugger attached, since the RP2350
+     * watchdog pauses while a core is halted only on faults -- and without a
+     * debugger only the ROM's own ~16.7 s TBYB timer saved the board. With
+     * this, a hung init reboots normally, and a TBYB image that has not been
+     * bought is not bootable on a normal boot, so the old slot comes back.
+     * The reset-on-watchdog flag is read above, before this re-arms it. */
+#define WATCHDOG_TIMEOUT_MS 8000
+    watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
     if (boot_after_watchdog) {
         printf("main: REBOOTED BY WATCHDOG -- the previous boot's loop stopped running\n");
     }
@@ -114,6 +129,11 @@ int main(void) {
 
     http_server_start();
     ops_init_all();
+#if CONFIG_OTA
+    /* After the network: the SMP socket serves every interface, and the
+     * try-before-you-buy gate inside ota_tick() counts loop passes from here. */
+    ota_init();
+#endif
     printf("http: listening on :80  (ws at /ws)\n");
 
     /* A pass longer than this means USB went unserviced long enough to
@@ -140,9 +160,7 @@ int main(void) {
      * halted under openocd from resetting itself mid-inspection -- without it
      * every attempt to examine a wedge destroys the evidence.
      */
-#define WATCHDOG_TIMEOUT_MS 8000
-    watchdog_enable(WATCHDOG_TIMEOUT_MS, true);
-    printf("main: watchdog armed at %d ms\n", WATCHDOG_TIMEOUT_MS);
+    printf("main: init done, watchdog at %d ms since before the radio\n", WATCHDOG_TIMEOUT_MS);
 
     while (true) {
         watchdog_update();
@@ -172,6 +190,9 @@ int main(void) {
 #endif
 #if CONFIG_NET_WIREGUARD
         wg_tick();
+#endif
+#if CONFIG_OTA
+        ota_tick();
 #endif
         cfg_tick();
         /* Coalesce whatever the pass produced into as few segments as possible;

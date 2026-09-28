@@ -6,3 +6,8 @@ _deps/
 node_modules/
 staged/
 web-dist/
+keys/
+*.pem
+
+tools/__pycache__/
+__pycache__/

@@ -41,6 +41,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_LIST_DIR}/src/bt/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/lua/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/io/Kconfig
+    ${CMAKE_CURRENT_LIST_DIR}/src/ota/Kconfig
     ${APP_DEFCONFIG})
 
 pico_sdk_init()
@@ -173,6 +174,60 @@ if(CONFIG_NET_USB_NCM)
     target_sources(btgw PRIVATE src/net/usb_ncm.c src/net/dhcpserver.c src/usb/usb_descriptors.c)
     target_link_libraries(btgw tinyusb_device tinyusb_board)
 endif()
+if(CONFIG_OTA)
+    # OTA: A/B firmware slots picked by the RP2350 boot ROM, driven over
+    # MCUmgr/SMP on UDP 1337. See src/ota/ and partitions.json.
+    target_sources(btgw PRIVATE
+        src/ota/cbor.c src/ota/smp.c src/ota/smp_udp.c src/ota/ota_slot.c
+        src/ota/img_mgmt.c src/ota/os_mgmt.c src/ota/fs_mgmt.c src/ota/stat_mgmt.c
+        src/ota/crc32.c src/ota/ota_ops.c)
+    if(NOT CONFIG_PROTO_ANKER_CRYPTO)
+        target_sources(btgw PRIVATE src/crypto/sha256.c)
+    endif()
+    # micro-ecc for the signature check. pico_btstack_ble carries it already;
+    # without BLE it is compiled in here.
+    target_include_directories(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc)
+    if(NOT CONFIG_BT_LE)
+        target_sources(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc/uECC.c)
+    endif()
+    target_link_libraries(btgw pico_flash)
+    # See __wrap_rom_pick_ab_partition_during_update in src/ota/ota_slot.c: the
+    # SDK's version reads ROM work-area offsets that do not hold on this
+    # silicon, and the CYW43 driver's firmware-partition lookup goes through it.
+    target_link_options(btgw PRIVATE -Wl,--wrap=rom_pick_ab_partition_during_update)
+    # BTstack's micro-ecc compiles ECDSA (uECC_verify) only behind this.
+    # (both spellings: uECC.c:528 guards vli_numBits behind a typo.)
+    target_compile_definitions(btgw PRIVATE ENABLE_MICRO_ECC_ECDSA=1 ENABLE_MICO_ECC_ECDSA=1)
+
+    # The WiFi blob lives in its own partition (id 0x776966696669726d), never
+    # OTA'd; this also builds btgw_wifi_firmware.uf2 to provision it once.
+    pico_use_wifi_firmware_partition(btgw NO_EMBEDDED_PT)
+
+    # Version: the ROM picks the A/B slot with the higher VERSION item, so
+    # every OTA build must carry a larger one. MINOR is the commit count
+    # unless overridden (cmake -DBTGW_VERSION_MINOR=n) for uncommitted work.
+    set(BTGW_VERSION_MAJOR 1)
+    if(NOT BTGW_VERSION_MINOR)
+        execute_process(COMMAND git rev-list --count HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+            OUTPUT_VARIABLE BTGW_VERSION_MINOR OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(NOT BTGW_VERSION_MINOR)
+            set(BTGW_VERSION_MINOR 0)
+        endif()
+    endif()
+    message(STATUS "btgw image version ${BTGW_VERSION_MAJOR}.${BTGW_VERSION_MINOR}")
+    pico_set_binary_version(btgw MAJOR ${BTGW_VERSION_MAJOR} MINOR ${BTGW_VERSION_MINOR})
+    pico_hash_binary(btgw)
+    # Try-before-you-buy: the image boots ONLY via a flash-update reboot and
+    # reverts unless bought (ota_tick). OFF for the first image provisioned
+    # over SWD, which the ROM boots normally.
+    option(BTGW_TBYB "Build a try-before-you-buy image (OTA releases)" ON)
+    if(BTGW_TBYB)
+        target_compile_definitions(btgw PRIVATE PICO_CRT0_IMAGE_TYPE_TBYB=1)
+    endif()
+    target_compile_definitions(btgw PRIVATE BTGW_VERSION_STR=\"${BTGW_VERSION_MAJOR}.${BTGW_VERSION_MINOR}\")
+endif()
+
 if(CONFIG_NET_MDNS)
     target_sources(btgw PRIVATE src/net/mdns.c)
     target_link_libraries(btgw pico_lwip_mdns)
@@ -193,8 +248,8 @@ pico_enable_stdio_rtt(btgw 1)
 pico_enable_stdio_uart(btgw 0)
 pico_enable_stdio_usb(btgw 0)
 
-# Caps FLASH at 2 MiB so the firmware can never silently grow over the
-# filesystem. NOT pico_override_flash_size(), which also redefines
+# Caps FLASH at one A/B slot (864 KiB, partitions.json) so the firmware can
+# never silently grow over the other slot or the filesystem. NOT pico_override_flash_size(), which also redefines
 # PICO_FLASH_SIZE_BYTES and would then stop hardware_flash writing past it.
 pico_add_linker_script_override_path(btgw ${CMAKE_CURRENT_LIST_DIR}/linker
     FILES pico_flash_region.ld)

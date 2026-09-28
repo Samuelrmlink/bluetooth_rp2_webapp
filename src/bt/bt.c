@@ -35,6 +35,7 @@ static bool s_ready;
  * advertising report, which IS handled, so this stays quiet in normal use. */
 static bool s_trace_unhandled = true;
 static uint32_t s_unhandled_count;
+uint32_t bt_unhandled_count(void) { return s_unhandled_count; }
 
 /* Events some part of this firmware acts on. Listed explicitly rather than
  * inferred, so adding a handler without adding it here shows up as noise and

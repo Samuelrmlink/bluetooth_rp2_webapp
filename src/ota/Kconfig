@@ -1,0 +1,16 @@
+menu "OTA updates"
+
+config OTA
+    bool "MCUmgr/SMP server and A/B firmware slots (RP2350 boot ROM)"
+    default n
+    help
+      Firmware updates over UDP port 1337 with the MCUmgr protocol (smpmgr,
+      mcumgr-client, nRF Connect Device Manager). Images land in the other
+      of two boot-ROM A/B partitions, are checked against the ECDSA public
+      key in src/ota/ota_pubkey.h, and boot try-before-you-buy: the ROM
+      reverts to the old slot unless the new firmware buys itself after a
+      healthy start. Also exposes the os, stat and fs groups. Requires the
+      partition table in partitions.json to be provisioned once (tools/
+      provision.sh).
+
+endmenu

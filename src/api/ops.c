@@ -26,6 +26,9 @@ extern const op_module_t op_module_wifi;
 #if CONFIG_NET_WIREGUARD
 extern const op_module_t op_module_wg;
 #endif
+#if CONFIG_OTA
+extern const op_module_t op_module_ota;
+#endif
 
 static const op_module_t *const modules[] = {
     &op_module_sys,
@@ -43,6 +46,9 @@ static const op_module_t *const modules[] = {
 #endif
 #if CONFIG_NET_WIREGUARD
     &op_module_wg,
+#endif
+#if CONFIG_OTA
+    &op_module_ota,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

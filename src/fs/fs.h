@@ -22,6 +22,15 @@
  * two flash banks, per pm220-pico2w. Stay below it. */
 #ifndef FS_FLASH_OFF
 #define FS_FLASH_OFF (2u * 1024u * 1024u)
+/* See the read hook in fs.c: on RP2350 flash is read through the alias that
+ * ignores QMI address translation, so the filesystem stays reachable when
+ * the firmware is booted from an A/B slot (src/ota/). */
+#include "hardware/regs/addressmap.h"   /* the #ifdef below is false without it: that fault was found on the bench */
+#ifdef XIP_NOCACHE_NOALLOC_NOTRANSLATE_BASE
+#define FS_READ_BASE XIP_NOCACHE_NOALLOC_NOTRANSLATE_BASE
+#else
+#define FS_READ_BASE XIP_BASE
+#endif
 #endif
 #ifndef FS_BT_TAIL
 #define FS_BT_TAIL   (16u * 1024u)

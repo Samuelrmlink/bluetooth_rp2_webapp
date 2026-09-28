@@ -66,6 +66,7 @@ typedef struct {
     bool  dead;
     char  err[160];
     uint32_t resumes;
+    uint32_t runtime_ms;   /* accumulated slice time, for taskstat */
     uint32_t wake_at_ms;   /* 0 = runnable now; set by sys.sleep */
     /* Why this script's last blocking wait ended. The resume ALWAYS carries
      * this: a coroutine is never woken without being told why. */
@@ -820,8 +821,9 @@ void lrt_tick(void) {
         int rc = lua_resume(co, L, 0, &nres);
         s_current_co = NULL;
         s_current_slot = -1;
-        if ((uint32_t)(to_ms_since_boot(get_absolute_time()) - s_slice_start_ms)
-                > SLICE_MAX_MS) {
+        uint32_t slice_ms = to_ms_since_boot(get_absolute_time()) - s_slice_start_ms;
+        s->runtime_ms += slice_ms;
+        if (slice_ms > SLICE_MAX_MS) {
             /* One slow C binding, not a loop of them: report but do not kill.
              * A single P-256 operation is ~41 ms on this part and is a normal
              * thing for a handshake to do. */
@@ -950,6 +952,30 @@ size_t lrt_stats_json(char *dst, size_t cap) {
         (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)lheap_peak(),
         (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET,
         (unsigned long)s_slice_overruns, SLICE_MAX_MS);
+}
+
+void lrt_stats(lrt_stats_t *out) {
+    out->arena_bytes = (uint32_t)lheap_capacity();
+    out->used = (uint32_t)lheap_used();
+    out->peak = (uint32_t)lheap_peak();
+    out->hook_kills = s_hook_kills;
+    out->slice_overruns = s_slice_overruns;
+    uint32_t n = 0;
+    for (int i = 0; i < MAX_SCRIPTS; i++) if (scripts[i].used && scripts[i].running) n++;
+    out->running = n;
+}
+
+int lrt_task_info(int i, lrt_task_info_t *out) {
+    if (i < 0 || i >= MAX_SCRIPTS) return -1;
+    const script_t *s = &scripts[i];
+    if (!s->used) return 0;
+    out->name = s->name;
+    /* Zephyr's thread states, loosely: 1 running/ready, 2 blocked (sleeping
+     * or waiting), 4 dead. */
+    out->state = s->dead ? 4 : (s->running ? (s->wake_at_ms ? 2 : 1) : 4);
+    out->resumes = s->resumes;
+    out->runtime_ms = s->runtime_ms;
+    return 1;
 }
 
 void lrt_init(void) {

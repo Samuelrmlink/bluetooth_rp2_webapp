@@ -1,0 +1,36 @@
+{
+  "_comment": "RP2350 flash layout (4 MB). The first 64 KB is unpartitioned and holds this table; Main A/B are one binary bootable from either (QMI address translation); the WiFi blob is provisioned once and never OTA'd; LittleFS keeps its historical place (src/fs/fs.h FS_FLASH_OFF) and the last 16 KB is BTstack's NVM, unpartitioned. tools/run_tests.py checks the numbers against fs.h and the linker script.",
+  "version": [1, 0],
+  "unpartitioned": {
+    "families": ["absolute"],
+    "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+  },
+  "partitions": [
+    {
+      "name": "Main A", "id": 0,
+      "start": "64K", "size": "864K",
+      "families": ["rp2350-arm-s"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+    },
+    {
+      "name": "Main B", "id": 0,
+      "size": "864K",
+      "families": ["rp2350-arm-s"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" },
+      "link": ["a", 0]
+    },
+    {
+      "name": "Wi-Fi Firmware", "id": "0x776966696669726d",
+      "start": "1792K", "size": "256K",
+      "families": ["cyw43-firmware"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" },
+      "no_reboot_on_uf2_download": true
+    },
+    {
+      "name": "LittleFS", "id": "0x6c66730000000000",
+      "start": "2048K", "size": "2032K",
+      "families": ["data"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+    }
+  ]
+}

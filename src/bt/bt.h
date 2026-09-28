@@ -9,5 +9,6 @@ void bt_init(void);
 
 /* True once HCI reports the controller working. */
 bool bt_ready(void);
+uint32_t bt_unhandled_count(void);   /* HCI events nobody handled; for stat */
 
 #endif

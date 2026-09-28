@@ -42,6 +42,12 @@ static unsigned ncm_rx_ok, ncm_rx_drop, ncm_tx_ok, ncm_tx_drop;
 static unsigned ncm_recoveries;
 static unsigned ncm_rx_ok_last, ncm_tx_ok_last, ncm_rx_drop_last, ncm_tx_drop_last;
 
+void usb_ncm_stats(usb_ncm_stats_t *out) {
+    out->rx_ok = ncm_rx_ok; out->rx_drop = ncm_rx_drop;
+    out->tx_ok = ncm_tx_ok; out->tx_drop = ncm_tx_drop;
+    out->recoveries = ncm_recoveries;
+}
+
 static err_t ncm_linkoutput(struct netif *netif, struct pbuf *p) {
     (void)netif;
     if (!tud_ready() || !tud_network_can_xmit(p->tot_len)) {

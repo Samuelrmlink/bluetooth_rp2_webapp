@@ -76,6 +76,14 @@ bool lrt_eval(const char *name, const char *chunk, char *out, size_t cap);
 size_t lrt_list_json(char *dst, size_t cap);
 size_t lrt_stats_json(char *dst, size_t cap);
 
+/* The same numbers as lrt_stats_json, as integers, for the MCUmgr stat
+ * group; and one script's row for its taskstat. lrt_task_info returns -1
+ * past the last slot, 0 for an empty slot, 1 with `out` filled. */
+typedef struct { uint32_t arena_bytes, used, peak, hook_kills, slice_overruns, running; } lrt_stats_t;
+void lrt_stats(lrt_stats_t *out);
+typedef struct { const char *name; uint32_t state, resumes, runtime_ms; } lrt_task_info_t;
+int lrt_task_info(int i, lrt_task_info_t *out);
+
 /* --- blocking waits, for the bindings -------------------------------------
  * A binding that must wait for an event arms a wait and then yields with no
  * values. The scheduler will not resume the script until the wait resolves,

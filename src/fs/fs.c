@@ -75,7 +75,12 @@ static void flash_do(flash_job_t *j) {
 static int bd_read(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
                    void *buffer, lfs_size_t size) {
     (void)c;
-    memcpy(buffer, (const uint8_t *)(XIP_BASE + FS_FLASH_OFF + block * FS_BLOCK + off), size);
+    /* NOT XIP_BASE. Booted from an A/B partition, the ROM translates the
+     * first 4 MB XIP window so the running slot appears at 0x10000000 and
+     * leaves a HOLE past it -- a plain read of 0x10200000 would fault. The
+     * no-translate alias reads flash by storage address, which is what the
+     * SDK's own partition reader and BTstack's flash bank use on RP2350. */
+    memcpy(buffer, (const uint8_t *)(FS_READ_BASE + FS_FLASH_OFF + block * FS_BLOCK + off), size);
     return 0;
 }
 

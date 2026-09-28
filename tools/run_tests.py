@@ -435,6 +435,85 @@ def build(cfg):
         return True, f"{last[0]} text / {last[2]} bss"
     return fn
 
+def _kb(v):
+    """picotool sizes: "864K", "2048K", "64K"."""
+    v = str(v).strip().upper()
+    return int(v[:-1]) * 1024 if v.endswith("K") else int(v)
+
+
+def t_ota_partition_layout():
+    """partitions.json, fs.h and the linker script agree on the flash map.
+
+    The ROM boots from the table, fs.c reads at FS_FLASH_OFF, and the linker
+    caps the image at one slot; three copies of the same numbers, so they are
+    checked against each other rather than trusted."""
+    import json
+    pt = json.load(open(os.path.join(ROOT, "partitions.json")))["partitions"]
+    by = {p["name"]: p for p in pt}
+    a, b, w, fs = by["Main A"], by["Main B"], by["Wi-Fi Firmware"], by["LittleFS"]
+    a0, asz, bsz = _kb(a["start"]), _kb(a["size"]), _kb(b["size"])
+    if asz != bsz or asz % 4096 or a0 % 4096:
+        return False, "A/B slots must be equal and sector aligned"
+    if b.get("link") != ["a", 0]:
+        return False, "Main B is not linked to Main A"
+    w0, wsz = _kb(w["start"]), _kb(w["size"])
+    if a0 + 2 * asz > w0:
+        return False, "slots overlap the WiFi firmware partition"
+    if w["id"].lower() != "0x776966696669726d":
+        return False, "WiFi firmware partition id is not the SDK's"
+    if w0 + wsz > _kb(fs["start"]):
+        return False, "WiFi partition overlaps LittleFS"
+    fsh = open(os.path.join(ROOT, "src/fs/fs.h")).read()
+    if "#define FS_FLASH_OFF (2u * 1024u * 1024u)" not in fsh or _kb(fs["start"]) != 2 * 1024 * 1024:
+        return False, "LittleFS partition start != FS_FLASH_OFF"
+    if _kb(fs["size"]) != 2 * 1024 * 1024 - 16 * 1024:
+        return False, "LittleFS partition size != FS_SIZE (2 MiB - BT NVM tail)"
+    ld = open(os.path.join(ROOT, "linker/pico_flash_region.ld")).read()
+    m = re.search(r"LENGTH\s*=\s*(\d+)\s*\*\s*1024", ld)
+    if not m or int(m.group(1)) * 1024 != asz:
+        return False, "linker FLASH LENGTH != slot size"
+    if "FS_READ_BASE" not in open(os.path.join(ROOT, "src/fs/fs.c")).read():
+        return False, "fs.c reads flash via XIP_BASE: faults past the translated slot"
+    return True, f"A/B {asz // 1024} KB @ {a0 // 1024} KB, WiFi {wsz // 1024} KB, LittleFS untouched"
+
+
+def t_ota_keys():
+    """Only the public key is in the tree; nothing tracked holds private material."""
+    hdr = open(os.path.join(ROOT, "src/ota/ota_pubkey.h")).read()
+    n = len(re.findall(r"0x[0-9a-fA-F]{2}", hdr))
+    if n != 64:
+        return False, f"ota_pubkey.h has {n} bytes, want 64"
+    gi = open(os.path.join(ROOT, ".gitignore")).read()
+    if "*.pem" not in gi or "keys/" not in gi:
+        return False, ".gitignore lacks *.pem / keys/"
+    import subprocess
+    files = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
+    for f in files:
+        try:
+            data = open(os.path.join(ROOT, f), "rb").read()
+        except OSError:
+            continue
+        if b"PRIVATE " + b"KEY-----" in data:   # split so this file is not a hit
+            return False, f"{f} contains private key material"
+    return True, "64-byte public key; no PEM tracked"
+
+
+def t_ota_flash_from_loop_only():
+    """SMP handlers write flash, so the UDP receive callback must only copy.
+
+    The HTTP PUT path writes flash inside an lwIP callback and http.c records
+    what that costs; the OTA path was designed not to, and one call slipping
+    into on_rx would silently undo that."""
+    src = open(os.path.join(ROOT, "src/ota/smp_udp.c")).read()
+    body = _fn_body(src, "on_rx")
+    if body is None:
+        return False, "smp_udp.c has no on_rx()"
+    for bad in ("smp_process", "fs_", "rom_flash", "ota_slot", "flash_"):
+        if bad in body:
+            return False, f"on_rx() calls {bad}: flash work in the lwIP callback"
+    return True, "on_rx copies; ota_tick processes"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", type=int, default=0)
@@ -455,6 +534,9 @@ def main():
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
     step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
+    step(0, "OTA flash layout is consistent", t_ota_partition_layout)
+    step(0, "OTA keys: public in tree, private out", t_ota_keys)
+    step(0, "SMP writes flash from the loop only", t_ota_flash_from_loop_only)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
 
     if a.tier >= 1:
