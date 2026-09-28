@@ -19,6 +19,11 @@
 #include "crypto/sha256.h"
 #include "uECC.h"
 
+/* The ROM clears the try-before-you-buy flag in the picobin block in the
+ * FIRST sector when an image is bought, so those bytes are not stable after
+ * a boot. Integrity re-checks hash the image EXCLUDING this sector. */
+#define IMG_SECTOR0 4096u
+
 #include <stdio.h>
 #include <string.h>
 #include "pico/time.h"
@@ -52,6 +57,7 @@ static struct {
     bool have_file_sha;
     sha256_ctx_t img_sha;     /* over the image part only: what the signature covers */
     sha256_ctx_t file_ctx;    /* over the whole file: what a client computes for state-write */
+    sha256_ctx_t body_ctx;    /* over image bytes past sector 0: stable across a TBYB buy */
     uint8_t sig[SIG_LEN];
     uint32_t erased;          /* sectors erased so far (next erase at erased*4096) */
     uint8_t page[256];
@@ -72,7 +78,7 @@ static bool test_armed;      /* state write {confirm:false} on the other slot */
  * client will send back in state-write -- smpmgr sends no `sha` with its
  * upload and hashes the file it has; the image digest is what the signature
  * covers and lets ota.status re-check the slot's bytes at any time. */
-typedef struct { uint8_t file[32], img[32]; uint32_t img_len; } slot_rec_t;
+typedef struct { uint8_t file[32], img[32], body[32]; uint32_t img_len; } slot_rec_t;
 static slot_rec_t slot_rec[2];
 static bool slot_hash_ok[2];
 
@@ -235,6 +241,7 @@ static int h_upload(const smp_req_t *req, cbor_enc_t *e) {
         if (have_sha) { memcpy(up.file_sha, sha, 32); up.have_file_sha = true; }
         sha256_init(&up.img_sha);
         sha256_init(&up.file_ctx);
+        sha256_init(&up.body_ctx);
         memset(up.sec0, 0xff, sizeof up.sec0);
         up.started_ms = to_ms_since_boot(get_absolute_time());
         test_armed = false;
@@ -257,6 +264,11 @@ static int h_upload(const smp_req_t *req, cbor_enc_t *e) {
         if (up.off < img_len) img_part = (up.off + dlen <= img_len) ? dlen : img_len - up.off;
         if (img_part) {
             sha256_update(&up.img_sha, data, img_part);
+            /* body = the image minus its first sector (see IMG_SECTOR0). */
+            if (up.off + img_part > IMG_SECTOR0) {
+                size_t skip = up.off >= IMG_SECTOR0 ? 0 : (size_t)(IMG_SECTOR0 - up.off);
+                sha256_update(&up.body_ctx, data + skip, img_part - skip);
+            }
             int rc = write_bytes(data, img_part);
             if (rc) { abort_upload(); return rc; }
         }
@@ -291,6 +303,7 @@ static int h_upload(const smp_req_t *req, cbor_enc_t *e) {
         }
         slot_rec_t r;
         sha256_final(&up.file_ctx, r.file);
+        sha256_final(&up.body_ctx, r.body);
         memcpy(r.img, digest, 32);
         r.img_len = up.len - SIG_LEN;
         save_rec(up.target, &r);
@@ -354,9 +367,24 @@ int img_mgmt_slot_check(int which) {
     const uint8_t *b = ota_slot_bytes(which);
     ota_part_t p;
     if (!b || !ota_slot_get(which, &p) || slot_rec[which].img_len > p.size) return -1;
+    /* Hash the body (past sector 0), which the ROM does not touch when it
+     * buys an image -- so this stays 0 after a boot, unlike a full-image
+     * hash. Sector 0's own integrity is the ROM's picobin hash at boot. */
+    uint32_t img_len = slot_rec[which].img_len;
+    uint32_t body_len = img_len > IMG_SECTOR0 ? img_len - IMG_SECTOR0 : 0;
     uint8_t d[32];
-    sha256(b, slot_rec[which].img_len, d);
-    return memcmp(d, slot_rec[which].img, 32) == 0 ? 0 : 1;
+    sha256(b + IMG_SECTOR0, body_len, d);
+    return memcmp(d, slot_rec[which].body, 32) == 0 ? 0 : 1;
+}
+
+/* The file hash recorded for a slot (SHA-256 of image||signature), for
+ * ota.status -- the value a client passes to state-write. */
+bool img_mgmt_slot_file_hash(int which, uint8_t out[32]) {
+    static bool loaded;
+    if (!loaded) { load_hashes(); loaded = true; }
+    if (which < 0 || which > 1 || !slot_hash_ok[which]) return false;
+    memcpy(out, slot_rec[which].file, 32);
+    return true;
 }
 
 const smp_cmd_t smp_img_cmds[] = {
