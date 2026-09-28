@@ -55,21 +55,39 @@ firmware will accept; recover by re-flashing over SWD (below), which
 bypasses OTA entirely. Back it up like any credential. To rotate it, see the
 header comment in `tools/ota_keygen.py`.
 
-### 2. Provision the flash layout (once per board, over SWD)
+### 2. Provision the flash layout (once per board)
 
-A fresh board has no partition table. Build a **non-TBYB** image (so a
-normal boot runs it — TBYB images only boot via a flash-update) and load the
-table, slot A and the Wi-Fi blob:
+A fresh board has no partition table. Provisioning writes three regions —
+the partition table, the firmware into slot A, and the Wi-Fi blob — and
+leaves LittleFS alone. The firmware must be a **non-TBYB** build, because the
+normal boot that follows provisioning won't run a try-before-you-buy image:
 
 ```sh
 cmake -B build -DBTGW_TBYB=OFF          # (defconfig already sets CONFIG_OTA=y)
 cmake --build build -j8
-tools/provision.sh                       # over the SWD probe; see tools/debug.sh
 ```
 
-`provision.sh` erases the first 64 KB, writes `pt.bin`, `btgw.bin` (→ slot A
-at `0x10010000`) and `btgw_wifi_firmware.bin` (→ `0x101C0000`), then resets.
-LittleFS is left alone. Confirm it came up:
+**Over SWD** (with a debug probe):
+
+```sh
+tools/provision.sh                       # writes PT + slot A + Wi-Fi blob, resets
+```
+
+**Over USB, no probe** — build a single drag-and-drop image:
+
+```sh
+tools/make_provision_uf2.sh              # -> build/btgw-provision.uf2
+```
+
+Hold BOOTSEL while plugging the board in, then copy `btgw-provision.uf2`
+onto the `RP2350` drive (or `picotool load build/btgw-provision.uf2`). Its
+blocks are absolute-addressed, so they write the same bytes to the same
+offsets as `provision.sh` — the partition table at `0x10000000`, the
+firmware at `0x10010000` (slot A) and the blob at `0x101C0000` — and the
+board reboots into the new firmware. LittleFS (`0x200000`+) is untouched, so
+a reprovision keeps `cfg/`, `lua/` and the web assets.
+
+Confirm it came up:
 
 ```sh
 python3 tools/wsapi.py ota.status
@@ -196,6 +214,17 @@ The SMP server carries three more groups, useful during and after an update:
   Writes go one chunk at a time and are paced by the flash, not the network.
 
 ---
+
+## WireGuard and reboots
+
+The device has no clock, so it fabricates WireGuard's handshake timestamp
+from a persisted boot counter (see `src/net/wg.c`). This keeps the tunnel
+reconnecting immediately after a reboot — including the reboot an OTA
+triggers — instead of being locked out for the length of the previous
+uptime. The only assumption is that a single boot never runs longer than
+~2.1 years continuously; if one somehow did, the recovery is to restart
+WireGuard on the server (`wg-quick down/up`, or reboot the VPS), which clears
+the peer timestamp it remembers. No device access needed.
 
 ## Known limitation
 
