@@ -637,10 +637,16 @@ bool wifi_scanning(void) { return scanning; }
  * the poll arch, and neither belongs in a bug fix.
  */
 bool wifi_connect(const char *ssid, const char *psk) {
-#if CONFIG_BT_LE
-    if (le_radio_busy()) { return false; }
-#endif
+    /* Save the credential FIRST, unconditionally. Adding a known network must
+     * not depend on the shared radio being free -- Bluetooth is often busy
+     * (scanning or holding a link), and gating the save on that was silently
+     * dropping every network the user tried to add. */
     if (!cfg_net_put(ssid, psk)) return false;
+#if CONFIG_BT_LE
+    /* Bluetooth holds the radio: the network is saved, but leave the join to
+     * the state machine (known_in_scan) once the radio is free. */
+    if (le_radio_busy()) { return true; }
+#endif
     snprintf(pending_ssid, sizeof(pending_ssid), "%s", ssid);
     pending_join = true;
     return true;

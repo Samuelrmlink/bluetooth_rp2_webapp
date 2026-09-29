@@ -151,7 +151,7 @@ static bool valid_psk(const char *s) {
 
 /* --- load / store --------------------------------------------------------- */
 
-static void persist(void) {
+static bool persist(void) {
     static char buf[CFG_BUF];
     size_t n = 0;
     n += (size_t)snprintf(buf + n, sizeof(buf) - n,
@@ -167,21 +167,23 @@ static void persist(void) {
     n += (size_t)snprintf(buf + n, sizeof(buf) - n, "]}");
     if (n >= sizeof(buf)) {
         printf("cfg: record too large, not written\n");
-        return;
+        return true;   /* not retriable; drop it */
     }
 
     if (fs_begin_write(CFG_PATH) != 0) {
         printf("cfg: write busy\n");
-        return;
+        return false;  /* retry next tick */
     }
     if (fs_write((const uint8_t *)buf, n) != 0) {
         fs_abort_write();
         printf("cfg: write failed\n");
-        return;
+        return false;
     }
     if (fs_end_write() != 0) {
         printf("cfg: close failed\n");
+        return false;
     }
+    return true;
 }
 
 void cfg_load(void) {
@@ -280,8 +282,7 @@ void cfg_tick(void) {
     /* One write per tick: two dirty records mean two erases, and spacing
      * them out costs nothing here. */
     if (dirty) {
-        dirty = false;
-        persist();
+        if (persist()) { dirty = false; }   /* keep dirty to retry if the write was busy/failed */
     } else if (notify_dirty) {
         notify_dirty = false;
         persist_notify();
