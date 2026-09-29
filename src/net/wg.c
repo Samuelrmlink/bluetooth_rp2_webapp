@@ -94,9 +94,22 @@ static void wg_bump_epoch(void) {
     }
     count++;
     uint8_t b[4] = { (uint8_t)count, (uint8_t)(count >> 8), (uint8_t)(count >> 16), (uint8_t)(count >> 24) };
-    if (fs_begin_write(WG_EPOCH_PATH) == 0 && fs_write(b, 4) == 0) {
-        fs_end_write();
-    } else {
+    /* fs_write() returns the BYTE COUNT, not 0 (see fs.h). Testing it for 0
+     * meant the success branch never ran: the counter was never committed AND
+     * fs_end_write() was never called, so fs.c's `wopen` stayed set and every
+     * later fs_begin_write() in the firmware returned -1. That is why
+     * boot_count sat at 1 for ever, which in turn made the TAI64N timestamp
+     * restart low on every boot and left WireGuard's anti-replay silently
+     * dropping our handshakes. */
+    bool persisted = false;
+    if (fs_begin_write(WG_EPOCH_PATH) == 0) {
+        if (fs_write(b, 4) < 0) {
+            fs_abort_write();
+        } else {
+            persisted = (fs_end_write() == 0);
+        }
+    }
+    if (!persisted) {
         /* A write failure only means the NEXT boot may reuse this count and
          * be rejected for one window; the tunnel this boot still works. */
         printf("wg: could not persist boot counter (tai64n offset still applied)\n");

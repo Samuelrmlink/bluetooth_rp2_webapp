@@ -174,7 +174,7 @@ static bool persist(void) {
         printf("cfg: write busy\n");
         return false;  /* retry next tick */
     }
-    if (fs_write((const uint8_t *)buf, n) != 0) {
+    if (fs_write((const uint8_t *)buf, n) < 0) {   /* returns a BYTE COUNT */
         fs_abort_write();
         printf("cfg: write failed\n");
         return false;
@@ -329,7 +329,7 @@ static void persist_notify(void) {
         printf("cfg: notify write busy\n");
         return;
     }
-    if (fs_write((const uint8_t *)buf, (size_t)n) != 0) {
+    if (fs_write((const uint8_t *)buf, (size_t)n) < 0) {   /* BYTE COUNT */
         fs_abort_write();
         printf("cfg: notify write failed\n");
         return;

@@ -115,7 +115,7 @@ static int h_upload(const smp_req_t *req, cbor_enc_t *e) {
         return SMP_GERR(FS_ERR_OFFSET_NOT_VALID);
     }
     if (dlen) {
-        if (fs_write(data, dlen) != 0) { abort_write(); return SMP_GERR(FS_ERR_WRITE_FAILED); }
+        if (fs_write(data, dlen) < 0) { abort_write(); return SMP_GERR(FS_ERR_WRITE_FAILED); }   /* BYTE COUNT */
         wr.off += dlen;
     }
     wr.last_ms = now;

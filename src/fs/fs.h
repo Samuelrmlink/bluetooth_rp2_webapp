@@ -66,6 +66,11 @@ int fs_rename(const char *from, const char *to);
 bool fs_stat(const char *name, size_t *size);
 
 int fs_begin_write(const char *name);
+/* Returns the NUMBER OF BYTES WRITTEN, negative on error -- it does NOT
+ * return 0 on success. Test it with `< 0`. Four call sites tested `!= 0`
+ * and so treated every successful write as a failure; one of them skipped
+ * fs_end_write() as a result, leaving the single write slot open and making
+ * every subsequent fs_begin_write() in the firmware fail. */
 int fs_write(const uint8_t *data, size_t len);
 int fs_end_write(void);
 void fs_abort_write(void);
