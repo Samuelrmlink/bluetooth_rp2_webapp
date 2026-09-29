@@ -660,8 +660,15 @@ bool wifi_connect(const char *ssid, const char *psk) {
  */
 #define LED_SLOW_MS 1000   /* alive / idle / AP */
 #define LED_FAST_MS  320   /* station associated */
+#define LED_REASSERT_MS 2000   /* re-write the LED at least this often, even
+                                * without an edge, so a missed chip GPIO write
+                                * self-heals and a lost link is never latched */
 static void led_tick(void) {
     static bool inited, last_on;
+    static uint32_t last_write;
+    /* Re-evaluated every call (wifi_poll runs it every loop pass), so the
+     * cadence follows the CURRENT state -- lose WiFi and it drops straight
+     * back to the slow blink; lose the tunnel and solid drops to fast. */
     bool want_on;
     if (wifi_is_up() && wg_is_confirmed()) {
         want_on = true;                    /* fully up: solid */
@@ -669,9 +676,11 @@ static void led_tick(void) {
         uint32_t period = wifi_is_up() ? LED_FAST_MS : LED_SLOW_MS;
         want_on = (now_ms() % period) < (period / 2);
     }
-    if (!inited || want_on != last_on) {
+    uint32_t now = now_ms();
+    if (!inited || want_on != last_on || (uint32_t)(now - last_write) >= LED_REASSERT_MS) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, want_on);
         last_on = want_on;
+        last_write = now;
         inited = true;
     }
 }
