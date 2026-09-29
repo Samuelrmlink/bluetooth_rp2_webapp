@@ -183,6 +183,7 @@ int main(void) {
 #endif
 
 #if CONFIG_BT_LE
+        bt_power_on_tick();   /* deferred controller power-on; staggers BT behind WiFi at boot */
         le_central_tick();
 #endif
 #if CONFIG_LUA_ENABLE

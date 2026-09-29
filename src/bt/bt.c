@@ -17,6 +17,10 @@
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
 #include "bt/le/bond.h"
+#include "autoconf.h"
+#if CONFIG_NET_WIFI
+#include "net/wifi.h"   /* wifi_bt_hold(): keep the BT controller off the bus during WiFi's boot join */
+#endif
 #include "bt/le/gattserver.h"
 #include "net/ws.h"
 #include "autoconf.h"
@@ -178,7 +182,26 @@ void bt_init(void) {
 
     hci_cb.callback = &hci_handler;
     hci_add_event_handler(&hci_cb);
+    /* Controller power-on is deferred to bt_power_on_tick(); see below. */
+}
+
+/*
+ * Power on the BT controller once WiFi has had the shared radio to itself for
+ * its initial scan + join (wifi_bt_hold). Downloading the controller firmware
+ * over the shared bus concurrently with a WiFi join was wedging the radio at
+ * boot (task #37) -- the LED-confirmed boot wedge that scan/connect staggering
+ * alone did not fix. Fires exactly once, from the main loop. On a no-WiFi
+ * build there is nothing to wait for, so it powers on immediately.
+ */
+void bt_power_on_tick(void) {
+    static bool powered;
+    if (powered) { return; }
+#if CONFIG_NET_WIFI
+    if (wifi_bt_hold()) { return; }
+#endif
+    powered = true;
     hci_power_control(HCI_POWER_ON);
+    printf("bt: controller power-on (WiFi has had its turn)\n");
 }
 
 /* ---- ops ---------------------------------------------------------------- */
