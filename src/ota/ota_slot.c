@@ -106,7 +106,7 @@ static void dump_pt(void) {
     int ret = rom_get_partition_table_info(buf, sizeof buf / sizeof buf[0],
                                            PT_INFO_PARTITION_LOCATION_AND_FLAGS | PT_INFO_PARTITION_ID);
     if (ret <= 0) { printf("ota: pt query -> %d\n", ret); return; }
-    int i = 1, p = 0, wifi = -1;
+    int i = 1, p = 0;
     while (i < ret) {
         uint32_t loc = buf[i++];
         uint32_t flags = buf[i++];
@@ -118,14 +118,17 @@ static void dump_pt(void) {
         printf("ota: pt[%d] %06lx..%06lx flags %08lx%s%016llx\n", p, (unsigned long)first * 4096,
                (unsigned long)(last + 1) * 4096 - 1, (unsigned long)flags, has_id ? " id " : "",
                has_id ? (unsigned long long)id : 0ull);
-        if (has_id && id == 0x776966696669726dull) wifi = p;
+        (void)id;
         p++;
     }
-    if (wifi >= 0) {
-        static uint32_t __attribute__((aligned(4))) work[1024];
-        int pick = rom_pick_ab_partition_during_update(work, sizeof work, (uint)wifi);
-        printf("ota: chip rev A%d; CYW43 firmware partition %d, pick -> %d\n", rp2350_chip_version(), wifi, pick);
-    }
+    /* NB: this used to also call rom_pick_ab_partition_during_update() here
+     * purely to LOG the chosen CYW43 firmware partition -- a heavy, image-
+     * verifying ROM routine run an extra time on every boot for a debug line,
+     * duplicating the pick the CYW43 driver already does during init. It was
+     * removed: it did nothing functional and ran non-essential ROM code in
+     * the pre-watchdog boot window where an intermittent lockup was seen. The
+     * partition-table listing above is a lightweight read-only ROM query and
+     * stays. */
 }
 
 void ota_slot_init(void) {
