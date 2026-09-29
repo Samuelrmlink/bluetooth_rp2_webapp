@@ -739,7 +739,7 @@ void wifi_poll(void) {
         begin_join(pending_ssid, k ? k->psk : NULL);
         return;
     }
-    if (pending_scan && !scanning && !ap_settling(now)) {
+    if (pending_scan && !scanning && !ap_settling(now) && !le_scanning()) {
         pending_scan = false;
         begin_scan();
         return;
@@ -912,6 +912,21 @@ void wifi_poll(void) {
 bool wifi_ap_up(void) { return ap_up; }
 
 bool wifi_is_up(void) { return state == ST_UP; }
+
+/*
+ * True while Bluetooth should hold off scanning/connecting, so WiFi gets the
+ * shared radio to itself for its initial scan + join. Released as soon as
+ * WiFi is up, or when the grace window expires (WiFi failing must never block
+ * BT forever), or immediately in mode "off" (no WiFi to wait for). Consumed
+ * by src/bt/le/central.c's scan/connect gates. See task #37: bringing WiFi,
+ * BT and WireGuard onto the one CYW43 at once intermittently wedged it.
+ */
+#define WIFI_BT_GRACE_MS 60000
+bool wifi_bt_hold(void) {
+    if (wifi_is_off()) return false;
+    if (wifi_is_up())  return false;
+    return !timed_out(now_ms(), boot_start, WIFI_BT_GRACE_MS);
+}
 
 const char *wifi_ip(void) { return ip_str; }
 

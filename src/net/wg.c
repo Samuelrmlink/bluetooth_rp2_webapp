@@ -14,6 +14,11 @@
 #include "lwip/udp.h"
 #include "lwip/pbuf.h"
 
+#include "autoconf.h"
+#if CONFIG_NET_WIFI
+#include "net/wifi.h"   /* wifi_is_up(): only reach for the tunnel once WiFi has an IP */
+#endif
+
 #include "wireguardif.h"
 #include "wireguard.h"
 
@@ -354,10 +359,9 @@ static bool attach_peer(void) {
         return false;
     }
     netif_set_up(&wg_netif);
-    if (!ip_addr_isany(&cfg.endpoint)) {
-        wireguardif_connect(&wg_netif, peer_index);
-        connect_attempts++;
-    }
+    /* Handshake initiation deferred to wg_tick(), gated on WiFi being up with
+     * an IP (task #37): WireGuard must not contend for the shared radio while
+     * WiFi is still associating. */
     return true;
 }
 
@@ -516,6 +520,13 @@ static void emit_state(bool connected, bool confirmed) {
 
 void wg_tick(void) {
     if (!netif_added || peer_index == WIREGUARDIF_INVALID_INDEX) { return; }
+#if CONFIG_NET_WIFI
+    /* No tunnel activity -- not even a handshake attempt -- until WiFi is
+     * associated AND has a DHCP address. A WiFi drop pauses new attempts. */
+    if (!wifi_is_up()) { return; }
+#else
+    return;   /* no-WiFi build: WireGuard is disabled */
+#endif
 
     bool up = wg_is_connected();
     bool confirmed = wg_is_confirmed();

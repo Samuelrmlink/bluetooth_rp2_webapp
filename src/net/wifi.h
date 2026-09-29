@@ -65,4 +65,9 @@ bool wifi_is_off(void);
  * both the two coexist, so neither mode name nor wifi_is_up() answers this. */
 bool wifi_ap_up(void);
 
+/* True while Bluetooth should defer scanning/connecting so WiFi can bring the
+ * shared radio up first (see wifi.c). False once WiFi is up, past the grace
+ * window, or in mode "off". */
+bool wifi_bt_hold(void);
+
 #endif /* KM003C_NET_WIFI_H */

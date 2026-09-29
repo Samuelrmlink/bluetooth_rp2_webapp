@@ -31,6 +31,9 @@
 #include "lua/lwait.h"
 #endif
 #include "autoconf.h"
+#if CONFIG_NET_WIFI
+#include "net/wifi.h"   /* wifi_bt_hold(), wifi_scanning(): stagger BT behind WiFi */
+#endif
 
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
 void le_on_disconnected(uint16_t con_handle);
@@ -181,6 +184,12 @@ void le_central_init(void) {
 }
 
 bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms) {
+#if CONFIG_NET_WIFI
+    /* Give WiFi the shared radio first (wifi_bt_hold), and never run a BLE
+     * scan and a WiFi scan at once. "Not yet" -- the caller (Lua discovery
+     * loop / API) re-issues; see task #37. */
+    if (wifi_bt_hold() || wifi_scanning()) { return false; }
+#endif
     s_filter = *f;
     /* Active scanning solicits SCAN_RSP, which is where most peripherals put
      * the complete local name. A passive scan often sees no names at all. */
@@ -872,6 +881,10 @@ bool le_connect(const uint8_t *addr, uint8_t addr_type) {
     if (s_connecting) {
         return false;
     }
+#if CONFIG_NET_WIFI
+    /* Hold connects behind WiFi's initial-connection grace, same as scans. */
+    if (wifi_bt_hold()) { return false; }
+#endif
     /* Scanning and connecting at once is asking the controller to do two
      * things with one radio; stop first. */
     if (s_scanning) {
