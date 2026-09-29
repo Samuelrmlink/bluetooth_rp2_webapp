@@ -53,34 +53,6 @@
  * It is evidence only when the board rebooted on its own. */
 bool boot_after_watchdog;
 
-/*
- * Put the CYW43 through a real power-on reset before EVERY bring-up.
- *
- * The driver does power-cycle the chip itself, but it holds WL_REG_ON low for
- * only 20 ms (cyw43_ctrl.c, "Reset and power up the WL chip"). That is ample
- * from a COLD start, where the chip's rails begin at 0 V. After a WARM reset --
- * an SWD `reset run`, a watchdog reboot, or the reboot an OTA does -- the radio
- * was running microseconds earlier and its decoupling is still charged, so
- * 20 ms does not pull it below its power-on-reset threshold. It comes back
- * half-initialised and cyw43_arch_init() fails. That is the whole of
- * "cyw43: init failed -- no Wi-Fi and no Bluetooth this boot", which made every
- * warm reboot a coin flip and left the radio dead until someone unplugged the
- * board -- including after an OTA, where nobody can.
- *
- * Unconditional on purpose. Doing it only when watchdog_caused_reboot() says so
- * would leave the case that bites (an `os reset`, a debugger reset, any reboot
- * the flag does not describe) still broken, and a cold boot pays only a fixed
- * delay with the chip already off. There is no boot-type test here to get wrong.
- */
-#define RADIO_RESET_HOLD_MS 250
-
-static void radio_hold_in_reset(uint32_t ms) {
-    gpio_init(CYW43_PIN_WL_REG_ON);
-    gpio_set_dir(CYW43_PIN_WL_REG_ON, GPIO_OUT);
-    gpio_put(CYW43_PIN_WL_REG_ON, 0);
-    sleep_ms(ms);
-}
-
 int main(void) {
     stdio_init_all();
     sleep_ms(200);                       /* let RTT attach before the first line */
@@ -113,18 +85,7 @@ int main(void) {
     }
 
     /* Brings up cyw43 + lwIP + BTstack on one async_context_poll. */
-    radio_hold_in_reset(RADIO_RESET_HOLD_MS);
-    watchdog_update();
-    int radio_rc = cyw43_arch_init();
-    if (radio_rc) {
-        /* Hold it down considerably longer and try once more, rather than
-         * spending the whole boot with no radio because one reset was short. */
-        printf("cyw43: init failed (%d) -- retrying after a longer reset\n", radio_rc);
-        radio_hold_in_reset(RADIO_RESET_HOLD_MS * 4);
-        watchdog_update();
-        radio_rc = cyw43_arch_init();
-    }
-    if (radio_rc) {
+    if (cyw43_arch_init()) {
         printf("cyw43: init failed -- no Wi-Fi and no Bluetooth this boot\n");
     } else {
         printf("cyw43: up\n");
