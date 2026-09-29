@@ -672,13 +672,21 @@ bool wifi_connect(const char *ssid, const char *psk) {
 static void led_tick(void) {
     static bool inited, last_on;
     static uint32_t last_write;
-    /* NEVER drive the LED while the radio is scanning or joining: the LED is a
-     * GPIO on the CYW43 chip, so each update is an SPI transaction, and issuing
-     * one during the WiFi join turned the recoverable ~10s join stall into a
-     * hard radio wedge (bench-confirmed: LED on -> wedge, LED off -> boots).
-     * Hold the LED as-is through those windows; update it only when the radio
-     * is quiet. */
-    if (scanning || state == ST_JOIN) { return; }
+    /* This used to return early while `scanning || state == ST_JOIN`, because a
+     * chip GPIO write during a join turned the recoverable ~10 s join stall
+     * into a hard radio wedge. That was a workaround for task #37, whose real
+     * cause is fixed: cyw43_wait.c now bounds every ioctl back-off on the
+     * free-running timer, so no SPI transaction can hang the loop regardless of
+     * when it is issued.
+     *
+     * Keeping the gate actively broke the contract above. Scan + join is ~37 s
+     * on a marginal AP (first attempt "network not found", retry ~20 s later),
+     * and the LED was held dark for ALL of it -- exactly the window where "is
+     * it alive?" matters most, and exactly what it looked like from outside:
+     * nothing for half a minute, then blinking. The slow blink now runs from
+     * the moment the radio is up, which is what "never dark while the loop
+     * runs" was always supposed to mean. It costs two chip GPIO writes a
+     * second, since the write below happens only on an edge. */
     /* Re-evaluated every call (wifi_poll runs it every loop pass), so the
      * cadence follows the CURRENT state -- lose WiFi and it drops straight
      * back to the slow blink; lose the tunnel and solid drops to fast. */
