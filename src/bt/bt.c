@@ -27,6 +27,23 @@
 
 static btstack_packet_callback_registration_t hci_cb;
 static bool s_ready;
+/* Whether bt_init() ran, i.e. whether BTstack exists at all.
+ *
+ * NOT the same as s_ready, which means the controller reached HCI_STATE_WORKING.
+ * main() calls bt_init() only when cyw43_arch_init() SUCCEEDS, but the main
+ * loop calls bt_power_on_tick() and le_central_tick() unconditionally. On a
+ * boot where the radio fails to come up ("cyw43: init failed"), BTstack is
+ * never initialised, so btstack_run_loop's `the_run_loop` is still NULL --
+ * and every btstack_run_loop_* entry point is a thunk that dereferences it:
+ *
+ *     ldr r3, [the_run_loop]   ; NULL
+ *     ldr r3, [r3, #28]        ; reads boot ROM 0x0000001C
+ *     blx r3                   ; = 0x30322029 -> unmapped -> BusFault
+ *
+ * That is the whole of the "intermittent HardFault" (task #42): a NULL-vtable
+ * call that lands on a boot-ROM constant, which is why the faulting address
+ * was byte-identical on every occurrence. */
+static bool s_stack_up;
 
 /* --- unhandled-event tracing ----------------------------------------------
  * A generic Bluetooth tool should not silently discard what the stack tells
@@ -128,6 +145,7 @@ static void trace_unhandled(uint8_t evt, const uint8_t *pkt, uint16_t size) {
 }
 
 bool bt_ready(void) { return s_ready; }
+bool bt_stack_up(void) { return s_stack_up; }
 
 static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
     (void)ch;
@@ -182,6 +200,8 @@ void bt_init(void) {
 
     hci_cb.callback = &hci_handler;
     hci_add_event_handler(&hci_cb);
+    /* Only now is it safe for anything to call into BTstack. */
+    s_stack_up = true;
     /* Controller power-on is deferred to bt_power_on_tick(); see below. */
 }
 
@@ -195,6 +215,9 @@ void bt_init(void) {
  */
 void bt_power_on_tick(void) {
     static bool powered;
+    /* No BTstack this boot: hci_power_control() would call through a NULL
+     * run loop. The radio failing is survivable; faulting over it is not. */
+    if (!s_stack_up) { return; }
     if (powered) { return; }
 #if CONFIG_NET_WIFI
     if (wifi_bt_hold()) { return; }

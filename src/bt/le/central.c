@@ -22,6 +22,7 @@
 #include "btstack.h"
 #include "pico/time.h"
 
+#include "bt/bt.h"      /* bt_stack_up(): the loop ticks us even with no BTstack */
 #include "bt/le/central.h"
 #include "bt/registry.h"
 #include "api/api.h"
@@ -221,6 +222,10 @@ static void op_pump(struct le_link *l);
 static void op_complete(struct le_link *l, uint8_t att_status);
 
 void le_central_tick(void) {
+    /* The main loop calls this every pass, including on a boot where the radio
+     * failed and BTstack was never initialised. gap_* would then call through
+     * a NULL run loop. */
+    if (!bt_stack_up()) { return; }
     if (s_connecting && (int32_t)(now_ms() - s_connect_deadline_ms) >= 0) {
         /* gap_connect has no timeout of its own; without this a peer that has
          * gone away leaves the stack believing a connect is still in flight and

@@ -13,6 +13,12 @@ void bt_power_on_tick(void);
 
 /* True once HCI reports the controller working. */
 bool bt_ready(void);
+
+/* True once bt_init() has run, i.e. BTstack exists. False for the whole of a
+ * boot whose radio never came up. Callers reached from the main loop must
+ * check this before entering BTstack, because the loop ticks them regardless
+ * of whether the radio initialised. */
+bool bt_stack_up(void);
 uint32_t bt_unhandled_count(void);   /* HCI events nobody handled; for stat */
 
 #endif
