@@ -646,12 +646,44 @@ bool wifi_connect(const char *ssid, const char *psk) {
     return true;
 }
 
+/*
+ * Onboard LED (a GPIO on the CYW43 chip) as a link-state indicator. It
+ * escalates with how far up the connectivity stack we are, and it is NEVER
+ * dark while the loop runs -- any blink at all means the main loop is alive,
+ * so the USB-NCM fallback should be reachable even when WiFi is not:
+ *   slow blink (~1 Hz)  -> alive: idle / AP / connecting / wifi-off (use NCM)
+ *   fast blink (~3 Hz)  -> WiFi associated (LAN reachable)
+ *   solid on            -> WiFi + WireGuard confirmed (remotely reachable)
+ * Written only on an edge, so it costs a couple of chip GPIO writes per second
+ * at most. Driven from wifi_poll(), so it needs no separate tick and only runs
+ * while the radio driver is up.
+ */
+#define LED_SLOW_MS 1000   /* alive / idle / AP */
+#define LED_FAST_MS  320   /* station associated */
+static void led_tick(void) {
+    static bool inited, last_on;
+    bool want_on;
+    if (wifi_is_up() && wg_is_confirmed()) {
+        want_on = true;                    /* fully up: solid */
+    } else {
+        uint32_t period = wifi_is_up() ? LED_FAST_MS : LED_SLOW_MS;
+        want_on = (now_ms() % period) < (period / 2);
+    }
+    if (!inited || want_on != last_on) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, want_on);
+        last_on = want_on;
+        inited = true;
+    }
+}
+
 void wifi_poll(void) {
     if (!driver_up) return;
 
     /* Drives the cyw43 async context, which also runs lwIP's timers in poll
      * mode — this stands in for sys_check_timeouts(). */
     cyw43_arch_poll();
+
+    led_tick();   /* link-state blink; see above */
 
     /* Mode "off" still polls the context above -- lwIP's timers and the
      * Bluetooth side both ride on it -- but the station/AP machine below
