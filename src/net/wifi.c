@@ -672,6 +672,13 @@ bool wifi_connect(const char *ssid, const char *psk) {
 static void led_tick(void) {
     static bool inited, last_on;
     static uint32_t last_write;
+    /* NEVER drive the LED while the radio is scanning or joining: the LED is a
+     * GPIO on the CYW43 chip, so each update is an SPI transaction, and issuing
+     * one during the WiFi join turned the recoverable ~10s join stall into a
+     * hard radio wedge (bench-confirmed: LED on -> wedge, LED off -> boots).
+     * Hold the LED as-is through those windows; update it only when the radio
+     * is quiet. */
+    if (scanning || state == ST_JOIN) { return; }
     /* Re-evaluated every call (wifi_poll runs it every loop pass), so the
      * cadence follows the CURRENT state -- lose WiFi and it drops straight
      * back to the slow blink; lose the tunnel and solid drops to fast. */
