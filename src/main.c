@@ -55,7 +55,10 @@ bool boot_after_watchdog;
 
 int main(void) {
     stdio_init_all();
-    sleep_ms(200);                       /* let RTT attach before the first line */
+    /* busy_wait_ms(): this runs BEFORE watchdog_enable() below, so a hang here
+     * has nothing to recover it, and sleep_ms()'s __wfe() depends on an alarm
+     * IRQ this early in boot. Spin on the timer instead. */
+    busy_wait_ms(200);                   /* let RTT attach before the first line */
     printf("\n--- bluetooth_rp2_webapp ---\n");
 
     boot_after_watchdog = watchdog_caused_reboot();

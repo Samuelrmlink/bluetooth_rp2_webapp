@@ -292,33 +292,34 @@ int ota_slot_program_page(int which, uint32_t off, const uint8_t page[256]) {
  * starts from a clean radio.
  */
 static void reboot_quiesce(void) {
-    /* There is nothing to quiesce on a boot whose radio never came up, and
-     * trying is FATAL: cyw43_arch_init() having failed leaves BTstack
-     * uninitialised, so hci_power_control() calls through a NULL run loop
-     * (the task #42 NULL-vtable fault) and cyw43_arch_deinit() tears down a
-     * driver that was never built. Faulting here is far worse than faulting
-     * anywhere else, because it happens INSIDE the reboot path: the reset
-     * never issues, so the device does not come back at all and looks dead on
-     * every transport until someone power-cycles it. That is exactly what an
-     * `os reset` on a radio-less boot did. */
+    /* Cut power to the CYW43 and do NOTHING else.
+     *
+     * This used to politely tear the radio down -- hci_power_control(OFF),
+     * cyw43_arch_disable_ap_mode(), cyw43_arch_disable_sta_mode(),
+     * cyw43_arch_deinit() -- and every one of those can block forever. They run
+     * chip ioctls and lwIP teardown that bottom out in sleep_until()'s bare
+     * __wfe(), which only returns if a timer alarm IRQ fires; mid-teardown of
+     * the very async context that owns that machinery, it may not. Caught on
+     * the bench twice, both INSIDE this function: once in our own sleep_ms(),
+     * once in cyw43_arch_disable_sta_mode -> cyw43_cb_tcpip_deinit ->
+     * netif_remove. A hang here is the worst place for one, because the reset
+     * is never issued: the device does not reboot, and it is dark on every
+     * transport until somebody power-cycles it. That is precisely the "applied
+     * an OTA and it never came back" failure.
+     *
+     * The goal was only ever to leave the chip in a state the next
+     * cyw43_arch_init() can recover. Dropping WL_REG_ON powers it down, which
+     * is a stronger guarantee than any teardown sequence -- an unpowered chip
+     * cannot be left mid-transfer -- and a GPIO write cannot block. The RP2350
+     * reset that follows reinitialises the SPI/PIO side anyway.
+     */
     if (!cyw43_is_initialized(&cyw43_state)) {
-        printf("ota: radio was never up -- nothing to quiesce\n");
-        return;
+        return;                 /* radio never came up; nothing to power down */
     }
-#if CONFIG_BT_LE
-    /* Same reason, one level finer: the radio can be up while BTstack is not. */
-    if (bt_stack_up()) {
-        hci_power_control(HCI_POWER_OFF);
-        for (int i = 0; i < 50 && hci_get_state() != HCI_STATE_OFF; i++) {
-            cyw43_arch_poll();
-            sleep_ms(2);
-        }
-    }
-#endif
-    cyw43_arch_disable_ap_mode();
-    cyw43_arch_disable_sta_mode();
-    cyw43_arch_deinit();
-    sleep_ms(20);
+    gpio_init(CYW43_PIN_WL_REG_ON);
+    gpio_set_dir(CYW43_PIN_WL_REG_ON, GPIO_OUT);
+    gpio_put(CYW43_PIN_WL_REG_ON, 0);
+    busy_wait_ms(20);           /* let its rails fall before the reset */
 }
 
 void ota_reboot(bool flash_update_other) {
