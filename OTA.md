@@ -235,6 +235,19 @@ uptime. The only assumption is that a single boot never runs longer than
 WireGuard on the server (`wg-quick down/up`, or reboot the VPS), which clears
 the peer timestamp it remembers. No device access needed.
 
+## Two things to expect in practice
+
+**A stalled upload is safe, and resumes.** Over a marginal link (a phone
+hotspot ran at ~22 kB/s against ~115 kB/s on USB-NCM) the transfer sometimes
+stops part-way and `image state-read` then shows the inactive slot still empty
+(`0.0.0`). The running image is untouched -- nothing is armed until step 3 --
+and the SMP image upload is offset-based, so simply **running the same upload
+command again resumes it**. Bench runs completed on the second attempt every
+time. Scripted deployments should retry the upload a few times before giving
+up rather than treating the first stall as a failure.
+
+**Confirm over LAN or WireGuard, not USB-NCM.** See below.
+
 ## Known limitation
 
 The boot-health **buy** runs a flash operation that briefly stops servicing
