@@ -191,6 +191,8 @@ bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms) {
      * loop / API) re-issues; see task #37. */
     if (wifi_bt_hold() || wifi_scanning()) { return false; }
 #endif
+    /* Reachable straight from a script (bt.scan) on a boot with no BTstack. */
+    if (!bt_stack_up()) { return false; }
     s_filter = *f;
     /* Active scanning solicits SCAN_RSP, which is where most peripherals put
      * the complete local name. A passive scan often sees no names at all. */
@@ -202,7 +204,7 @@ bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms) {
 }
 
 void le_scan_stop(void) {
-    if (!s_scanning) {
+    if (!s_scanning || !bt_stack_up()) {
         return;
     }
     gap_stop_scan();
@@ -883,6 +885,8 @@ void le_on_disconnected(uint16_t con_handle) {
 }
 
 bool le_connect(const uint8_t *addr, uint8_t addr_type) {
+    /* Reachable straight from a script (bt.connect) on a boot with no BTstack. */
+    if (!bt_stack_up()) { return false; }
     if (s_connecting) {
         return false;
     }

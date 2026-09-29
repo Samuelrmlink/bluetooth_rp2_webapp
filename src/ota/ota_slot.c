@@ -13,6 +13,7 @@
 #include "autoconf.h"
 #if CONFIG_BT_LE
 #include "btstack.h"
+#include "bt/bt.h"     /* bt_stack_up(): never enter BTstack if it was never built */
 #endif
 #include "pico/platform.h"
 
@@ -291,11 +292,27 @@ int ota_slot_program_page(int which, uint32_t off, const uint8_t page[256]) {
  * starts from a clean radio.
  */
 static void reboot_quiesce(void) {
+    /* There is nothing to quiesce on a boot whose radio never came up, and
+     * trying is FATAL: cyw43_arch_init() having failed leaves BTstack
+     * uninitialised, so hci_power_control() calls through a NULL run loop
+     * (the task #42 NULL-vtable fault) and cyw43_arch_deinit() tears down a
+     * driver that was never built. Faulting here is far worse than faulting
+     * anywhere else, because it happens INSIDE the reboot path: the reset
+     * never issues, so the device does not come back at all and looks dead on
+     * every transport until someone power-cycles it. That is exactly what an
+     * `os reset` on a radio-less boot did. */
+    if (!cyw43_is_initialized(&cyw43_state)) {
+        printf("ota: radio was never up -- nothing to quiesce\n");
+        return;
+    }
 #if CONFIG_BT_LE
-    hci_power_control(HCI_POWER_OFF);
-    for (int i = 0; i < 50 && hci_get_state() != HCI_STATE_OFF; i++) {
-        cyw43_arch_poll();
-        sleep_ms(2);
+    /* Same reason, one level finer: the radio can be up while BTstack is not. */
+    if (bt_stack_up()) {
+        hci_power_control(HCI_POWER_OFF);
+        for (int i = 0; i < 50 && hci_get_state() != HCI_STATE_OFF; i++) {
+            cyw43_arch_poll();
+            sleep_ms(2);
+        }
     }
 #endif
     cyw43_arch_disable_ap_mode();
