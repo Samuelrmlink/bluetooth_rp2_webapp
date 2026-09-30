@@ -85,7 +85,41 @@ typedef struct {
     uint8_t owned[CONFIG_BT_MAX_LINKS][6];
     uint8_t n_owned;
 #endif
+    /* What was compiled the last time this slot loaded: the tier it came from
+     * and an FNV-1a hash of the exact bytes. Reported by script.loaded so a
+     * client can tell "running what is on flash" from "running something the
+     * file no longer says" -- which nothing could tell before, because a
+     * running script keeps the code it compiled however the file changes. */
+    uint8_t  src_tier;       /* SRC_TIER_* */
+    uint32_t src_hash;
 } script_t;
+
+#define SRC_TIER_NONE      0
+#define SRC_TIER_DRAFT     1
+#define SRC_TIER_STAGED    2
+#define SRC_TIER_COMMITTED 3
+
+static uint8_t tier_code(const char *tier) {
+    if (!tier) { return SRC_TIER_NONE; }
+    if (tier[0] == 'd') { return SRC_TIER_DRAFT; }
+    if (tier[0] == 's') { return SRC_TIER_STAGED; }
+    return SRC_TIER_COMMITTED;
+}
+
+static const char *tier_name(uint8_t t) {
+    return t == SRC_TIER_DRAFT ? "draft" : t == SRC_TIER_STAGED ? "staged"
+         : t == SRC_TIER_COMMITTED ? "committed" : "none";
+}
+
+/* FNV-1a, 32-bit. Chosen for being a dozen lines on both sides of the wire --
+ * the web editor computes the same function over its buffer -- not for
+ * strength: this detects change, it does not authenticate anything. */
+static uint32_t fnv1a(const void *data, size_t len) {
+    const uint8_t *b = (const uint8_t *)data;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) { h ^= b[i]; h *= 16777619u; }
+    return h;
+}
 
 static lua_State *L;
 static script_t scripts[MAX_SCRIPTS];
@@ -297,6 +331,11 @@ static const char *resolve_src(script_t *s, const char *name,
 typedef struct {
     char     name[48];
     uint32_t users;          /* bit per script slot, plus MODULE_PINNED */
+    /* As for scripts: where the resident copy was read from, and a hash of
+     * it. Five bytes a slot, and the path needs no storing -- it follows
+     * from the name and the tier (see module_path()). */
+    uint8_t  tier;
+    uint32_t hash;
 } module_use_t;
 
 static module_use_t s_mod_use[MAX_TRACKED_MODULES];
@@ -324,6 +363,18 @@ static void module_note_user(const char *name, int slot) {
     s_mod_use[free_i].users = bit;
 }
 
+/* Record what a fresh load of `name` compiled. Only on an actual load, never
+ * on a cache hit, which reuses whatever the earlier load recorded. */
+static void module_set_src(const char *name, uint8_t tier, uint32_t hash) {
+    for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
+        if (s_mod_use[i].name[0] && strcmp(s_mod_use[i].name, name) == 0) {
+            s_mod_use[i].tier = tier;
+            s_mod_use[i].hash = hash;
+            return;
+        }
+    }
+}
+
 static void module_forget(const char *name) {
     for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
         if (s_mod_use[i].name[0] && strcmp(s_mod_use[i].name, name) == 0) {
@@ -334,7 +385,8 @@ static void module_forget(const char *name) {
 }
 
 
-static bool read_module_src(const char *name, const char **src, size_t *len) {
+static bool read_module_src(const char *name, const char **src, size_t *len,
+                            uint8_t *tier) {
     /* dots -> slashes, and nothing else: no "..", no leading slash, so a
      * module name cannot climb out of lua/. */
     char rel[64];
@@ -354,9 +406,13 @@ static bool read_module_src(const char *name, const char **src, size_t *len) {
 
     char path[96];
     snprintf(path, sizeof path, "staged/%s.lua", rel);
-    if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return true; }
+    if (read_fs(path, src_buf, sizeof(src_buf), len)) {
+        *src = src_buf; *tier = SRC_TIER_STAGED; return true;
+    }
     snprintf(path, sizeof path, "lua/%s.lua", rel);
-    if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return true; }
+    if (read_fs(path, src_buf, sizeof(src_buf), len)) {
+        *src = src_buf; *tier = SRC_TIER_COMMITTED; return true;
+    }
     return false;
 }
 
@@ -380,9 +436,14 @@ static int l_require(lua_State *Ls) {
 
     const char *src = NULL;
     size_t len = 0;
-    if (!read_module_src(name, &src, &len)) {
+    uint8_t tier = SRC_TIER_NONE;
+    if (!read_module_src(name, &src, &len, &tier)) {
         return luaL_error(Ls, "module '%s' not found in staged/ or lua/", name);
     }
+    /* Hashed NOW, not after it runs: src is the shared src_buf, and the
+     * lua_call below can require further modules, each of which reads its
+     * own source into the same buffer. */
+    uint32_t hash = fnv1a(src, len);
 
     char chunkname[80];
     snprintf(chunkname, sizeof chunkname, "@%s", name);
@@ -423,6 +484,7 @@ static int l_require(lua_State *Ls) {
 
     lua_call(Ls, 0, 1);
     module_note_user(name, lrt_current_slot());
+    module_set_src(name, tier, hash);
     if (lua_isnil(Ls, -1)) {
         lua_pop(Ls, 1);
         lua_pushboolean(Ls, 1);      /* a module that returns nothing is still loaded */
@@ -538,6 +600,7 @@ size_t lrt_collect(void) {
 static bool load_tier(script_t *s, const char *src, size_t len, const char *tier,
                       const char **err) {
     flush_modules();
+    uint32_t hash = fnv1a(src, len);
     char chunkname[48];
     snprintf(chunkname, sizeof(chunkname), "@%s(%s)", s->name, tier);
     if (luaL_loadbuffer(L, src, len, chunkname) != LUA_OK) {
@@ -564,6 +627,8 @@ static bool load_tier(script_t *s, const char *src, size_t len, const char *tier
     lua_pop(L, 1);                                 /* the chunk */
 
     lua_sethook(co, hook, LUA_MASKCOUNT, CONFIG_LUA_HOOK_BUDGET);
+    s->src_tier = tier_code(tier);
+    s->src_hash = hash;
     s->running = true;
     s->dead = false;
     s->err[0] = 0;
@@ -943,6 +1008,83 @@ size_t lrt_list_json(char *dst, size_t cap) {
         first = false;
     }
     return n + (size_t)snprintf(dst + n, cap - n, "]");
+}
+
+/* The file a unit was compiled from, from its name and tier. Scripts are
+ * lua/<name>.lua (or staged/); a module's dots are directories. A draft has
+ * no file, which is exactly the point of a draft. */
+static bool unit_path(const char *name, bool module, uint8_t tier, char *out, size_t cap) {
+    if (tier != SRC_TIER_STAGED && tier != SRC_TIER_COMMITTED) { return false; }
+    int n = snprintf(out, cap, "%s/", tier == SRC_TIER_STAGED ? "staged" : "lua");
+    for (size_t i = 0; name[i] && (size_t)n + 5 < cap; i++) {
+        out[n++] = (module && name[i] == '.') ? '/' : name[i];
+    }
+    out[n] = 0;
+    return snprintf(out + n, cap - n, ".lua") == 4;
+}
+
+/* One unit of script.loaded's reply. `now` is the hash of the file at the
+ * unit's path as it stands, so hash != now is "loaded, modified since"; null
+ * when there is no file (a draft, or a file since deleted). */
+static int unit_json(char *dst, size_t cap, bool first, const char *name, bool module,
+                     uint8_t tier, uint32_t hash, uint32_t users) {
+    char path[112];
+    char now[16] = "null";
+    size_t len = 0;
+    if (unit_path(name, module, tier, path, sizeof path) &&
+        read_fs(path, src_buf, sizeof(src_buf), &len)) {
+        snprintf(now, sizeof now, "\"%08lx\"", (unsigned long)fnv1a(src_buf, len));
+    }
+    if (module) {
+        return snprintf(dst, cap,
+            "%s{\"name\":\"%s\",\"kind\":\"module\",\"tier\":\"%s\","
+            "\"hash\":\"%08lx\",\"now\":%s,\"users\":%u}",
+            first ? "" : ",", name, tier_name(tier), (unsigned long)hash, now,
+            (unsigned)__builtin_popcount(users & ~MODULE_PINNED) +
+                ((users & MODULE_PINNED) ? 1u : 0u));
+    }
+    return snprintf(dst, cap,
+        "%s{\"name\":\"%s\",\"kind\":\"script\",\"tier\":\"%s\","
+        "\"hash\":\"%08lx\",\"now\":%s}",
+        first ? "" : ",", name, tier_name(tier), (unsigned long)hash, now);
+}
+
+/*
+ * Everything resident in the arena, and whether each still matches its file.
+ *
+ * This is the one question the editor could not answer before: a running
+ * script keeps the code it compiled, and a required module stays cached until
+ * the script that required it restarts, so "the file on flash" and "what is
+ * running" drift apart silently the moment anything is saved. Each unit
+ * reports what it was compiled from (tier + hash) and what its file holds now.
+ *
+ * Stops cleanly and says so rather than overflowing: an oversized reply is
+ * dropped whole by the websocket layer, which would read as "nothing is
+ * loaded" -- the most misleading answer available.
+ */
+size_t lrt_loaded_json(char *dst, size_t cap) {
+    size_t n = (size_t)snprintf(dst, cap, "{\"units\":[");
+    bool first = true, truncated = false;
+    const size_t reserve = 32;     /* room to close the object whatever happens */
+    for (int i = 0; i < MAX_SCRIPTS && !truncated; i++) {
+        const script_t *sc = &scripts[i];
+        if (!sc->used || !sc->running) { continue; }
+        int w = unit_json(dst + n, cap - n - reserve, first, sc->name, false,
+                          sc->src_tier, sc->src_hash, 0);
+        if (w < 0 || (size_t)w >= cap - n - reserve) { truncated = true; break; }
+        n += (size_t)w; first = false;
+    }
+    for (int i = 0; i < MAX_TRACKED_MODULES && !truncated; i++) {
+        const module_use_t *m = &s_mod_use[i];
+        if (!m->name[0] || !m->users) { continue; }
+        int w = unit_json(dst + n, cap - n - reserve, first, m->name, true,
+                          m->tier, m->hash, m->users);
+        if (w < 0 || (size_t)w >= cap - n - reserve) { truncated = true; break; }
+        n += (size_t)w; first = false;
+    }
+    dst[n] = 0;   /* a refused unit may have left a partial write past n */
+    return n + (size_t)snprintf(dst + n, cap - n, "],\"truncated\":%s}",
+                                truncated ? "true" : "false");
 }
 
 size_t lrt_stats_json(char *dst, size_t cap) {

@@ -75,6 +75,9 @@ bool lrt_eval(const char *name, const char *chunk, char *out, size_t cap);
 
 size_t lrt_list_json(char *dst, size_t cap);
 size_t lrt_stats_json(char *dst, size_t cap);
+/* script.loaded: every running script and resident module, with the tier and
+ * hash it was compiled from and the hash of its file now. */
+size_t lrt_loaded_json(char *dst, size_t cap);
 
 /* The same numbers as lrt_stats_json, as integers, for the MCUmgr stat
  * group; and one script's row for its taskstat. lrt_task_info returns -1

@@ -194,6 +194,29 @@ def t_wifi_mode_both_everywhere():
         return False, "web/wifi/index.html has no both option"
     return True, "both: config, API text and UI agree"
 
+def t_script_loaded_reports_arena():
+    """The web editor's "loaded" and "loaded, modified since" markers rest on
+    script.loaded: each unit's compiled tier + FNV-1a hash, and the hash of its
+    file now. Check the op is registered, the load paths record what they
+    compiled (scripts in load_tier, modules in require), a module's hash is
+    taken before lua_call can reuse src_buf, and the FNV-1a constants match
+    the 32-bit standard the browser side implements."""
+    c = open(os.path.join(ROOT, "src/lua/lrt.c")).read()
+    o = open(os.path.join(ROOT, "src/lua/lops.c")).read()
+    if '"script.loaded"' not in o:
+        return False, "script.loaded is not in the op table"
+    if "s->src_hash = hash" not in c or "module_set_src(name, tier, hash)" not in c:
+        return False, "a load path no longer records what it compiled"
+    req = c[c.index("static int l_require"):]
+    if req.index("uint32_t hash = fnv1a(src, len)") > req.index("lua_call(Ls, 0, 1)"):
+        return False, "module hash taken after lua_call -- src_buf may hold another module by then"
+    if "2166136261u" not in c or "16777619u" not in c:
+        return False, "fnv1a constants changed; the web editor hashes with the standard ones"
+    if '\\"truncated\\"' not in c:
+        return False, "script.loaded must report truncation rather than overflow the frame"
+    return True, "registered, recorded on both load paths, hashed before running"
+
+
 def t_wg_confirmed_exists():
     """wifi.c's AP policy keys on wg_is_confirmed(); if it were removed or its
     stub dropped, the AP would be permanently on (or the build would fail only
@@ -520,6 +543,7 @@ def main():
     a = ap.parse_args()
 
     step(0, "webapp + model unit tests", t_unit)
+    step(0, "script.loaded reports what the arena holds", t_script_loaded_reports_arena)
     step(0, "no device-specific code in the core", t_no_device_in_core)
     step(0, "protocol binding stays a thin wrapper", t_proto_binding_is_thin)
     step(0, "device registry stays transport-neutral", t_registry_transport_neutral)
