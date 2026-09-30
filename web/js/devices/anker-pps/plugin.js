@@ -15,9 +15,9 @@ export const controls = [
   { kind: 'readout', field: 'remaining_time_h', label: 'Remaining', unit: 'h', digits: 1 },
   { kind: 'readout', field: 'total_output_power_w', label: 'Output, total', unit: 'W' },
   { kind: 'readout', field: 'total_input_power_w', label: 'Input, total', unit: 'W' },
-  { kind: 'readout', field: 'ac_output_power_w', label: 'AC output', unit: 'W' },
-  { kind: 'readout', field: 'ac_input_power_w', label: 'AC input', unit: 'W' },
-  { kind: 'readout', field: 'solar_input_power_w', label: 'Solar input', unit: 'W' },
+  { kind: 'readout', field: 'ac_output_power_w', label: 'AC output power', unit: 'W' },
+  { kind: 'readout', field: 'ac_input_power_w', label: 'AC input power', unit: 'W' },
+  { kind: 'readout', field: 'solar_input_power_w', label: 'Solar input power', unit: 'W' },
   { kind: 'readout', field: 'bms_temp_major_c', label: 'Battery temperature', unit: '°C' },
 
   // Writable: the four setters whose payloads were captured from the app

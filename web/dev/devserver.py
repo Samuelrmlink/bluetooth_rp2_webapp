@@ -43,6 +43,60 @@ MOCK_TREE = {
     ],
 }
 
+# --- device state shared by every connection, as on a real gateway ----------
+#
+# A real gateway is one device that every tab talks to, so the filesystem, the
+# Lua runtime and the C1000's settings live here, not per connection.
+# `test.reset` (mock only) puts all of it back, so each Playwright test starts
+# from the same device.
+REPO = os.path.join(WEB, "..")
+
+def _seed_fs():
+    fs = {}
+    for rel in ["lua/anker.lua", "lua/anker2.lua", "lua/pinecil.lua",
+                "lua/profiles/anker/run.lua", "lua/profiles/anker/link.lua",
+                "lua/profiles/anker/models/A1761.lua"]:
+        path = os.path.join(REPO, rel)
+        if os.path.exists(path):
+            fs[rel] = open(path, "rb").read()
+    fs["cfg/wifi.json"] = b'{"mode":"auto","networks":[{"ssid":"bench"}]}'
+    fs["var/wg_epoch.bin"] = b"\x4e\x00\x00\x00"
+    return fs
+
+def fnv1a(b):
+    h = 2166136261
+    for x in b: h = ((h ^ x) * 16777619) & 0xFFFFFFFF
+    return "%08x" % h
+
+C1000_BASE = {
+    "addr": "E8:EE:CC:B6:89:7E", "product_code": "A1761", "product_type": "B105",
+    "model_name": "SOLIX C1000(X) Portable Power Station", "serial": "APC5YX0D43200118",
+    "battery_pct": 87, "remaining_time_h": 19.5, "total_output_power_w": 24, "total_input_power_w": 0,
+    "ac_output_power_w": 24, "ac_input_power_w": 0, "solar_input_power_w": 0, "bms_temp_major_c": 29,
+    "ac_output_enabled": 1, "car_output_enabled": 0, "screen_enabled": 1, "ambient_light": 0,
+    "ac_frequency_hz": 60, "ac_charge_power_w": 600, "device_timeout_min": 720, "ultra_fast_charging": 0,
+    "unknown_b1": 3, "capability_block": "\x02\x01\x01\x01", "fault_major": 0,
+}
+C1000_SETTERS = {"ac_output_enabled": (0, 1), "car_output_enabled": (0, 1),
+                 "ambient_light": (0, 1, 3), "screen_enabled": (0, 1)}
+
+STATE = {}
+def reset_state():
+    STATE.clear()
+    STATE["fs"] = _seed_fs()
+    # anker runs from boot, as on the bench, with its modules resident
+    STATE["scripts"] = {"anker": {"running": True, "draft": None, "tier": "committed",
+                                  "hash": fnv1a(STATE["fs"].get("lua/anker.lua", b""))}}
+    STATE["modules"] = {m: fnv1a(STATE["fs"][f"lua/{m.replace('.', '/')}.lua"])
+                        for m in ["profiles.anker.run", "profiles.anker.link", "profiles.anker.models.A1761"]
+                        if f"lua/{m.replace('.', '/')}.lua" in STATE["fs"]}
+    STATE["c1000"] = dict(C1000_BASE)
+    STATE["drafts"] = {}
+reset_state()
+
+def script_file(name, tier):
+    return f"{'staged' if tier == 'staged' else 'lua'}/{name}.lua"
+
 class MockGateway:
     """One instance per connected browser."""
     def __init__(self, send):
@@ -58,6 +112,10 @@ class MockGateway:
         while True:
             time.sleep(1.0)
             try:
+                if STATE["scripts"].get("anker", {}).get("running"):
+                    c = STATE["c1000"]
+                    c["ac_output_power_w"] = c["total_output_power_w"] = (22 + int(time.time()) % 5) if c["ac_output_enabled"] else 0
+                    self.send({"evt": "profile.anker.telemetry", "data": dict(c)})
                 if self.scanning:
                     for d in self.devices.values():
                         d["rssi"] = max(-95, min(-40, d["rssi"] + (hash(time.time()) % 5) - 2))
@@ -131,6 +189,91 @@ class MockGateway:
             return {"policy": self.policy}
         if op == "bond.list":
             return {"policy": self.policy, "bonds": []}
+        if op.startswith("script.") or op in ("anker.set", "test.reset"):
+            return self._script_op(op, p)
+        raise ApiError("unknown_op", op)
+
+    # --- the Lua runtime, as far as the web app sees it ---------------------
+    def _script_op(self, op, p):
+        fs, scripts = STATE["fs"], STATE["scripts"]
+        name = p.get("script") or p.get("name")
+        if op == "test.reset":
+            reset_state(); return {"reset": True}
+        if op == "script.list":
+            files = [{"name": k[4:-4], "kind": "script", "tier": "committed", "bytes": len(v)}
+                     for k, v in fs.items() if k.startswith("lua/") and k.count("/") == 1 and k.endswith(".lua")]
+            files += [{"name": k[7:-4], "kind": "staged", "tier": "staged", "bytes": len(v)}
+                      for k, v in fs.items() if k.startswith("staged/") and k.endswith(".lua")]
+            return {"scripts": [{"name": n, "running": s["running"], "dead": False, "draft": s["draft"] is not None,
+                                 "resumes": 1, "error": ""} for n, s in scripts.items()],
+                    "ops": ["anker.set"] if scripts.get("anker", {}).get("running") else [],
+                    "files": files,
+                    "runtime": {"arena_bytes": 163840, "used": 81920, "peak": 120000, "hook_kills": 0,
+                                "budget": 20000, "slice_overruns": 0, "slice_max_ms": 25}}
+        if op == "script.loaded":
+            units = []
+            for n, s in scripts.items():
+                if not s["running"]: continue
+                f = None if s["tier"] == "draft" else fs.get(script_file(n, s["tier"]))
+                units.append({"name": n, "kind": "script", "tier": s["tier"], "hash": s["hash"],
+                              "now": fnv1a(f) if f is not None else None})
+            if scripts.get("anker", {}).get("running"):
+                for m, h in STATE["modules"].items():
+                    f = fs.get(f"lua/{m.replace('.', '/')}.lua")
+                    units.append({"name": m, "kind": "module", "tier": "committed", "hash": h,
+                                  "now": fnv1a(f) if f is not None else None, "users": 1})
+            return {"units": units, "truncated": False}
+        if op == "script.draft":
+            buf = STATE["drafts"].get(name, "") if p.get("offset", 0) else ""
+            buf += p.get("source", "")
+            STATE["drafts"][name] = buf
+            s = scripts.setdefault(name, {"running": False, "draft": None, "tier": "committed", "hash": ""})
+            if p.get("final", True):
+                s["draft"] = buf
+                if p.get("run", True):
+                    s.update(running=True, tier="draft", hash=fnv1a(buf.encode()))
+            return {"draft": True, "bytes": len(buf), "flash_written": False}
+        if op in ("script.start", "script.reload"):
+            s = scripts.setdefault(name, {"running": False, "draft": None, "tier": "committed", "hash": ""})
+            if s["draft"] is not None:
+                s.update(running=True, tier="draft", hash=fnv1a(s["draft"].encode()))
+            else:
+                for tier in ("staged", "committed"):
+                    f = fs.get(script_file(name, tier))
+                    if f is not None:
+                        s.update(running=True, tier=tier, hash=fnv1a(f)); break
+                else:
+                    raise ApiError("start_failed", "no draft, staged or committed source for that name")
+            return {"started": True} if op == "script.start" else {"reloaded": True}
+        if op == "script.stop":
+            if name in scripts: scripts[name]["running"] = False
+            return {"stopped": True}
+        if op == "script.revert":
+            s = scripts.get(name)
+            if s and s["draft"] is not None: s["draft"] = None
+            else: fs.pop(script_file(name, "staged"), None)
+            return {"reverted": True}
+        if op == "script.stage":
+            s = scripts.get(name)
+            if not s or s["draft"] is None: raise ApiError("stage_failed", "no draft to stage")
+            fs[script_file(name, "staged")] = s["draft"].encode()
+            return {"staged": True}
+        if op == "script.commit":
+            s = scripts.get(name) or {}
+            src = s.get("draft").encode() if s.get("draft") is not None else fs.get(script_file(name, "staged"))
+            if src is None: raise ApiError("commit_failed", "nothing staged")
+            fs[script_file(name, "committed")] = src
+            return {"committed": True}
+        if op == "script.eval":
+            return {"ok": True, "value": f"(mock) {p.get('chunk', '')}"}
+        if op == "anker.set":
+            # As the driver: only captured setters, only their listed values;
+            # a refusal is a result carrying `error`, not a failed call.
+            f, v = p.get("field"), p.get("value")
+            if f not in C1000_SETTERS: return {"error": "unknown_field", "message": f"{f} has no captured setter"}
+            if v not in C1000_SETTERS[f]: return {"error": "bad_value", "message": f"{f} takes {C1000_SETTERS[f]}"}
+            threading.Timer(0.3, lambda: STATE["c1000"].__setitem__(f, v)).start()
+            return {"queued": True, "field": f, "value": v}
         raise ApiError("unknown_op", op)
 
 class ApiError(Exception):
@@ -167,7 +310,62 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.split("?")[0] == "/ws":
             return self._ws()
+        if self.path.startswith("/api/fs"):
+            return self._fs("GET")
         return super().do_GET()
+
+    def do_PUT(self): self._fs("PUT")
+    def do_DELETE(self): self._fs("DELETE")
+    def do_POST(self): self._fs("POST")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def _reply(self, code, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(data)
+
+    # /api/fs, in memory, with the device's shapes: a one-level listing
+    # {"dir", "files": [{name, dir:true} | {name, size}]}, raw file bodies,
+    # {"ok":false,"error"} on failure.
+    def _fs(self, method):
+        from urllib.parse import unquote
+        fs = STATE["fs"]
+        path = unquote(self.path.split("?")[0][len("/api/fs"):]).strip("/")
+        if method == "POST" and path == "rename":
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            src, dst = req.get("from"), req.get("to")
+            if src not in fs: return self._reply(404, {"ok": False, "error": "not found"})
+            if dst in fs: return self._reply(409, {"ok": False, "error": "exists"})
+            fs[dst] = fs.pop(src); return self._reply(200, {"ok": True})
+        if method == "PUT":
+            n = int(self.headers.get("Content-Length", 0))
+            if n > 128 * 1024: return self._reply(413, {"ok": False, "error": "too large"})
+            fs[path] = self.rfile.read(n); return self._reply(200, {"ok": True, "name": path, "bytes": n})
+        if method == "DELETE":
+            if path not in fs: return self._reply(404, {"ok": False, "error": "not found"})
+            del fs[path]; return self._reply(200, {"ok": True})
+        if path in fs:
+            return self._reply(200, fs[path], "application/octet-stream")
+        pre = path + "/" if path else ""
+        names = {}
+        for k in fs:
+            if k.startswith(pre):
+                rest = k[len(pre):]
+                if "/" in rest: names[rest.split("/")[0]] = None
+                else: names[rest] = len(fs[k])
+        if not names and path: return self._reply(404, {"ok": False, "error": "not found"})
+        files = [{"name": n, "dir": True} if sz is None else {"name": n, "size": sz} for n, sz in sorted(names.items())]
+        return self._reply(200, {"dir": path, "files": files} if path else {"files": files})
 
     def _ws(self):
         key = self.headers.get("Sec-WebSocket-Key")

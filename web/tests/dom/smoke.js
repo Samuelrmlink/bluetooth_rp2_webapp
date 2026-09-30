@@ -27,10 +27,9 @@ export function run({ errors, wantedIds = [] }) {
   const missing = wantedIds.filter((id) => !document.getElementById(id));
   ok('every element this app\'s JS looks up exists', missing.length === 0, missing.join(','));
 
-  // The header is shared by every app and is how you get between them.
-  const links = document.querySelectorAll('#appnav .applink');
-  ok('the app nav rendered', links.length >= 2, `${links.length} link(s)`);
-  ok('the nav marks the current app', !!document.querySelector('#appnav [aria-current="page"]'));
+  // (There was a shared nav bar between six pages here; the UI is one page
+  // now, every UI a window, so there is nothing to navigate between.)
+  ok('the toolbar and its connection status rendered', !!document.getElementById('conn-status'));
 
   const tiles = document.getElementById('tiles');
   const solo = document.getElementById('solo');

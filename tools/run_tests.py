@@ -424,6 +424,20 @@ def t_parity():
 def t_registry_transport_neutral():
     return _grep(r"\ble_[a-z]|gatt_|att_", ["src/bt/registry.c"])
 
+def t_webapp_e2e():
+    """The one-page app driven end to end against dev/devserver.py's mock
+    device: windows and keys, the editor's four states with vim and undo, and
+    the device-plugin lifecycle with a write confirmed by telemetry. Skipped
+    where Playwright is not installed (cd web && npm install)."""
+    if not os.path.exists(os.path.join(ROOT, "web/node_modules/.bin/playwright")):
+        return True, "skipped (Playwright not installed: cd web && npm install)"
+    rc, out = sh("npx playwright test --reporter=line", cwd=os.path.join(ROOT, "web"))
+    m = re.search(r"(\d+) passed", out)
+    if rc or not m:
+        bad = re.search(r"(\d+) failed", out)
+        return False, (f"{bad.group(1)} failed" if bad else (out.strip().splitlines() or ["no output"])[-1][:90])
+    return True, f"{m.group(1)} passed"
+
 def t_webapp_dom():
     """Render the real page in a real browser. Every model test passed while
     the app opened to an empty workspace nothing could be selected in, because
@@ -578,6 +592,7 @@ def main():
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)
+        step(2, "webapp end to end (Playwright, mock device)", t_webapp_e2e)
 
     print()
     if FAILS:
