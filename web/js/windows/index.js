@@ -4,10 +4,10 @@ import { ConsoleWindow } from './console.js';
 import { ScannerWindow } from './scanner.js';
 import { GattWindow } from './gatt.js';
 import { HardwareWindow } from './hardware.js';
-import { stub } from './stub.js';
+import { EditorWindow } from './editor.js';
 
 export const BUILTIN_WINDOWS = [
-  { id: 'editor', title: 'Editor', group: 'Tools', create: stub('Editor') },
+  { id: 'editor', title: 'Editor', group: 'Tools', create: EditorWindow },
   { id: 'scanner', title: 'Scanner', group: 'Tools', create: ScannerWindow },
   { id: 'gatt', title: 'GATT', group: 'Tools', create: GattWindow },
   { id: 'console', title: 'Console', group: 'Tools', create: ConsoleWindow },

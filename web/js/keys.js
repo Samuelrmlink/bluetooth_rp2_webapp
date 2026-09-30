@@ -130,6 +130,14 @@ export const BINDINGS = [
   { id: 'nav-esc', group: 'Inside a window', keys: 'Esc in a text field', combos: [], when: 'workspace', label: 'Leave the field' },
   // Everywhere
   { id: 'settings', group: 'Everywhere', keys: 'Alt+S', combos: ['Mod+KeyS'], when: 'always', label: 'Open / close Settings' },
+  // The editor's own. Context 'editor' is the workspace with the Editor
+  // window active (see WORKSPACE_LIKE below), so these act only there: F5
+  // still reloads the page from any other window.
+  { id: 'editor-save', group: 'Editor', keys: 'Ctrl+S', combos: ['Ctrl+KeyS'], when: 'editor', label: 'Save the file to the device' },
+  { id: 'editor-run', group: 'Editor', keys: 'F5', combos: ['F5'], when: 'editor', label: 'Run the script from the buffer (a draft: nothing is written to flash)' },
+  { id: 'editor-stop', group: 'Editor', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
+  { id: 'editor-sidebar', group: 'Editor', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
+  { id: 'editor-files', group: 'Editor', keys: 'j / k, l, h', combos: [], when: 'editor', label: 'In the file list: move, open or expand, collapse' },
   { id: 'help', group: 'Everywhere', keys: '?', combos: ['?', 'Mod+Slash'], when: 'always', label: 'Show / hide this list' },
   // No combos: typing is not a binding, it goes to the filter box. Listed so
   // that the one place people look for what the keys do says so.
@@ -137,11 +145,18 @@ export const BINDINGS = [
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
-export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Everywhere'];
+export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Everywhere'];
 
 // The banner's contents per context: short, and only what applies now.
 // `tiled` marks entries that make no sense in tabs mode.
 export const HINTS = {
+  editor: [
+    { keys: 'Ctrl+S', label: 'save' },
+    { keys: 'F5', label: 'run' },
+    { keys: 'Alt+B', label: 'files' },
+    { keys: 'Esc', label: 'leave the text' },
+    { keys: 'Alt+HJKL', label: 'focus window' },
+  ],
   workspace: [
     { keys: 'HJKL', label: 'controls' },
     { keys: 'Space', label: 'press / open' },
@@ -219,9 +234,14 @@ export function matches(e, combo) {
   return e.code === c.code;
 }
 
+// Contexts that are the workspace with something extra: every workspace
+// binding (Alt+hjkl and the rest) applies in them too, plus their own.
+const WORKSPACE_LIKE = new Set(['editor']);
+
 function applies(b, context) {
   const w = Array.isArray(b.when) ? b.when : [b.when];
-  return w.includes('always') || w.includes(context);
+  return w.includes('always') || w.includes(context) ||
+    (WORKSPACE_LIKE.has(context) && w.includes('workspace'));
 }
 
 export function bindingsFor(context) {
@@ -244,6 +264,7 @@ export class Keys {
   */
   constructor({ actions, getContext, getNavRoots, isTabs, hintEl }) {
     this._actions = actions;
+    this._escOwners = new WeakMap();    // text field -> (e) => took it?
     this._getContext = getContext;
     // An armed context that owns the keyboard ahead of everything but the
     // dropdown. `sticky` ones last until something ends them (a key released,
@@ -375,6 +396,17 @@ export class Keys {
 
     // Esc in a text field leaves the field; the next Esc reaches the app.
     if (typing) {
+      // A text field may own Esc for as long as it means something inside
+      // it: the editor's vim layer drops from insert to normal mode on Esc,
+      // and only a SECOND Esc (in normal mode) should leave the field. The
+      // owner says whether it took the key; if not, the rules below apply.
+      const escOwner = e.key === 'Escape' && this._escOwners.get(document.activeElement);
+      if (escOwner && escOwner(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.refreshHint();
+        return;
+      }
       // Esc in a text field leaves the field; the next Esc reaches the app.
       // Not in the help overlay: there the field is a filter over the list
       // it sits above, nothing else is focusable, and Esc means "clear it,
@@ -385,7 +417,13 @@ export class Keys {
         this.refreshHint();
         return;
       }
-      if (e.key !== 'Escape' && !isAlt) return;
+      // Ctrl-combos and function keys reach the bindings from inside a text
+      // field ONLY when one is bound in this context -- Ctrl+S saves and F5
+      // runs in the editor, while Ctrl+C/V/Z and every unbound key stay the
+      // browser's, untouched.
+      const shortcut = (e.ctrlKey || /^F\d{1,2}$/.test(e.key)) &&
+        bindingsFor(this.context()).some((b) => b.combos.some((c) => matches(e, c)));
+      if (e.key !== 'Escape' && !isAlt && !shortcut) return;
     }
 
     // Tab / Shift+Tab on a <select> step its value in place: the direction
@@ -443,7 +481,9 @@ export class Keys {
     // own keys (Shift is allowed through for G). Outside text fields only
     // (already returned above).
     const plain = !e.altKey && !e.ctrlKey && !e.metaKey;
-    if (!handled && plain && context !== 'drag') {
+    // Never the in-window navigation from inside a text field: a key that
+    // got this far there was a bound shortcut, not a direction.
+    if (!handled && plain && context !== 'drag' && !typing) {
       const ae = document.activeElement;
       if ((e.code === 'Space' || e.code === 'Enter') && !e.shiftKey && ae?.tagName === 'SELECT') {
         handled = this.dropdown.open(ae);
@@ -461,6 +501,12 @@ export class Keys {
       e.stopPropagation();
       this.refreshHint();
     }
+  }
+
+  // Lets a text field take Esc before the "Esc leaves the field" rule.
+  // `fn(e)` returns true when it used the key.
+  ownEscape(el, fn) {
+    this._escOwners.set(el, fn);
   }
 
   // Rebuilds the banner for the current context. Cheap enough to call from

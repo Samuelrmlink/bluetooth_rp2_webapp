@@ -187,3 +187,213 @@ table.grid tr.is-connected td:first-child { color: var(--green); }
 .sect-body .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
 .sect-body .row .spacer { flex: 1 1 auto; }
 .sect-body .err { color: var(--red); }
+
+/* --- Editor ------------------------------------------------------------------ */
+.pane-editor { --ed-font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.ed-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.ed-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.ed-state { color: var(--dim); }
+.ed-state.is-dirty { color: var(--fg); }
+.ed-state.ed-loaded { color: var(--green); }
+.ed-state.ed-stale { color: var(--orange); }
+
+.ed-notice {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.ed-notice.warn { color: var(--orange); }
+.ed-notice.err { color: var(--red); }
+.ed-titlebar .spacer { flex: 1 1 auto; }
+
+.ed-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.ed-sidebar {
+  flex: 0 0 200px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+
+.ed-sidebar[hidden] { display: none; }
+
+.ed-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+
+.ed-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 4px 10px;
+}
+
+.ed-tab[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--green); }
+
+.ed-files {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0;
+  font-size: 12.5px;
+}
+
+.ed-files[data-nav-active] { outline: 1px solid var(--green); outline-offset: -1px; }
+
+.ft-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--dim);                /* on the device, unmodified: grey */
+}
+
+.ft-row:hover { background: #1a1c20; }
+.ft-row[aria-selected='true'] { background: #1f2a24; }
+.ft-dir { color: var(--fg); }
+.ft-row.is-dirty { color: var(--fg); }
+.ft-twisty { flex: 0 0 10px; color: var(--dim); }
+.ft-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ft-badges { display: inline-flex; gap: 5px; align-items: center; }
+.ft-dot { font-size: 10px; color: var(--fg); }
+.ft-arena { font: 600 10px ui-monospace, monospace; }
+.ft-arena.ft-loaded { color: var(--green); }
+.ft-arena.ft-stale { color: var(--orange); }
+
+.ed-surface {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.ed-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+}
+
+.ed-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-height: 100%;
+  padding: 6px 10px 6px 8px;
+  text-align: right;
+  white-space: pre;
+  color: #4b5058;
+  background: var(--bg);
+  font: var(--ed-font);
+  user-select: none;
+}
+
+/* The pre and the textarea share one grid cell, so the cell is as big as the
+   longer of the two and they overlay exactly. Everything that affects where a
+   glyph lands is set identically on both. */
+.ed-code {
+  flex: 1 0 auto;
+  display: grid;
+  min-width: calc(100% - 60px);
+  min-height: 100%;
+}
+
+.ed-hl,
+.ed-input {
+  grid-area: 1 / 1;
+  margin: 0;
+  padding: 6px 12px 6px 4px;
+  border: 0;
+  font: var(--ed-font);
+  letter-spacing: normal;
+  tab-size: 2;
+  white-space: pre;
+  word-wrap: normal;
+  overflow: hidden;
+}
+
+.ed-hl {
+  color: var(--fg);
+  pointer-events: none;
+}
+
+.ed-input {
+  resize: none;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--fg);
+  -webkit-text-fill-color: transparent;
+}
+
+.ed-input::selection { background: rgba(79, 208, 127, 0.25); }
+
+.tk-kw { color: #c792ea; }
+.tk-lit { color: #f78c6c; }
+.tk-str { color: #c3e88d; }
+.tk-num { color: #f78c6c; }
+.tk-com { color: #697386; font-style: italic; }
+.tk-lib { color: #82aaff; }
+.tk-fn { color: #82aaff; }
+.tk-key { color: #82aaff; }
+
+.ed-status {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 2px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ed-status .spacer { flex: 1 1 auto; }
+.ed-s-mode { font-weight: 600; letter-spacing: 0.04em; }
+
+.ed-more-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 240px;
+}
+
+.ed-more-menu .pane-btn { text-align: left; }
