@@ -51,14 +51,16 @@ function num(v, fallback) {
   return Number.isFinite(v) ? v : fallback;
 }
 
-// A pane that belongs to one meter: 'graphs@022862', 'events@81645'. A
-// stored layout may name a meter's panes before the page has heard of
-// that meter — it is unplugged, or still handshaking — and those leaves
+// A pane that belongs to one device: 'anker-pps.controls@E8EECCB6897E',
+// 'pinecil.controls@C0A1B2…'. A stored layout may name a device's windows
+// before the page has heard of that device — its script is not running yet,
+// or it is still handshaking — and those leaves
 // are kept as they are (see fromJSON) so the arrangement survives.
-const METER_PANE = /^[a-z][a-z-]*@[A-Za-z0-9._-]{1,32}$/;
+// <plugin>.<window>@<device key>; the dot joins plugin and window name.
+const DEVICE_PANE = /^[a-z][a-z0-9.-]*@[A-Za-z0-9._:-]{1,40}$/;
 
-export function isMeterPane(id) {
-  return typeof id === 'string' && METER_PANE.test(id);
+export function isDevicePane(id) {
+  return typeof id === 'string' && DEVICE_PANE.test(id);
 }
 
 export class Layout {
@@ -73,14 +75,14 @@ export class Layout {
     return this._known.has(id);
   }
 
-  // A pane that may be placed from now on (a meter's panes, as it arrives).
+  // A pane that may be placed from now on (a device's windows, as it appears).
   addKnown(id) {
     this._known.add(id);
   }
 
   // Renames a pane wherever it sits — a leaf or a float. What the page
   // does once when the serial-less panes it started with turn out to be
-  // a particular meter's. Returns false when no window holds `oldId`.
+  // a particular device's. Returns false when no window holds `oldId`.
   renamePane(oldId, newId) {
     // The new name is placeable either way; a pane that is not in any
     // window right now (a Live Values pane nobody has opened) is still
@@ -132,7 +134,7 @@ export class Layout {
         return l._leaf(null);
       }
       if (leavesLeft.n-- <= 0) return l._leaf(null);
-      if (typeof node === 'string' && (l._known.has(node) || isMeterPane(node)) && !seen.has(node)) {
+      if (typeof node === 'string' && (l._known.has(node) || isDevicePane(node)) && !seen.has(node)) {
         seen.add(node);
         l._known.add(node);
         return l._leaf(node);
@@ -144,7 +146,7 @@ export class Layout {
     const fl = json && Array.isArray(json.floating) ? json.floating : [];
     for (const f of fl) {
       if (!f || typeof f !== 'object' || typeof f.p !== 'string') continue;
-      if ((!l._known.has(f.p) && !isMeterPane(f.p)) || seen.has(f.p)) continue;
+      if ((!l._known.has(f.p) && !isDevicePane(f.p)) || seen.has(f.p)) continue;
       seen.add(f.p);
       l._known.add(f.p);
       l.floating.push(l._float(f.p, f.x, f.y, f.w, f.h));

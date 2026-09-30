@@ -66,6 +66,11 @@ const SWAP_ZONE = 0.25;
 // hit — and with too much it would swallow the edge zones it sits between.
 const DIVIDER_GRAB = 4;
 
+// Groups the picker pins to the bottom of its list, in this order, whatever
+// order their panes were registered in (constructor option `pinLast`). Every
+// other group keeps registration order.
+
+
 // Travelling one way means arriving at the opposite edge of what you reach:
 // move down onto a tile and you come in through its top. Both halves of the
 // feature turn a direction into a landing edge this way, which is what keeps
@@ -167,7 +172,8 @@ export class LayoutManager {
     active: index into layout.windows() to start focused on.
     onChange(): after every geometry pass. app.js re-measures uPlot here.
   */
-  constructor({ panes, layout, mode, active, onChange, paneTitle = null }) {
+  constructor({ panes, layout, mode, active, onChange, paneTitle = null, paneParts = null, pinLast = [] }) {
+    this._pinLast = pinLast;
     this._panes = new Map(panes.map((p) => [p.id, p]));
     this.layout = layout;
     this._onChange = onChange;
@@ -175,6 +181,8 @@ export class LayoutManager {
     // Names a pane that is not registered right now (a meter's, while the
     // meter is away) for the tile that is keeping its place.
     this._paneTitle = paneTitle;
+    // The same, split into the picker's two halves — see _buildTile.
+    this._paneParts = paneParts;
 
     this._workspace = document.getElementById('workspace');
     this._tiles = document.getElementById('tiles');
@@ -303,11 +311,12 @@ export class LayoutManager {
   // Renames a pane in the tree and the registry — the one-time step when
   // the serial-less panes the page starts with turn out to be a
   // particular meter's.
-  renamePane(oldId, newId, title) {
+  renamePane(oldId, newId, title, short) {
     const pane = this._panes.get(oldId);
     if (!pane) return false;
     pane.id = newId;
     if (title) pane.title = title;
+    if (short) pane.short = short;
     // Same position in the pickers and the tab bar: rebuild the map in
     // order rather than delete+set, which would send it to the end.
     this._panes = new Map([...this._panes].map(([k, v]) => [k === oldId ? newId : k, v]));
@@ -515,26 +524,54 @@ export class LayoutManager {
     const head = document.createElement('div');
     head.className = 'tile-head';
 
+    // Grouped by kind: the heading says what the panes are, each entry says
+    // which meter. The list then reads down the meters of one kind instead of
+    // repeating the kind against every meter — and, because a <select> is as
+    // wide as its widest entry, the control shrinks to the width of a meter
+    // name rather than a whole sentence. That width is the point: what it
+    // gives back is .tile-grab, the part of the header you drag the window by.
     const pick = document.createElement('select');
     pick.className = 'pane-pick';
     pick.setAttribute('aria-label', 'Pane to show');
     const none = document.createElement('option');
     none.value = '';
-    none.textContent = '— choose a pane —';
+    // Short on purpose: an empty tile has nothing else in its picker, so this
+    // one line would set the control's width on its own.
+    none.textContent = 'choose\u2026';
     pick.appendChild(none);
-    for (const p of this._panes.values()) {
-      const o = document.createElement('option');
-      o.value = p.id;
-      o.textContent = p.title;
-      pick.appendChild(o);
-    }
-    // A pane this tile holds for a meter that is away: its own option, so
-    // the picker can show what the tile is reserved for.
+
+    const order = [];
+    const byGroup = new Map();
+    const add = (group, value, text) => {
+      if (!byGroup.has(group)) {
+        byGroup.set(group, []);
+        order.push(group);
+      }
+      byGroup.get(group).push({ value, text });
+    };
+    for (const p of this._panes.values()) add(p.group ?? '', p.id, p.short ?? p.title);
+    // A pane this tile is holding for a meter that is away: its own entry,
+    // under its own kind, so the picker still says what the tile is for.
     if (win.pane && !this._panes.has(win.pane)) {
-      const o = document.createElement('option');
-      o.value = win.pane;
-      o.textContent = `${this.paneTitle(win.pane)} (not attached)`;
-      pick.appendChild(o);
+      const parts = this._paneParts?.(win.pane);
+      add(parts?.group ?? '', win.pane, `${parts?.short ?? this.paneTitle(win.pane)} (away)`);
+    }
+    // Stable, so everything else keeps the order it was registered in.
+    const rank = (g) => { const k = this._pinLast.indexOf(g); return k < 0 ? -1 : k; };
+    order.sort((a, b) => rank(a) - rank(b));
+    for (const g of order) {
+      let parent = pick;
+      if (g) {
+        parent = document.createElement('optgroup');
+        parent.label = g;
+        pick.appendChild(parent);
+      }
+      for (const e of byGroup.get(g)) {
+        const o = document.createElement('option');
+        o.value = e.value;
+        o.textContent = e.text;
+        parent.appendChild(o);
+      }
     }
     pick.addEventListener('change', () => this.setPane(win.id, pick.value || null));
     this._pickers.set(win.id, pick);

@@ -50,7 +50,8 @@ def _pages() -> list[str]:
 
 PLAIN_FILES = [
     *_pages(),
-    "css/style.css",
+    "css/shell.css",   # the window manager, from the km003c app
+    "css/app.css",     # the windows themselves
 ]
 # No vendored libraries. The GATT explorer needs no charting, and everything
 # else is hand-written, so there is nothing here that a CDN or an npm install

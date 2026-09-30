@@ -1,0 +1,48 @@
+/* The gateway app's own styles. css/shell.css is the window manager, taken
+   from the km003c app; this file is everything the windows themselves need. */
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+}
+
+.pane-empty {
+  padding: 16px;
+}
+
+.pane-bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* --- Console -------------------------------------------------------------- */
+.console-log {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 8px;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.console-line.lvl-error { color: var(--red); }
+.console-line.lvl-warn { color: var(--orange); }
+.console-src { color: var(--dim); }
+
+.console-eval {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.console-eval .c-chunk {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

@@ -1,0 +1,1329 @@
+/* Hand-written, no framework — kept intentionally small. */
+
+:root {
+  /* dark, not "dark light": there is no light theme here — every colour
+     below is a dark-surface value. Listing `light` let a browser whose
+     user prefers light pick it, and then the one thing the page does not
+     draw itself, the native <select> popup, came out as the select's own
+     light-grey text on the UA's white list. Unreadable, and only on some
+     machines, which is why it survived this long. This also gets the
+     scrollbars and the focus rings right for free. */
+  color-scheme: dark;
+  /* Matched against a screenshot of the ImGui km003c-frontend (its default
+     dark ImGui style) — near-black rather than the blue-tinted dark grey
+     this used to be, so the chrome and the (near-black) chart background
+     read as one consistent surface instead of two visibly different tones. */
+  --bg: #111113;
+  --fg: #d8dbe0;
+  --dim: #8a8f98;
+  --green: #4fd07f;
+  --orange: #e6a83d;
+  --red: #e05c52;
+  --border: #2a2d33;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The popup list a <select> opens is drawn by the browser, not by us, and
+   it inherits the select's own colour onto the UA's own background. Say
+   both, on every select in the page: `color-scheme` above handles
+   Chromium, these handle the engines that restyle the list from the
+   option rules instead. */
+option,
+optgroup {
+  background-color: #1c1f24;
+  color: var(--fg);
+}
+
+html, body {
+  height: 100%;
+  /* On html as well as body: the browser resolves a touch's effective
+     touch-action by walking up from the hit element, and Safari in particular
+     is unreliable when the declaration sits only on body. Neither is
+     sufficient on its own for double-tap zoom — see the touchend guard in
+     app.js — but this is what removes the 300ms click delay. */
+  touch-action: manipulation;
+  /* Kill pull-to-refresh and the rubber-band bounce at the edges. This app
+     fills the viewport and never scrolls as a page, so both gestures are
+     pure noise — and the bounce in particular reads as the whole UI coming
+     unglued when you drag a chart near the top of the screen. */
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  /* dvh tracks the *visible* viewport as a mobile URL bar collapses and
+     expands; vh is frozen at the tall figure, so the bottom of the events
+     pane would sit under the browser chrome. The vh line is the fallback for
+     engines without dvh and must stay first. */
+  height: 100vh;
+  height: 100dvh;
+  /* viewport-fit=cover (index.html) deliberately extends the page under the
+     notch, the rounded corners and the home indicator — without it iOS letter-
+     boxes the page in landscape. The insets are the other half of that deal;
+     skip them and content sits under hardware. They are 0 in portrait on a
+     phone, so the per-region padding below is what buys breathing room there,
+     and they only grow (~47px) in landscape, exactly where the notch is.
+
+     Applied here rather than per-region on purpose: in landscape the whole
+     page must move inboard, dividers included, because the occluded strip is
+     physical. Keeping the toolbar border full-bleed would just run it under
+     the notch. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.4 system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  /* Allows tap and pan-to-scroll inside scrollable children, but suppresses
+     double-tap-to-zoom and its 300ms click delay. Elements that own a custom
+     gesture (splitter handles, the uPlot plot rect) set touch-action: none
+     for themselves — see splitter.js and chart.js. */
+  touch-action: manipulation;
+}
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  /* Was absent, which is why 11 children laid out on one unbreakable row and
+     ran off the right edge of a phone. */
+  flex-wrap: wrap;
+}
+
+/* Pushes the gear to the right edge on a wide screen; collapses to nothing
+   once the bar wraps. */
+#toolbar .spacer {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+
+/* The gear carries .tool-btn like the two arrangement buttons beside it; it
+   used to set only a font size, which left it with the browser's own button
+   chrome — a grey slab next to three flat icons. */
+
+/* The toolbar's icon buttons — the two arrangement ones and the gear. Same
+   shape as the tile-header buttons (.tile-btn), since they do the same kind of
+   thing; they are not inside a tile, so the rules are repeated rather than
+   shared. */
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--dim);
+  padding: 2px;
+  min-width: 26px;
+  min-height: 26px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.tool-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tool-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.tool-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Tabbed view is a state you are in, not an action, so the button stays lit
+   while it is on. */
+.tool-btn[aria-pressed='true'] {
+  color: var(--green);
+  border-color: var(--border);
+}
+
+.disconnected {
+  color: var(--dim);
+}
+
+.connected {
+  color: var(--green);
+}
+
+/* --- Workspace: a tree of tiles, any pane in any tile ---------------------
+
+   js/layout.js builds nested .split containers (flex rows or columns by
+   data-dir) whose children carry their share of the space as an inline
+   flex-grow, with a .splitter between each pair. Tiles are the leaves.
+
+   min-width AND min-height 0 on every level down to the pane: a flex item
+   defaults to min-*: auto, refusing to shrink below its content, and a uPlot
+   canvas is wide content. Without these the workspace simply refuses to give
+   a tile less than its chart wants and the splitter stops dead partway. */
+#workspace {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  position: relative; /* the floating layer is positioned against it */
+}
+
+#tiles {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Children of a split carry their share as an inline flex-grow; the root
+   has no split to share with and fills the workspace. */
+#tiles > .split,
+#tiles > .tile {
+  flex: 1 1 auto;
+}
+
+.split {
+  display: flex;
+  flex-shrink: 1;
+  flex-basis: 0;
+  min-height: 0;
+  min-width: 0;
+}
+
+.split[data-dir='row'] {
+  flex-direction: row;
+}
+
+.split[data-dir='col'] {
+  flex-direction: column;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 1;
+  flex-basis: 0;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  outline: none;
+  /* The drop indicator below is absolutely positioned inside the tile;
+     overflow:hidden above keeps a half-tile overlay from escaping it. */
+  position: relative;
+}
+
+/* display:flex would otherwise beat the UA [hidden]{display:none}. */
+.split[hidden],
+.tile[hidden],
+.splitter[hidden],
+.pane[hidden] {
+  display: none;
+}
+
+.tile-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The active window is where the keys land, so it needs to read as such
+   without shouting: the header's bottom rule turns green. */
+.tile[data-active] > .tile-head {
+  border-bottom-color: var(--green);
+}
+
+.pane-pick {
+  background: none;
+  color: var(--fg);
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font: inherit;
+  font-weight: 600;
+  padding: 2px 4px;
+  min-width: 0;
+  /* Two caps, because there are two ways for this to sprawl. A <select> is as
+     wide as its widest entry, so the ch bound holds it to a meter name however
+     long a pane gets called; the percentage keeps it from eating a narrow
+     tile's header whatever the font. What the space buys back is .tile-grab,
+     the part of the header the window is dragged by. */
+  max-width: min(24ch, 45%);
+}
+
+.pane-pick:hover {
+  border-color: var(--border);
+}
+
+.tile-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--dim);
+  padding: 2px;
+  min-width: 24px;
+  min-height: 24px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.tile-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.tile-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.tile-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* The header's empty stretch is the drag handle; it takes whatever the
+   buttons leave so there is always something to grab. */
+.tile-grab {
+  flex: 1 1 auto;
+  min-width: 12px;
+  align-self: stretch;
+  cursor: grab;
+  /* A finger on it is a drag, never a scroll: without this the browser
+     claims the touch for panning and the pointer stream is cancelled. */
+  touch-action: none;
+}
+
+.tile-body,
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.tile-placeholder {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  text-align: center;
+}
+
+/* The icon sprite. `hidden` on an inline <svg> is not honoured everywhere
+   (it is an HTML attribute, and an SVG root defaults to 300x150), so hide it
+   here or it takes a 150px band out of the workspace. */
+#icon-sprite {
+  display: none;
+}
+
+/* Panes not currently in a tile live here rather than being destroyed, which
+   is what lets uPlot keep its canvases across a rotation or a pane swap
+   instead of being torn down and rebuilt. */
+#pane-park {
+  display: none;
+}
+
+/* One handle for both axes: flex-basis is the thickness whichever way its
+   split is pointing. The cursor is set from JS per axis. */
+.splitter {
+  flex: 0 0 8px;
+  background: var(--border);
+  position: relative;
+}
+
+.splitter::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-top: 1px dotted var(--dim);
+  opacity: 0.8;
+}
+
+.splitter[data-axis='y']::after {
+  width: 36px;
+  height: 2px;
+  margin: -1px 0 0 -18px;
+}
+
+/* Rotated to read as a grip along a vertical bar. */
+.splitter[data-axis='x']::after {
+  width: 2px;
+  height: 36px;
+  margin: -18px 0 0 -1px;
+  border-top: none;
+  border-left: 1px dotted var(--dim);
+}
+
+.splitter:hover,
+.splitter.dragging {
+  background: var(--dim);
+}
+
+/* --- Floating windows ---------------------------------------------------- */
+
+/* Positioned over the tiles; pointer-events off on the layer itself so the
+   gaps between windows still reach the tiles underneath. */
+#floating-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#floating-layer[hidden] {
+  display: none;
+}
+
+/* The edge is drawn as an inset ring rather than a real border, so that it
+   is INSIDE the element: an absolutely positioned child sits against the
+   padding box, so a real border would be a strip of window that looks
+   grabbable and isn't. This way the line you aim at and the handle you hit
+   are the same pixels. Wider than the 1px it used to be so there is
+   something to aim at, and wider again for a fingertip below. */
+.tile.floating {
+  position: absolute;
+  pointer-events: auto;
+  background: var(--bg);
+  border-radius: 4px;
+  box-shadow:
+    inset 0 0 0 2px var(--border),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+.tile.floating[data-active] {
+  box-shadow:
+    inset 0 0 0 2px var(--dim),
+    0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* A floating window has no split to make. */
+.tile.floating .split-h,
+.tile.floating .split-v {
+  display: none;
+}
+
+/* --- Resizing a floating window ---
+
+   Eight grab strips covering the window's inset edge (the tile clips
+   anything outside itself, which is why that edge is a box-shadow and not a
+   border — see above). Invisible: the cursor already says they are there.
+   Narrower than the header's 8px side padding so a header button never loses
+   a click to them. Corners sit above the edges, or the last few pixels of a
+   corner would drag only one axis. */
+.float-resize {
+  position: absolute;
+  z-index: 6;
+}
+
+.float-resize[data-edge='n'],
+.float-resize[data-edge='s'] {
+  left: 0;
+  right: 0;
+  height: 5px;
+}
+
+.float-resize[data-edge='n'] {
+  top: 0;
+}
+
+.float-resize[data-edge='s'] {
+  bottom: 0;
+}
+
+.float-resize[data-edge='e'],
+.float-resize[data-edge='w'] {
+  top: 0;
+  bottom: 0;
+  width: 5px;
+}
+
+.float-resize[data-edge='w'] {
+  left: 0;
+}
+
+.float-resize[data-edge='e'] {
+  right: 0;
+}
+
+.float-resize[data-edge='ne'],
+.float-resize[data-edge='nw'],
+.float-resize[data-edge='se'],
+.float-resize[data-edge='sw'] {
+  width: 12px;
+  height: 12px;
+  z-index: 7;
+}
+
+.float-resize[data-edge='nw'] {
+  top: 0;
+  left: 0;
+}
+
+.float-resize[data-edge='ne'] {
+  top: 0;
+  right: 0;
+}
+
+.float-resize[data-edge='sw'] {
+  bottom: 0;
+  left: 0;
+}
+
+.float-resize[data-edge='se'] {
+  bottom: 0;
+  right: 0;
+}
+
+/* In tabs mode the tab bar already names the visible pane and is the way you
+   change it, so the tile's own header is pure duplication — and on the small
+   screens that mode targets, a row of chrome is expensive. */
+#workspace[data-mode='tabs'] .tile-head {
+  display: none;
+}
+
+/* A tile keeping a place for a meter that is not attached. */
+.pane-missing {
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  margin: 8px;
+}
+
+/* A move in progress. The pane is already where it would end up — the tree
+   really has been changed (layout.js's preview), so the rest of the layout
+   has reflowed into the room it left — and the transparency is what says it
+   is not settled yet. Taking it away is the confirmation. */
+.tile[data-preview] {
+  opacity: 0.5;
+}
+
+/* The transparency alone is easy to miss against dark pane content, so the
+   window in transit is ringed as well — the same green the drop indicator
+   uses, meaning the same thing: this is where it would go. */
+.tile[data-preview]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  border: 2px dashed var(--green);
+  border-radius: 3px;
+}
+
+/* Where the pane would land, not merely which tile it would land in: the
+   overlay covers the half it would take, or the whole tile when releasing
+   here would swap the two panes instead (layout.js _dropZone). Drawn as one
+   ::after rather than an element, so nothing is added to or removed from a
+   tile mid-drag. z-index clears the pane's own content, uPlot's canvases
+   included. */
+.tile[data-drop]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  border: 2px solid var(--green);
+  border-radius: 3px;
+  background: rgb(79 208 127 / 14%);
+}
+
+.tile[data-drop='left']::after {
+  right: 50%;
+}
+
+.tile[data-drop='right']::after {
+  left: 50%;
+}
+
+.tile[data-drop='up']::after {
+  bottom: 50%;
+}
+
+.tile[data-drop='down']::after {
+  top: 50%;
+}
+
+.tile-ghost {
+  position: fixed;
+  z-index: 200;
+  pointer-events: none;
+  padding: 4px 10px;
+  border: 1px solid var(--dim);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-weight: 600;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+/* Focus rings only once a keyboard has been used: a mouse click on a tile
+   also focuses it, and a ring on every click reads as an error. */
+.tile:focus,
+.modal:focus {
+  outline: none;
+}
+
+body[data-kbd] .tile:focus-visible {
+  outline: 1px solid var(--green);
+  outline-offset: -1px;
+}
+
+body[data-kbd] #settings-modal .modal:focus-visible {
+  outline: 1px solid var(--green);
+}
+
+body[data-kbd] .modal-body :focus-visible,
+body[data-kbd] .tile-head :focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 1px;
+}
+
+body[data-kbd] [data-navlist]:focus-visible {
+  outline: 1px solid var(--dim);
+  outline-offset: -1px;
+}
+
+body[data-kbd] [data-navlist][data-nav-active] {
+  outline: 1px solid var(--green);
+  outline-offset: -1px;
+}
+
+/* --- Keybind banner ----------------------------------------------------- */
+
+.keyhint {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 14px;
+  padding: 4px 10px;
+  border-top: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.keyhint[hidden] {
+  display: none;
+}
+
+kbd {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+/* --- Dropdown popup (keyboard-opened <select> list, js/dropdown.js) ------ */
+
+.dropdown {
+  position: fixed;
+  z-index: 300;
+  max-height: 40vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--dim);
+  border-radius: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  padding: 3px 0;
+}
+
+.dropdown[hidden] {
+  display: none;
+}
+
+/* An <optgroup>'s label. Not an option: it cannot be highlighted, picked or
+   hovered, and j/k step straight over it — it heads the rows beneath, the way
+   the native popup draws one. */
+.dropdown-group {
+  padding: 6px 12px 2px;
+  color: var(--dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.dropdown-item {
+  padding: 5px 12px 5px 20px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dropdown-item[aria-selected='true'] {
+  background: var(--border);
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--green);
+}
+
+.dropdown-item[aria-disabled='true'] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* --- Help overlay ---------------------------------------------------------- */
+
+/* Unlike Settings this one blocks the page: it is read, not worked alongside. */
+#help-modal {
+  pointer-events: auto;
+}
+
+#help-modal .modal {
+  width: min(560px, 94vw);
+}
+
+#help-modal h3 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#help-modal h3:first-child {
+  margin-top: 0;
+}
+
+#help-modal .keys {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+#help-modal .keys td {
+  padding: 3px 4px;
+  vertical-align: top;
+}
+
+#help-modal .keys td:first-child {
+  white-space: nowrap;
+  width: 40%;
+}
+
+/* --- Tab bar (tabs mode only) ------------------------------------------- */
+
+/* The bar scrolls, the page does not. With a pane per meter there can be
+   eight or more tabs, and `flex: 1 1 0` tabs cannot shrink below their own
+   min-content width — so the bar grew past the viewport and took the whole
+   document sideways with it (the toolbar and the panes scrolled too, which
+   is what it looked like on a phone). min-width: 0 lets the bar be as wide
+   as the screen; overflow-x makes the overflow its own to scroll. */
+#tabbar {
+  display: flex;
+  border-top: 1px solid var(--border);
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  /* The bar is one row tall; a scrollbar across it would cost more than it
+     tells, and the tabs are obviously draggable. */
+  scrollbar-width: none;
+}
+
+#tabbar::-webkit-scrollbar {
+  display: none;
+}
+
+#tabbar[hidden] {
+  display: none;
+}
+
+.tab {
+  /* Natural width, one line: the bar scrolls rather than squeezing eight
+     three-line tabs into the screen. */
+  flex: 0 0 auto;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  border-top: 2px solid transparent;
+  color: var(--dim);
+  font: inherit;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.tab.active {
+  color: var(--fg);
+  border-top-color: var(--green);
+}
+
+/* --- Debug / Logging modals (dimmed backdrop, non-blocking: the
+   background stays fully clickable — e.g. Start/Stop — while a modal is
+   open, unlike ImGui's BeginPopupModal which this used to match). The
+   overlay only exists to center the panel and dim the background
+   visually; it must not intercept clicks itself, so pointer-events are
+   re-enabled just on the modal panel below. */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* Author `display` on the class above beats the UA [hidden]{display:none}
+   rule on a specificity tie, so an "invisible" hidden overlay was still
+   flex-laid-out and intercepting clicks on whatever's underneath it —
+   this compound selector's higher specificity wins the tie back. */
+.modal-overlay[hidden] {
+  display: none;
+}
+
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  width: min(640px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+/* The help overlay's filter. Sits between the title and the close button, so
+   it keeps its place while the list under it scrolls. Flat like the rest of
+   the chrome — it is a field you are already typing in, not one to hunt for. */
+.help-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg);
+  font: inherit;
+  font-weight: 400;
+  padding: 2px 8px;
+}
+
+.help-filter:focus {
+  outline: none;
+  border-color: var(--dim);
+}
+
+.help-filter::placeholder {
+  color: var(--dim);
+}
+
+.modal-body {
+  padding: 10px 12px;
+  overflow-y: auto;
+}
+
+.modal-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 10px 0;
+}
+
+.modal-body .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+
+.modal-body .dim {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.modal-body .err {
+  color: var(--red);
+}
+
+.modal-body input[type="text"],
+.modal-body input[type="number"],
+.modal-body select {
+  background: #1c1f24;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+
+.modal-body input[type="number"] {
+  width: 70px;
+}
+
+/* --- Settings modal: collapsible sections ---------------------------------
+
+   One modal replaces what used to be a Debug modal, a Logging modal and a
+   Perf floating panel. Sections are native <details>, so the collapse needs
+   no JS and comes keyboard-accessible; the modules that fill them decide
+   whether to render based on the section being open (see settings.js's
+   sectionVisible). */
+
+.sect {
+  border-top: 1px solid var(--border);
+}
+
+.sect:first-child {
+  border-top: none;
+}
+
+.sect > summary {
+  cursor: pointer;
+  padding: 9px 2px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  /* Suppress the UA disclosure triangle in favour of the ::before below,
+     which can be styled consistently across engines. Both properties are
+     needed: `list-style` for Firefox, the pseudo-element for WebKit. */
+  list-style: none;
+}
+
+.sect > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sect > summary::before {
+  content: '\25B8';
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.sect[open] > summary::before {
+  content: '\25BE';
+}
+
+.sect-body {
+  padding: 0 2px 12px;
+}
+
+.sect-body .row:first-child {
+  margin-top: 0;
+}
+
+/* The seven channel toggles. They read as one group, so they wrap together
+   rather than joining the generic .row flow. */
+.row.chans {
+  gap: 4px 12px;
+}
+
+.row.wifi-row {
+  gap: 4px 10px;
+  justify-content: flex-start;
+}
+
+.row.wifi-row > span:first-child {
+  flex: 1 1 8em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* "Saved to device" confirmation — see js/feedback.js. Green because it is
+   the one message in these forms that means success. */
+.saved-ok {
+  color: var(--green);
+}
+
+/* --- Settings modal: floating on desktop, a sheet on mobile ---------------
+
+   Undimmed and draggable on a wide screen, because Perf's counters and the
+   Debug trace are live streams whose whole point is being watched *while* a
+   graph runs — a dark backdrop would hide the thing you opened them to see.
+   The app behind is already clickable: .modal-overlay sets pointer-events:
+   none with auto restored only on .modal, so removing the dim is all that's
+   needed here. */
+#settings-modal {
+  background: none;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 48px 14px 14px;
+}
+
+#settings-modal .modal {
+  width: min(470px, 94vw);
+  max-height: min(78vh, 760px);
+}
+
+/* The bottom-sheet grabber exists only on a phone; on a wide screen the panel
+   is a floating window dragged by its header instead. */
+.sheet-grab {
+  display: none;
+}
+
+/* Applied by sheet.js only for the ~180ms of a snap, so the sheet eases to its
+   stop but still tracks the finger 1:1 while actually being dragged. */
+.modal.snapping {
+  transition: transform 0.18s ease-out;
+}
+
+/* --- Touch / small screen -------------------------------------------------
+
+   The app's first media queries. Two axes, deliberately kept separate:
+   `pointer: coarse` is about the input device (finger vs mouse) and drives
+   hit-target sizing; `max-width` is about available room and drives layout.
+   A tablet with a mouse wants the big layout but not the big targets, and a
+   touchscreen laptop wants the opposite. */
+
+@media (pointer: coarse) {
+  /* 5px and 8px strips are fine for a mouse and hopeless for a fingertip
+     (~9mm). The handles grow; the layout maths reads their real height from
+     the DOM rather than a constant, so nothing needs to be kept in sync. */
+  .splitter {
+    flex-basis: 22px;
+  }
+
+  /* A thicker edge to aim at, matched by a wider grab band. Not the full
+     22px of a splitter: these sit on top of the window's own header and
+     content, so every pixel they gain is a pixel that stops being tappable.
+     16 is comfortably findable without eating the header's buttons, which
+     start 8px in. */
+  .tile.floating {
+    box-shadow:
+      inset 0 0 0 3px var(--border),
+      0 8px 28px rgba(0, 0, 0, 0.55);
+  }
+
+  .tile.floating[data-active] {
+    box-shadow:
+      inset 0 0 0 3px var(--dim),
+      0 8px 28px rgba(0, 0, 0, 0.55);
+  }
+
+  .float-resize[data-edge='n'],
+  .float-resize[data-edge='s'] {
+    height: 16px;
+  }
+
+  .float-resize[data-edge='e'],
+  .float-resize[data-edge='w'] {
+    width: 16px;
+  }
+
+  .float-resize[data-edge='ne'],
+  .float-resize[data-edge='nw'],
+  .float-resize[data-edge='se'],
+  .float-resize[data-edge='sw'] {
+    width: 24px;
+    height: 24px;
+  }
+
+  .splitter[data-axis='y']::after {
+    width: 44px;
+    margin-left: -22px;
+  }
+
+  /* The header buttons are the only way to split or close by touch. */
+  .tile-btn {
+    min-width: 34px;
+    min-height: 34px;
+  }
+}
+
+@media (max-width: 767px) {
+  /* A sheet, not a floating panel: anchored to the bottom edge, dimmed, and
+     blocking — on a phone there's no "beside the graph" to float in.
+
+     !important is doing real work here rather than papering over specificity:
+     makeDraggable pins the panel with inline position/left/top the moment it
+     is first dragged, and inline styles beat a stylesheet rule. Without it, a
+     desktop drag followed by a rotate or a resize past the breakpoint would
+     strand the sheet at stale coordinates. */
+  /* The spacer exists to push the gear to the right edge of a wide bar. Once
+     the bar wraps it becomes actively harmful: a flex-grow item absorbs the
+     slack on its own line and shoves the gear onto a line of its own, costing
+     a whole extra row of the vertical budget the graphs need. */
+  #toolbar .spacer {
+    display: none;
+  }
+
+  /* Tighter gaps than desktop, but NOT tighter side padding: squeezing that to
+     6px never did win the gear its place on row one, and on a 375px iPhone 13
+     mini it just left every label sitting on the rounded corner. Content needs
+     a visible margin from the screen edge more than it needs the 8px. */
+  #toolbar {
+    gap: 6px;
+    padding: 6px 10px;
+  }
+
+  /* Same reasoning for the other chrome rows, so the left edge of the toolbar,
+     the pane picker and the events header all line up at one margin. */
+  .tile-head {
+    padding: 4px 10px;
+  }
+
+  #settings-modal {
+    background: rgba(0, 0, 0, 0.5);
+    padding: 0;
+    pointer-events: auto;
+  }
+
+  #settings-modal .modal {
+    position: fixed !important;
+    left: 0 !important;
+    right: 0 !important;
+    top: 7vh !important;
+    bottom: 0 !important;
+    width: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    border-radius: 12px 12px 0 0;
+    /* The sheet is translated DOWN from here by sheet.js, so its bottom edge
+       runs off-screen at the half stop. Nothing below it needs to be seen —
+       the visible part is always the top of the panel. */
+    overflow: hidden;
+  }
+
+  /* A 36x4 pill, the near-universal "drag me" affordance for a sheet. The
+     padding around it is deliberate: it makes the strip a ~20px-tall grab
+     target rather than a 4px one. */
+  .sheet-grab {
+    display: block;
+    flex: 0 0 auto;
+    width: 36px;
+    height: 4px;
+    margin: 8px auto 4px;
+    border-radius: 2px;
+    background: var(--dim);
+    opacity: 0.5;
+    cursor: grab;
+  }
+
+  .sheet-grab:active {
+    cursor: grabbing;
+  }
+
+  /* The header is the sheet's other grab area, so its text must not be
+     selectable out from under a drag. */
+  #settings-modal .modal-header {
+    user-select: none;
+  }
+}
+
+/* A checkbox drawn as a slide switch — for the one control that is a
+   physical state (the port's 5 V) rather than a preference. Same element,
+   same keyboard and same events as any checkbox; only the paint differs. */
+input.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 34px;
+  height: 18px;
+  margin: 0 6px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  position: relative;
+  vertical-align: middle;
+  cursor: pointer;
+  transition: background 120ms;
+}
+input.switch::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--dim);
+  transition: left 120ms, background 120ms;
+}
+input.switch:checked {
+  background: var(--green);
+  border-color: var(--green);
+}
+input.switch:checked::before {
+  left: 18px;
+  background: var(--bg);
+}
+input.switch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+input.switch:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+
+/* --- A pane's own bar and settings panel -------------------------------
+   The bar is the first child of a pane, above its content — inside the
+   pane rather than in the tile header, because the header is rebuilt on
+   every split, float and meter attach and is hidden outright in tabs
+   mode, while anything in here moves with the pane and keeps its state.
+   Same shape as #offline-bar, which is the same idea. */
+
+.pane-bar[hidden] {
+  display: none;
+}
+
+.pane-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.pane-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--dim);
+  font: inherit;
+  line-height: 1;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.pane-btn:hover {
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+/* Scoped to the gear: .pane-btn is shared with the text buttons on the same
+   bar ("Reset Wh", "Live"), which must keep their own line box. A touch
+   smaller than the toolbar's 16px, to sit with the pane bar's text. */
+.pane-btn.settings-btn {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ...and the same trap the split/tile rules call out: a display of our own
+   beats the UA's [hidden]{display:none}, and this gear really is hidden on a
+   meter whose PHY cannot be read. */
+.pane-btn.settings-btn[hidden] {
+  display: none;
+}
+
+.pane-btn.settings-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.pane-bar .window-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The panel itself. It lives in its pane (hidden) and is lent to the one
+   popover host while open, so these rules have to reach it in both
+   places. */
+.pane-popover {
+  position: fixed;
+  /* Below .dropdown (300): the theme picker inside this panel opens the
+     keyboard dropdown, which has to render over the panel holding it. */
+  z-index: 250;
+  max-width: min(22rem, calc(100vw - 12px));
+  /* dvh so a collapsing mobile URL bar does not leave it taller than the
+     visible viewport; vh first as the fallback. */
+  max-height: min(70vh, calc(100vh - 12px));
+  max-height: min(70dvh, calc(100dvh - 12px));
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--dim);
+  border-radius: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  padding: 6px 10px;
+}
+
+.pane-popover[hidden] {
+  display: none;
+}
+
+.pane-settings[hidden] {
+  display: none;
+}
+
+.pane-settings .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+
+.pane-settings .row.chans {
+  gap: 4px 12px;
+}
+
+.pane-settings .dim {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.pane-settings .window-slider {
+  flex: 1 1 120px;
+  min-width: 0;
+}
+
+.pane-settings .err {
+  color: var(--red);
+  font-size: 12px;
+  min-height: 1em;
+}
+
+.pane-settings-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.pane-settings .regs-section[hidden] {
+  display: none;
+}
+
+/* The register dump is a fixed-width table, not a menu: a grid rather than
+   the .row flex it inherited by accident inside the Settings modal, and its
+   own scroller so a 24-row dump cannot grow the panel past the screen. */
+.pane-settings .regs-list {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.pane-settings .regs-row {
+  display: grid;
+  grid-template-columns: 5ch 11ch 5ch 10ch 1fr;
+  gap: 0 8px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 12px;
+}
+

@@ -48,16 +48,35 @@ export class Dropdown {
     this._select = select;
     this._items = [];
     const frag = document.createDocumentFragment();
-    [...select.options].forEach((o, i) => {
+    // Walk the children rather than the flat options list, so that an
+    // <optgroup> can put its label in as a heading — without one, the
+    // keyboard list would lose the very grouping the picker is built around.
+    //
+    // Headings go into the fragment but NOT into _items, which is what keeps
+    // _items index-aligned with select.options: close() commits by setting
+    // selectedIndex to _index, so an extra row in here would quietly select
+    // the wrong entry.
+    const addOption = (o) => {
       const item = document.createElement('div');
       item.className = 'dropdown-item';
       item.setAttribute('role', 'option');
-      item.dataset.index = String(i);
+      item.dataset.index = String(this._items.length);
       item.textContent = o.textContent.trim() || ' ';
       if (o.disabled) item.setAttribute('aria-disabled', 'true');
       frag.appendChild(item);
       this._items.push(item);
-    });
+    };
+    for (const child of select.children) {
+      if (child.tagName === 'OPTGROUP') {
+        const head = document.createElement('div');
+        head.className = 'dropdown-group';
+        head.textContent = child.label;
+        frag.appendChild(head);
+        for (const o of child.children) if (o.tagName === 'OPTION') addOption(o);
+      } else if (child.tagName === 'OPTION') {
+        addOption(child);
+      }
+    }
     this._el.replaceChildren(frag);
     this._index = Math.max(0, select.selectedIndex);
     this._el.hidden = false;

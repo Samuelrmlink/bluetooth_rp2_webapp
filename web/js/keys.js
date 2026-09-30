@@ -131,6 +131,9 @@ export const BINDINGS = [
   // Everywhere
   { id: 'settings', group: 'Everywhere', keys: 'Alt+S', combos: ['Mod+KeyS'], when: 'always', label: 'Open / close Settings' },
   { id: 'help', group: 'Everywhere', keys: '?', combos: ['?', 'Mod+Slash'], when: 'always', label: 'Show / hide this list' },
+  // No combos: typing is not a binding, it goes to the filter box. Listed so
+  // that the one place people look for what the keys do says so.
+  { id: 'help-filter', group: 'Everywhere', keys: 'type', combos: [], when: 'help', label: 'While this list is open: filter it by any part of a key or of what it does' },
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
@@ -182,7 +185,11 @@ export const HINTS = {
     { keys: 'Alt+,', label: 'close' },
     { keys: 'Esc', label: 'close' },
   ],
-  help: [{ keys: 'J / K', label: 'scroll' }, { keys: 'Esc', label: 'close' }],
+  help: [
+    { keys: 'type', label: 'filter' },
+    { keys: '\u2191 / \u2193', label: 'scroll' },
+    { keys: 'Esc', label: 'clear, then close' },
+  ],
   drag: [{ keys: 'Esc', label: 'cancel' }],
   dropdown: [{ keys: 'J / K', label: 'move' }, { keys: 'Enter', label: 'pick' }, { keys: 'Esc', label: 'cancel' }],
 };
@@ -225,7 +232,7 @@ export function bindingsFor(context) {
 // prefix on its way to the key it modifies.
 const MODIFIER_KEYS = new Set(['Alt', 'Shift', 'Control', 'Meta', 'CapsLock']);
 
-const KBD_KEY = 'km003c.kbd';
+const KBD_KEY = 'btgw.kbd';
 
 export class Keys {
   /*
@@ -368,13 +375,17 @@ export class Keys {
 
     // Esc in a text field leaves the field; the next Esc reaches the app.
     if (typing) {
-      if (e.key === 'Escape') {
+      // Esc in a text field leaves the field; the next Esc reaches the app.
+      // Not in the help overlay: there the field is a filter over the list
+      // it sits above, nothing else is focusable, and Esc means "clear it,
+      // then close" — which is the app's business, so the key goes through.
+      if (e.key === 'Escape' && this.context() !== 'help') {
         document.activeElement.blur();
         e.preventDefault();
         this.refreshHint();
         return;
       }
-      if (!isAlt) return;
+      if (e.key !== 'Escape' && !isAlt) return;
     }
 
     // Tab / Shift+Tab on a <select> step its value in place: the direction
