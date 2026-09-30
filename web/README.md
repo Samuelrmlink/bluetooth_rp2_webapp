@@ -37,6 +37,18 @@ subscribe through it and everything is dropped with it). Optional:
 while active (the editor claims `editor`). Register built-ins in
 `js/windows/index.js`.
 
+## Tables
+
+Every table (Scanner, GATT value log, Unclassified) is built with
+`js/controls/grid.js`: click a heading to sort ascending, descending, then back
+to the table's default; drag a heading's right edge to resize (double-click it
+to reset). Widths and sort are remembered per table in `btgw.prefs.tables`.
+A window sorts its rows with `grid.sort(rows)` before drawing them.
+
+The Scanner's filter boxes filter what has been heard, in the browser, as you
+type -- scanning or not. `/` jumps to them; inside one, Alt+N / Alt+Shift+N
+step between them (elsewhere those keys still cycle windows).
+
 ## Adding a device plugin
 
 A device appears when a running script publishes `profile.<name>.telemetry`

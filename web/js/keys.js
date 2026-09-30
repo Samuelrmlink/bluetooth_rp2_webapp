@@ -138,6 +138,13 @@ export const BINDINGS = [
   { id: 'editor-stop', group: 'Editor', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
   { id: 'editor-sidebar', group: 'Editor', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
   { id: 'editor-files', group: 'Editor', keys: 'j / k, l, h', combos: [], when: 'editor', label: 'In the file list: move, open or expand, collapse' },
+  // The Scanner's. 'scanner-filter' is the Scanner with a filter box
+  // focused: there Alt+N steps between the boxes instead of the windows.
+  { id: 'scanner-filter', group: 'Scanner', keys: '/', combos: ['Slash'], when: 'scanner', label: 'Jump to the filter boxes (they filter as you type, scanning or not)' },
+  { id: 'scanner-filter-next', group: 'Scanner', keys: 'Alt+N in a filter box', combos: ['Mod+KeyN'], when: 'scanner-filter', label: 'Next filter box' },
+  { id: 'scanner-filter-prev', group: 'Scanner', keys: 'Alt+Shift+N in a filter box', combos: ['Mod+Shift+KeyN'], when: 'scanner-filter', label: 'Previous filter box' },
+  { id: 'scanner-list', group: 'Scanner', keys: 'Enter / L in the list', combos: [], when: 'scanner', label: 'Connect or disconnect the selected device / show it in GATT' },
+  { id: 'table-columns', group: 'Scanner', keys: 'click a column heading', combos: [], when: 'scanner', label: 'Sort ascending, descending, back to default; drag its right edge to resize (every table)' },
   { id: 'help', group: 'Everywhere', keys: '?', combos: ['?', 'Mod+Slash'], when: 'always', label: 'Show / hide this list' },
   // No combos: typing is not a binding, it goes to the filter box. Listed so
   // that the one place people look for what the keys do says so.
@@ -145,7 +152,7 @@ export const BINDINGS = [
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
-export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Everywhere'];
+export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'Everywhere'];
 
 // The banner's contents per context: short, and only what applies now.
 // `tiled` marks entries that make no sense in tabs mode.
@@ -209,6 +216,16 @@ export const HINTS = {
   dropdown: [{ keys: 'J / K', label: 'move' }, { keys: 'Enter', label: 'pick' }, { keys: 'Esc', label: 'cancel' }],
 };
 
+// The Scanner is the workspace plus a way into its filters; inside one,
+// Alt+N means the next box.
+HINTS.scanner = [{ keys: '/', label: 'filter' }, { keys: 'Enter', label: 'connect' }, ...HINTS.workspace];
+HINTS['scanner-filter'] = [
+  { keys: 'Alt+N', label: 'next filter' },
+  { keys: 'Alt+Shift+N', label: 'previous filter' },
+  { keys: 'Esc', label: 'leave the box' },
+  { keys: 'Alt+HJKL', label: 'focus window' },
+];
+
 // 'Mod+Shift+KeyH' -> { mod, shift, code }; '?' -> { key: '?' }; 'Escape' -> code.
 export function parseCombo(s) {
   if (s === '?') return { key: '?' };
@@ -236,7 +253,7 @@ export function matches(e, combo) {
 
 // Contexts that are the workspace with something extra: every workspace
 // binding (Alt+hjkl and the rest) applies in them too, plus their own.
-const WORKSPACE_LIKE = new Set(['editor']);
+const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-filter']);
 
 function applies(b, context) {
   const w = Array.isArray(b.when) ? b.when : [b.when];
@@ -244,8 +261,13 @@ function applies(b, context) {
     (WORKSPACE_LIKE.has(context) && w.includes('workspace'));
 }
 
+// A context's own bindings come before the workspace's it inherits, so one
+// may take over a workspace key while it lasts (Alt+N in a Scanner filter
+// box steps between the boxes, not the windows).
 export function bindingsFor(context) {
-  return BINDINGS.filter((b) => applies(b, context));
+  const own = (b) => (Array.isArray(b.when) ? b.when : [b.when]).includes(context);
+  const all = BINDINGS.filter((b) => applies(b, context));
+  return [...all.filter(own), ...all.filter((b) => !own(b))];
 }
 
 // Pressing a modifier is not "some other key" — it must not end an armed

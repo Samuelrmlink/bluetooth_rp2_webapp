@@ -298,7 +298,8 @@ class App {
     // Window-specific actions (the editor's save/run/sidebar) are looked up on
     // whichever window is active, so a binding only does something where it
     // means something.
-    for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar']) {
+    for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar',
+      'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev']) {
       actions[id] = () => activeWin()?.action?.(id);
     }
 

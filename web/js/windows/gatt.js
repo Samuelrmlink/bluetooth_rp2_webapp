@@ -12,8 +12,18 @@
 // selected one.
 
 import { shortUuid, uuidLabel, hexToAscii } from '../gattdb.js';
+import { Grid } from '../controls/grid.js';
 
 const LOG_MAX = 500;
+
+// `get` is what a column sorts by, `show` what it displays when that differs.
+const LOG_COLUMNS = [
+  { key: 'time', label: 'Time', width: 76, type: 'num', get: (r) => r.t.getTime(), show: (r) => r.t.toTimeString().slice(0, 8) },
+  { key: 'src', label: 'Source', width: 110, get: (r) => `${r.id} ${r.src}` },
+  { key: 'len', label: 'Len', width: 50, type: 'num', get: (r) => r.len },
+  { key: 'hex', label: 'Hex', width: 260, get: (r) => r.hex },
+  { key: 'ascii', label: 'ASCII', width: 160, get: (r) => hexToAscii(r.hex) },
+];
 
 export class GattWindow {
   constructor(el, ctx) {
@@ -48,8 +58,7 @@ export class GattWindow {
             <label class="dim"><input type="checkbox" class="g-resp" checked> with response</label>
             <button type="submit" class="pane-btn">Write</button>
           </form>
-          <div class="table-wrap"><table class="grid g-log"><thead><tr>
-            <th>Time</th><th>Source</th><th>Len</th><th>Hex</th><th>ASCII</th></tr></thead><tbody></tbody></table></div>
+          <div class="table-wrap"><table class="grid g-log"><thead></thead><tbody></tbody></table></div>
         </div>
       </div>`;
     this._dev = el.querySelector('.g-dev');
@@ -57,6 +66,11 @@ export class GattWindow {
     this._tree = el.querySelector('.gatt-tree');
     this._target = el.querySelector('.g-target');
     this._logBody = el.querySelector('.g-log tbody');
+    // Newest first unless a column says otherwise.
+    this._logGrid = new Grid(el.querySelector('.g-log'), {
+      id: 'gatt-log', columns: LOG_COLUMNS, defaultSort: { key: 'time', dir: 'desc' },
+      onChange: () => { this._dirty = true; },
+    });
     this._dev.addEventListener('change', () => this.showDevice(this._dev.value));
     el.querySelector('.g-disconnect').addEventListener('click', () => {
       if (this.addr) this.ws.call('dev.disconnect', { device: this.addr }).catch((e) => this.app.log('!', e.message));
@@ -244,12 +258,13 @@ export class GattWindow {
       ? `${this.sel.id}  ${shortUuid(this.sel.uuid)}  [${this.sel.flags.join(', ')}]`
       : 'Select a characteristic.';
 
-    const rows = this.values.filter((v) => v.addr === this.addr).slice(-200).reverse();
+    const rows = this._logGrid.sort(this.values.filter((v) => v.addr === this.addr).slice(-200));
     this._logBody.replaceChildren(...rows.map((r) => {
       const tr = document.createElement('tr');
-      for (const v of [r.t.toTimeString().slice(0, 8), `${r.id} ${r.src}`, r.len, r.hex, hexToAscii(r.hex)]) {
+      for (const c of LOG_COLUMNS) {
         const td = document.createElement('td');
-        td.textContent = v;
+        td.textContent = c.show ? c.show(r) : c.get(r);
+        if (c.key === 'hex' || c.key === 'ascii') td.title = td.textContent;
         tr.appendChild(td);
       }
       return tr;

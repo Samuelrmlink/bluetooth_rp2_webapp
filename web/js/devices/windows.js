@@ -9,6 +9,7 @@
 // device: { key, name, addr, sample, seen, gone }.
 
 import { buildControl } from '../controls/kit.js';
+import { Grid } from '../controls/grid.js';
 import { Pending, same, unclassified, displayValue } from '../controls/state.js';
 
 function header(dev) {
@@ -103,9 +104,20 @@ export class UnclassifiedWindow {
     this._age = el.querySelector('.dev-age');
     const wrap = document.createElement('div');
     wrap.className = 'table-wrap';
-    wrap.innerHTML = '<table class="grid dev-fields"><thead><tr><th>Field</th><th>Value</th><th>Changed</th></tr></thead><tbody></tbody></table>';
+    wrap.innerHTML = '<table class="grid dev-fields"><thead></thead><tbody></tbody></table>';
     el.appendChild(wrap);
     this._tbody = wrap.querySelector('tbody');
+    // One remembered layout for every device's Unclassified table: the
+    // columns mean the same whichever device fills them.
+    this._cols = [
+      { key: 'field', label: 'Field', width: 200, get: (f) => f },
+      { key: 'value', label: 'Value', width: 200, get: (f) => displayValue(this.dev.sample[f]) },
+      { key: 'changed', label: 'Changed', width: 90, type: 'num', get: (f) => (this.changed.has(f) ? Date.now() - this.changed.get(f) : null),
+        show: (f) => (this.changed.get(f) ? `${Math.round((Date.now() - this.changed.get(f)) / 1000)} s ago` : '') },
+    ];
+    this.grid = new Grid(wrap.querySelector('table'), {
+      id: 'unclassified', columns: this._cols, onChange: () => { this._dirty = true; },
+    });
     this._dirty = true;
   }
 
@@ -125,16 +137,14 @@ export class UnclassifiedWindow {
     this._dirty = false;
     const now = Date.now();
     this._flashing = false;
-    const fields = unclassified(this.dev.sample, this.plugin.controls);
+    const fields = this.grid.sort(unclassified(this.dev.sample, this.plugin.controls));
     this._tbody.replaceChildren(...fields.map((f) => {
       const tr = document.createElement('tr');
       const at = this.changed.get(f);
       if (at && now - at < 1500) { tr.classList.add('just-changed'); this._flashing = true; }
-      const v = this.dev.sample[f];
-      for (const text of [f, displayValue(v),
-        at ? `${Math.round((now - at) / 1000)} s ago` : '']) {
+      for (const c of this._cols) {
         const td = document.createElement('td');
-        td.textContent = text;
+        td.textContent = c.show ? c.show(f) : c.get(f);
         tr.appendChild(td);
       }
       return tr;

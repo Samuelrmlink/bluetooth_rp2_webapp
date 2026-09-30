@@ -86,7 +86,9 @@ table.grid th {
 table.grid tbody tr { cursor: default; }
 table.grid tbody tr:hover { background: #1a1c20; }
 table.grid tbody tr[aria-selected='true'] { background: #1f2a24; box-shadow: inset 2px 0 0 var(--green); }
-table.grid tr.is-connected td:first-child { color: var(--green); }
+
+table.s-table tr.is-connected td:nth-child(2) { color: var(--green); }
+table.s-table td:first-child { padding: 1px 4px; }
 
 .pane-btn.on {
   color: var(--green);
@@ -94,6 +96,7 @@ table.grid tr.is-connected td:first-child { color: var(--green); }
 }
 
 .scan-bar input[type='text'],
+.scan-bar input[type='search'],
 .scan-bar input[type='number'] {
   width: 7em;
   min-width: 0;
@@ -436,3 +439,56 @@ table.grid tr.is-connected td:first-child { color: var(--green); }
 .ctl-switch:disabled, .dev-controls select:disabled, .dev-controls input:disabled { opacity: 0.45; }
 
 table.dev-fields tr.just-changed td { background: #2a2615; transition: background 0.2s; }
+
+/* --- Sortable, resizable columns (controls/grid.js) ------------------------- */
+table.grid.grid-resizable { table-layout: fixed; }
+table.grid.grid-resizable th,
+table.grid.grid-resizable td { overflow: hidden; text-overflow: ellipsis; }
+table.grid.grid-resizable th { padding: 0; }
+table.grid .col-sort {
+  display: flex;
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+table.grid .col-sort:hover,
+table.grid .col-sort:focus-visible { color: var(--fg, #ddd); }
+table.grid .col-label { overflow: hidden; text-overflow: ellipsis; }
+table.grid th[aria-sort='ascending'] .col-sort,
+table.grid th[aria-sort='descending'] .col-sort { color: var(--green); }
+table.grid th.is-default-sort .col-sort { color: inherit; }
+table.grid .col-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+table.grid .col-resize::after {
+  content: '';
+  position: absolute;
+  top: 25%;
+  bottom: 25%;
+  right: 3px;
+  width: 1px;
+  background: var(--border);
+}
+table.grid .col-resize:hover::after,
+table.grid.is-resizing .col-resize::after { background: var(--green); }
+table.grid.is-resizing { cursor: col-resize; user-select: none; }
+
+/* The row's action, visibly a button; green once connected. */
+.s-table .s-conn { border-color: var(--border); padding: 2px 8px; }
+.s-table .s-conn:hover:not(:disabled) { color: var(--green); border-color: var(--green); }
+.s-table tr.is-connected .s-conn { color: var(--orange); }
+.s-table .s-conn:disabled { opacity: 0.4; cursor: default; }
