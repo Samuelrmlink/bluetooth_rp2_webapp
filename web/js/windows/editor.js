@@ -24,6 +24,7 @@ import { EditorCore } from '../editor/core.js';
 import { FileTree } from '../editor/filetree.js';
 import { languageOf } from '../editor/highlight.js';
 import { arenaMarks, shownArena, scriptNameOf, shadowedBy } from '../editor/status.js';
+import { initialState, handle as vimHandle, modeLabel, clampNormal } from '../editor/vim.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -98,6 +99,15 @@ export class EditorWindow {
     this._upload = q('.ed-upload-input');
 
     this.core = new EditorCore(q('.ed-surface'));
+    // Vim: a pure reducer (editor/vim.js) driven from here. vcur is vim's
+    // logical cursor -- in normal mode the textarea shows it as a one-
+    // character selection, which is what makes it look like a block.
+    this.vimOn = !!this.app.prefs.vim;
+    this.vst = initialState();
+    this.vcur = 0;
+    this.core.ta.addEventListener('keydown', (e) => this._vimKey(e));
+    this.core.ta.addEventListener('mouseup', () => this._vimSync());
+    this.core.ta.addEventListener('focus', () => this._vimSync());
     this.core.onChange = (text) => this._edited(text);
     this.core.onCursor = (l, c) => { this._sPos.textContent = `Ln ${l}, Col ${c}`; };
 
@@ -146,6 +156,110 @@ export class EditorWindow {
   attachKeys(keys) {
     this.keys = keys;
     keys.nav.registerList(this._files, this.tree.listController());
+    // The Esc ladder: insert -> normal (vim takes it), then normal -> leave
+    // the text (vim declines, the key layer blurs), then Alt+hjkl.
+    keys.ownEscape(this.core.ta, (e) => this._vimEsc(e));
+  }
+
+  // --- vim ---------------------------------------------------------------------
+
+  onPrefs(prefs) {
+    if (!!prefs.vim === this.vimOn) return;
+    this.vimOn = !!prefs.vim;
+    this.vst = initialState();
+    const p = this.core.ta.selectionStart;
+    this.core.ta.setSelectionRange(p, p);
+    this._renderTitle();
+  }
+
+  _vimEsc() {
+    if (!this.vimOn) return false;
+    const r = vimHandle(this.vst, 'Escape', this.core.value, this._vimCursor());
+    if (r.action === 'leave') return false;
+    this._vimApply(r);
+    return true;
+  }
+
+  _vimCursor() {
+    return this.vst.mode === 'insert' ? this.core.ta.selectionStart : this.vcur;
+  }
+
+  _vimKey(e) {
+    if (!this.vimOn || this.core.readOnly) return;
+    if (e.key === 'Escape' || e.altKey || e.metaKey || e.isComposing) return;
+    if (['Shift', 'Control', 'Alt', 'Meta', 'CapsLock'].includes(e.key)) return;
+    // Ctrl combos are the browser's (copy, paste, select all) except the
+    // ones vim means: Ctrl+R redo.
+    if (e.ctrlKey && e.key !== 'r') return;
+    const r = vimHandle(this.vst, e.key, this.core.value, this._vimCursor(), e.ctrlKey);
+    if (r.action === 'pass') { this.vst = r.state; return; }
+    e.preventDefault();
+    this._vimApply(r);
+  }
+
+  _vimApply(r) {
+    const wasInsert = this.vst.mode === 'insert';
+    const nowInsert = r.state.mode === 'insert';
+    const h = this.core.history;
+    // An insert session -- the command that opened it (o, cw, A...) plus
+    // everything typed until Esc -- is ONE undo step, as in vim. Snapshot
+    // before the opening command's edit; squash on the way out.
+    if (!wasInsert && nowInsert) {
+      h.seal();
+      this._ins = { index: h.length, text: this.core.value, sel: [this.core.ta.selectionStart, this.core.ta.selectionEnd] };
+    }
+    this.vst = r.state;
+    if (r.edit) this.core.replaceRange(r.edit.from, r.edit.to, r.edit.insert);
+    if (!nowInsert && this._ins) {
+      if (wasInsert) {
+        const ta = this.core.ta;
+        h.squashSince(this._ins.index, this._ins.text, this.core.value, this._ins.sel, [ta.selectionStart, ta.selectionEnd]);
+      }
+      this._ins = null;
+    }
+    this.vcur = r.cursor;
+    switch (r.action) {
+      case 'undo': this.core.undo(); this.vcur = clampNormal(this.core.value, this.core.ta.selectionStart); break;
+      case 'redo': this.core.redo(); this.vcur = clampNormal(this.core.value, this.core.ta.selectionStart); break;
+      case 'save': this.save(); break;
+      case 'save-quit': this.save().then(() => this.core.ta.blur()); break;
+      case 'quit': this.core.ta.blur(); break;
+      case 'unknown': this._say(r.message || 'Unknown command', 'warn'); break;
+      default: break;
+    }
+    this._vimPaint();
+    this._renderTitle();
+  }
+
+  // A click moves vim's cursor to where it landed.
+  _vimSync() {
+    if (!this.vimOn || this.vst.mode === 'insert') return;
+    this.vcur = clampNormal(this.core.value, this.core.ta.selectionStart);
+    if (this.vst.mode !== 'normal') this.vst = { ...this.vst, mode: 'normal' };
+    this._vimPaint();
+    this._renderTitle();
+  }
+
+  _vimPaint() {
+    const ta = this.core.ta;
+    const t = ta.value;
+    const c = Math.max(0, Math.min(this.vcur, t.length));
+    const st = this.vst;
+    if (!this.vimOn || st.mode === 'insert') { ta.setSelectionRange(c, c); return; }
+    if (st.mode === 'visual' || st.mode === 'vline') {
+      let a = Math.min(st.anchor, c), b = Math.max(st.anchor, c) + 1;
+      if (st.mode === 'vline') {
+        a = t.lastIndexOf('\n', a - 1) + 1;
+        const e = t.indexOf('\n', b - 1);
+        b = e < 0 ? t.length : e;
+      }
+      ta.setSelectionRange(a, Math.min(b, t.length), c < st.anchor ? 'backward' : 'forward');
+      return;
+    }
+    // normal: a one-character selection is the block cursor, except on an
+    // empty line or at the very end, where there is no character to cover
+    const block = c < t.length && t[c] !== '\n' ? 1 : 0;
+    ta.setSelectionRange(c, c + block);
   }
 
   // Active editor window -> the 'editor' context: the workspace bindings
@@ -214,6 +328,8 @@ export class EditorWindow {
     this.path = path;
     this.core.setValue(b.binary ? '' : b.text, b.lang);
     this.core.readOnly = b.binary;
+    this.vst = initialState();
+    this.vcur = 0;
     this._say(b.binary ? 'Binary file — download it to inspect it.' : '');
     this.tree.reveal(path);
     this._renderTitle();
@@ -347,6 +463,9 @@ export class EditorWindow {
     this.path = name;
     this.core.setValue('', languageOf(name));
     this.core.readOnly = false;
+    // A new file starts in insert mode: there is nothing to move over yet.
+    this.vst = { ...initialState(), mode: 'insert' };
+    this.vcur = 0;
     this._say(`New file — Ctrl+S writes ${name} to the device`);
     this.tree.invalidate();
     this._renderTitle();
@@ -417,7 +536,7 @@ export class EditorWindow {
     this._sLang.textContent = b ? LANG_NAMES[b.lang] || '' : '';
     this._sArena.textContent = this.runtime
       ? `arena ${Math.round(this.runtime.used / 1024)}/${Math.round(this.runtime.arena_bytes / 1024)} KB` : '';
-    this._sMode.textContent = this.modeLabel || '';
+    this._sMode.textContent = this.vimOn ? modeLabel(this.vst) : '';
   }
 
   render() {

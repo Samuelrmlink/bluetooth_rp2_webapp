@@ -19,6 +19,7 @@
 // Highlighting runs at most once a frame, after the text changes.
 
 import { highlight } from './highlight.js';
+import { History } from './history.js';
 
 export class EditorCore {
   constructor(host) {
@@ -36,15 +37,30 @@ export class EditorCore {
     this.pre = host.querySelector('.ed-hl');
     this.ta = host.querySelector('.ed-input');
     this.lang = 'text';
+    // Our own undo history: Chrome's cannot survive a live highlight layer
+    // (see editor/history.js), so every change is recorded here.
+    this.history = new History();
+    this._prev = '';               // the text before the change in flight
+    this._selBefore = [0, 0];
     this.onChange = null;          // (text) => void, after every edit
     this.onCursor = null;          // (line, col) => void
     this._dirty = true;
     this._lines = 0;
 
+    this.ta.addEventListener('beforeinput', (e) => {
+      // The context menu's Undo / Redo arrive here; route them to ours.
+      if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') {
+        e.preventDefault();
+        if (e.inputType === 'historyUndo') this.undo(); else this.redo();
+        return;
+      }
+      this._selBefore = [this.ta.selectionStart, this.ta.selectionEnd];
+    });
     this.ta.addEventListener('input', () => {
-      this._dirty = true;
-      this.onChange?.(this.ta.value);
-      this._cursor();
+      const now = this.ta.value;
+      this.history.record(this._prev, now, this._selBefore, [this.ta.selectionStart, this.ta.selectionEnd]);
+      this._prev = now;
+      this._changed();
     });
     for (const ev of ['keyup', 'click', 'select']) this.ta.addEventListener(ev, () => this._cursor());
     // Tab inserts two spaces rather than leaving the field -- inside an
@@ -53,6 +69,12 @@ export class EditorCore {
       if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey && !this.readOnly) {
         e.preventDefault();
         this.insert('  ');
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'z' && !e.shiftKey) { e.preventDefault(); this.undo(); }
+        else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); this.redo(); }
       }
     });
   }
@@ -63,6 +85,8 @@ export class EditorCore {
   // undo history rather than letting Ctrl+Z walk back into another file.
   setValue(text, lang) {
     this.ta.value = text;
+    this._prev = text;
+    this.history.reset();
     this.lang = lang || this.lang;
     this._dirty = true;
     this.ta.setSelectionRange(0, 0);
@@ -76,16 +100,41 @@ export class EditorCore {
 
   focus() { this.ta.focus({ preventScroll: true }); }
 
-  // Insert at the selection as if typed, so it is one undo step.
+  // Insert at the selection, as one undo step.
   insert(text) {
-    this.ta.focus({ preventScroll: true });
-    if (!document.execCommand('insertText', false, text)) {
-      // Fallback where insertText is refused: correct, but not undoable.
-      const { selectionStart: a, selectionEnd: b, value } = this.ta;
-      this.ta.value = value.slice(0, a) + text + value.slice(b);
-      this.ta.setSelectionRange(a + text.length, a + text.length);
-      this.ta.dispatchEvent(new Event('input'));
-    }
+    this.replaceRange(this.ta.selectionStart, this.ta.selectionEnd, text);
+  }
+
+  _changed() {
+    this._dirty = true;
+    this.onChange?.(this.ta.value);
+    this._cursor();
+  }
+
+  undo() { this._restore(this.history.undo(this.ta.value)); }
+  redo() { this._restore(this.history.redo(this.ta.value)); }
+
+  _restore(r) {
+    if (!r || this.readOnly) return;
+    this.ta.value = r.text;
+    this._prev = r.text;
+    this.ta.setSelectionRange(r.sel[0], r.sel[1]);
+    this._changed();
+  }
+
+  // Replace [from, to) as ONE undo step -- the vim layer's way of changing
+  // text, and Tab's. setRangeText is programmatic (no input event), so the
+  // change is recorded here rather than by the input listener.
+  replaceRange(from, to, text) {
+    if (this.readOnly) return;
+    const before = this.ta.value;
+    const selBefore = [this.ta.selectionStart, this.ta.selectionEnd];
+    this.ta.setRangeText(text, from, to, 'end');
+    this.history.seal();
+    this.history.record(before, this.ta.value, selBefore, [this.ta.selectionStart, this.ta.selectionEnd]);
+    this.history.seal();
+    this._prev = this.ta.value;
+    this._changed();
   }
 
   // Line/column of the caret, 1-based, for the status bar.
