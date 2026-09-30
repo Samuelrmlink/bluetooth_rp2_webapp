@@ -20,15 +20,34 @@ export const controls = [
   { kind: 'readout', field: 'solar_input_power_w', label: 'Solar input', unit: 'W' },
   { kind: 'readout', field: 'bms_temp_major_c', label: 'Battery temperature', unit: '°C' },
 
-  { kind: 'switch', field: 'ac_output_enabled', label: 'AC output', verified: false },
-  { kind: 'switch', field: 'car_output_enabled', label: 'Car output', verified: false },
-  { kind: 'select', field: 'ac_frequency_hz', label: 'AC frequency', options: [[50, '50 Hz'], [60, '60 Hz']], verified: false },
-  { kind: 'number', field: 'ac_charge_power_w', label: 'AC charge limit', unit: 'W', min: 100, max: 1300, step: 100, verified: false },
+  // Writable: the four setters whose payloads were captured from the app
+  // (lua/profiles/anker/models/A1761.lua `setters`). `verified` is set once a
+  // change from here has been seen to move the matching telemetry field on
+  // the bench C1000.
+  { kind: 'switch', field: 'car_output_enabled', label: 'Car output', verified: true },
+  { kind: 'switch', field: 'ac_output_enabled', label: 'AC output', verified: false,
+    why: 'captured, not yet tested on this unit — it switches the outlet\'s load' },
+  { kind: 'switch', field: 'screen_enabled', label: 'Display', verified: true },
+  { kind: 'select', field: 'ambient_light', label: 'Ambient light', verified: true,
+    options: [[0, 'Off'], [1, 'On'], [3, '3 (captured; meaning unknown)']] },
+
+  // Opcodes known, payloads never captured: shown, not writable. A guessed
+  // encoding is not something to try on a power station.
+  { kind: 'select', field: 'ac_frequency_hz', label: 'AC frequency', options: [[50, '50 Hz'], [60, '60 Hz']],
+    blocked: 'setter payload not yet captured' },
+  { kind: 'number', field: 'ac_charge_power_w', label: 'AC charge limit', unit: 'W', min: 100, max: 1300, step: 100,
+    blocked: 'setter payload not yet captured' },
   { kind: 'select', field: 'device_timeout_min', label: 'Device auto-off',
-    options: [[0, 'Never'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [360, '6 h'], [720, '12 h'], [1440, '24 h']], verified: false },
-  { kind: 'switch', field: 'ultra_fast_charging', label: 'Ultra-fast charging', verified: false },
+    options: [[0, 'Never'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [360, '6 h'], [720, '12 h'], [1440, '24 h']],
+    blocked: 'setter payload not yet captured' },
+  { kind: 'switch', field: 'ultra_fast_charging', label: 'Ultra-fast charging', blocked: 'no setter known' },
 ];
 
-export function write(ctx, control, value) {
-  return ctx.ws.call('anker.set', { device: ctx.device.addr, field: control.field, value });
+// A script op reports a refusal as a result carrying `error`, not as a
+// failed call -- so it is turned into one here, or the control would sit
+// pending until it timed out instead of saying why at once.
+export async function write(ctx, control, value) {
+  const r = await ctx.ws.call('anker.set', { device: ctx.device.addr, field: control.field, value });
+  if (r && r.error) throw new Error(r.message || r.error);
+  return r;
 }

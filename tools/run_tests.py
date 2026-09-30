@@ -189,9 +189,11 @@ def t_wifi_mode_both_everywhere():
     ops = open(os.path.join(ROOT, "src/net/wifi_ops.c")).read()
     if "auto, sta, ap, both, off" not in ops:
         return False, "wifi_ops.c error text does not list both"
-    html = open(os.path.join(ROOT, "web/wifi/index.html")).read()
-    if 'value="both"' not in html:
-        return False, "web/wifi/index.html has no both option"
+    # The WiFi UI is a Settings section of the one-page app now (it was
+    # web/wifi/index.html); the mode select is built there.
+    ui = open(os.path.join(ROOT, "web/js/settings/wifi.js")).read()
+    if 'value="both"' not in ui:
+        return False, "web/js/settings/wifi.js offers no both option"
     return True, "both: config, API text and UI agree"
 
 def t_script_loaded_reports_arena():

@@ -44,7 +44,8 @@ export class ControlsWindow {
       const ctl = buildControl(c, (v) => this._write(c, ctl, v));
       if (c.kind !== 'readout') {
         if (!writable) ctl.setEnabled(false, 'no write path yet');
-        else if (c.verified === false) ctl.setEnabled(false, 'not yet verified on hardware');
+        else if (c.blocked) ctl.setEnabled(false, c.blocked);
+        else if (c.verified === false) ctl.setEnabled(false, c.why || 'not yet verified on hardware');
       }
       this.controls.push({ c, ctl });
       body.appendChild(ctl.el);

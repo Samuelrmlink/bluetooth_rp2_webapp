@@ -305,6 +305,58 @@ function R.run(target_override)
   sys.collect()
 
   log.info('anker: streaming')
+
+  --[[
+  anker.set {device, field, value}: change a setting on the device.
+
+  QUEUED, not sent from the handler: an op handler may not yield (see
+  src/lua/lbind.c) and a setter must wait for its reply, so the handler only
+  validates and queues, and the poll loop below sends what is queued between
+  reports -- then polls at once, so the new value shows up in telemetry
+  within a second rather than a poll period later. The web UI shows the
+  control as pending until that report confirms it.
+
+  Only fields in the model's `setters` table can be written: their payloads
+  were captured from the official app. Anything else is refused by name.
+
+  One launcher's handler per op name: registering again replaces it, so with
+  two Anker devices on two launchers the last one's handler wins and the
+  other device's writes are refused with a clear error rather than sent to
+  the wrong unit. One C1000, as on the bench, is unaffected.
+  ]]
+  local queue = {}
+  local setters = model and model.setters or {}
+  ops.register('anker.set', function(p)
+    p = p or {}
+    local want = tostring(p.device or ''):upper():gsub('[^0-9A-F]', '')
+    if want ~= addr:upper():gsub('[^0-9A-F]', '') then
+      return { error = 'not_this_device', message = 'anker.set is held by the launcher for ' .. addr }
+    end
+    local s = setters[p.field]
+    if not s then return { error = 'unknown_field', message = tostring(p.field) .. ' has no captured setter' } end
+    local v = math.tointeger(tonumber(p.value))
+    local okv = false
+    for _, a in ipairs(s.values or {}) do if a == v then okv = true end end
+    if not okv then return { error = 'bad_value', message = ('%s takes %s'):format(p.field, table.concat(s.values, ', ')) } end
+    queue[#queue + 1] = { field = p.field, opcode = s.opcode, value = v }
+    return { queued = true, field = p.field, value = v }
+  end)
+
+  local function send_setters()
+    while #queue > 0 do
+      local q = table.remove(queue, 1)
+      local _, err = link:secure(model.poll.ft, q.opcode,
+        tlv.build{ { tag = 0xa1, enc = 'bytes', value = '\x21', type_byte = false },
+                   { tag = 0xa2, enc = 'bytes', value = '\x01' .. string.char(q.value), type_byte = false },
+                   { tag = 0xfe, enc = 'bytes',
+                     value = '\x03' .. link_m.le32(link_m.now_epoch()),
+                     type_byte = false } },
+        q.opcode | 0x0800, 4000)
+      if err then log.warn(('anker: set %s=%d: %s'):format(q.field, q.value, err))
+      else log.info(('anker: set %s=%d: accepted'):format(q.field, q.value)) end
+    end
+  end
+
   if model and model.poll then
     -- Polled family (the power stations): ask, decode, wait.
     while true do
@@ -327,7 +379,10 @@ function R.run(target_override)
         log.warn('anker: poll: ' .. tostring(perr))
         if not is_connected() then log.error('anker: link dropped'); return end
       end
-      sys.sleep(model.poll.period_ms or 5000)
+      -- Sleep out the poll period, but wake for a queued setter.
+      local wake = sys.ms() + (model.poll.period_ms or 5000)
+      while #queue == 0 and sys.ms() < wake do sys.sleep(200) end
+      send_setters()
     end
   else
     -- Pushing family (the chargers): just listen.

@@ -88,6 +88,23 @@ return {
            payload_tlv = { { tag = 0xa1, value = '\x21' } }, fe_epoch = 'typed' },
   report = 0x0840,
 
+  -- Setters the driver's anker.set may send, and ONLY these: each opcode and
+  -- payload shape was captured from the official app on 2026-09-08
+  -- (anker_c1000_protocol/anker-protocol.md, section 11). A setter is
+  --   a1 01 21 · a2 <len> <type> <value> · fe 05 03 <epoch32 LE>
+  -- and every one here is a2 02 01 <u8>. The charge limit (0x0044), the
+  -- auto-off timer (0x0045) and the AC frequency (0x004D) are left out on
+  -- purpose: their opcodes are known but their payloads were never captured,
+  -- and a guessed encoding is not something to try on a power station.
+  -- `verified` is per field, set once changing it from the app has been seen
+  -- to move the matching tag -- the rule this file states for names.
+  setters = {
+    ac_output_enabled  = { opcode = 0x004A, enc = 'u8', values = { 0, 1 } },
+    car_output_enabled = { opcode = 0x004B, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30, bench C1000: 0 -> 1 -> 0, d8 followed
+    ambient_light      = { opcode = 0x004F, enc = 'u8', values = { 0, 1, 3 }, verified = true },  -- 2026-09-30: 0 -> 1 -> 0, dc followed (3 untested)
+    screen_enabled     = { opcode = 0x0052, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30: 1 -> 0 -> 1, de followed
+  },
+
   -- a1 is the selector echo, not data. fe is the sequence guard the app uses
   -- to drop stale packets (a1771_device_commands.dart:106), not a measurement.
   ignore = { a1 = true, fe = true },
