@@ -1,0 +1,4 @@
+/* Anker PPS windows. Linked when the first of its windows mounts and removed
+   with the last, like the plugin itself. */
+.pane-device .dev-controls .ctl.is-readout .ctl-readout { font-variant-numeric: tabular-nums; }
+.pane-device .dev-controls .ctl:first-child .ctl-readout { font-size: 20px; font-weight: 600; color: var(--green); }

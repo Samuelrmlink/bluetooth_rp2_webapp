@@ -30,6 +30,7 @@ import { readLayoutStore, writeLayoutStore, readPrefs, writePrefs } from './pref
 import { BUILTIN_WINDOWS, DEFAULT_TREE } from './windows/index.js';
 import { SETTINGS_SECTIONS } from './settings/index.js';
 import { DeviceStore } from './gattdb.js';
+import { DeviceHost } from './devices/host.js';
 
 const NUDGE_PX = 24;
 const RESIZE_PX = 32;
@@ -63,6 +64,9 @@ class App {
 
     this._initLayout();
     this._initKeys();
+    // After the layout exists: devices register windows into it as they
+    // appear, and a saved arrangement may already have a place for them.
+    this.deviceHost = new DeviceHost(this);
     this._wireToolbar();
     this._wireConnection();
 
@@ -98,13 +102,40 @@ class App {
   // the editor", "show in GATT") so a request never lands in a parked pane.
   show(paneId) {
     if (!this.windows.has(paneId)) return null;
+    // showPane puts it in the active tile; focus() takes a TILE id, so it is
+    // the active tile that gets focus, not the pane id (which focus ignored).
     this._layout.showPane(paneId);
-    this._layout.focus(paneId, { dom: true });
+    this._layout.focus(this._layout.activeId, { dom: true });
     return this.windows.get(paneId).win;
   }
 
   window(paneId) {
     return this.windows.get(paneId)?.win ?? null;
+  }
+
+  // A window that arrives at runtime -- a device's. `create(el)` builds it.
+  // If a saved arrangement already has a place for this id (a device seen
+  // in an earlier session), addPane puts it straight there.
+  addWindow(id, meta, create) {
+    const have = this.windows.get(id);
+    if (have) return have.win;
+    const el = document.createElement('section');
+    el.className = 'pane pane-device';
+    document.getElementById('pane-park').appendChild(el);
+    const win = create(el);
+    this.windows.set(id, { def: { id, ...meta }, el, win });
+    this._layout.addPane({ id, title: meta.title, group: meta.group, short: meta.short, el });
+    return win;
+  }
+
+  removeWindow(id) {
+    const w = this.windows.get(id);
+    if (!w) return;
+    if (this._visible.has(id)) w.win.onHide?.();
+    this._visible.delete(id);
+    this.windows.delete(id);
+    this._layout.removePane(id);
+    w.el.remove();
   }
 
   // A line in the Console, from any window. The Console keeps it whether or
@@ -131,6 +162,13 @@ class App {
       mode: stored.mode,
       active: stored.active,
       onChange: () => this._afterLayout(),
+      // A device window a saved arrangement remembers but whose device has
+      // not reported yet: the tile keeps its place and says what it is for.
+      paneTitle: (id) => {
+        const [win, key] = id.split('@');
+        const kind = win.split('.').pop();
+        return `${kind.charAt(0).toUpperCase()}${kind.slice(1)} · device ${key} (not reporting)`;
+      },
     });
     this._layout.onCommit(() => this._persistLayout());
     // The manager builds nothing until asked: apply() is the first render, and
