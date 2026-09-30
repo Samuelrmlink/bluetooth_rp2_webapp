@@ -191,9 +191,14 @@ export class Nav {
         return true;
       }
       case 'Escape': el.removeAttribute('data-nav-active'); return true;
-      // Space/Enter/h/l do nothing inside a list, and must not scroll the
-      // page or move focus out of it by surprise.
-      case 'Space': case 'Enter': case 'KeyH': case 'KeyL': case 'ArrowLeft': case 'ArrowRight': return true;
+      // Optional verbs, for lists whose rows DO something: the scanner
+      // connects on Enter, the file tree opens with l/Enter and collapses
+      // with h. A list without them keeps the old behaviour -- the keys do
+      // nothing and, above all, must not scroll the page or move focus out
+      // of the list by surprise.
+      case 'Space': case 'Enter': ctl.activate?.(); return true;
+      case 'KeyL': case 'ArrowRight': (ctl.right || ctl.activate)?.call(ctl); return true;
+      case 'KeyH': case 'ArrowLeft': ctl.left?.(); return true;
       default: return false;
     }
   }

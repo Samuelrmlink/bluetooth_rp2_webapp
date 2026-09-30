@@ -29,6 +29,7 @@ import { HelpModal } from './modals/help.js';
 import { readLayoutStore, writeLayoutStore, readPrefs, writePrefs } from './prefs.js';
 import { BUILTIN_WINDOWS, DEFAULT_TREE } from './windows/index.js';
 import { SETTINGS_SECTIONS } from './settings/index.js';
+import { DeviceStore } from './gattdb.js';
 
 const NUDGE_PX = 24;
 const RESIZE_PX = 32;
@@ -48,6 +49,9 @@ class App {
     this.prefs = readPrefs();
     this.ws = new WsApi(wsUrl());
     this.bus = new Bus(this.ws);
+    // One mirror of the devices the gateway knows, shared by every window
+    // that shows them, so the Scanner and GATT can never disagree.
+    this.devices = new DeviceStore().bind(this.ws);
     this.windows = new Map();       // pane id -> window instance
     this._visible = new Set();      // pane ids currently in a tile or float
 
@@ -101,6 +105,16 @@ class App {
 
   window(paneId) {
     return this.windows.get(paneId)?.win ?? null;
+  }
+
+  // A line in the Console, from any window. The Console keeps it whether or
+  // not it is on screen.
+  log(src, text, level = src === '!' ? 'error' : undefined) {
+    this.window('console')?.add('info', src, text, level);
+  }
+
+  showDevice(addr) {
+    this.show('gatt')?.showDevice(addr);
   }
 
   // --- layout ----------------------------------------------------------------

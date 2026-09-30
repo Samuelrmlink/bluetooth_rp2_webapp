@@ -46,3 +46,144 @@
   min-width: 0;
   font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+/* --- Tables (Scanner, GATT value log) -------------------------------------- */
+.table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.table-wrap:focus-visible,
+.table-wrap[data-nav-active] {
+  outline: 1px solid var(--green);
+  outline-offset: -1px;
+}
+
+table.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+table.grid th,
+table.grid td {
+  text-align: left;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+table.grid th {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+table.grid tbody tr { cursor: default; }
+table.grid tbody tr:hover { background: #1a1c20; }
+table.grid tbody tr[aria-selected='true'] { background: #1f2a24; box-shadow: inset 2px 0 0 var(--green); }
+table.grid tr.is-connected td:first-child { color: var(--green); }
+
+.pane-btn.on {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+.scan-bar input[type='text'],
+.scan-bar input[type='number'] {
+  width: 7em;
+  min-width: 0;
+}
+
+/* --- GATT ------------------------------------------------------------------- */
+.gatt-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.gatt-tree {
+  flex: 0 0 42%;
+  min-width: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.gatt-tree[data-nav-active] { outline: 1px solid var(--green); outline-offset: -1px; }
+
+.gatt-char {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.g-target, .g-actions, .g-write {
+  padding: 6px 8px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.g-target { font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.g-write .g-hex { flex: 1 1 12em; min-width: 0; font-family: ui-monospace, monospace; }
+
+.t-svc { padding: 3px 8px; font-weight: 600; border-top: 1px solid var(--border); }
+.t-chr { padding: 2px 8px 2px 22px; cursor: pointer; display: flex; gap: 8px; }
+.t-chr:hover { background: #1a1c20; }
+.t-chr[aria-selected='true'] { background: #1f2a24; color: var(--green); }
+.t-flags { color: var(--dim); }
+.t-val { color: var(--green); overflow: hidden; text-overflow: ellipsis; }
+
+/* --- Hardware ---------------------------------------------------------------- */
+.hw-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 10px 10px;
+}
+
+.hw-body h4 { margin: 10px 0 6px; color: var(--dim); font-weight: 600; }
+.hw-pins { display: flex; flex-wrap: wrap; gap: 4px; }
+
+.pin {
+  min-width: 2.4em;
+  padding: 3px 0;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg);
+  font: 12px ui-monospace, monospace;
+}
+
+.pin:hover:not(:disabled) { border-color: var(--dim); }
+.pin[data-state='claimed'] { border-color: var(--green); color: var(--green); }
+.pin[data-state='reserved'] { opacity: 0.35; }
+.pin[aria-pressed='true'] { background: #1f2a24; }
+
+.hw-detail { margin-top: 6px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+.kv-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 14px;
+  font-size: 12px;
+}
+
+.kv-list .k { color: var(--dim); }
+.kv-list .v { font-family: ui-monospace, monospace; }
+.hw-i2c-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.hw-i2c-form input { width: 4em; }
+.hw-i2c .addr { display: inline-block; margin: 4px 6px 0 0; font-family: ui-monospace, monospace; color: var(--green); }
+
+/* --- Settings sections --------------------------------------------------------- */
+.sect-body .kv-list { margin: 4px 0; }
+.sect-body .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+.sect-body .row .spacer { flex: 1 1 auto; }
+.sect-body .err { color: var(--red); }
