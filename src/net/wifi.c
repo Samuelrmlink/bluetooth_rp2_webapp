@@ -45,6 +45,8 @@
 #include "pico/cyw43_arch.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/dhcp.h"
+#include "lwip/prot/dhcp.h"
 #include "net/mdns.h"
 #include "dhcpserver.h"
 #include "net/wg.h"
@@ -119,6 +121,16 @@
 
 #define SCAN_MAX 24
 
+/*
+ * The cyw43 driver's join-state bits. They are private to cyw43_ctrl.c
+ * (WIFI_JOIN_STATE_*), copied here because adopt_firmware_rejoin() has to read
+ * them -- see there for why.
+ */
+#define JS_ACTIVE 0x0001u
+#define JS_AUTH   0x0200u
+#define JS_LINK   0x0400u
+#define JS_KEYED  0x0800u
+
 typedef enum { ST_IDLE = 0, ST_JOIN, ST_UP } wifi_state_t;
 
 typedef struct {
@@ -134,6 +146,7 @@ static wifi_state_t state = ST_IDLE;
 static uint32_t join_start, last_fail, down_since, boot_start, scan_start;
 static uint32_t last_scan_end;   /* when the most recent scan stopped */
 static bool deferred_for_bt;     /* so the deferral is logged once, not per pass */
+static uint32_t fw_rejoins;      /* links taken over from the radio's own rejoin */
 static char ip_str[16] = "0.0.0.0";
 static char last_error[56] = "";
 static char cur_ssid[CFG_SSID_MAX + 1] = "";
@@ -521,6 +534,76 @@ static void on_lost(const char *why) {
     state = ST_IDLE;
 }
 
+/*
+ * THE RADIO REJOINED BY ITSELF; TAKE IT.
+ *
+ * Seen 2026-09-30: the access point (a Starlink router) lost power and came
+ * back. The board reassociated -- the router listed it -- but never got an
+ * address, and stayed off the network until it was power cycled. Two things
+ * combined:
+ *
+ *  1. Our own rejoin could not run. on_lost() drops to ST_IDLE, and the join
+ *     from there is deferred while Bluetooth holds the radio (begin_join; a
+ *     join under BLE wedges the driver). le_radio_busy() counts any open
+ *     link, and the gateway's job is to hold one -- the Anker script keeps
+ *     the C1000 connected -- so "deferred" meant "never".
+ *
+ *  2. The CYW43 firmware DID rejoin, on its own: it keeps the SSID and
+ *     reassociates when the AP returns, with no ioctl from us. But the driver
+ *     raises the lwIP link only when its join state is exactly
+ *     ACTIVE|AUTH|LINK|KEYED (cyw43_ctrl.c), and ACTIVE is set only by a
+ *     host-initiated join. A DISASSOC event zeroes the state, so after one,
+ *     a firmware rejoin collects AUTH|LINK|KEYED and stops one bit short: the
+ *     radio is associated, the netif link stays down, DHCP never runs.
+ *
+ * So, from ST_IDLE: if the firmware's events say it is associated with the
+ * network we were on, raise the link it forgot (the same call the driver
+ * makes), make sure DHCP is running, and let ST_JOIN's DHCP wait take it
+ * from there. If the link is already up -- the driver did raise it -- adopt
+ * it the same way. Neither path issues a radio ioctl; DHCP is ordinary
+ * traffic. So it is safe with Bluetooth busy, which is the whole point.
+ *
+ * What this does NOT cover: an AP that the firmware does not rejoin (it gave
+ * up, or the network changed). That still needs begin_join and still waits
+ * for Bluetooth to go idle.
+ */
+static bool adopt_firmware_rejoin(uint32_t now) {
+    if (!cur_ssid[0] || !sta_enabled() || sta_parked) { return false; }
+    struct netif *nif = sta_netif();
+    const cfg_net_t *k = cfg_net_find(cur_ssid);
+    const bool open = !k || !k->psk[0];
+    /* An open network has no key exchange; the driver presets KEYED for it
+     * on a host join, and a firmware rejoin never sets it. */
+    const uint32_t need = JS_AUTH | JS_LINK | (open ? 0 : JS_KEYED);
+    const uint32_t js = cyw43_state.wifi_join_state;
+
+    cyw43_arch_lwip_begin();
+    const bool link_up = netif_is_link_up(nif);
+    if (!link_up && (js & need) != need) {
+        cyw43_arch_lwip_end();
+        return false;
+    }
+    if (!link_up) {
+        printf("wifi: the radio rejoined '%s' by itself; raising the link the driver "
+               "left down (join state 0x%04lx)\n", cur_ssid, (unsigned long)js);
+        cyw43_state.wifi_join_state = JS_ACTIVE;   /* as after a host join */
+        cyw43_cb_tcpip_set_link_up(&cyw43_state, CYW43_ITF_STA);
+    } else {
+        printf("wifi: the radio rejoined '%s' by itself\n", cur_ssid);
+    }
+    /* Raising the link restarts DHCP (dhcp_network_changed_link_up) unless
+     * it was stopped outright; then it needs starting. */
+    struct dhcp *d = netif_dhcp_data(nif);
+    if (!d || d->state == DHCP_STATE_OFF) { dhcp_start(nif); }
+    cyw43_arch_lwip_end();
+
+    fw_rejoins++;
+    snprintf(last_error, sizeof(last_error), "rejoined by the radio; waiting for DHCP");
+    join_start = now;
+    state = ST_JOIN;
+    return true;
+}
+
 /* --- lifecycle ------------------------------------------------------------ */
 
 /* The radio is shared with Bluetooth now, so main() owns cyw43_arch_init()
@@ -858,6 +941,7 @@ void wifi_poll(void) {
              * the flip in the order that works: AP down, then join. */
         }
         if (!timed_out(now, last_fail, WIFI_RETRY_MS)) break;
+        if (adopt_firmware_rejoin(now)) break;
         /* AP FIRST when the mode wants it unconditionally. Joining and THEN
          * making room for the AP means a disassociation followed by the AP
          * init, and that pair is flaky (it wedged one boot in three). The AP
@@ -980,12 +1064,22 @@ int wifi_status_json(char *buf, size_t cap) {
                     "{\"ok\":true,\"driver\":%s,\"mode\":\"%s\",\"want\":\"%s\","
                     "\"ssid\":\"%s\",\"ip\":\"%s\",\"ap\":%s,\"ap_ip\":\"%s\","
                     "\"ap_ssid\":\"%s\",\"ap_psk\":\"%s\","
-                    "\"ap_clients\":%d,\"scanning\":%s,\"error\":\"%s\"}",
+                    "\"ap_clients\":%d,\"scanning\":%s,\"error\":\"%s\","
+                    /* Enough of the layers below to tell, remotely, where a
+                     * station that is not up is stuck: the driver's join
+                     * state, the lwIP link, DHCP's state (lwip/prot/dhcp.h),
+                     * and whether the join is waiting on Bluetooth. */
+                    "\"radio_join\":\"0x%04lx\",\"link\":%s,\"dhcp\":%d,"
+                    "\"join_deferred\":%s,\"fw_rejoins\":%lu}",
                     driver_up ? "true" : "false", mode_name(), cfg_mode(),
                     cur_ssid, ip_str,
                     ap_up ? "true" : "false", ap_up ? "192.168.4.1" : "",
                     cfg_ap_ssid(), cfg_ap_psk(),
-                    ap_clients_cached, scanning ? "true" : "false", last_error);
+                    ap_clients_cached, scanning ? "true" : "false", last_error,
+                    (unsigned long)cyw43_state.wifi_join_state,
+                    netif_is_link_up(sta_netif()) ? "true" : "false",
+                    netif_dhcp_data(sta_netif()) ? (int)netif_dhcp_data(sta_netif())->state : -1,
+                    deferred_for_bt ? "true" : "false", (unsigned long)fw_rejoins);
 }
 
 int wifi_networks_json(char *buf, size_t cap) {
