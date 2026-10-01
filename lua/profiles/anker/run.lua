@@ -99,6 +99,17 @@ local function dispatch_set(p)
   return { error = 'not_this_device', message = 'no Anker launcher holds ' .. tostring(p.device) }
 end
 
+-- anker.screensaver routes the same way; only models with `screensaver`
+-- (the A2687) register a handler for their device.
+local function dispatch_screensaver(p)
+  p = p or {}
+  local want = norm(p.device)
+  for a, d in pairs(control.devices) do
+    if norm(a) == want and d.screensaver then return d.screensaver(p) end
+  end
+  return { error = 'not_this_device', message = 'no screensaver-capable device at ' .. tostring(p.device) }
+end
+
 function R.run(target_override, who)
   who = who or 'anker'
   local state = {}
@@ -419,6 +430,23 @@ function R.run(target_override, who)
     set = function(field, value) return request_set{ field = field, value = value } end,
   }
 
+  -- Screensaver upload, driven step by step from the browser (screensaver.lua).
+  -- Queued for the same reason setters are: the op handler may not yield.
+  local ss_q = {}
+  local ss = model and model.screensaver and require 'profiles.anker.screensaver'
+  if ss then
+    control.devices[addr].screensaver = function(p)
+      -- one window of data plus its select/begin: the browser waits for each ack
+      if #ss_q >= 12 then return { error = 'busy', message = 'screensaver queue full -- wait for the ack' } end
+      local j, why = ss.job(p)
+      if not j then return { error = 'bad_request', message = why } end
+      ss_q[#ss_q + 1] = j
+      return { queued = true, step = j.step }
+    end
+    ops.register('anker.screensaver', dispatch_screensaver)
+  end
+  local function ss_emit(ev) bus.emit('anker.screensaver', ev) end
+
   local function send_setters()
     while #queue > 0 do
       local q = table.remove(queue, 1)
@@ -457,16 +485,27 @@ function R.run(target_override, who)
       send_setters()
     end
   else
-    -- Pushing family (the chargers): just listen.
+    -- Pushing family (the chargers): listen, and serve queued screensaver
+    -- steps between reports. Short waits so a step starts at once; the link
+    -- check stays at its old ten-second pace (bt.devices() builds a table).
+    local checked = sys.ms()
     while true do
-      local f, dec = link:await(nil, 10000)
+      if ss_q[1] then
+        ss.run(link, addr, table.remove(ss_q, 1), ss_emit)
+        goto continue
+      end
+      local f, dec = link:await(nil, 250)
       if not f then
         if dec ~= 'timeout' then log.error('anker: link ended: ' .. tostring(dec)); return end
-        if not is_connected() then log.error('anker: link dropped'); return end
+        if sys.ms() - checked > 10000 then
+          checked = sys.ms()
+          if not is_connected() then log.error('anker: link dropped'); return end
+        end
       elseif model == nil or f.opcode == model.report
              or (model.also and model.also[f.opcode]) then
         publish(dec)
       end
+      ::continue::
     end
   end
 end

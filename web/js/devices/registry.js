@@ -23,6 +23,11 @@ export const PLUGINS = [
     // tab; the model code is what it is called on the bench.
     name: (d) => d.product_code || 'Anker charger',
     module: './anker-scp/plugin.js',
+    windows: [
+      { kind: 'controls', title: 'Controls' },
+      { kind: 'unclassified', title: 'Unclassified' },
+      { kind: 'screensaver', title: 'Screensaver' },
+    ],
   },
   {
     id: 'pinecil',

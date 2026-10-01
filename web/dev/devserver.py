@@ -270,7 +270,7 @@ class MockGateway:
             return {"policy": self.policy}
         if op == "bond.list":
             return {"policy": self.policy, "bonds": []}
-        if op.startswith("script.") or op in ("anker.set", "test.reset"):
+        if op.startswith("script.") or op in ("anker.set", "anker.screensaver", "test.reset"):
             return self._script_op(op, p)
         raise ApiError("unknown_op", op)
 
@@ -287,7 +287,7 @@ class MockGateway:
                       for k, v in fs.items() if k.startswith("staged/") and k.endswith(".lua")]
             return {"scripts": [{"name": n, "running": s["running"], "dead": False, "draft": s["draft"] is not None,
                                  "resumes": 1, "error": ""} for n, s in scripts.items()],
-                    "ops": ["anker.set"] if scripts.get("anker", {}).get("running") else [],
+                    "ops": ["anker.set", "anker.screensaver"] if scripts.get("anker", {}).get("running") else [],
                     "files": files,
                     "runtime": {"arena_bytes": 163840, "used": 81920, "peak": 120000, "hook_kills": 0,
                                 "budget": 20000, "slice_overruns": 0, "slice_max_ms": 25}}
@@ -347,6 +347,37 @@ class MockGateway:
             return {"committed": True}
         if op == "script.eval":
             return {"ok": True, "value": f"(mock) {p.get('chunk', '')}"}
+        if op == "anker.screensaver":
+            # The A2687's upload, as decrypted from the app's own: select says
+            # 0x11 (not cached) unless the id was sent before; begin is 0;
+            # data acks at window ends with packets received, 0x10 when done.
+            if str(p.get("device", "")).upper() != A2687_BASE["addr"]:
+                return {"error": "not_this_device", "message": "no screensaver-capable device there"}
+            ss = STATE.setdefault("screensaver", {"cached": set(), "got": set(), "count": 0, "id": None})
+            step = p.get("step")
+            ev = {"addr": A2687_BASE["addr"], "step": step}
+            if step == "select":
+                ev.update(id=p.get("id"), status=0 if p.get("id") in ss["cached"] else 0x11)
+            elif step == "begin":
+                ss.update(got=set(), count=int(p.get("count", 0)), id=p.get("id"))
+                ev.update(id=p.get("id"), status=0)
+            elif step == "data":
+                if len(str(p.get("a", ""))) + len(str(p.get("b", ""))) == 0:
+                    return {"error": "bad_request", "message": "data needs n and a/b hex"}
+                ss["got"].add(int(p.get("n", -1)))
+                if not p.get("ack"):
+                    return {"queued": True, "step": step}
+                have = 0
+                while have in ss["got"]:
+                    have += 1
+                done = have >= ss["count"] > 0
+                if done:
+                    ss["cached"].add(ss["id"])
+                ev.update(n=p.get("n"), status=0x10 if done else 0, received=have)
+            else:
+                return {"error": "bad_request", "message": "step is select, begin or data"}
+            threading.Timer(0.05, lambda: self.send({"evt": "profile.anker.screensaver", "data": ev})).start()
+            return {"queued": True, "step": step}
         if op == "anker.set":
             # As the driver: only captured setters, only their listed values;
             # a refusal is a result carrying `error`, not a failed call.

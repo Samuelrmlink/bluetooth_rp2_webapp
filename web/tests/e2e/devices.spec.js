@@ -191,3 +191,29 @@ test('two devices at once: each its own windows and tabs, named in the picker', 
   expect(tabs.some((t) => t.includes('C1000 · Controls'))).toBe(true);
   expect(tabs.some((t) => t.includes('A2687 · Controls'))).toBe(true);
 });
+
+test('A2687 Screensaver: a picture is cropped, sent in windows, and a resend is a cache hit', async ({ page }) => {
+  const SS = 'anker-scp.screensaver@7CE913601FD8';
+  await ready(page);
+  await page.waitForFunction((id) => window.__btgwApp.windows.has(id), SS);
+  await page.evaluate((id) => window.__btgwApp.show(id), SS);
+  const win = page.locator('.ss');
+  await expect(win.locator('.ss-send')).toBeDisabled();
+  // a 320x200 picture drawn by the browser itself; it is cropped to 240x240
+  const png = Buffer.from(await page.evaluate(() => {
+    const c = document.createElement('canvas');
+    c.width = 320; c.height = 200;
+    const g = c.getContext('2d');
+    g.fillStyle = '#3a6'; g.fillRect(0, 0, 320, 200);
+    g.fillStyle = '#fff'; g.fillRect(100, 50, 120, 100);
+    return c.toDataURL('image/png').split(',')[1];
+  }), 'base64');
+  await win.locator('.ss-file').setInputFiles({ name: 'p.png', mimeType: 'image/png', buffer: png });
+  await expect(win.locator('.ss-info')).toContainText('B JPEG');
+  await expect(win.locator('.ss-id')).not.toHaveValue('');
+  await win.locator('.ss-send').click();
+  await expect(win.locator('.ss-status')).toContainText('Sent in', { timeout: 15000 });
+  await expect(win.locator('.ss-bar')).toHaveAttribute('value', '1');
+  await win.locator('.ss-send').click();
+  await expect(win.locator('.ss-status')).toContainText('already had this picture', { timeout: 15000 });
+});

@@ -167,13 +167,21 @@ function Link:stage(opcode, payload, timeout_ms)
 end
 
 -- A command under the established session cipher.
-function Link:secure(ft, opcode, payload, want, timeout_ms)
+-- Send under the session cipher without waiting for a reply: for commands
+-- the device answers only now and then (screensaver data, acked per window).
+function Link:secure_send(ft, opcode, payload)
   if not (self.session and self.session.encrypt) then return nil, 'no session' end
   local ct = self.session.encrypt(payload)
   if not ct then return nil, 'session encrypt failed' end
   if not self:send(ft, opcode, ct, true) then
     return nil, ('%s: write refused'):format(named(opcode))
   end
+  return true
+end
+
+function Link:secure(ft, opcode, payload, want, timeout_ms)
+  local sent, err = self:secure_send(ft, opcode, payload)
+  if not sent then return nil, err end
   local f, dec = self:await(want, timeout_ms or 4000)
   if not f then
     return nil, ('%s: no reply (%s)'):format(named(opcode), tostring(dec))

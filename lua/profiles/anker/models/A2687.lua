@@ -180,6 +180,9 @@ return {
 
   -- It pushes; there is nothing to poll.
   report = 0x0300,
+  -- Custom screensaver upload: profiles/anker/screensaver.lua, driven by the
+  -- browser (web/js/devices/anker-scp).
+  screensaver = true,
   also   = { [0x0a00] = true },
 
   -- a1 is a selector echo (always 0x31); fe is the anti-replay stamp and is

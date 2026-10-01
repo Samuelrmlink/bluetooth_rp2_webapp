@@ -302,6 +302,24 @@ do
   check('charge limit refuses 0', setter.check(cp, 0) == nil)
 end
 
+print('\n== screensaver ==')
+do
+  local ss = mod('anker/screensaver')
+  -- The app's own upload, decrypted from the phone's snoop log and tag-verified
+  -- (anker_c1000_protocol a2687-re/captures/20261001-063437).
+  eq('select = the captured 0x021F', hex(ss.select_payload(47984, 0xc01ff4d0, 3, 0x6abe459b)),
+     'a10121a3020103a4050470bb0000a50504d0f41fc0fd1100536d616c6c4368617267696e6755726cfe05039b45be6a')
+  eq('begin = the captured 0x0220', hex(ss.begin_payload({ id = 47984, crc = 0xc01ff4d0, size = 30700,
+     window = 10, plen = 156, count = 197 }, 0x6abe459c)),
+     'a10121a2020101a3050470bb0000a40504d0f41fc0a50503ec770000a602010aa703029c00a80302c500fe05039c45be6a')
+  eq('packet 0 = the captured 0x0221', hex(ss.data_payload(0, bytes.unhex('ffd8ffe000104a46494600010100000100010000ffdb0084000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f1718161418121415140103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc0'))),
+     'a10121a203020000a39d04ffd8ffe000104a46494600010100000100010000ffdb0084000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f1718161418121415140103040405040509050509140d0b0d1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc0')
+  eq('the final ack says 197 received', ss.received(bytes.unhex('10a10131a20302c500'):sub(2)), 197)
+  check('a packet as two hex halves', ss.job{ step = 'data', n = 3, a = 'aabb', b = 'cc' }.data == '\xaa\xbb\xcc')
+  check('begin refuses a missing size', ss.job{ step = 'begin', id = 1, crc = 2, count = 3 } == nil)
+  check('an unknown step is refused', ss.job{ step = 'nope' } == nil)
+end
+
 -- tlv.each, the report iterator schema.decode uses instead of tlv.parse (to
 -- avoid a table per item). It must hand a reader EXACTLY what tlv.parse's item
 -- would have: the same items in the same order, the same tag, the same raw
