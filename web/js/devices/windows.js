@@ -10,6 +10,8 @@
 
 import { buildControl } from '../controls/kit.js';
 import { Grid } from '../controls/grid.js';
+import { copyWithToast } from '../controls/cellmenu.js';
+import { toast } from '../toast.js';
 import { Pending, same, unclassified, displayValue } from '../controls/state.js';
 
 function header(dev) {
@@ -112,6 +114,16 @@ export class UnclassifiedWindow {
     wrap.innerHTML = '<table class="grid dev-fields"><thead></thead><tbody></tbody></table>';
     el.appendChild(wrap);
     this._tbody = wrap.querySelector('tbody');
+    // Copy all: the table as it is shown (order, columns, sort), as tab-
+    // separated text under a line naming the device -- pastes into a report
+    // or a spreadsheet.
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'pane-btn dev-copy';
+    copy.textContent = 'Copy all';
+    copy.title = 'Copy every field shown to the clipboard';
+    copy.addEventListener('click', () => this.copyAll());
+    el.querySelector('.dev-head').appendChild(copy);
     // One remembered layout for every device's Unclassified table: the
     // columns mean the same whichever device fills them.
     this._cols = [
@@ -124,6 +136,16 @@ export class UnclassifiedWindow {
       id: 'unclassified', columns: this._cols, onChange: () => { this._dirty = true; },
     });
     this._dirty = true;
+  }
+
+  copyAll() {
+    const fields = this.grid.sort(unclassified(this.dev.sample, this.plugin.controls));
+    if (!fields.length) { toast('Nothing to copy'); return; }
+    const cols = this.grid.visible;
+    const id = [this.dev.name, this.dev.sample.product_code, this.dev.addr].filter(Boolean).join(' · ');
+    const lines = [`# ${id} — ${new Date().toISOString()}`, cols.map((c) => c.label).join('\t'),
+      ...fields.map((f) => cols.map((c) => String((c.show ? c.show(f) : c.get(f)) ?? '')).join('\t'))];
+    copyWithToast(lines.join('\n'), `Copied ${fields.length} field${fields.length === 1 ? '' : 's'}`);
   }
 
   update(sample) {

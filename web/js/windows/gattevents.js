@@ -207,11 +207,14 @@ export class GattEventsView {
       });
     }
     if (e.addr && this.store.get(e.addr)?.connected) items.push({ label: 'Show in GATT', fn: () => this.app.showDevice(e.addr) });
-    openCellMenu(this.app, {
+    const opened = openCellMenu(this.app, {
       anchor, menuEl: this._menu, paneId: 'events-cell', wrap: this._wrap,
       title: `${time(e.t)} · ${this._chrName(e) || e.addr || ''}`,
       items, value, onReturn: () => { this._dirty = true; },
+      onClose: () => { this._menuCell = null; this._dirty = true; },
     });
+    // The cell the menu is for stays marked while it is open.
+    if (opened) { this._menuCell = { entry: e, key }; anchor.classList.add('is-menu-cell'); this._dirty = true; }
   }
 
   // --- data ----------------------------------------------------------------------------
@@ -298,6 +301,7 @@ export class GattEventsView {
           td.textContent = text;
         }
         if (c.key === 'value' || c.key === 'chr' || c.key === 'uuid' || c.key === 'hex') td.title = text;
+        if (this._menuCell && this._menuCell.entry === e && this._menuCell.key === c.key) td.classList.add('is-menu-cell');
         tr.appendChild(td);
       });
       return this.grid.appendSpacer(tr);

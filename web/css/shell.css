@@ -60,6 +60,11 @@ body {
      engines without dvh and must stay first. */
   height: 100vh;
   height: 100dvh;
+  /* What is actually visible: app.js keeps --app-h at visualViewport.height,
+     so an on-screen keyboard shrinks the app above it instead of the page
+     scrolling the top of the app away (browsers without the viewport tag's
+     interactive-widget=resizes-content, which does this natively). */
+  height: var(--app-h, 100dvh);
   /* viewport-fit=cover (index.html) deliberately extends the page under the
      notch, the rounded corners and the home indicator — without it iOS letter-
      boxes the page in landscape. The insets are the other half of that deal;

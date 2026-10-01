@@ -62,3 +62,48 @@ test('tabbed view: Alt+N visits every tab in order, one at a time; Alt+Shift+N g
     await expect.poll(active).toBe(tabs[(start - k + tabs.length) % tabs.length]);
   }
 });
+
+test('Console: Copy all copies the lines shown', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await ready(page);
+  await page.evaluate(() => window.__btgwApp.show('console'));
+  await page.click('.c-copy');
+  await expect(page.locator('.toast')).toContainText(/Copied \d+ lines?/);
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  expect(text).toMatch(/^\d\d:\d\d:\d\d app connected to the gateway/m);
+});
+
+test('Console on a phone: the keyboard shrinks the app instead of hiding it; Send and Enter both run', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 880 });            // a Fold6-ish portrait screen
+  await ready(page);
+  await page.evaluate(() => window.__btgwApp.show('console'));
+  for (let i = 0; i < 40; i++) await page.evaluate((n) => window.__btgwApp.windows.get('console').win.add('info', 'test', `line ${n}`), i);
+  await expect(page.locator('.console-line').last()).toContainText('line 39');
+  const box = page.locator('.c-chunk');
+  await box.focus();
+  const mode = () => page.evaluate(() => window.__btgwApp._layout.mode);
+  const before = await mode();
+  // what an on-screen keyboard does: the visible height drops, focus stays in the box
+  await page.setViewportSize({ width: 412, height: 470 });
+  await page.waitForTimeout(300);
+  expect(await mode()).toBe(before);                                    // the arrangement does not flip
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);           // the page did not scroll the app away
+  const inView = async (sel) => {
+    const b = await page.locator(sel).last().boundingBox();
+    const ok = b && b.y >= 0 && b.y + b.height <= 470 + 1;
+    return ok;
+  };
+  await expect.poll(() => inView('.c-chunk')).toBe(true);
+  await expect.poll(() => inView('.c-send')).toBe(true);
+  await expect.poll(() => inView('.console-line')).toBe(true);         // the newest line is still on screen
+  await expect(page.locator('.console-line').last()).toContainText('line 39');
+  // Send runs it and keeps the box (and so the keyboard)
+  await box.fill('1+1');
+  await page.locator('.c-send').click();
+  await expect(page.locator('.console-line').last()).toContainText(/2|=/);
+  await expect(box).toBeFocused();
+  // Enter still runs it
+  await box.fill('2+2');
+  await box.press('Enter');
+  await expect(page.locator('.console-line', { hasText: /> 2\+2$/ })).toHaveCount(1);   // the input line: Enter ran it
+});

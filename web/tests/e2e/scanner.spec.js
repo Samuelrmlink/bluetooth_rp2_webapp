@@ -158,6 +158,12 @@ test('cell menu: Filter by a service, and the full value copies', async ({ page,
   await (await cellIn(page, 'HRM-9000', 'services')).click();
   const menu = page.locator('#pane-popover .s-menu');
   await expect(menu).toBeVisible();
+  // the cell the menu is for is marked while it is open, and only then
+  await expect(page.locator('.s-table td.is-menu-cell')).toHaveCount(1);
+  await expect(page.locator('.s-table td.is-menu-cell')).toHaveText('180d 180f 6e400001-b5a3-f393-e0a9-e50e24dcca9e');
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.s-table td.is-menu-cell')).toHaveCount(0);
+  await (await cellIn(page, 'HRM-9000', 'services')).click();
   await menu.getByRole('button', { name: 'Filter by 180d Heart Rate' }).click();
   await expect(rows(page)).toHaveCount(1);
   await expect(page.locator('.toast')).toContainText('Filtered by 180d Heart Rate');

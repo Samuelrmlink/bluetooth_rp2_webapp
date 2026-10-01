@@ -54,6 +54,7 @@ class App {
     // One mirror of the devices the gateway knows, shared by every window
     // that shows them, so the Scanner and GATT can never disagree.
     this.devices = new DeviceStore().bind(this.ws);
+    this._fitViewport();
     // Every GATT value and operation result, for every window that shows them
     // (GATT, GATT Events, and the events split inside GATT in tabbed view).
     this.gattLog = new GattLog(500);
@@ -425,6 +426,23 @@ class App {
   }
 
   get layoutMode() { return this._layout.override; }
+
+  // The app is exactly as tall as what is visible -- above an on-screen
+  // keyboard too -- and never scrolls as a page: a phone keyboard otherwise
+  // pushed the top of the app (the Console's log) off screen to reveal the
+  // text box. The viewport tag's interactive-widget=resizes-content does
+  // this natively on Android; this covers the browsers that ignore it.
+  _fitViewport() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const fit = () => {
+      document.documentElement.style.setProperty('--app-h', `${Math.round(vv.height)}px`);
+      if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+    };
+    vv.addEventListener('resize', fit);
+    vv.addEventListener('scroll', fit);
+    fit();
+  }
 
   // Whether the workspace is showing tabs right now (forced on a small screen
   // or chosen) -- the GATT window offers its events split only then.

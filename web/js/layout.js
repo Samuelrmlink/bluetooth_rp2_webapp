@@ -124,10 +124,29 @@ function floatResizeRect(r0, edge, dx, dy) {
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
 
+// The height seen while nothing was being typed into.
+let restingH = 0;
+let restingW = 0;
+
+const typingNow = () => {
+  const ae = document.activeElement;
+  if (!ae) return false;
+  if (ae.tagName === 'TEXTAREA' || ae.isContentEditable) return true;
+  return ae.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'button', 'submit', 'reset', 'color', 'file'].includes(ae.type);
+};
+
 function viewportH() {
   // Not innerHeight: a mobile URL bar collapsing changes the visible height
   // without changing innerHeight, and mode would latch to the wrong branch.
-  return window.visualViewport?.height ?? window.innerHeight;
+  const h = window.visualViewport?.height ?? window.innerHeight;
+  // But an on-screen keyboard is not a smaller screen: while a text box has
+  // focus, a height lost at the same width is the keyboard's, and the
+  // arrangement must not flip to tabs or turn its split around under the
+  // user's thumbs (seen on a Galaxy Z Fold6 typing in the Console).
+  if (typingNow() && restingH && h < restingH && window.innerWidth === restingW) return restingH;
+  restingH = h;
+  restingW = window.innerWidth;
+  return h;
 }
 
 function isLandscape() {

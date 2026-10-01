@@ -111,7 +111,8 @@ test('search: / opens it selected, matches marked, n / Shift+N and Prev / Next s
   await page.locator('.ge-wrap').focus();
   await page.keyboard.press('Space');
   await page.keyboard.press('KeyN');
-  await expect.poll(() => cursor(page)).toMatch(/^td:/);
+  // on a match (not just the cell the table was entered on)
+  await expect(page.locator('.ge-table td.is-cursor.is-match')).toHaveCount(1);
   const a = await cursor(page);
   await page.keyboard.press('KeyN');
   await expect.poll(() => cursor(page)).not.toBe(a);
@@ -132,7 +133,9 @@ test('cell menu: Enter opens it, the value copies, Search for this, Esc closes o
   await page.keyboard.press('Enter');
   const menu = page.locator('#pane-popover .s-menu');
   await expect(menu).toBeVisible();
+  await expect(page.locator('.ge-table td.is-menu-cell')).toHaveCount(1);       // the menu's cell, marked
   await page.keyboard.press('Escape');
+  await expect(page.locator('.ge-table td.is-menu-cell')).toHaveCount(0);
   await expect(page.locator('#pane-popover')).toBeHidden();
   await expect(page.locator('.ge-wrap')).toHaveAttribute('data-nav-active', '');
   // click a "mock" value cell: copy, then search for it

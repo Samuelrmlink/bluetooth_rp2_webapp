@@ -325,12 +325,16 @@ export class ScannerWindow {
     }
     // The cell's whole value, wrapped, tap to copy -- where the long hex
     // fields (manufacturer data, raw) can be read in full.
-    openCellMenu(this.app, {
+    // The cell the menu is for stays marked while it is open: the menu can
+    // sit over other rows, and rows re-sort under it.
+    const opened = openCellMenu(this.app, {
       anchor, menuEl: this._menu, paneId: 'scanner-cell', wrap: this._wrap,
       title: d.name ? `${d.name} · ${d.addr}` : d.addr,
       items, value: key !== 'action' ? value : '',
       onReturn: () => { this._dirty = true; },
+      onClose: () => { this._menuCell = null; this._dirty = true; },
     });
+    if (opened) { this._menuCell = { addr: d.addr, key }; anchor.classList.add('is-menu-cell'); this._dirty = true; }
   }
 
   // --- data -----------------------------------------------------------------------------
@@ -462,6 +466,7 @@ export class ScannerWindow {
           td.textContent = v ?? '';         // advertised names are anyone's text
           if (v && String(v).length > 12) td.title = String(v);
         }
+        if (this._menuCell && this._menuCell.addr === d.addr && this._menuCell.key === c.key) td.classList.add('is-menu-cell');
         tr.appendChild(td);
       }
       frag.appendChild(this.grid.appendSpacer(tr));

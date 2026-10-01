@@ -41,6 +41,7 @@
   border-top: 1px solid var(--border);
 }
 
+.console-eval .c-send { border-color: var(--border); padding: 3px 12px; }
 .console-eval .c-chunk {
   flex: 1 1 auto;
   min-width: 0;
@@ -563,3 +564,7 @@ table.grid td.is-match-cur mark { background: rgba(230, 168, 61, 0.8); color: #1
 .g-mtu-text { color: var(--dim); font-size: 12px; padding: 0 4px; }
 .bt-mtu-row input { width: 6em; }
 .bt-mtu-note { font-size: 11px; }
+
+/* The cell a menu is for, while the menu is open. */
+table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -2px; background: rgba(230, 168, 61, 0.12); }
+.dev-head .dev-copy, .pane-bar .c-copy { border-color: var(--border); margin-left: 8px; }

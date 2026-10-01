@@ -12,8 +12,10 @@ export async function copyWithToast(text, done = 'Copied') {
   toast((await copyText(text)) ? done : 'Could not copy');
 }
 
-// items: [{ label, fn, cls? }]. Returns false when there was nothing to show.
-export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '', wrap, paneId = 'cell-menu', onReturn }) {
+// items: [{ label, fn, cls? }]. onClose runs however the menu closes (the
+// window un-highlights the cell it was for). Returns false when there was
+// nothing to show.
+export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '', wrap, paneId = 'cell-menu', onReturn, onClose }) {
   if (!anchor) return false;
   const m = menuEl;
   m.replaceChildren();
@@ -42,6 +44,7 @@ export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '
   const fromTable = wrap?.hasAttribute('data-nav-active');
   app.popover.open(anchor, m, paneId, {
     onClose: () => {
+      onClose?.();
       if (!fromTable || !wrap.isConnected) return;
       const ae = document.activeElement;
       if (ae && ae !== document.body && !wrap.contains(ae) && !anchor.contains(ae)) return;

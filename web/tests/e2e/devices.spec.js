@@ -78,3 +78,19 @@ test('AC output asks before switching off, and a No sends nothing', async ({ pag
   await ac.click();                      // on: no question
   await expect(ac).toHaveText('On');
 });
+
+test('Unclassified: Copy all puts the table, as shown, on the clipboard', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await ready(page);
+  const id = CONTROLS.replace('.controls@', '.unclassified@');
+  await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
+  await page.evaluate((x) => window.__btgwApp.show(x), id);
+  await expect(page.locator('.dev-fields tbody tr').first()).toBeVisible();
+  await page.click('.dev-copy');
+  await expect(page.locator('.toast')).toContainText(/Copied \d+ fields/);
+  const text = await page.evaluate(() => navigator.clipboard.readText());
+  const lines = text.split('\n');
+  expect(lines[0]).toMatch(/^# C1000 · A1761 · /);
+  expect(lines[1]).toBe('Field\tValue\tChanged');
+  expect(lines.some((l) => l.startsWith('unknown_b1\t'))).toBe(true);
+});
