@@ -72,8 +72,12 @@ export class Popover {
   /* anchor:  the gear button to hang under
      content: the pane's own .pane-settings element
      paneId:  for data-pane, and for toggle() */
-  open(anchor, content, paneId = '') {
+  /* opts.onClose: called after it closes, however that happens (Esc, a click
+     outside, an item) -- for a caller that must put the keyboard somewhere
+     other than the anchor, like a table back into its selection mode. */
+  open(anchor, content, paneId = '', opts = {}) {
     if (this.isOpen) this.close();
+    this._onClose = opts.onClose || null;
     this._anchor = anchor;
     this._content = content;
     // Where to put it back: its own pane, which is where it lives.
@@ -106,6 +110,9 @@ export class Popover {
     // Put the keyboard back on the gear, not on the body, so h/j/k/l
     // carries on from where it was.
     if (anchor && anchor.offsetParent !== null) anchor.focus({ preventScroll: true });
+    const done = this._onClose;
+    this._onClose = null;
+    done?.();
     return false;
   }
 

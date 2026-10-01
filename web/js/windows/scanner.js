@@ -382,7 +382,21 @@ export class ScannerWindow {
       m.appendChild(hint);
     }
     if (m.children.length <= 1) return;
-    this.app.popover.open(anchor, m, 'scanner-cell');
+    // Opened from the keyboard, the table was in its selection mode -- which
+    // ends when focus moves into the menu. Closing the menu (Esc included)
+    // must only close the menu: put the table back as it was.
+    const fromTable = this._wrap.hasAttribute('data-nav-active');
+    this.app.popover.open(anchor, m, 'scanner-cell', {
+      onClose: () => {
+        if (!fromTable || !this._wrap.isConnected) return;
+        // An item that moved the keyboard elsewhere (Show in GATT) wins.
+        const ae = document.activeElement;
+        if (ae && ae !== document.body && !this._wrap.contains(ae) && !anchor.contains(ae)) return;
+        this._wrap.focus({ preventScroll: true });
+        this._wrap.setAttribute('data-nav-active', '');
+        this._dirty = true;
+      },
+    });
   }
 
   // --- data -----------------------------------------------------------------------------

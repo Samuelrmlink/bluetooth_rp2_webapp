@@ -135,8 +135,18 @@ test('keyboard grid: move cells, sort with a/d, resize and reorder with Shift+H/
   await page.keyboard.press('KeyH');
   await page.keyboard.press('Enter');
   await expect(page.locator('#pane-popover .s-menu')).toBeVisible();
+  const at = await cursor();
   await page.keyboard.press('Escape');
+  // Esc closes only the menu: the table keeps the keyboard and its cursor.
   await expect(page.locator('#pane-popover')).toBeHidden();
+  await expect(page.locator('.s-wrap')).toBeFocused();
+  await expect(page.locator('.s-wrap')).toHaveAttribute('data-nav-active', '');
+  await expect.poll(cursor).toBe(at);
+  await page.keyboard.press('KeyJ');
+  await expect.poll(cursor).not.toBe(at);                   // still driving the table
+  // and a second Esc leaves the table, as before
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.s-wrap')).not.toHaveAttribute('data-nav-active', '');
 });
 
 test('cell menu: Filter by a service, and the full value copies', async ({ page, context }) => {
