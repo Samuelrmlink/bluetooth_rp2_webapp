@@ -50,6 +50,10 @@ void *lheap_realloc(void *ptr, size_t osize, size_t nsize);
 size_t lheap_used(void);
 size_t lheap_peak(void);
 size_t lheap_capacity(void);
+/* The largest single block that could be handed out now (walks the chain). */
+size_t lheap_largest_free(void);
+/* The size of the last request that failed, and how many have failed. */
+void  lheap_fail_stats(size_t *last, size_t *count);
 
 /* Structural self-check, for tests and for anything that wants to assert the
  * heap is still sane. Walks the whole chain; not cheap. Returns true when

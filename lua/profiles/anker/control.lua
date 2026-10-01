@@ -25,11 +25,28 @@ copy of this module -- an empty one. The first version kept `devices` in the
 module table and ac_pulse found nothing. Every script's environment falls
 through (__index) to the one global table, so `sys` is the same object for
 all of them and outlives any flush.
+
+Two launchers (lua/anker.lua, lua/anker2.lua) share two more things here:
+
+  claims[addr] = launcher name   -- which launcher holds which device, so
+             two of them never both take one. Set and checked without a
+             yield in between, which makes the take atomic: scripts are
+             coroutines and only switch where they block.
+  handshake  = { who, until_ms } -- held from connect through authentication.
+             Two handshakes at once double the negotiation code's arena peak
+             and share one radio; one at a time costs a few seconds. Expires
+             by itself, so a launcher that dies holding it delays the other
+             by at most that long. Never held while looking for a device.
+
+`devices` and `claims` are added to rather than replaced, so a board that
+built this table with an older copy of the module keeps working.
 ]]
 
 local S = sys.anker_control
 if not S then
-  S = { devices = {} }
+  S = {}
   sys.anker_control = S
 end
+S.devices = S.devices or {}
+S.claims = S.claims or {}
 return S

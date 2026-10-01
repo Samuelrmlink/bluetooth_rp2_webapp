@@ -5,10 +5,8 @@ Anker devices, identified from their advertisement.
 
 This is a launcher; the driver is profiles/anker/run.lua, which is shared so
 that a second device costs a second two-line launcher rather than a second
-copy of the code. To watch two at once, add lua/anker2.lua:
-
-    local run = require 'profiles.anker.run'
-    run(sys.secret('anker', 'target2'))
+copy of the code. To watch two at once, start lua/anker2.lua as well: each
+takes a device the other does not hold, and each works without the other.
 
 CREDENTIALS ARE NOT IN THIS FILE AND MUST NOT BE. They come from
 cfg/anker.json, which is git-ignored and which the HTTP filesystem API will
@@ -25,4 +23,4 @@ productType.
 ]]
 
 local run = require 'profiles.anker.run'
-run(nil)
+run(sys.secret('anker', 'target'), 'anker')

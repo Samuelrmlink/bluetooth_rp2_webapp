@@ -33,6 +33,10 @@ typedef struct blk { size_t size; struct blk *next; bool free; } blk_t;
 static uint8_t arena[ARENA_BYTES] __attribute__((aligned(8)));
 static blk_t *heap_head;
 static size_t heap_used, heap_peak;
+/* The last request that found no block big enough, and how many have. With a
+ * first-fit arena "not enough memory" usually means "no hole that size", not
+ * "no bytes": these say which, without a debugger. */
+static size_t fail_last, fail_count;
 
 void lheap_init(void) {
     heap_head = (blk_t *)arena;
@@ -85,7 +89,22 @@ void *lheap_alloc(size_t want) {
         if (heap_used > heap_peak) { heap_peak = heap_used; }
         return (uint8_t *)b + HDR;
     }
+    fail_last = want;
+    fail_count++;
     return NULL;
+}
+
+size_t lheap_largest_free(void) {
+    size_t big = 0;
+    for (blk_t *b = heap_head; b; b = b->next) {
+        if (b->free && b->size > big) { big = b->size; }
+    }
+    return big;
+}
+
+void lheap_fail_stats(size_t *last, size_t *count) {
+    if (last)  { *last = fail_last; }
+    if (count) { *count = fail_count; }
 }
 
 void lheap_free(void *p) {

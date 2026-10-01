@@ -37,10 +37,6 @@ local function load_cfg()
     tz_offset_sec = tonumber(sys.secret('anker', 'tz_offset_sec') or '0') or 0,
     client_id     = sys.secret('anker', 'client_id') or 'btgw-0000',
     region        = sys.secret('anker', 'region') or 'US',
-    -- Optional. With more than one Anker device in range, "whichever the scan
-    -- reports first" is a coin toss; set this to an address or a productType
-    -- (e.g. "B105") to pin it. Absent, any Anker device will do.
-    target        = sys.secret('anker', 'target'),
   }
 end
 
@@ -52,11 +48,69 @@ local function drop(name, alsonil)
            :format(name, had and 'unloaded' or 'was not cached', before, after))
 end
 
-function R.run(target_override)
+-- Device-independent cleanup for one session of one launcher: whatever ends
+-- it -- a return, an error, a stop, a lost link -- its claim, its handshake
+-- lock and its entry in control.devices go, so the other launcher can take
+-- the device and nothing routes writes to a dead session. A to-be-closed
+-- variable because a coroutine killed mid-wait is closed with
+-- lua_closethread (lrt.c release_runtime), which runs these and nothing else.
+local function session_guard(who, state)
+  return setmetatable({}, { __close = function()
+    for a, w in pairs(control.claims) do
+      if w == who then control.claims[a] = nil end
+    end
+    if control.handshake and control.handshake.who == who then control.handshake = nil end
+    if state.addr and control.devices[state.addr] and control.devices[state.addr].who == who then
+      control.devices[state.addr] = nil
+    end
+    -- A session that failed half way (no cipher, discovery timed out) can
+    -- leave the link up; the next attempt starts from a clean connect.
+    if state.addr then bt.disconnect(state.addr) end
+  end })
+end
+
+-- Wait for the other launcher's handshake to finish, then hold the lock.
+local HANDSHAKE_MS = 45000
+local function handshake_lock(who)
+  while true do
+    local h = control.handshake
+    if not h or h.who == who or sys.ms() > h.until_ms then break end
+    sys.sleep(250)
+  end
+  control.handshake = { who = who, until_ms = sys.ms() + HANDSHAKE_MS }
+end
+local function handshake_unlock(who)
+  if control.handshake and control.handshake.who == who then control.handshake = nil end
+end
+
+local function norm(a) return (tostring(a or ''):upper():gsub('[^0-9A-F]', '')) end
+
+-- anker.set routes to whichever launcher holds the device. One handler for
+-- every launcher: registering replaces, and a handler that only knew its own
+-- device refused writes to the other one. Ops outlive the script that
+-- registered them, so this must not hold anything of a session -- it reads
+-- the shared table on every call.
+local function dispatch_set(p)
+  p = p or {}
+  local want = norm(p.device)
+  for a, d in pairs(control.devices) do
+    if norm(a) == want and d.set then return d.set(p.field, p.value) end
+  end
+  return { error = 'not_this_device', message = 'no Anker launcher holds ' .. tostring(p.device) }
+end
+
+function R.run(target_override, who)
+  who = who or 'anker'
+  local state = {}
+  local _guard <close> = session_guard(who, state)
   local adv = require 'profiles.anker.adv'
   local cfg, err = load_cfg()
-  if not cfg then log.error('anker: ' .. err); return end
-  if target_override then cfg.target = target_override end
+  if not cfg then log.error('anker: ' .. err); return 'fatal' end
+  -- The launcher's pin, if it has one: lua/anker.lua passes cfg "target",
+  -- lua/anker2.lua "target2". An address or a productType (e.g. "B105").
+  -- Taken from the cfg here once, it pinned EVERY launcher to the first
+  -- one's device, and the second waited forever for a device already held.
+  cfg.target = target_override
 
   -- ---------------------------------------------------------------------------
   -- 1. Identify from the advertisement
@@ -68,9 +122,12 @@ function R.run(target_override)
     return d.addr:upper() == t or got.product_type == t
   end
 
-  log.info(cfg.target and ('anker: looking for ' .. cfg.target)
-                       or 'anker: looking for an Anker device')
+  log.info(('%s: looking for %s'):format(who, cfg.target or 'an Anker device no other launcher holds'))
   local addr, a
+  -- Scan hard for a while, then in bursts: a launcher whose device is not
+  -- around (switched off, or never here) must not hold the radio in a scan
+  -- indefinitely -- a running scan keeps le_radio_busy() true for WiFi too.
+  local hunt_until = sys.ms() + 30000
   repeat
     -- Make the radio actually look. bt.devices() is the scan TABLE, not a
     -- scan: it returns whatever was last seen, so polling it without
@@ -82,18 +139,34 @@ function R.run(target_override)
     -- restarting one and losing the window an advertisement arrives in.
     bt.scan(true)
     for _, d in ipairs(bt.devices()) do
-      if not addr then
+      if not addr and not control.claims[d.addr] then
         local got = adv.identify(d)
-        if got and wanted(d, got) then addr, a = d.addr, got end
+        -- Checked and claimed with no yield in between: atomic.
+        if got and wanted(d, got) then
+          addr, a = d.addr, got
+          control.claims[addr] = who
+        end
       end
     end
-    if not addr then sys.sleep(500) end
+    if not addr then
+      if sys.ms() < hunt_until then
+        sys.sleep(500)
+      else
+        sys.sleep(4000)          -- scan for ~4 s ...
+        bt.scan(false)
+        sys.sleep(11000)         -- ... then leave the radio alone for 11
+      end
+    end
   until addr
+  state.addr = addr
 
   -- Stop scanning before connecting. The radio is shared with WiFi and with
   -- the other launcher, and a scan left running is the thing that makes
   -- le_radio_busy() true for no reason.
   bt.scan(false)
+
+  -- One handshake at a time, from here to the end of authentication.
+  handshake_lock(who)
 
   log.info(('anker: %s is productType %s, sku %s, v%d, %s, capability 0x%02x (%s)')
            :format(addr, a.product_type, tostring(a.sku), a.version,
@@ -306,9 +379,9 @@ function R.run(target_override)
     end
   end
   bind_burst = nil
-  sys.collect()
-
-  log.info('anker: streaming')
+  handshake_unlock(who)
+  log.info(('%s: streaming from %s (%s), live heap %d B')
+           :format(who, addr, tostring(product_code), sys.collect()))
 
   --[[
   anker.set {device, field, value}: change a setting on the device.
@@ -333,11 +406,6 @@ function R.run(target_override)
   -- One function for both callers: the anker.set op (WebSocket clients) and
   -- other scripts, through profiles.anker.control.
   local function request_set(p)
-    p = p or {}
-    local want = tostring(p.device or ''):upper():gsub('[^0-9A-F]', '')
-    if want ~= addr:upper():gsub('[^0-9A-F]', '') then
-      return { error = 'not_this_device', message = 'anker.set is held by the launcher for ' .. addr }
-    end
     local s = setters[p.field]
     if not s then return { error = 'unknown_field', message = tostring(p.field) .. ' has no captured setter' } end
     local v, why = setter.check(s, p.value)
@@ -345,9 +413,10 @@ function R.run(target_override)
     queue[#queue + 1] = { field = p.field, opcode = s.opcode, value = v, s = s }
     return { queued = true, field = p.field, value = v }
   end
-  ops.register('anker.set', request_set)
+  ops.register('anker.set', dispatch_set)
   control.devices[addr] = {
-    set = function(field, value) return request_set{ device = addr, field = field, value = value } end,
+    who = who,
+    set = function(field, value) return request_set{ field = field, value = value } end,
   }
 
   local function send_setters()
@@ -403,5 +472,14 @@ function R.run(target_override)
 end
 
 -- One entry point, so `require` hands back the function itself and a launcher
--- reads as two lines rather than three.
-return R.run
+-- reads as two lines rather than three. A session that ends -- the link
+-- dropped, the device went away, a handshake failed -- starts over after a
+-- pause, looking again for any device no other launcher holds. Only a
+-- configuration error stops for good.
+return function(target, who)
+  while true do
+    if R.run(target, who) == 'fatal' then return end
+    sys.collect()
+    sys.sleep(5000)
+  end
+end

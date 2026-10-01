@@ -416,6 +416,27 @@ static bool read_module_src(const char *name, const char **src, size_t *len,
     return false;
 }
 
+/* Is the cached copy of `name` still what is on flash? Re-reads the source
+ * (staged/ first, as a load would) and compares tier and hash with what the
+ * load recorded. A module with no record -- tracking slots ran out -- counts
+ * as stale and is simply reloaded. A module whose file has gone keeps its
+ * cached copy: that is what is running, and reloading could only fail. */
+static bool module_is_current(const char *name) {
+    const module_use_t *u = NULL;
+    for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
+        if (s_mod_use[i].name[0] && strcmp(s_mod_use[i].name, name) == 0) {
+            u = &s_mod_use[i];
+            break;
+        }
+    }
+    if (!u || u->tier == SRC_TIER_NONE) { return false; }
+    const char *src = NULL;
+    size_t len = 0;
+    uint8_t tier = SRC_TIER_NONE;
+    if (!read_module_src(name, &src, &len, &tier)) { return true; }
+    return tier == u->tier && fnv1a(src, len) == u->hash;
+}
+
 static int l_require(lua_State *Ls) {
     const char *name = luaL_checkstring(Ls, 1);
 
@@ -426,11 +447,16 @@ static int l_require(lua_State *Ls) {
         lua_setfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE);
     }
     if (lua_getfield(Ls, -1, name) != LUA_TNIL) {
-        /* A cache HIT still adds this script to the users. Missing this is
-         * how a module shared by two profiles gets dropped when the first of
-         * them exits, leaving the second holding a stale reference. */
-        module_note_user(name, lrt_current_slot());
-        return 1;
+        if (module_is_current(name)) {
+            /* A cache HIT still adds this script to the users. Missing this
+             * is how a module shared by two profiles gets dropped when the
+             * first of them exits, leaving the second holding a stale
+             * reference. */
+            module_note_user(name, lrt_current_slot());
+            return 1;
+        }
+        /* Edited since it was loaded: load it again. A script already
+         * holding the old copy keeps it until it restarts. */
     }
     lua_pop(Ls, 1);
 
@@ -494,22 +520,14 @@ static int l_require(lua_State *Ls) {
     return 1;
 }
 
-/* Drop every cached module.
- *
- * Without this, require() defeats the draft tier for the one file you are
- * actually editing: push a new profile, restart the script, and the OLD
- * module is still what runs, because it is cached. That was not theoretical
- * -- it cost a confusing hardware run where a freshly uploaded profile
- * appeared to ignore a step that had just been added to it.
- *
- * Called on every script load, so "push and restart" means what it looks
- * like. Modules another script already holds a reference to are unaffected;
- * this only decides what the NEXT require reads. */
-static void flush_modules(void) {
-    if (!L) { return; }
-    lua_newtable(L);
-    lua_setfield(L, LUA_REGISTRYINDEX, MODULE_CACHE);
-}
+/* Script loads used to drop EVERY cached module here, so that "push and
+ * restart" ran the pushed file rather than the cached copy (a freshly
+ * uploaded profile once appeared to ignore a step just added to it). That
+ * also meant a second script requiring the same modules compiled its own
+ * copy of all of them -- two Anker launchers, two drivers' worth of code, on
+ * an arena that holds one. require() now revalidates a cache hit against the
+ * file instead (module_is_current): an edited module still reloads, an
+ * unchanged one is shared. */
 
 /* Drop ONE module from the cache, so its memory can be reclaimed.
  *
@@ -599,7 +617,6 @@ size_t lrt_collect(void) {
 /* --- start / stop --------------------------------------------------------- */
 static bool load_tier(script_t *s, const char *src, size_t len, const char *tier,
                       const char **err) {
-    flush_modules();
     uint32_t hash = fnv1a(src, len);
     char chunkname[48];
     snprintf(chunkname, sizeof(chunkname), "@%s(%s)", s->name, tier);
@@ -1113,10 +1130,14 @@ size_t lrt_loaded_json(char *dst, size_t cap) {
 }
 
 size_t lrt_stats_json(char *dst, size_t cap) {
+    size_t fail_last = 0, fail_count = 0;
+    lheap_fail_stats(&fail_last, &fail_count);
     return (size_t)snprintf(dst, cap,
-        "{\"arena_bytes\":%u,\"used\":%u,\"peak\":%u,\"hook_kills\":%lu,"
+        "{\"arena_bytes\":%u,\"used\":%u,\"peak\":%u,\"largest_free\":%u,"
+        "\"alloc_fails\":%u,\"alloc_fail_last\":%u,\"hook_kills\":%lu,"
         "\"budget\":%d,\"slice_overruns\":%lu,\"slice_max_ms\":%d}",
         (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)lheap_peak(),
+        (unsigned)lheap_largest_free(), (unsigned)fail_count, (unsigned)fail_last,
         (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET,
         (unsigned long)s_slice_overruns, SLICE_MAX_MS);
 }
