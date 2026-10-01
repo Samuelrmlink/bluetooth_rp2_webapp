@@ -47,7 +47,13 @@ export class Popover {
       },
       true,
     );
-    window.addEventListener('resize', () => this.close());
+    // A resize closes it -- except while focus is inside it: on a phone,
+    // focusing a text box opens the on-screen keyboard, which resizes the
+    // window, and the panel vanished the moment it appeared.
+    window.addEventListener('resize', () => {
+      if (this.isOpen && this._el.contains(document.activeElement)) this.reposition();
+      else this.close();
+    });
     // Not a scroll in the first moments after opening: scroll events arrive a
     // frame late, so the one that scrolled the anchor into view (or a
     // finger's momentum scroll, just before the tap that opened this) would

@@ -138,16 +138,19 @@ test('keyboard: move, open, into the panel, Esc back to the row', async ({ page 
   await expect(row(page, '0.0')).toHaveAttribute('aria-expanded', 'false');
 });
 
-test('MTU: the connection\'s, and what new connections ask for', async ({ page }) => {
+test('MTU: GATT shows the negotiated value; the preferred maximum is in Settings → Bluetooth', async ({ page }) => {
   await connected(page);
   await expect(page.locator('.g-mtu')).toHaveText('MTU 255');
-  await page.click('.g-mtu');
-  const m = page.locator('#pane-popover');
-  await expect(m.locator('.g-mtu-now')).toContainText('This connection: 255');
-  await expect(m.locator('.g-mtu-in')).toHaveValue('255');
-  await m.locator('.g-mtu-in').fill('185');
-  await m.locator('.g-mtu-save').click();
-  await expect(m.locator('.g-mtu-msg')).toContainText('new connections ask for 185');
+  expect(await page.locator('.g-mtu').evaluate((el) => el.tagName)).toBe('SPAN');   // not a control any more
+  await page.keyboard.press('Alt+KeyS');
+  await page.evaluate(() => window.__btgwApp.settingsModal.expand('sect-bluetooth'));
+  const inp = page.locator('#bt-mtu');
+  await expect(inp).toHaveValue('255');
+  await expect(page.locator('.bt-mtu-note')).toContainText('23–255');
+  await inp.fill('185');
+  await page.click('.bt-mtu-save');
+  await expect(page.locator('.bt-mtu-note')).toContainText('new connections ask for 185');
+  expect(await page.evaluate(async () => (await window.__btgwApp.ws.call('bt.mtu')).max_mtu)).toBe(185);
 });
 
 test('tabbed view: an Events split with a resize handle and an axis switch', async ({ page }) => {
@@ -171,6 +174,14 @@ test('tabbed view: an Events split with a resize handle and an axis switch', asy
   expect(Math.round(w0 - w1)).toBeGreaterThan(80);
   await page.click('.g-axis');
   await expect(page.locator('.gatt-body')).toHaveAttribute('data-axis', 'y');
+  // off really is off: no events, no divider, the tree gets the room back
+  await page.click('.g-ev');
+  await expect(page.locator('.gatt-events-host')).toBeHidden();
+  await expect(page.locator('.g-split')).toBeHidden();
+  const body = await page.locator('.gatt-body').boundingBox();
+  expect(Math.round((await tree.boundingBox()).height)).toBeGreaterThan(Math.round(body.height) - 6);
+  await page.click('.g-ev');
+  await expect(page.locator('.gatt-events-host')).toBeVisible();
   await page.reload();
   await page.waitForFunction(() => document.getElementById('conn-status')?.textContent === 'Connected');
   await page.evaluate(() => window.__btgwApp.show('gatt'));

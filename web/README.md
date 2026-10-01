@@ -46,7 +46,8 @@ value, and a format: Hex, Decimal (one number per byte, `100 0 255`) or String (
 bytes). The format is used both to show values and to type them, and is remembered per
 service/characteristic UUID in the browser. 16-bit UUIDs always show, with names when known;
 128-bit ones show as a name or abbreviated — hover, or click for the whole UUID and Copy — or in full
-with **UUID-128**. **MTU** shows the connection's MTU and sets what new connections ask for
+with **UUID-128**. The bar shows the connection's negotiated MTU. The **preferred MTU** — the most a
+connection asks for; each device's answer decides what its link gets — is in Settings → Bluetooth
 (`bt.mtu`, firmware 1.84+, 23–255 on this build, kept in `cfg/bt.json`; raising it back to the maximum
 takes a reboot, a BTstack limit).
 

@@ -57,7 +57,7 @@ export class GattWindow {
         <span class="dim g-note"></span>
         <span class="spacer"></span>
         <button type="button" class="pane-btn g-u128" aria-pressed="false" title="Show 128-bit UUIDs in full">UUID-128</button>
-        <button type="button" class="pane-btn g-mtu" title="The ATT MTU: this connection's, and what new connections ask for">MTU</button>
+        <span class="g-mtu g-mtu-text" title="This connection's MTU, as negotiated. The preferred (maximum) MTU is in Settings → Bluetooth."></span>
         <button type="button" class="pane-btn g-ev" aria-pressed="false" title="Show GATT events beside the tree (tabbed view)" hidden>Events</button>
         <button type="button" class="pane-btn g-axis" title="Side by side / stacked" hidden></button>
       </div>
@@ -70,15 +70,6 @@ export class GattWindow {
         <div class="g-uuid-full"></div>
         <button type="button" class="pane-btn g-uuid-copy">Copy</button>
       </div>
-      <div class="pane-settings g-mtu-menu" hidden>
-        <div class="g-mtu-now dim"></div>
-        <label>Ask new connections for
-          <input class="g-mtu-in" type="number" min="23" step="1" inputmode="numeric"></label>
-        <div class="g-mtu-actions">
-          <button type="button" class="pane-btn g-mtu-save">Save</button>
-          <button type="button" class="pane-btn g-mtu-reconnect">Reconnect now</button>
-        </div>
-        <div class="g-mtu-msg dim"></div>
       </div>`;
     const q = (s) => el.querySelector(s);
     this._dev = q('.g-dev');
@@ -92,14 +83,12 @@ export class GattWindow {
     this._evBtn = q('.g-ev');
     this._axisBtn = q('.g-axis');
     this._uuidMenu = q('.g-uuid-menu');
-    this._mtuMenu = q('.g-mtu-menu');
 
     this._dev.addEventListener('change', () => this.showDevice(this._dev.value));
     q('.g-disconnect').addEventListener('click', () => {
       if (this.addr) this.ws.call('dev.disconnect', { device: this.addr }).catch((e) => this.app.log('!', e.message));
     });
     this._u128.addEventListener('click', () => this.app.setPref('gattUuid128', !this.app.prefs.gattUuid128));
-    this._mtuBtn.addEventListener('click', () => this._openMtu());
     this._evBtn.addEventListener('click', () => this._setSplit({ on: !this._splitPref().on }));
     this._axisBtn.addEventListener('click', () => this._setSplit({ axis: this._splitPref().axis === 'x' ? 'y' : 'x' }));
     q('.g-uuid-copy').addEventListener('click', async () => {
@@ -107,8 +96,6 @@ export class GattWindow {
       this._note.textContent = ok ? 'UUID copied' : 'Could not copy';
       this.app.popover.close();
     });
-    q('.g-mtu-save').addEventListener('click', () => this._saveMtu());
-    q('.g-mtu-reconnect').addEventListener('click', () => this._reconnect());
 
     this._tree.addEventListener('click', (e) => this._onClick(e));
 
@@ -434,56 +421,6 @@ export class GattWindow {
     }
   }
 
-  // --- MTU ---------------------------------------------------------------------------
-
-  async _openMtu() {
-    const m = this._mtuMenu;
-    const now = this._gatt()?.mtu;
-    m.querySelector('.g-mtu-now').textContent = now ? `This connection: ${now} (negotiated when it connected)` : 'No device connected';
-    m.querySelector('.g-mtu-msg').textContent = '';
-    m.querySelector('.g-mtu-reconnect').hidden = !this.addr;
-    this.app.popover.toggle(this._mtuBtn, m, 'gatt-mtu');
-    try {
-      const r = await this.ws.call('bt.mtu');
-      const inp = m.querySelector('.g-mtu-in');
-      inp.max = String(r.ceiling);
-      inp.value = String(r.max_mtu);
-      this._ceiling = r.ceiling;
-      m.querySelector('.g-mtu-msg').textContent = `23–${r.ceiling} on this firmware. A new value applies to the next connection.`;
-    } catch (e) {
-      m.querySelector('.g-mtu-msg').textContent = e.code === 'unknown_op' ? 'This firmware cannot change the MTU (1.84 or later can).' : e.message;
-    }
-  }
-
-  async _saveMtu() {
-    const m = this._mtuMenu;
-    const v = Number(m.querySelector('.g-mtu-in').value);
-    const msg = m.querySelector('.g-mtu-msg');
-    try {
-      const r = await this.ws.call('bt.mtu', { max_mtu: v });
-      msg.textContent = r.reboot_needed
-        ? `Saved ${v}. Raising it back to the maximum takes a reboot of the gateway.`
-        : `Saved: new connections ask for ${r.max_mtu}.${this.addr ? ' Reconnect to use it now.' : ''}`;
-    } catch (e) {
-      msg.textContent = e.message;
-    }
-  }
-
-  async _reconnect() {
-    const addr = this.addr;
-    const msg = this._mtuMenu.querySelector('.g-mtu-msg');
-    if (!addr) return;
-    msg.textContent = 'Reconnecting…';
-    try {
-      await this.ws.call('dev.disconnect', { device: addr });
-      for (let i = 0; i < 50 && this.store.get(addr)?.connected; i++) await new Promise((r) => setTimeout(r, 100));
-      await this.ws.call('dev.connect', { device: addr });
-      msg.textContent = 'Reconnecting — the MTU shows here once it is up.';
-    } catch (e) {
-      msg.textContent = e.message;
-    }
-  }
-
   // --- the events split (tabbed view only) ---------------------------------------------
 
   _splitPref() {
@@ -579,7 +516,7 @@ export class GattWindow {
     const g = this._gatt();
     this._note.textContent = !conn.length ? 'no device connected'
       : !g ? 'discovering…' : g.truncated ? 'TRUNCATED — raise the GATT_MAX_* caps' : '';
-    this._mtuBtn.textContent = g?.mtu ? `MTU ${g.mtu}` : 'MTU';
+    this._mtuBtn.textContent = g?.mtu ? `MTU ${g.mtu}` : '';
     const full = !!this.app.prefs.gattUuid128;
     this._u128.setAttribute('aria-pressed', String(full));
     this._u128.classList.toggle('on', full);
