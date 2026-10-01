@@ -141,9 +141,20 @@ export class GattWindow {
     });
   }
 
-  // While an open panel has the keyboard, the banner says how to get back.
+  // While an open panel has the keyboard, the banner says how to get back;
+  // inside the embedded events view (tabbed view), its keys are the view's.
   context() {
+    if (this._eventsHasFocus()) return this._events.context();
     return document.activeElement?.closest?.('.t-panel') ? 'gatt-panel' : 'gatt';
+  }
+
+  action(id) {
+    if (id.startsWith('events-') && this._events && !this._host.hidden) return this._events.action(id);
+    return undefined;
+  }
+
+  _eventsHasFocus() {
+    return !!this._events && !this._host.hidden && this._host.contains(document.activeElement);
   }
 
   // --- device and tree ---------------------------------------------------------

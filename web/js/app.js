@@ -313,7 +313,8 @@ class App {
     // whichever window is active, so a binding only does something where it
     // means something.
     for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar', 'editor-to-files', 'editor-to-text',
-      'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev', 'scanner-columns', 'scanner-clear']) {
+      'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev', 'scanner-columns', 'scanner-clear',
+      'events-search', 'events-next', 'events-prev', 'events-columns']) {
       actions[id] = () => activeWin()?.action?.(id);
     }
 

@@ -21,8 +21,9 @@ import { Grid } from '../controls/grid.js';
 import { Dialog } from '../modals/dialog.js';
 import { parseAd, flagNames, allServices, companyLabel } from '../adparse.js';
 import { uuidDisplay } from '../gattfmt.js';
-import { copyText } from '../clipboard.js';
 import { toast } from '../toast.js';
+import { columnsDialog } from '../controls/columnsdialog.js';
+import { openCellMenu, copyWithToast } from '../controls/cellmenu.js';
 
 const lc = (s) => String(s || '').toLowerCase();
 
@@ -280,61 +281,16 @@ export class ScannerWindow {
   // --- the Columns dialog -----------------------------------------------------------------
 
   _buildColumnsDialog() {
-    const body = document.createElement('div');
-    body.className = 'scan-dlg cols-dlg';
-    const groups = new Map();
-    for (const c of this.columns) {
-      if (c.pinned) continue;
-      if (!groups.has(c.group)) groups.set(c.group, []);
-      groups.get(c.group).push(c);
-    }
-    for (const [g, cols] of groups) {
-      const h = document.createElement('div');
-      h.className = 'cd-group';
-      h.textContent = g;
-      body.appendChild(h);
-      for (const c of cols) {
-        const l = document.createElement('label');
-        l.className = 'sd-check';
-        l.innerHTML = `<input type="checkbox" data-col="${c.key}"> <span></span>`;
-        l.querySelector('span').textContent = c.label;
-        l.querySelector('input').addEventListener('change', (e) => this.grid.setHidden(c.key, !e.target.checked));
-        body.appendChild(l);
-      }
-    }
-    const act = document.createElement('div');
-    act.className = 'sd-actions';
-    act.innerHTML = '<button type="button" class="pane-btn cd-reset">Reset columns</button><span class="dim">Drag a heading to move it; drag its edge to resize.</span>';
-    act.querySelector('.cd-reset').addEventListener('click', () => this.grid.reset());
-    body.appendChild(act);
-    const dlg = new Dialog({ id: 'scanner-columns-dlg', title: 'Columns', body });
-    dlg.sync = () => {
-      for (const cb of body.querySelectorAll('input[data-col]')) cb.checked = !this.grid.isHidden(cb.dataset.col);
-    };
-    dlg.onOpen = () => dlg.sync();
-    this._columnsDlg = dlg;
-    this.columnsDlg = this.app.registerDialog(dlg);
+    this.columnsDlg = columnsDialog(this.app, this.grid, { id: 'scanner-columns-dlg' });
+    this._columnsDlg = this.columnsDlg;
   }
 
   // --- the cell menu ------------------------------------------------------------------------
 
   _openMenu(d, key, anchor) {
     if (!anchor) return;
-    const m = this._menu;
-    m.replaceChildren();
-    const title = document.createElement('div');
-    title.className = 'sm-title';
-    title.textContent = d.name ? `${d.name} · ${d.addr}` : d.addr;
-    m.appendChild(title);
-    const item = (label, fn, cls = '') => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = `pane-btn sm-item ${cls}`;
-      b.textContent = label;
-      b.addEventListener('click', () => { this.app.popover.close(); fn(); });
-      m.appendChild(b);
-      return b;
-    };
+    const items = [];
+    const item = (label, fn) => items.push({ label, fn });
     const filterBy = (k, v, what) => {
       this.filters = { ...this.filters, [k]: v };
       this.app.setPref('scanFilters', this.filters);
@@ -342,7 +298,6 @@ export class ScannerWindow {
       this._dirty = true;
       toast(`Filtered by ${what}`);
     };
-    const copy = async (text, what = 'Copied') => toast((await copyText(text)) ? what : 'Could not copy');
     const col = this.columns.find((c) => c.key === key);
     const value = col?.get ? String(col.get(d) ?? '') : '';
 
@@ -351,11 +306,11 @@ export class ScannerWindow {
     const p = this._parse(d);
     switch (key) {
       case 'addr':
-        item('Copy address', () => copy(d.addr));
+        item('Copy address', () => copyWithToast(d.addr));
         item('Filter by this address', () => filterBy('name', d.addr, d.addr));
         break;
       case 'name': case 'name_complete': case 'name_short':
-        if (value) { item('Copy name', () => copy(value)); item('Filter by this name', () => filterBy('name', value, `"${value}"`)); }
+        if (value) { item('Copy name', () => copyWithToast(value)); item('Filter by this name', () => filterBy('name', value, `"${value}"`)); }
         break;
       case 'services': case 'uuid16c': case 'uuid16i': case 'uuid32': case 'uuid128c': case 'uuid128i': {
         const all = key === 'services' ? servicesOf(d, (x) => this._parse(x)) : value.split(' ').filter(Boolean);
@@ -363,39 +318,18 @@ export class ScannerWindow {
         break;
       }
       case 'company':
-        if (p.mfg) {
-          const le = p.mfg.raw.slice(0, 4);
-          item(`Filter by ${companyLabel(p.mfg)}`, () => filterBy('mfg', le, companyLabel(p.mfg)));
-        }
+        if (p.mfg) item(`Filter by ${companyLabel(p.mfg)}`, () => filterBy('mfg', p.mfg.raw.slice(0, 4), companyLabel(p.mfg)));
         break;
       default:
         break;
     }
-    // The cell's whole value, wrapped; tap to copy. For the long hex fields
-    // (manufacturer data, raw) this is where they can be read in full.
-    if (value && key !== 'action') {
-      const v = item(value, () => copy(value), 'sm-value');
-      v.title = 'Copy';
-      const hint = document.createElement('div');
-      hint.className = 'dim sm-hint';
-      hint.textContent = 'Tap the value to copy it';
-      m.appendChild(hint);
-    }
-    if (m.children.length <= 1) return;
-    // Opened from the keyboard, the table was in its selection mode -- which
-    // ends when focus moves into the menu. Closing the menu (Esc included)
-    // must only close the menu: put the table back as it was.
-    const fromTable = this._wrap.hasAttribute('data-nav-active');
-    this.app.popover.open(anchor, m, 'scanner-cell', {
-      onClose: () => {
-        if (!fromTable || !this._wrap.isConnected) return;
-        // An item that moved the keyboard elsewhere (Show in GATT) wins.
-        const ae = document.activeElement;
-        if (ae && ae !== document.body && !this._wrap.contains(ae) && !anchor.contains(ae)) return;
-        this._wrap.focus({ preventScroll: true });
-        this._wrap.setAttribute('data-nav-active', '');
-        this._dirty = true;
-      },
+    // The cell's whole value, wrapped, tap to copy -- where the long hex
+    // fields (manufacturer data, raw) can be read in full.
+    openCellMenu(this.app, {
+      anchor, menuEl: this._menu, paneId: 'scanner-cell', wrap: this._wrap,
+      title: d.name ? `${d.name} · ${d.addr}` : d.addr,
+      items, value: key !== 'action' ? value : '',
+      onReturn: () => { this._dirty = true; },
     });
   }
 

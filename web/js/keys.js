@@ -176,6 +176,14 @@ export const BINDINGS = [
   { id: 'gatt-back', group: 'GATT', keys: 'Esc in a panel', combos: [], when: 'gatt-panel', label: 'Back to the characteristic\'s row' },
   { id: 'gatt-uuid', group: 'GATT', keys: 'click a 128-bit UUID', combos: [], when: 'gatt', label: 'Show it whole, with Copy (or turn on UUID-128 in the bar)' },
   { id: 'gatt-events-split', group: 'GATT', keys: 'Events button', combos: [], when: 'gatt', label: 'Tabbed view: GATT Events beside or below the tree, with a resize handle' },
+  // GATT Events (its own window, or inside GATT in tabbed view): the Scanner's
+  // table keys, plus a search.
+  { id: 'events-search', group: 'GATT Events', keys: '/', combos: ['Slash'], when: ['events', 'events-table', 'events-head'], label: 'Search the events (opens the Search dialog with the box selected)' },
+  { id: 'events-next', group: 'GATT Events', keys: 'n', combos: ['KeyN'], when: ['events', 'events-table', 'events-head'], label: 'Next match (moves the table\'s cell cursor there; wraps)' },
+  { id: 'events-prev', group: 'GATT Events', keys: 'Shift+N', combos: ['Shift+KeyN'], when: ['events', 'events-table', 'events-head'], label: 'Previous match' },
+  { id: 'events-columns', group: 'GATT Events', keys: 'c', combos: ['KeyC'], when: ['events', 'events-table', 'events-head'], label: 'Open the Columns dialog (address, UUID, raw hex, …)' },
+  { id: 'events-search-box', group: 'GATT Events', keys: 'Enter / Shift+Enter in the box', combos: [], when: 'settings', label: 'Search dialog: next / previous match (or its ◀ Prev / Next ▶ buttons)' },
+  { id: 'events-table', group: 'GATT Events', keys: 'Space, then h j k l, a d, Shift+H/L, Enter', combos: [], when: ['events', 'events-table', 'events-head'], label: 'The table: as in the Scanner — move between cells, sort, move / resize columns, the cell menu (copy, search for this)' },
   { id: 'help', group: 'Everywhere', keys: '?', combos: ['?', 'Mod+Slash'], when: 'always', label: 'Show / hide this list' },
   // No combos: typing is not a binding, it goes to the filter box. Listed so
   // that the one place people look for what the keys do says so.
@@ -183,7 +191,7 @@ export const BINDINGS = [
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
-export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'GATT', 'Everywhere'];
+export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'GATT', 'GATT Events', 'Everywhere'];
 
 // The banner's contents per context: short, and only what applies now.
 // `tiled` marks entries that make no sense in tabs mode.
@@ -251,6 +259,7 @@ export const HINTS = {
 
 // The Scanner is the workspace plus a way into its filters; inside one,
 // Alt+N means the next box.
+HINTS.events = [{ keys: '/', label: 'search' }, { keys: 'n/N', label: 'match' }, { keys: 'c', label: 'columns' }, { keys: 'Space', label: 'table' }, ...HINTS.workspace];
 HINTS.gatt = [
   { keys: 'Space', label: 'into the tree' },
   { keys: 'J/K', label: 'move' },
@@ -282,6 +291,9 @@ HINTS['scanner-head'] = [
   { keys: 'J', label: 'rows' },
   { keys: 'Esc', label: 'leave' },
 ];
+// The table keys are the Scanner's; n / N find.
+HINTS['events-table'] = [...HINTS['scanner-table'].filter((h) => h.keys !== '/'), { keys: 'n/N', label: 'match' }, { keys: '/', label: 'search' }];
+HINTS['events-head'] = HINTS['scanner-head'];
 HINTS['scanner-filter'] = [
   { keys: 'Alt+N', label: 'next filter' },
   { keys: 'Alt+Shift+N', label: 'previous filter' },
@@ -316,7 +328,7 @@ export function matches(e, combo) {
 // Contexts that are the workspace with something extra: every workspace
 // binding (Alt+hjkl and the rest) applies in them too, plus their own.
 // ('scanner-filter' is a box in a dialog, not the workspace: only its own keys.)
-const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-table', 'scanner-head', 'gatt', 'gatt-panel']);
+const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-table', 'scanner-head', 'gatt', 'gatt-panel', 'events', 'events-table', 'events-head']);
 
 function applies(b, context) {
   const w = Array.isArray(b.when) ? b.when : [b.when];

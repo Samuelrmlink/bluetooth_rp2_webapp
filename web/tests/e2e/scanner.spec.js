@@ -106,13 +106,15 @@ test('keyboard grid: move cells, sort with a/d, resize and reorder with Shift+H/
   const cursor = () => page.evaluate(() => {
     const el = document.querySelector('.s-table .is-cursor');
     if (!el) return null;
-    return el.tagName === 'TH' ? `th:${el.dataset.key}` : `td:${[...el.parentElement.cells].indexOf(el)}`;
+    // td:<row>:<column> (rows of the body, from 0)
+    return el.tagName === 'TH' ? `th:${el.dataset.key}`
+      : `td:${[...el.parentElement.parentElement.rows].indexOf(el.parentElement)}:${[...el.parentElement.cells].indexOf(el)}`;
   });
-  await expect.poll(cursor).toBe('td:0');
+  await expect.poll(cursor).toBe('td:0:0');
   await page.keyboard.press('KeyL');
   await page.keyboard.press('KeyL');
   const key = (await heads(page))[2];
-  await expect.poll(cursor).toBe('td:2');
+  await expect.poll(cursor).toBe('td:0:2');
   // a / d sort that column
   await page.keyboard.press('KeyD');
   await expect(col(page, key)).toHaveAttribute('aria-sort', 'descending');
@@ -133,9 +135,10 @@ test('keyboard grid: move cells, sort with a/d, resize and reorder with Shift+H/
   await page.keyboard.press('KeyJ');
   await page.keyboard.press('KeyH');
   await page.keyboard.press('KeyH');
+  await expect.poll(cursor).toBe('td:0:1');                 // where the menu is opened from
+  const at = await cursor();
   await page.keyboard.press('Enter');
   await expect(page.locator('#pane-popover .s-menu')).toBeVisible();
-  const at = await cursor();
   await page.keyboard.press('Escape');
   // Esc closes only the menu: the table keeps the keyboard and its cursor.
   await expect(page.locator('#pane-popover')).toBeHidden();

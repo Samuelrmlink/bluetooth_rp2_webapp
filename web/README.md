@@ -50,7 +50,12 @@ with **UUID-128**. **MTU** shows the connection's MTU and sets what new connecti
 (`bt.mtu`, firmware 1.84+, 23–255 on this build, kept in `cfg/bt.json`; raising it back to the maximum
 takes a reboot, a BTstack limit).
 
-**GATT Events** is every value, write and failure from the shared log (`js/gattlog.js`). In tabbed
+**GATT Events** is every value, write and failure from the shared log (`js/gattlog.js`). Its table
+behaves exactly like the Scanner's (same grid, Columns dialog and cell menu, from `js/controls/`), with
+optional columns for the address, service, full UUID, raw hex and notes. **Search** (`/`) marks
+matches in every shown column; `n` / Shift+N (or the dialog's ◀ Prev / Next ▶, or Enter / Shift+Enter
+in the box) step through them, moving the cell cursor; "Show only matching rows" turns it into a
+filter. A cell's menu copies its value or the row, or searches for it. In tabbed
 view, where it cannot sit beside GATT, GATT's **Events** button splits it into the GATT window
 instead, side by side or stacked, with a resize handle.
 
