@@ -639,7 +639,9 @@ bool lrt_start(const char *name, const char **err) {
     if (!s_ready) { *err = "lua runtime is not up"; return false; }
     script_t *s = alloc_script(name);
     if (!s) { *err = "too many scripts"; return false; }
-    if (s->running) { teardown(s); }
+    /* Not only a RUNNING one: a dead or finished script's state must go too,
+     * or load_tier overwrites its references and leaks it (release_runtime). */
+    if (s->running || s->co_ref != LUA_NOREF || s->env_ref != LUA_NOREF) { teardown(s); }
 
     const char *src = NULL; size_t len = 0;
     const char *tier = resolve_src(s, name, &src, &len);
@@ -671,6 +673,39 @@ bool lrt_start(const char *name, const char **err) {
     return false;
 }
 
+/*
+ * Drop a script's Lua state: its coroutine and its environment. Called by
+ * teardown() and, since 1.82, the moment a script DIES or FINISHES.
+ *
+ * Before, a dead script kept both. A coroutine that ended in an error keeps
+ * its whole stack -- every frame's locals -- so a profile that died of "not
+ * enough memory" went on holding nearly all of it (measured: a device
+ * profile, ~90 KB of a 160 KB arena). Worse, lrt_start tore down only a
+ * RUNNING script, so restarting a dead or finished one overwrote co_ref and
+ * env_ref without releasing them: the old coroutine leaked for the life of
+ * the board, out of reach of any stop. One crash and the profile could
+ * never load again ("module '<profile>': not enough memory") --
+ * found 2026-09-30 by walking a dump of the arena: three threads in the
+ * registry that no script slot referred to, one holding the dead driver.
+ */
+static void release_runtime(script_t *s) {
+    if (s->co_ref != LUA_NOREF) {
+        /* Close the thread rather than merely dropping the reference. A
+         * coroutine killed mid-wait -- by a link loss, a stop or a reload --
+         * must still run its to-be-closed variables, or every dropped link
+         * leaks the ops.register entries, subscriptions and loaded modules
+         * its profile took out. lua_closethread makes that guaranteed rather
+         * than best-effort, and gives a profile an idiomatic place to put its
+         * teardown. */
+        lua_rawgeti(L, LUA_REGISTRYINDEX, s->co_ref);
+        lua_State *co = lua_tothread(L, -1);
+        if (co) { lua_closethread(co, L); }
+        lua_pop(L, 1);
+        luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref);  s->co_ref = LUA_NOREF;
+    }
+    if (s->env_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->env_ref); s->env_ref = LUA_NOREF; }
+}
+
 /* Tears down the coroutine and environment but KEEPS the entry and its draft.
  * A draft is source, not runtime state: destroying it here made reload (which
  * is stop-then-start) lose the very thing it was asked to reload. */
@@ -687,21 +722,7 @@ static void teardown(script_t *s) {
      * reused by the next script to start. */
     lwait_cancel((uint8_t)(s - scripts));
 
-    if (s->co_ref != LUA_NOREF) {
-        /* Close the thread rather than merely dropping the reference. A
-         * coroutine killed mid-wait -- by a link loss, a stop or a reload --
-         * must still run its to-be-closed variables, or every dropped link
-         * leaks the ops.register entries, subscriptions and loaded modules
-         * its profile took out. lua_closethread makes that guaranteed rather
-         * than best-effort, and gives a profile an idiomatic place to put its
-         * teardown. */
-        lua_rawgeti(L, LUA_REGISTRYINDEX, s->co_ref);
-        lua_State *co = lua_tothread(L, -1);
-        if (co) { lua_closethread(co, L); }
-        lua_pop(L, 1);
-        luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref);  s->co_ref = LUA_NOREF;
-    }
-    if (s->env_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->env_ref); s->env_ref = LUA_NOREF; }
+    release_runtime(s);
     /* Phase 7 releases this script's pin and bus claims here too. */
     s->wake_reason = LWAIT_PENDING;
     s->running = false;
@@ -934,6 +955,7 @@ void lrt_tick(void) {
                     snprintf(msg + n, sizeof(msg) - n, "\"}");
                     api_emit("script.error", msg);
                     printf("lua: %s %s\n", s->name, s->err);
+                    release_runtime(s);
                     continue;
                 }
             }
@@ -957,6 +979,9 @@ void lrt_tick(void) {
             api_emit("script.error", msg);
             printf("lua: %s died: %s\n", s->name, s->err);
         }
+        /* After the error text is copied out of its stack: nothing of a
+         * finished script's state is needed any more. */
+        release_runtime(s);
     }
 }
 
