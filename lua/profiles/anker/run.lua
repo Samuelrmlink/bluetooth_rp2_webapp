@@ -20,6 +20,7 @@ per-model schema is the last thing standing.
 -- 62144 B", which is the shape of an unload that did not.
 local link_m = require 'profiles.anker.link'
 local schema = require 'profiles.anker.schema'
+local control = require 'profiles.anker.control'
 
 local R = {}
 
@@ -279,6 +280,8 @@ function R.run(target_override)
     t.cipher = negotiated
     t.serial = t.serial_number or link.serial
     bus.emit('anker.telemetry', t)
+    local c = control.devices[addr]
+    if c then c.sample, c.at = t, sys.ms() end
   end
 
   link.on_unsolicited = function(_, f, dec)
@@ -326,7 +329,9 @@ function R.run(target_override)
   ]]
   local queue = {}
   local setters = model and model.setters or {}
-  ops.register('anker.set', function(p)
+  -- One function for both callers: the anker.set op (WebSocket clients) and
+  -- other scripts, through profiles.anker.control.
+  local function request_set(p)
     p = p or {}
     local want = tostring(p.device or ''):upper():gsub('[^0-9A-F]', '')
     if want ~= addr:upper():gsub('[^0-9A-F]', '') then
@@ -340,7 +345,11 @@ function R.run(target_override)
     if not okv then return { error = 'bad_value', message = ('%s takes %s'):format(p.field, table.concat(s.values, ', ')) } end
     queue[#queue + 1] = { field = p.field, opcode = s.opcode, value = v }
     return { queued = true, field = p.field, value = v }
-  end)
+  end
+  ops.register('anker.set', request_set)
+  control.devices[addr] = {
+    set = function(field, value) return request_set{ device = addr, field = field, value = value } end,
+  }
 
   local function send_setters()
     while #queue > 0 do
