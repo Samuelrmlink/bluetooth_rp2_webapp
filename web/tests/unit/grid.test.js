@@ -72,3 +72,49 @@ test('the Scanner keeps every workspace binding', () => {
   const sc = new Set(bindingsFor('scanner').map((b) => b.id));
   for (const id of ws) assert.ok(sc.has(id), id);
 });
+
+// --- column order, visibility and widths (controls/gridmodel.js) -------------
+import { columnOrder, visibleColumns, moveColumn, placeColumn, setWidth, clampWidth, nextSort, MIN_W } from '../../js/controls/gridmodel.js';
+
+const COLS = [{ key: 'act', pinned: true, width: 80 }, { key: 'a', width: 100 }, { key: 'b', width: 60 }, { key: 'c', width: 200 }];
+
+test('order: remembered, minus gone columns, new ones slotted after their predecessor', () => {
+  assert.deepEqual(columnOrder(COLS, []), ['act', 'a', 'b', 'c']);
+  assert.deepEqual(columnOrder(COLS, ['c', 'a', 'act', 'gone']), ['act', 'c', 'a', 'b'], 'pinned leads');
+});
+
+test('hidden columns are left out; a pinned or fixed one never is', () => {
+  const vis = (st) => visibleColumns(COLS, st).map((c) => c.key);
+  assert.deepEqual(vis({ hidden: ['b'] }), ['act', 'a', 'c']);
+  assert.deepEqual(vis({ hidden: ['act'] }), ['act', 'a', 'b', 'c']);
+});
+
+test('moving a column steps over hidden ones and stops at the ends', () => {
+  const st = { hidden: ['b'] };
+  assert.deepEqual(moveColumn(COLS, st, 'a', 1), ['act', 'b', 'c', 'a']);
+  assert.deepEqual(moveColumn(COLS, st, 'a', -1), ['act', 'a', 'b', 'c'], 'cannot pass the pinned column');
+  assert.deepEqual(moveColumn(COLS, {}, 'c', 1), ['act', 'a', 'b', 'c'], 'already last');
+  assert.deepEqual(moveColumn(COLS, {}, 'act', 1), ['act', 'a', 'b', 'c'], 'pinned does not move');
+  assert.deepEqual(placeColumn(COLS, {}, 'c', 'a'), ['act', 'c', 'a', 'b']);
+  assert.deepEqual(placeColumn(COLS, {}, 'c', 'act'), ['act', 'c', 'a', 'b'], 'dropped before pinned = first after it');
+  assert.deepEqual(placeColumn(COLS, {}, 'act', null), ['act', 'a', 'b', 'c']);
+});
+
+test('widths clamp, and the default width is not stored', () => {
+  assert.equal(clampWidth(3), MIN_W);
+  assert.deepEqual(setWidth(COLS, {}, 'b', 30), { b: 30 });
+  assert.deepEqual(setWidth(COLS, { widths: { b: 30 } }, 'b', 60), {});
+});
+
+test('sort cycles ascending, descending, default', () => {
+  assert.deepEqual(nextSort(null, 'a'), { key: 'a', dir: 'asc' });
+  assert.deepEqual(nextSort({ key: 'a', dir: 'asc' }, 'a'), { key: 'a', dir: 'desc' });
+  assert.equal(nextSort({ key: 'a', dir: 'desc' }, 'a'), null);
+  assert.deepEqual(nextSort({ key: 'a', dir: 'desc' }, 'b'), { key: 'b', dir: 'asc' });
+});
+
+test('a column declared hidden starts hidden, until visibility is chosen', () => {
+  const cols = [{ key: 'a' }, { key: 'b', hidden: true }];
+  assert.deepEqual(visibleColumns(cols, {}).map((c) => c.key), ['a']);
+  assert.deepEqual(visibleColumns(cols, { hidden: [] }).map((c) => c.key), ['a', 'b']);
+});

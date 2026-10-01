@@ -146,6 +146,16 @@ size_t bt_device_json(const bt_device_t *d, char *dst, size_t cap) {
         }
         n += (size_t)snprintf(dst + n, cap - n, "]");
     }
+    if (d->adv_len && n + 2u * d->adv_len + 12 < cap) {
+        n += (size_t)snprintf(dst + n, cap - n, ",\"adv\":\"");
+        n += hex_append(dst + n, cap - n, d->adv, d->adv_len);
+        n += (size_t)snprintf(dst + n, cap - n, "\"");
+    }
+    if (d->rsp_len && n + 2u * d->rsp_len + 12 < cap) {
+        n += (size_t)snprintf(dst + n, cap - n, ",\"rsp\":\"");
+        n += hex_append(dst + n, cap - n, d->rsp, d->rsp_len);
+        n += (size_t)snprintf(dst + n, cap - n, "\"");
+    }
     if (n + 2 < cap) {
         n += (size_t)snprintf(dst + n, cap - n, "}");
     }

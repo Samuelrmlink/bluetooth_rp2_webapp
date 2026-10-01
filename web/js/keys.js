@@ -155,13 +155,20 @@ export const BINDINGS = [
   { id: 'vim-run', group: 'Editor', keys: ':run  :stop', combos: [], when: 'editor', label: 'Vim: run the buffer as a draft / stop the script (F5 / Shift+F5)' },
   { id: 'vim-visual', group: 'Editor', keys: 'v  V, then y d c p P', combos: [], when: 'editor', label: 'Vim: select characters / lines (or drag with the mouse or a finger), then yank, delete, change, or paste over' },
   { id: 'vim-clipboard', group: 'Editor', keys: 'y  /  Ctrl+V', combos: [], when: 'editor', label: 'Vim: a yank also copies to the system clipboard; paste (Ctrl+V or the phone\'s Paste) in normal mode inserts like p' },
-  // The Scanner's. 'scanner-filter' is the Scanner with a filter box
-  // focused: there Alt+N steps between the boxes instead of the windows.
-  { id: 'scanner-filter', group: 'Scanner', keys: '/', combos: ['Slash'], when: 'scanner', label: 'Jump to the filter boxes (they filter as you type, scanning or not)' },
+  // The Scanner's: 'scanner' (the window), 'scanner-head' / 'scanner-table'
+  // (the table's cursor on the header / a row), 'scanner-filter' (a text box
+  // in the Filter dialog).
+  { id: 'scanner-filter', group: 'Scanner', keys: '/  or  f', combos: ['Slash', 'KeyF'], when: ['scanner', 'scanner-table', 'scanner-head'], label: 'Open the Filter dialog (filters apply as you type, scanning or not)' },
+  { id: 'scanner-columns', group: 'Scanner', keys: 'c', combos: ['KeyC'], when: ['scanner', 'scanner-table', 'scanner-head'], label: 'Open the Columns dialog: choose which advertisement fields are shown' },
+  { id: 'scanner-clear', group: 'Scanner', keys: 'Shift+X', combos: ['Shift+KeyX'], when: ['scanner', 'scanner-table', 'scanner-head'], label: 'Clear the list (connected devices stay; the rest return as they advertise)' },
   { id: 'scanner-filter-next', group: 'Scanner', keys: 'Alt+N in a filter box', combos: ['Mod+KeyN'], when: 'scanner-filter', label: 'Next filter box' },
   { id: 'scanner-filter-prev', group: 'Scanner', keys: 'Alt+Shift+N in a filter box', combos: ['Mod+Shift+KeyN'], when: 'scanner-filter', label: 'Previous filter box' },
-  { id: 'scanner-list', group: 'Scanner', keys: 'Enter / L in the list', combos: [], when: 'scanner', label: 'Connect or disconnect the selected device / show it in GATT' },
-  { id: 'table-columns', group: 'Scanner', keys: 'click a column heading', combos: [], when: 'scanner', label: 'Sort ascending, descending, back to default; drag its right edge to resize (every table)' },
+  { id: 'table-enter', group: 'Scanner', keys: 'Space / Enter on a table', combos: [], when: 'scanner', label: 'Into the table (any table): a cell cursor; Esc leaves' },
+  { id: 'table-move', group: 'Scanner', keys: 'h j k l / arrows', combos: [], when: ['scanner-table', 'scanner-head'], label: 'Table: move between cells (the header is the top row); gg / G first / last row' },
+  { id: 'table-sort', group: 'Scanner', keys: 'a  /  d', combos: [], when: ['scanner-table', 'scanner-head'], label: 'Table: sort the cursor\'s column ascending / descending (Enter on a heading cycles)' },
+  { id: 'table-reorder', group: 'Scanner', keys: 'Shift+H / Shift+L on the header', combos: [], when: 'scanner-head', label: 'Table: move the column left / right (or drag its heading)' },
+  { id: 'table-resize', group: 'Scanner', keys: 'Shift+H / Shift+L on a row', combos: [], when: 'scanner-table', label: 'Table: narrow / widen the column (or drag a heading\'s edge; double-click resets)' },
+  { id: 'table-menu', group: 'Scanner', keys: 'Enter / Space on a cell', combos: [], when: 'scanner-table', label: 'Its menu: Connect, Show in GATT, Filter by, the whole value (tap to copy). On the Connect column: connect' },
   // The GATT window's tree (context 'gatt'; 'gatt-panel' inside an open panel).
   { id: 'gatt-move', group: 'GATT', keys: 'j / k, gg / G', combos: [], when: 'gatt', label: 'In the tree: move between services and characteristics' },
   { id: 'gatt-open', group: 'GATT', keys: 'Enter / Space', combos: [], when: 'gatt', label: 'Open or close a characteristic\'s panel (or a service)' },
@@ -258,12 +265,27 @@ HINTS['gatt-panel'] = [
   { keys: 'Esc', label: 'back to the row' },
   { keys: 'Alt+HJKL', label: 'focus window' },
 ];
-HINTS.scanner = [{ keys: '/', label: 'filter' }, { keys: 'Enter', label: 'connect' }, ...HINTS.workspace];
+HINTS.scanner = [{ keys: '/', label: 'filter' }, { keys: 'c', label: 'columns' }, { keys: 'Space', label: 'table' }, ...HINTS.workspace];
+HINTS['scanner-table'] = [
+  { keys: 'HJKL', label: 'cell' },
+  { keys: 'Enter', label: 'menu' },
+  { keys: 'a/d', label: 'sort' },
+  { keys: 'Shift+H/L', label: 'width' },
+  { keys: '/', label: 'filter' },
+  { keys: 'Esc', label: 'leave' },
+];
+HINTS['scanner-head'] = [
+  { keys: 'H/L', label: 'column' },
+  { keys: 'Enter', label: 'sort' },
+  { keys: 'a/d', label: 'asc / desc' },
+  { keys: 'Shift+H/L', label: 'move column' },
+  { keys: 'J', label: 'rows' },
+  { keys: 'Esc', label: 'leave' },
+];
 HINTS['scanner-filter'] = [
   { keys: 'Alt+N', label: 'next filter' },
   { keys: 'Alt+Shift+N', label: 'previous filter' },
-  { keys: 'Esc', label: 'leave the box' },
-  { keys: 'Alt+HJKL', label: 'focus window' },
+  { keys: 'Esc', label: 'leave the box (again: close)' },
 ];
 
 // 'Mod+Shift+KeyH' -> { mod, shift, code }; '?' -> { key: '?' }; 'Escape' -> code.
@@ -293,7 +315,8 @@ export function matches(e, combo) {
 
 // Contexts that are the workspace with something extra: every workspace
 // binding (Alt+hjkl and the rest) applies in them too, plus their own.
-const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-filter', 'gatt', 'gatt-panel']);
+// ('scanner-filter' is a box in a dialog, not the workspace: only its own keys.)
+const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-table', 'scanner-head', 'gatt', 'gatt-panel']);
 
 function applies(b, context) {
   const w = Array.isArray(b.when) ? b.when : [b.when];

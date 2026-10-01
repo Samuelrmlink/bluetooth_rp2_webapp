@@ -9,6 +9,7 @@
 
 import { Grid } from '../controls/grid.js';
 import { formatValue, defaultFormat, formatKey, uuidDisplay } from '../gattfmt.js';
+import { copyText } from '../clipboard.js';
 
 const time = (t) => new Date(t).toTimeString().slice(0, 8);
 
@@ -101,17 +102,32 @@ export class GattEventsView {
     }
     const rows = this.grid.sort(this.log.list(this.device));
     if (this._count) this._count.textContent = `${rows.length} event${rows.length === 1 ? '' : 's'}`;
-    this._tbody.replaceChildren(...rows.slice(0, 300).map((e) => {
+    this._rows = rows.slice(0, 300);
+    const vis = this.grid.visible;
+    this._tbody.replaceChildren(...this._rows.map((e) => {
       const tr = document.createElement('tr');
       if (e.src === 'error') tr.classList.add('is-error');
-      for (const c of this.columns) {
+      for (const c of vis) {
         const td = document.createElement('td');
         const v = c.show ? c.show(e) : c.get(e);
         td.textContent = v ?? '';
         if (c.key === 'value' || c.key === 'chr') td.title = td.textContent;
         tr.appendChild(td);
       }
-      return tr;
+      return this.grid.appendSpacer(tr);
+    }));
+    this.grid.paintCursor();
+  }
+
+  // The table is a keyboard list like every grid: h/j/k/l between cells, a/d
+  // to sort, Shift+H/L to move or resize a column; Enter copies the cell.
+  attachKeys(keys) {
+    const wrap = this.grid.table.closest('.table-wrap');
+    keys.nav.registerList(wrap, this.grid.controller({
+      list: wrap,
+      count: () => (this._rows || []).length,
+      activate: (i, key, td) => { if (td) copyText(td.textContent); },
+      onChange: () => { this._dirty = true; },
     }));
   }
 
@@ -123,6 +139,7 @@ export class GattEventsWindow {
   constructor(el, ctx) {
     this.view = new GattEventsView(el, ctx);
   }
+  attachKeys(keys) { this.view.attachKeys(keys); }
   onPrefs() { this.view.onPrefs(); }
   onShow() { this.view.invalidate(); }
   render() { this.view.render(); }

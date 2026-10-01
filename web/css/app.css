@@ -95,12 +95,6 @@ table.s-table td:first-child { padding: 3px 4px; }
   border-color: var(--green);
 }
 
-.scan-bar input[type='text'],
-.scan-bar input[type='search'],
-.scan-bar input[type='number'] {
-  width: 7em;
-  min-width: 0;
-}
 
 /* --- Hardware ---------------------------------------------------------------- */
 .hw-body {
@@ -417,7 +411,14 @@ table.s-table td:first-child { padding: 3px 4px; }
 table.dev-fields tr.just-changed td { background: #2a2615; transition: background 0.2s; }
 
 /* --- Sortable, resizable columns (controls/grid.js) ------------------------- */
-table.grid.grid-resizable { table-layout: fixed; }
+table.grid.grid-resizable { table-layout: fixed; width: 100%; }
+/* The spacer column: takes what is left, so the others keep their widths. */
+table.grid .col-spacer { padding: 0; }
+table.grid .is-cursor { outline: 1px solid var(--green); outline-offset: -1px; }
+table.grid th.is-cursor .col-sort { color: var(--green); }
+table.grid th.drop-before { box-shadow: inset 2px 0 0 var(--green); }
+table.grid th.drop-after { box-shadow: inset -2px 0 0 var(--green); }
+table.grid.is-dragging-col { cursor: grabbing; user-select: none; }
 table.grid.grid-resizable th,
 table.grid.grid-resizable td { overflow: hidden; text-overflow: ellipsis; }
 table.grid.grid-resizable th { padding: 0; }
@@ -519,3 +520,32 @@ table.grid.is-resizing { cursor: col-resize; user-select: none; }
 .g-mtu-menu input { width: 6em; margin-left: 6px; }
 .g-mtu-actions { display: flex; gap: 6px; }
 .ge-table tr.is-error td { color: var(--red); }
+
+/* --- Scanner dialogs, cell menu, toast ------------------------------------- */
+.scan-bar .pane-btn { border-color: var(--border); }
+.scan-bar .pane-btn.on { color: var(--green); border-color: var(--green); }
+.scan-dlg { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px 8px; }
+.sd-row { display: flex; flex-direction: column; gap: 4px; }
+.sd-row > span { color: var(--dim); }
+.sd-row b { color: var(--fg); font-weight: 600; margin-left: 4px; }
+.sd-row input[type='search'] { width: 100%; box-sizing: border-box; }
+.sd-row input[type='range'] { width: 100%; }
+.sd-note { font-size: 11px; margin-top: -6px; }
+.sd-check { display: flex; gap: 8px; align-items: center; }
+.sd-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.sd-actions .pane-btn { border-color: var(--border); padding: 3px 10px; }
+.cd-group { color: var(--dim); font-weight: 600; margin-top: 6px; }
+.s-menu { display: flex; flex-direction: column; gap: 4px; max-width: min(440px, 90vw); }
+.sm-title { font-weight: 600; padding: 2px 4px 4px; overflow-wrap: anywhere; }
+.sm-item { text-align: left; border-color: var(--border); padding: 4px 8px; }
+.sm-value {
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--fg);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 40vh; overflow: auto; cursor: copy;
+}
+.sm-hint { font-size: 11px; padding: 0 4px; }
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 1000;
+  background: #22262c; border: 1px solid var(--border); color: var(--fg); border-radius: 6px;
+  padding: 6px 12px; opacity: 0; transition: opacity 0.2s; pointer-events: none; max-width: 90vw;
+}
+.toast.show { opacity: 1; }

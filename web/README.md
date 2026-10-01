@@ -56,15 +56,28 @@ instead, side by side or stacked, with a resize handle.
 
 ## Tables
 
-Every table (Scanner, GATT value log, Unclassified) is built with
-`js/controls/grid.js`: click a heading to sort ascending, descending, then back
-to the table's default; drag a heading's right edge to resize (double-click it
-to reset). Widths and sort are remembered per table in `btgw.prefs.tables`.
-A window sorts its rows with `grid.sort(rows)` before drawing them.
+Every table (Scanner, GATT Events, Unclassified) is built with `js/controls/grid.js`
+(rules in `gridmodel.js`): click a heading to sort ascending, descending, then back to the
+default; drag a heading sideways to move its column; drag its right edge to resize (double-click
+resets; down to 24 px). A trailing spacer takes the leftover width, so columns keep exactly the
+width they were given, left-aligned. Order, widths, sort and hidden columns are remembered per
+table in `btgw.prefs.tables`. Keyboard: Space/Enter on a table enters it; h/j/k/l move a cell
+cursor (the header is the top row); `a` / `d` sort the cursor's column; Shift+H/L moves the column
+(on the header) or narrows/widens it (on a row).
 
-The Scanner's filter boxes filter what has been heard, in the browser, as you
-type -- scanning or not. `/` jumps to them; inside one, Alt+N / Alt+Shift+N
-step between them (elsewhere those keys still cycle windows).
+## Scanner
+
+**Filter** (`/` or `f`): name or address, manufacturer-data prefix, service UUID, a minimum-RSSI
+slider, and **Expire** — while scanning, devices not heard for that long are removed (connected
+ones stay). Filters apply in the browser as you type, scanning or not, and are remembered;
+**Clear filters** resets them. Alt+N / Alt+Shift+N step between the text boxes.
+**Columns** (`c`): any advertisement field — names (complete / shortened), flags, appearance,
+manufacturer code and data, 16/32/128-bit service lists (complete / incomplete), service data,
+TX power, and the raw advertisement and scan response — parsed in the browser (`js/adparse.js`)
+from the raw payloads the firmware sends (1.85+). **Clear list** (Shift+X) empties the table; devices
+return as they advertise. Clicking a cell (or Enter on it) opens its menu: Connect / Disconnect,
+Show in GATT, Filter by (a service, a name, a company), and the whole value — tap to copy.
+`scan.list` is paged (`offset`, `limit` → `total`, `next`), so a busy room is listed in full.
 
 ## Adding a device plugin
 

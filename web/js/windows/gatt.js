@@ -501,7 +501,10 @@ export class GattWindow {
     this._body.dataset.axis = p.axis;
     this._body.classList.toggle('is-split', on);
     this._tree.style.flexBasis = on ? `${(p.ratio * 100).toFixed(1)}%` : '';
-    if (on && !this._events) this._events = new GattEventsView(this._host, this.ctx, { embedded: true });
+    if (on && !this._events) {
+      this._events = new GattEventsView(this._host, this.ctx, { embedded: true });
+      if (this.keys) this._events.attachKeys(this.keys);
+    }
     if (on && this._splitAxis !== p.axis) {
       this._splitter?.destroy();
       this._splitAxis = p.axis;

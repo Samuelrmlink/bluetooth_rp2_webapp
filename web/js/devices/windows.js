@@ -147,11 +147,12 @@ export class UnclassifiedWindow {
       const tr = document.createElement('tr');
       const at = this.changed.get(f);
       if (at && now - at < 1500) { tr.classList.add('just-changed'); this._flashing = true; }
-      for (const c of this._cols) {
+      for (const c of this.grid.visible) {
         const td = document.createElement('td');
         td.textContent = c.show ? c.show(f) : c.get(f);
         tr.appendChild(td);
       }
+      this.grid.appendSpacer(tr);
       return tr;
     }));
   }

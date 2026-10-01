@@ -65,6 +65,9 @@ class App {
 
     this._buildWindows();
     this.settingsModal = new SettingsModal(this);
+    // Every Settings-shaped dialog (js/modals/dialog.js). Windows are built
+    // first and may already have registered theirs.
+    this.dialogs = [this.settingsModal, ...(this.dialogs || [])];
     this.sections = SETTINGS_SECTIONS.map((S) => new S(this, this.settingsModal));
     this.helpModal = new HelpModal();
     this.popover = new Popover();
@@ -218,14 +221,14 @@ class App {
     const move = (dir) => {
       if (this.getContext() === 'settings') {
         const [dx, dy] = dirs[dir];
-        settings.nudge(dx * NUDGE_PX, dy * NUDGE_PX);
+        (this.activeDialog() || settings).nudge(dx * NUDGE_PX, dy * NUDGE_PX);
       } else {
         layout.swapDir(dir);
       }
     };
     const resize = (axis, sign) => {
       if (this.getContext() === 'settings') {
-        settings.resizeBy(axis === 'x' ? sign * RESIZE_PX : 0, axis === 'y' ? sign * RESIZE_PX : 0);
+        (this.activeDialog() || settings).resizeBy(axis === 'x' ? sign * RESIZE_PX : 0, axis === 'y' ? sign * RESIZE_PX : 0);
       } else {
         layout.resizeActive(axis, sign);
       }
@@ -290,8 +293,12 @@ class App {
       'pick-pane': () => layout.focusPicker(),
       'pane-settings': () => activeWin()?.openSettings?.(),
       settings: () => {
-        if (settings.isOpen) this._closeSettingsByKey();
-        else settings.open();
+        if (settings.isOpen) {
+          settings.close();
+          this._layout.focus(this._layout.activeId, { dom: true });
+        } else {
+          settings.open();
+        }
       },
       help: () => this.helpModal.toggle(),
       escape: () => {
@@ -306,7 +313,7 @@ class App {
     // whichever window is active, so a binding only does something where it
     // means something.
     for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar', 'editor-to-files', 'editor-to-text',
-      'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev']) {
+      'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev', 'scanner-columns', 'scanner-clear']) {
       actions[id] = () => activeWin()?.action?.(id);
     }
 
@@ -324,6 +331,8 @@ class App {
     const ctx = this.getContext();
     if (ctx === 'help') return [this.helpModal.panel];
     if (ctx === 'popover') return [this.popover.el];
+    const dlg = this.activeDialog();
+    if (dlg && (ctx === 'settings' || ctx === 'scanner-filter')) return [dlg.panel];
     if (ctx === 'settings') return [this.settingsModal.panel];
     const roots = [this._layout.activeEl()];
     if (this._layout.mode === 'tabs') roots.push(document.getElementById('tabbar'));
@@ -334,19 +343,36 @@ class App {
     if (this.helpModal?.isOpen) return 'help';
     if (this._layout?.dragging) return 'drag';
     if (this.popover?.isOpen) return 'popover';
-    if (this.settingsModal?.isOpen) {
-      const ae = document.activeElement;
-      if (!ae || ae === document.body || this.settingsModal.hasFocus) return 'settings';
-    }
+    // An open dialog with focus (or, with focus nowhere, the newest one) is
+    // the 'settings' context, unless it names one of its own.
+    const dlg = this.activeDialog();
+    if (dlg) return dlg.context?.() || 'settings';
     // A window may claim a context of its own while it has focus (the editor
     // does, so its bindings and banner apply only there).
     const w = this.windows.get(this._layout?.activeEl()?.dataset.pane || '')?.win;
     return w?.context?.() || 'workspace';
   }
 
+  registerDialog(d) { (this.dialogs ||= []).push(d); return d; }
+
+  activeDialog() {
+    const open = (this.dialogs || []).filter((d) => d.isOpen);
+    if (!open.length) return null;
+    const focused = open.find((d) => d.hasFocus);
+    if (focused) return focused;
+    const ae = document.activeElement;
+    if (!ae || ae === document.body) return open.sort((a, b) => b.openedAt - a.openedAt)[0];
+    return null;
+  }
+
   _closeSettingsByKey() {
-    this.settingsModal.close();
-    this._layout.focus(this._layout.activeId, { dom: true });
+    const d = this.activeDialog() || this.settingsModal;
+    d.close();
+    // Settings hands the keyboard back to the window; a window's own dialog
+    // has already put it back where it was opened from.
+    if (d === this.settingsModal || document.activeElement === document.body) {
+      this._layout.focus(this._layout.activeId, { dom: true });
+    }
   }
 
   _cycleWindow(step) {

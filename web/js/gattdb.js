@@ -35,8 +35,16 @@ export class DeviceStore {
     if (rec.service_uuids === undefined && prev.service_uuids !== undefined) {
       next.service_uuids = prev.service_uuids;
     }
+    // The raw advertisement and scan response (fw 1.85+) arrive separately.
+    if (rec.adv === undefined && prev.adv !== undefined) next.adv = prev.adv;
+    if (rec.rsp === undefined && prev.rsp !== undefined) next.rsp = prev.rsp;
     this.devices.set(rec.addr, next);
     this._changed();
+  }
+
+  /** Forget a device (the Scanner's expiry and Clear list). */
+  remove(addr) {
+    if (this.devices.delete(addr)) this._changed();
   }
 
   setConnected(addr, connected) {

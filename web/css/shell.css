@@ -581,7 +581,8 @@ body[data-kbd] .tile:focus-visible {
   outline-offset: -1px;
 }
 
-body[data-kbd] #settings-modal .modal:focus-visible {
+body[data-kbd] #settings-modal .modal:focus-visible,
+body[data-kbd] .app-dialog .modal:focus-visible {
   outline: 1px solid var(--green);
 }
 
@@ -969,14 +970,16 @@ kbd {
    The app behind is already clickable: .modal-overlay sets pointer-events:
    none with auto restored only on .modal, so removing the dim is all that's
    needed here. */
-#settings-modal {
+#settings-modal,
+.app-dialog {
   background: none;
   align-items: flex-start;
   justify-content: flex-end;
   padding: 48px 14px 14px;
 }
 
-#settings-modal .modal {
+#settings-modal .modal,
+.app-dialog .modal {
   width: min(470px, 94vw);
   max-height: min(78vh, 760px);
 }
@@ -1088,13 +1091,15 @@ kbd {
     padding: 4px 10px;
   }
 
-  #settings-modal {
+  #settings-modal,
+  .app-dialog {
     background: rgba(0, 0, 0, 0.5);
     padding: 0;
     pointer-events: auto;
   }
 
-  #settings-modal .modal {
+  #settings-modal .modal,
+  .app-dialog .modal {
     position: fixed !important;
     left: 0 !important;
     right: 0 !important;
@@ -1131,7 +1136,8 @@ kbd {
 
   /* The header is the sheet's other grab area, so its text must not be
      selectable out from under a drag. */
-  #settings-modal .modal-header {
+  #settings-modal .modal-header,
+  .app-dialog .modal-header {
     user-select: none;
   }
 }

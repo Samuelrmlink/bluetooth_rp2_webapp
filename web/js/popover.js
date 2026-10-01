@@ -33,6 +33,7 @@ export class Popover {
     this._anchor = null;
     this._content = null;
     this._home = null;
+    this._openedAt = 0;
 
     // Capture phase: the charts and the tiles stop propagation on their own
     // elements, and a click outside must close this wherever it landed.
@@ -47,7 +48,11 @@ export class Popover {
       true,
     );
     window.addEventListener('resize', () => this.close());
-    window.addEventListener('scroll', () => this.close(), true);
+    // Not a scroll in the first moments after opening: scroll events arrive a
+    // frame late, so the one that scrolled the anchor into view (or a
+    // finger's momentum scroll, just before the tap that opened this) would
+    // otherwise close it as soon as it opened.
+    window.addEventListener('scroll', () => { if (performance.now() - this._openedAt > 200) this.close(); }, true);
   }
 
   get isOpen() {
@@ -77,6 +82,7 @@ export class Popover {
     this._el.replaceChildren(content);
     this._el.dataset.pane = paneId;
     this._el.hidden = false;
+    this._openedAt = performance.now();
     this.reposition();
     // The first real control, so the keyboard lands somewhere useful.
     const first = this._el.querySelector('input, select, button, [tabindex]:not([tabindex="-1"])');

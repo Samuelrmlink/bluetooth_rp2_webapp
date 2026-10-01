@@ -154,13 +154,19 @@ static void on_advertisement(uint8_t *pkt) {
         d->connectable = true;
     }
 
-    merge_ad(d, gap_event_advertising_report_get_data(pkt),
-             gap_event_advertising_report_get_data_length(pkt));
+    const uint8_t *data = gap_event_advertising_report_get_data(pkt);
+    uint8_t dlen = gap_event_advertising_report_get_data_length(pkt);
+    merge_ad(d, data, dlen);
+    if (dlen > BT_ADV_MAX) { dlen = BT_ADV_MAX; }
+    if (et == 4) { memcpy(d->rsp, data, dlen); d->rsp_len = dlen; }
+    else         { memcpy(d->adv, data, dlen); d->adv_len = dlen; }
 
     if (!passes_filter(d)) {
         return;
     }
-    char json[512];
+    /* static: with the raw payloads a device's JSON outgrew what this
+     * callback path should put on core0's small stack. */
+    static char json[768];
     bt_device_json(d, json, sizeof(json));
     api_emit("scan.device", json);
 }
@@ -425,7 +431,7 @@ gattdb_t *le_db_for_addr(const uint8_t *addr) {
 
 static void emit_device_event(const char *topic, const uint8_t *addr) {
     bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
-    char json[512];
+    static char json[768];          /* see on_advertisement */
     if (d) {
         bt_device_json(d, json, sizeof(json));
     } else {

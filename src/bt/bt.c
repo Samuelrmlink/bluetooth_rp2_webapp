@@ -396,26 +396,46 @@ static void op_scan_stop(const char *params, api_reply_fn reply, void *ctx, long
     api_reply_ok(reply, ctx, id, "{\"scanning\":false}");
 }
 
+/* scan.list {offset?, limit?} -> {devices, scanning, total, next}
+ *
+ * PAGED. One reply is one websocket frame (WS_TX_MAX, 4 KB), and every
+ * device's JSON now carries its raw advertisement and scan response, so a
+ * busy room never fit in one: the old reply stopped at the buffer edge and
+ * said nothing (measured: 3751 B, 24 devices, with ~46 in range). Now it
+ * stops there and says where -- `next` is the offset to ask for, or null at
+ * the end -- and the client walks the pages. No parameters is the first page,
+ * so an older client still gets what it always got. */
 static void op_scan_list(const char *params, api_reply_fn reply, void *ctx, long id) {
-    (void)params;
+    long off = 0, lim = 1000;
+    (void)api_json_int(params, "offset", &off);
+    (void)api_json_int(params, "limit", &lim);
+    if (off < 0) { off = 0; }
+    if (lim < 1) { lim = 1; }
     size_t n = (size_t)snprintf(list_buf, LIST_BUF_SZ, "{\"devices\":[");
     size_t count = bt_registry_count();
+    size_t i = (size_t)off;
+    long sent = 0;
     bool first = true;
-    for (size_t i = 0; i < count; i++) {
+    static char one[768];           /* static: core0's stack is small */
+    for (; i < count && sent < lim; i++) {
         bt_device_t *d = bt_registry_at(i);
         if (!d) {
             continue;
         }
-        char one[512];
         bt_device_json(d, one, sizeof(one));
-        if (n + strlen(one) + 4 >= LIST_BUF_SZ) {
-            break;                    /* truncate rather than overflow */
+        /* Room for this device AND the closing fields (~80 bytes). */
+        if (n + strlen(one) + 96 >= LIST_BUF_SZ) {
+            break;
         }
         n += (size_t)snprintf(list_buf + n, LIST_BUF_SZ - n, "%s%s", first ? "" : ",", one);
         first = false;
+        sent++;
     }
-    snprintf(list_buf + n, LIST_BUF_SZ - n, "],\"scanning\":%s}",
-             le_scanning() ? "true" : "false");
+    char next[16];
+    if (i < count) { snprintf(next, sizeof next, "%u", (unsigned)i); }
+    else { snprintf(next, sizeof next, "null"); }
+    snprintf(list_buf + n, LIST_BUF_SZ - n, "],\"scanning\":%s,\"total\":%u,\"next\":%s}",
+             le_scanning() ? "true" : "false", (unsigned)count, next);
     api_reply_ok(reply, ctx, id, list_buf);
 }
 
@@ -467,7 +487,7 @@ static void op_dev_list(const char *params, api_reply_fn reply, void *ctx, long 
         if (!d || !d->connected) {
             continue;
         }
-        char one[512];
+        static char one[768];       /* static: core0's stack is small */
         bt_device_json(d, one, sizeof(one));
         if (n + strlen(one) + 4 >= LIST_BUF_SZ) {
             break;

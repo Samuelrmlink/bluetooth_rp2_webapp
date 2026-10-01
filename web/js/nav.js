@@ -173,6 +173,9 @@ export class Nav {
 
   // Keys while a list is entered. Returns true when consumed.
   _listKey(e, el, ctl) {
+    // A list may take keys of its own first (a table's cell cursor: h/l
+    // between columns, a/d to sort, Shift+H/L to move or resize).
+    if (ctl.key?.(e)) return true;
     const shift = e.shiftKey;
     switch (e.code) {
       case 'KeyJ': case 'ArrowDown': if (!shift) ctl.move(1); return true;

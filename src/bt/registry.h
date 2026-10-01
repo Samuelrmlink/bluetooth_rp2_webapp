@@ -25,6 +25,7 @@ typedef enum {
 #define BT_NAME_MAX 30
 #define BT_MFG_MAX  31
 #define BT_UUIDS_MAX 4
+#define BT_ADV_MAX  31             /* a legacy advertising / scan response payload */
 
 typedef struct {
     bool     used;
@@ -47,6 +48,15 @@ typedef struct {
     int8_t   tx_power;
     bool     have_tx_power;
     bool     connectable;
+
+    /* The raw payloads as last received, kept separately because they say
+     * different things: the advertisement (ADV_IND & co) and the scan
+     * response. The browser parses every AD type from these (js/adparse.js);
+     * the fields above are what the firmware itself needs. */
+    uint8_t  adv[BT_ADV_MAX];
+    uint8_t  adv_len;
+    uint8_t  rsp[BT_ADV_MAX];
+    uint8_t  rsp_len;
 
     uint32_t last_seen_ms;
     bool     connected;

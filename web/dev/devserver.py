@@ -21,12 +21,15 @@ WEB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 MOCK_DEVICES = [
     {"addr": "7C:E9:13:60:1F:D8", "transport": "le", "addr_type": 0, "rssi": -67,
      "connectable": True, "connected": False, "name": "ASHDJW61F45100348",
-     "mfg_data": "ffff027ce913601fd802b405444a573604", "service_uuids": ["ff09"]},
+     "mfg_data": "ffff027ce913601fd802b405444a573604", "service_uuids": ["ff09"],
+     "adv": "020106030209ff12ffffff027ce913601fd802b405444a573604", "rsp": "1209415348444a573631463435313030333438"},
     {"addr": "C4:11:22:33:44:55", "transport": "le", "addr_type": 1, "rssi": -52,
      "connectable": True, "connected": False, "name": "HRM-9000",
-     "service_uuids": ["180d", "180f"]},
+     "service_uuids": ["180d", "180f"], "tx_power": -12,
+     "adv": "02010605030d180f18020af4040848524d04160f1857", "rsp": "090948524d2d3930303011069ecadc240ee5a9e093f3a3b50100406e"},
     {"addr": "D9:AA:BB:CC:DD:EE", "transport": "le", "addr_type": 1, "rssi": -88,
-     "connectable": False, "connected": False, "mfg_data": "4c0012020003"},
+     "connectable": False, "connected": False, "mfg_data": "4c0012020003",
+     "adv": "02010607ff4c0012020003"},
 ]
 
 MOCK_TREE = {
@@ -165,7 +168,14 @@ class MockGateway:
             self.send({"evt": "scan.done", "data": {"reason": "stopped"}})
             return {"scanning": False}
         if op == "scan.list":
-            return {"devices": list(self.devices.values()), "scanning": self.scanning}
+            # Paged like the firmware (1.85+), two per page here so the
+            # client's page walk is exercised whatever `limit` it asks for.
+            devs = list(self.devices.values())
+            off = int(p.get("offset", 0)); lim = min(int(p.get("limit", 1000)), 2)
+            page = devs[off:off + lim]
+            nxt = off + len(page)
+            return {"devices": page, "scanning": self.scanning, "total": len(devs),
+                    "next": nxt if nxt < len(devs) else None}
         if op == "dev.list":
             return {"devices": [d for d in self.devices.values() if d["connected"]]}
         if op == "dev.connect":
