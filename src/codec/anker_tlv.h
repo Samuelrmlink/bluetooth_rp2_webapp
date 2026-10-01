@@ -79,6 +79,14 @@ static inline uint16_t anker_tlv_raw_len(const anker_tlv_item_t *it) {
 int anker_tlv_parse(const uint8_t *body, size_t len, anker_tlv_item_t *items,
                     size_t cap, size_t *n_out);
 
+// One item at a time, for a caller that wants no item array: decode the item
+// starting at `off` into *it and return the offset of the next one, or -1 when
+// there is no complete item at `off` (the end, or a truncated tail -- exactly
+// where anker_tlv_parse stops). Same rules and same decoding as
+// anker_tlv_parse, which visits the same items in the same order.
+int anker_tlv_next(const uint8_t *body, size_t len, size_t off,
+                   anker_tlv_item_t *it);
+
 // Find one tagged item without a scratch array (O(1) stack) — for comparing a
 // single tag against a previously-cached body, e.g. the telemetry change
 // detector, without re-parsing the whole thing into a second items[] array.

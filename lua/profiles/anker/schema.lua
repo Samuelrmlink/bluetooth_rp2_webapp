@@ -56,7 +56,8 @@ local READERS = { u8 = num, u16 = num, u32 = num, s8 = snum, s16 = snum, str = s
 --[[
 decode(model, body, want_unknown) -> fields | nil, err
 
-`model.fields[tag] = { name, type, scale }`, tag lowercase hex.
+`model.fields[tag] = { name, type, scale }`, tag lowercase hex. Fields are
+matched to names by their TAG, never by position.
 
 Unknown tags are reported as hex, but only when asked -- the set does not
 change between reports, and hexing twenty of them every few seconds churned
@@ -65,42 +66,45 @@ was otherwise fine. Once is informative; every time is a leak with extra
 steps.
 ]]
 function S.decode(model, body, want_unknown)
-  local t = tlv.parse(body, false)
-  if not t then return nil, 'tlv parse failed' end
+  if type(body) ~= 'string' then return nil, 'tlv parse failed' end
 
-  local out, unknown = {}, {}
-  for i = 1, (t.n or 0) do
-    local it = t[i]
-    local tag = it and it.hex
-    if tag then
-      local f = model.fields and model.fields[tag]
-      if f then
-        -- A reader is a type name for a scalar, or a function for a field
-        -- that is a structure. The SCP chargers need the latter for their
-        -- per-port objects; the power stations never do.
-        local reader = f[2]
-        if type(reader) == 'string' then reader = READERS[reader] or num end
-        -- One bad field must not cost the whole report: a firmware revision
-        -- that widens a struct would otherwise blank the telemetry pane.
-        local ok, v = pcall(reader, it)
-        if not ok then
-          -- `log` is absent in the host harness, which opens only the
-          -- protocol bindings. A decoder must not depend on its logger.
-          if log and log.warn then
-            log.warn(('anker: tag %s did not decode: %s'):format(tag, tostring(v)))
-          end
-          v = nil
+  -- Field by field (tlv.each), not tlv.parse: parse built a table per item,
+  -- ~22 KB for a C1000 report, every poll, read once and dropped. ONE item
+  -- table is refilled per field instead, carrying exactly what readers use --
+  -- it.raw and it.value -- so the readers, the model files and the tag->name
+  -- lookup below are unchanged. A reader must not keep `it`: it is reused.
+  local out, unknown, n = {}, {}, 0
+  local it = {}
+  for tag, rawv, value in tlv.each(body) do
+    n = n + 1
+    it.hex, it.raw, it.value = tag, rawv, value
+    local f = model.fields and model.fields[tag]
+    if f then
+      -- A reader is a type name for a scalar, or a function for a field
+      -- that is a structure. The SCP chargers need the latter for their
+      -- per-port objects; the power stations never do.
+      local reader = f[2]
+      if type(reader) == 'string' then reader = READERS[reader] or num end
+      -- One bad field must not cost the whole report: a firmware revision
+      -- that widens a struct would otherwise blank the telemetry pane.
+      local ok, v = pcall(reader, it)
+      if not ok then
+        -- `log` is absent in the host harness, which opens only the
+        -- protocol bindings. A decoder must not depend on its logger.
+        if log and log.warn then
+          log.warn(('anker: tag %s did not decode: %s'):format(tag, tostring(v)))
         end
-        if v and f[3] then v = v * f[3] end
-        out[f[1]] = v
-      elseif want_unknown and not (model.ignore and model.ignore[tag]) then
-        unknown[tag] = bytes.hex(raw(it))
+        v = nil
       end
+      if v and f[3] then v = v * f[3] end
+      out[f[1]] = v
+    elseif want_unknown and not (model.ignore and model.ignore[tag]) then
+      unknown[tag] = bytes.hex(raw(it))
     end
   end
 
   if want_unknown and next(unknown) then out.unknown = unknown end
-  out.tlv_count = t.n
+  out.tlv_count = n
   return out
 end
 

@@ -124,6 +124,16 @@ int anker_tlv_parse(const uint8_t *body, size_t len, anker_tlv_item_t *items,
     return (int)i; // JS `consumed`
 }
 
+int anker_tlv_next(const uint8_t *body, size_t len, size_t off,
+                   anker_tlv_item_t *it) {
+    if (!body || !it || off + 1 >= len) return -1;
+    uint8_t nn = body[off + 1];
+    if (off + 2 + (size_t)nn > len) return -1; // truncated / not TLV from here
+    decode_item(body, (uint16_t)off, nn, it);
+    it->tag = body[off];
+    return (int)(off + 2 + nn);
+}
+
 bool anker_tlv_find_tag(const uint8_t *body, size_t len, uint8_t tag,
                         anker_tlv_item_t *out) {
     if (!body || !out) return false;

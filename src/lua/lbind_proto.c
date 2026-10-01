@@ -259,6 +259,67 @@ static int l_tlv_parse(lua_State *L) {
     return 1;
 }
 
+/* tlv.each(body) -> iterator over a REPORT, one field at a time:
+ *
+ *   for hex, raw, value in tlv.each(body) do ... end
+ *
+ *   hex    the tag as two lowercase hex characters ("a6"), as item.hex
+ *   raw    the value region INCLUDING the type byte, as item.raw
+ *   value  the decoded number for u8/u16/u32/f32, as item.value; otherwise
+ *          nil -- except for a field of one byte or none, where it is the
+ *          string item.value would be (a reader falls back to it when raw
+ *          has nothing after the type byte)
+ *
+ * Why it exists: tlv.parse builds a seven-field table per item plus a named
+ * second reference to each, ~22 KB for a C1000 report of ~68 fields, every
+ * poll, to be read once and thrown away. This allocates one string per field
+ * (raw; the hex names are short strings Lua interns) and no tables. Same
+ * items, same order, same decoding as tlv.parse
+ * (the codec's one-item step); the host test holds the two paths to identical
+ * output.
+ * The handshake keeps tlv.parse, which it calls a few times per connection. */
+static int l_tlv_each_step(lua_State *L) {
+    size_t n = 0;
+    const char *body = lua_tolstring(L, lua_upvalueindex(1), &n);
+    lua_Integer off = lua_tointeger(L, lua_upvalueindex(2));
+    anker_tlv_item_t it;
+    int next = anker_tlv_next((const uint8_t *)body, n, (size_t)off, &it);
+    if (next < 0) { return 0; }                    /* end: the for loop stops */
+    lua_pushinteger(L, next);
+    lua_replace(L, lua_upvalueindex(2));
+
+    char hx[3] = { "0123456789abcdef"[it.tag >> 4], "0123456789abcdef"[it.tag & 0xf], 0 };
+    lua_pushstring(L, hx);
+    lua_pushlstring(L, (const char *)anker_tlv_raw(&it, (const uint8_t *)body),
+                    anker_tlv_raw_len(&it));
+    switch (it.type) {
+        case ANKER_TLV_U8:
+        case ANKER_TLV_U16:
+        case ANKER_TLV_U32:
+            lua_pushinteger(L, (lua_Integer)it.ival);
+            break;
+        case ANKER_TLV_F32:
+            lua_pushnumber(L, (lua_Number)it.fval);
+            break;
+        default:
+            if (it.len <= 1) {
+                lua_pushlstring(L, body + it.val_off, it.val_len);
+            } else {
+                lua_pushnil(L);
+            }
+            break;
+    }
+    return 3;
+}
+
+static int l_tlv_each(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TSTRING);
+    lua_pushvalue(L, 1);                 /* upvalue 1: the body, kept alive by the closure */
+    lua_pushinteger(L, 0);               /* upvalue 2: offset of the next item */
+    lua_pushcclosure(L, l_tlv_each_step, 2);
+    return 1;
+}
+
 static int l_tlv_find(lua_State *L) {
     size_t n = 0;
     const char *body = luaL_checklstring(L, 1, &n);
@@ -527,6 +588,7 @@ void lbind_proto_open(lua_State *L) {
     static const luaL_Reg tlv_fns[] = {
         { "parse", l_tlv_parse },
         { "find", l_tlv_find },
+        { "each", l_tlv_each },
         { "build", l_tlv_build },
         { "strip_status", l_tlv_strip_status },
         { "stamp_fe", l_tlv_stamp_fe },

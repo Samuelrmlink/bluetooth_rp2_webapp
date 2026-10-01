@@ -276,6 +276,68 @@ do
   check('identify rejects a mac mismatch', adv.identify(dev) == nil)
 end
 
+-- tlv.each, the report iterator schema.decode uses instead of tlv.parse (to
+-- avoid a table per item). It must hand a reader EXACTLY what tlv.parse's item
+-- would have: the same items in the same order, the same tag, the same raw
+-- bytes, and the same value where a reader can use it (a number; or, for a
+-- field of one byte or none, the string). Real C1000 reports, the A2687
+-- sample, and fuzz -- floats, empty and one-byte fields, truncated tails.
+print('\n== tlv.each ==')
+do
+  local reports = dofile('test/host/c1000_reports.lua')
+  local function same_as_parse(body)
+    local t = tlv.parse(body, false)
+    local i = 0
+    for h, raw, value in tlv.each(body) do
+      i = i + 1
+      local it = t[i]
+      if not it or it.hex ~= h or it.raw ~= raw then return false, 'item ' .. i end
+      local want = it.value
+      if type(want) ~= 'number' and #raw > 1 then want = nil end
+      local both_nan = value ~= value and want ~= want   -- a fuzzed f32 can be NaN
+      if value ~= want and not both_nan then return false, ('item %d value %s vs %s'):format(i, tostring(value), tostring(want)) end
+    end
+    if i ~= t.n then return false, ('count %d vs %d'):format(i, t.n) end
+    return true
+  end
+  for k, h in ipairs(reports) do
+    local ok, why = same_as_parse(bytes.unhex(h))
+    check(('real C1000 report %d: each == parse%s'):format(k, ok and '' or ' (' .. why .. ')'), ok)
+  end
+
+  -- Fuzz, seeded so a failure reproduces. Bodies are built from items with
+  -- every type byte (0x00..0x07 and junk), lengths 0, 1 and up, and a random
+  -- tail that may be a truncated item.
+  math.randomseed(1761)
+  local bad, worst = 0, nil
+  for _ = 1, 3000 do
+    local parts = {}
+    for _ = 1, math.random(0, 12) do
+      local n = ({0, 1, 2, 3, 5, math.random(0, 20)})[math.random(1, 6)]
+      local v = {}
+      if n >= 1 then v[1] = string.char(({0, 1, 2, 3, 4, 5, 6, 0x41, 0x7f, 0xff})[math.random(1, 10)]) end
+      for j = 2, n do v[j] = string.char(math.random(0, 255)) end
+      parts[#parts + 1] = string.char(math.random(0, 255), n) .. table.concat(v)
+    end
+    if math.random() < 0.3 then parts[#parts + 1] = string.char(math.random(0, 255), 40, 1, 2) end
+    local body = table.concat(parts)
+    local ok, why = same_as_parse(body)
+    if not ok then bad = bad + 1; worst = worst or (bytes.hex(body) .. ': ' .. why) end
+  end
+  check('3000 fuzzed bodies: each == parse' .. (worst and (' -- first: ' .. worst) or ''), bad == 0)
+
+  -- And the decoded C1000 report itself, pinned field by field: names come
+  -- from the model's tag table, so a change to the iteration cannot move a
+  -- value to another name without failing here.
+  local schema = mod('anker/schema')
+  local model  = mod('anker/models/A1761')
+  local d = assert(schema.decode(model, bytes.unhex(reports[1]), true))
+  eq('C1000: serial is the redacted fixture', d.serial_number, ('X'):rep(#(d.serial_number or '')))
+  check('C1000: serial decoded at all', d.serial_number and #d.serial_number > 0)
+  eq('C1000: every field counted', d.tlv_count, 68)
+
+end
+
 -- ---------------------------------------------------------------------------
 print(('\n%d checks, %d failed'):format(checks, fails))
 return fails == 0 and 0 or 1
