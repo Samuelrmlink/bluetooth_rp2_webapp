@@ -412,6 +412,16 @@ table.s-table td:first-child { padding: 3px 4px; }
 .ctl-value:has(.ctl-steps) { flex-wrap: wrap; }
 .ctl-timer { width: 7.5em; font: 14px ui-monospace, monospace; }
 .ctl-steps { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+/* The timer's steps: outlined like the switches, so they read as buttons. */
+.dev-controls .ctl-step {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  min-width: 3.6em;
+}
+.dev-controls .ctl-step:hover:not(:disabled),
+.dev-controls .ctl-step:focus-visible { color: var(--green); border-color: var(--green); }
+.dev-controls .ctl-step[data-step="0"]:hover:not(:disabled) { color: var(--orange); border-color: var(--orange); }
 .ctl-step:disabled { opacity: 0.45; }
 
 table.dev-fields tr.just-changed td { background: #2a2615; transition: background 0.2s; }
