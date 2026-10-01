@@ -1255,3 +1255,16 @@ void lbind_open_all(lua_State *L) {
 #if !CONFIG_BT_LE
 void lbind_pairing_pump(void) {}
 #endif
+
+/* The Lua state is being thrown away (lrt_vm_restart): forget every
+ * reference into it without touching it. */
+void lbind_reset(void) {
+    memset(lua_ops, 0, sizeof lua_ops);
+    n_lua_ops = 0;
+#if CONFIG_BT_LE
+    memset(s_pair_ref, 0, sizeof s_pair_ref);
+    memset(s_pair_q, 0, sizeof s_pair_q);
+    memset(s_pair_dev, 0, sizeof s_pair_dev);
+#endif
+    gL = NULL;
+}

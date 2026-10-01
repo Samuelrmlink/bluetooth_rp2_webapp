@@ -289,6 +289,38 @@ class MockGateway:
             else:
                 self.send({"evt": "security.bonded", "data": {"addr": p.get("device")}})
             return {"supplied": True}
+        if op == "sys.reboot":
+            self.send({"evt": "sys.rebooting", "data": {}})
+            STATE["rebooted"] = STATE.get("rebooted", 0) + 1
+            return {"rebooting": True, "in_ms": 500}
+        if op == "script.heap":
+            used = 18016 if not STATE["scripts"].get("anker", {}).get("running") else 85424
+            return {"arena": {"bytes": 163840, "used": used, "peak": 133768, "blocks": 412, "free_blocks": 9,
+                              "free_bytes": 163840 - used, "largest_free": 55120, "alloc_fails": 0,
+                              "alloc_fail_last": 0, "header": 16,
+                              "free_hist": [{"size": "<64", "n": 3, "bytes": 96}, {"size": ">=16K", "n": 1, "bytes": 55120}]},
+                    "objects": {"short_string": {"n": 812, "bytes": 21500}, "table": {"n": 140, "bytes": 30200},
+                                "lua_closure": {"n": 320, "bytes": 9100}, "proto": {"n": 290, "bytes": 15800},
+                                "thread": {"n": 2, "bytes": 3100}, "total": 79700},
+                    "strtab": {"size": 1024, "used": 812},
+                    "tables": [{"bytes": 6200, "array": 0, "hash": 256, "name": "registry"},
+                               {"bytes": 4100, "array": 0, "hash": 128, "name": "module:profiles.anker.run"}],
+                    "threads": [2600, 500], "unaccounted": used - 79700}
+        if op == "script.arena":
+            # a tiny but well-formed arena: one 64 B live table block, then one free block
+            import struct
+            size, base, off = 4096, 0x20010000, int(p.get("offset", 0))
+            raw = bytearray(size)
+            struct.pack_into("<IIB", raw, 0, 64, base + 80, 0)
+            struct.pack_into("<IBB", raw, 16, 0, 0x05, 0)
+            struct.pack_into("<IIB", raw, 80, size - 96, 0, 1)
+            chunk = bytes(raw[off:off + min(int(p.get("len", 1024)), 1024)])
+            return {"base": base, "size": size, "header": 16, "offset": off, "len": len(chunk), "hex": chunk.hex()}
+        if op == "script.vm_restart":
+            n = sum(1 for v in STATE["scripts"].values() if v.get("running"))
+            for v in STATE["scripts"].values():
+                v["running"] = False
+            return {"restarted": True, "stopped": n, "before": 85424, "after": 15640}
         if op == "test.pairing":
             # e2e only: the firmware's question, as if a device had asked.
             topic = {"input": "security.passkey_request", "compare": "security.numeric_comparison",
@@ -300,7 +332,8 @@ class MockGateway:
             return {"sent": topic}
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
-        if op.startswith("script.") or op in ("anker.set", "anker.screensaver", "test.reset"):
+        if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \
+                or op in ("anker.set", "anker.screensaver", "test.reset"):
             return self._script_op(op, p)
         raise ApiError("unknown_op", op)
 

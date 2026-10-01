@@ -52,6 +52,12 @@ size_t lheap_peak(void);
 size_t lheap_capacity(void);
 /* The largest single block that could be handed out now (walks the chain). */
 size_t lheap_largest_free(void);
+/* Every block in address order: its payload, size, and whether it is free. */
+typedef void (*lheap_walk_fn)(const void *payload, size_t size, bool free, void *ctx);
+void lheap_walk(lheap_walk_fn cb, void *ctx);
+/* Where the arena is, and the block header size -- for a raw dump. */
+const void *lheap_base(void);
+size_t lheap_header_size(void);
 /* The size of the last request that failed, and how many have failed. */
 void  lheap_fail_stats(size_t *last, size_t *count);
 

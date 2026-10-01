@@ -135,6 +135,29 @@ static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) 
     api_reply_ok(reply, ctx, id, buf);
 }
 
+/* script.heap: the arena and every Lua object, after a full collection. */
+static void op_heap(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    lrt_heap_json(buf, BUF_SZ);
+    api_reply_ok(reply, ctx, id, buf);
+}
+
+/* script.arena {offset, len<=1024}: raw arena bytes as hex. */
+static void op_arena(const char *params, api_reply_fn reply, void *ctx, long id) {
+    long off = 0, len = 1024;
+    (void)api_json_int(params, "offset", &off);
+    (void)api_json_int(params, "len", &len);
+    lrt_arena_json(off, len, buf, BUF_SZ);
+    api_reply_ok(reply, ctx, id, buf);
+}
+
+/* script.vm_restart: a fresh Lua state without rebooting the board. */
+static void op_vm_restart(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    lrt_vm_restart(buf, BUF_SZ);
+    api_reply_ok(reply, ctx, id, buf);
+}
+
 static void op_loaded(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     lrt_loaded_json(buf, BUF_SZ);
@@ -284,6 +307,9 @@ static const op_def_t lua_ops_tbl[] = {
     { "script.source", op_source },
     { "script.list",   op_list },
     { "script.loaded", op_loaded },
+    { "script.heap",   op_heap },
+    { "script.arena",  op_arena },
+    { "script.vm_restart", op_vm_restart },
     { "script.start",  op_start },
     { "script.stop",   op_stop },
     { "script.reload", op_reload },

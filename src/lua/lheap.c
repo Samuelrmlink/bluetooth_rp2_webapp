@@ -94,6 +94,15 @@ void *lheap_alloc(size_t want) {
     return NULL;
 }
 
+void lheap_walk(lheap_walk_fn cb, void *ctx) {
+    for (blk_t *b = heap_head; b; b = b->next) {
+        cb((uint8_t *)b + HDR, b->size, b->free, ctx);
+    }
+}
+
+const void *lheap_base(void) { return arena; }
+size_t lheap_header_size(void) { return HDR; }
+
 size_t lheap_largest_free(void) {
     size_t big = 0;
     for (blk_t *b = heap_head; b; b = b->next) {

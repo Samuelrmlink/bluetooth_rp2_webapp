@@ -206,6 +206,26 @@ void api_handle_text(const char *text, api_reply_fn reply, void *ctx) {
 
 /* ---- sys.* : the one module that is always present ---------------------- */
 
+/* sys.reboot: answer first, then reboot from the main loop half a second
+ * later (api_reboot_due), so the reply and a sys.rebooting event reach every
+ * client before the link goes. The reset itself is ota_reboot's, which
+ * powers the radio down first (see ota_slot.c). */
+static uint32_t s_reboot_at_ms;
+
+static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
+
+static void op_sys_reboot(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    s_reboot_at_ms = now_ms() + 500;
+    if (!s_reboot_at_ms) { s_reboot_at_ms = 1; }
+    api_reply_ok(reply, ctx, id, "{\"rebooting\":true,\"in_ms\":500}");
+    api_emit("sys.rebooting", "{}");
+}
+
+bool api_reboot_due(void) {
+    return s_reboot_at_ms && (int32_t)(now_ms() - s_reboot_at_ms) >= 0;
+}
+
 static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     char mods[512];
@@ -306,11 +326,12 @@ static void op_sys_secret_put(const char *params, api_reply_fn reply, void *ctx,
 
 static const op_def_t sys_ops[] = {
     { "sys.info", op_sys_info },
+    { "sys.reboot", op_sys_reboot },
     { "sys.secret_put", op_sys_secret_put },
     { NULL, NULL }
 };
 
-static const char *const sys_topics[] = { "hello", "log", NULL };
+static const char *const sys_topics[] = { "hello", "log", "sys.rebooting", NULL };
 
 const op_module_t op_module_sys = {
     .ns = "sys", .ops = sys_ops, .topics = sys_topics, .init = NULL

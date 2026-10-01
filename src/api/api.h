@@ -24,6 +24,10 @@ void api_handle_text(const char *text, api_reply_fn reply, void *ctx);
  * `json` must already be a valid JSON value. */
 void api_emit(const char *topic, const char *json);
 
+/* True once a sys.reboot has been asked for and its grace period is over:
+ * the main loop then resets the board. */
+bool api_reboot_due(void);
+
 /* Escape a string INTO a JSON string body (no surrounding quotes), returning
  * the number of bytes written. Device names and script errors are
  * attacker-controlled in a way an SSID is not, so nothing user-supplied may be

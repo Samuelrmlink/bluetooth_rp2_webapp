@@ -19,6 +19,8 @@
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/watchdog.h"
+#include "api/api.h"
+#include "ota/ota_slot.h"     /* ota_reboot, for sys.reboot */
 
 #include "autoconf.h"
 #include "app_config.h"
@@ -167,6 +169,15 @@ int main(void) {
 
     while (true) {
         watchdog_update();
+        if (api_reboot_due()) {
+            printf("main: reboot requested over the API\n");
+#if CONFIG_OTA
+            ota_reboot(false);          /* powers the radio down first */
+#else
+            watchdog_reboot(0, 0, 100);
+            for (;;) { __asm volatile("wfi"); }
+#endif
+        }
 #if CONFIG_NET_USB_NCM
         tud_task();
         usb_ncm_poll();

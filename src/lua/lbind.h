@@ -26,5 +26,7 @@ int lbind_release_ops(int slot);
 /* Deliver queued pairing questions to scripts' bt.on_pairing handlers
  * (lrt_tick; a no-op without BLE). */
 void lbind_pairing_pump(void);
+/* Forget every reference into a Lua state that is being closed. */
+void lbind_reset(void);
 
 #endif

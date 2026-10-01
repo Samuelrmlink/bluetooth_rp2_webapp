@@ -978,6 +978,14 @@ static void release_runtime(script_t *s) {
         luaL_unref(L, LUA_REGISTRYINDEX, s->co_ref);  s->co_ref = LUA_NOREF;
     }
     if (s->env_ref != LUA_NOREF) { luaL_unref(L, LUA_REGISTRYINDEX, s->env_ref); s->env_ref = LUA_NOREF; }
+    /* Collect NOW. Nothing else may allocate for a long while after a script
+     * stops -- the collector only steps on allocation -- so its whole
+     * session (a driver's ~70 KB) sat in the arena as garbage and the arena
+     * figure in Settings said it was still in use: 131 KB "used" with the
+     * Anker driver stopped, 18 KB once collected (2026-10-01). The collect in
+     * release_modules ran before this coroutine was let go, so it could not
+     * reach any of it. */
+    lrt_collect();
 }
 
 /* Tears down the coroutine and environment but KEEPS the entry and its draft.
@@ -1386,6 +1394,250 @@ size_t lrt_loaded_json(char *dst, size_t cap) {
     dst[n] = 0;   /* a refused unit may have left a partial write past n */
     return n + (size_t)snprintf(dst + n, cap - n, "],\"truncated\":%s}",
                                 truncated ? "true" : "false");
+}
+
+/* --- heap diagnostics -------------------------------------------------------
+ * script.heap: where the arena's bytes are, from two sides.
+ *
+ *   arena    the allocator's view: blocks, free blocks, and a histogram of
+ *            free block sizes -- fragmentation is the shape of that histogram
+ *   objects  Lua's view: every collectable object, walked off the GC lists,
+ *            tallied by type with its exact size; the largest tables, named
+ *            where they can be (the registry, the globals, a module, a
+ *            script's environment); and each coroutine's stack
+ *
+ * Run it after a full collection (it does one first) and compare two runs:
+ * a leak is whatever grows. script.arena reads the raw arena for offline
+ * analysis (tools/lua_heapdump.py). Added 2026-10-01 after a leak took
+ * three rounds of guesswork to pin down with only "used" and "largest free".
+ */
+#include "lstate.h"
+#include "lfunc.h"
+#include "lstring.h"
+#include "ltable.h"
+
+typedef struct { uint32_t n, bytes; } tally_t;
+enum { T_SHRSTR, T_LNGSTR, T_TABLE, T_LCL, T_CCL, T_PROTO, T_UDATA, T_THREAD, T_UPVAL, T_OTHER, T_N };
+static const char *const T_NAMES[T_N] = { "short_string", "long_string", "table", "lua_closure",
+    "c_closure", "proto", "userdata", "thread", "upvalue", "other" };
+
+static size_t obj_size(GCObject *o, int *kind) {
+    switch (o->tt) {
+        case LUA_VSHRSTR: *kind = T_SHRSTR; return sizelstring(gco2ts(o)->shrlen);
+        case LUA_VLNGSTR: *kind = T_LNGSTR; return sizelstring(gco2ts(o)->u.lnglen);
+        case LUA_VTABLE: {
+            Table *t = gco2t(o);
+            *kind = T_TABLE;
+            return sizeof(Table) + sizeof(TValue) * luaH_realasize(t)
+                 + (isdummy(t) ? 0 : sizeof(Node) * sizenode(t));
+        }
+        case LUA_VLCL: *kind = T_LCL; return sizeLclosure(gco2lcl(o)->nupvalues);
+        case LUA_VCCL: *kind = T_CCL; return sizeCclosure(gco2ccl(o)->nupvalues);
+        case LUA_VPROTO: {
+            Proto *f = gco2p(o);
+            *kind = T_PROTO;
+            return sizeof(Proto) + sizeof(Instruction) * f->sizecode + sizeof(TValue) * f->sizek
+                 + sizeof(Proto *) * f->sizep + f->sizelineinfo
+                 + sizeof(AbsLineInfo) * f->sizeabslineinfo + sizeof(LocVar) * f->sizelocvars
+                 + sizeof(Upvaldesc) * f->sizeupvalues;
+        }
+        case LUA_VUSERDATA: {
+            Udata *u = gco2u(o);
+            *kind = T_UDATA;
+            return sizeudata(u->nuvalue, u->len);
+        }
+        case LUA_VTHREAD: {
+            lua_State *th = gco2th(o);
+            *kind = T_THREAD;
+            return sizeof(lua_State) + sizeof(StackValue) * (size_t)(stacksize(th) + EXTRA_STACK)
+                 + sizeof(CallInfo) * th->nci;
+        }
+        case LUA_VUPVAL: *kind = T_UPVAL; return sizeof(UpVal);
+        default: *kind = T_OTHER; return 0;
+    }
+}
+
+typedef struct { const void *p; uint32_t bytes; uint32_t asize, hsize; } bigtab_t;
+#define TOP_TABLES 8
+
+typedef struct {
+    size_t used, n, live, free_bytes, free_n, largest;
+    uint32_t hist_n[6], hist_b[6];
+} walk_stats_t;
+static const uint32_t HIST_LIM[5] = { 64, 256, 1024, 4096, 16384 };
+
+static void arena_cb(const void *p, size_t size, bool free, void *ctx) {
+    (void)p;
+    walk_stats_t *w = ctx;
+    w->n++;
+    if (!free) { w->live += size; return; }
+    w->free_n++;
+    w->free_bytes += size;
+    if (size > w->largest) { w->largest = size; }
+    int b = 0;
+    while (b < 5 && size >= HIST_LIM[b]) { b++; }
+    w->hist_n[b]++;
+    w->hist_b[b] += (uint32_t)size;
+}
+
+/* A name for a table, when it is one we can recognise. */
+static void table_name(const void *t, char *out, size_t cap) {
+    out[0] = 0;
+    lua_pushglobaltable(L);
+    if (lua_topointer(L, -1) == t) { snprintf(out, cap, "globals"); }
+    lua_pop(L, 1);
+    if (!out[0] && lua_topointer(L, LUA_REGISTRYINDEX) == t) { snprintf(out, cap, "registry"); }
+    if (!out[0]) {
+        for (int i = 0; i < MAX_SCRIPTS && !out[0]; i++) {
+            if (!scripts[i].used || scripts[i].env_ref == LUA_NOREF) { continue; }
+            lua_rawgeti(L, LUA_REGISTRYINDEX, scripts[i].env_ref);
+            if (lua_topointer(L, -1) == t) { snprintf(out, cap, "env:%s", scripts[i].name); }
+            lua_pop(L, 1);
+        }
+    }
+    if (out[0]) { return; }
+    /* Pop exactly what was pushed. 1.90 popped the module cache even when it
+     * had returned early without fetching it -- for the registry and the
+     * globals, i.e. always -- which corrupted the main thread's stack and
+     * crashed the board on the first script.heap. */
+    int top = lua_gettop(L);
+    if (lua_getfield(L, LUA_REGISTRYINDEX, MODULE_CACHE) == LUA_TTABLE) {
+        if (lua_topointer(L, -1) == t) { snprintf(out, cap, "module cache"); }
+        lua_pushnil(L);
+        while (!out[0] && lua_next(L, -2)) {
+            if (lua_topointer(L, -1) == t && lua_type(L, -2) == LUA_TSTRING) {
+                snprintf(out, cap, "module:%s", lua_tostring(L, -2));
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_settop(L, top);
+}
+
+size_t lrt_heap_json(char *dst, size_t cap) {
+    if (!L) { return (size_t)snprintf(dst, cap, "{\"error\":\"no Lua state\"}"); }
+    if (!lua_checkstack(L, 8)) { return (size_t)snprintf(dst, cap, "{\"error\":\"no Lua stack\"}"); }
+    lrt_collect();
+    walk_stats_t w = { 0 };
+    lheap_walk(arena_cb, &w);
+    size_t fail_last = 0, fail_count = 0;
+    lheap_fail_stats(&fail_last, &fail_count);
+    size_t n = (size_t)snprintf(dst, cap,
+        "{\"arena\":{\"bytes\":%u,\"used\":%u,\"peak\":%u,\"blocks\":%u,\"free_blocks\":%u,"
+        "\"free_bytes\":%u,\"largest_free\":%u,\"alloc_fails\":%u,\"alloc_fail_last\":%u,"
+        "\"header\":%u,\"free_hist\":[",
+        (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)lheap_peak(), (unsigned)w.n,
+        (unsigned)w.free_n, (unsigned)w.free_bytes, (unsigned)w.largest, (unsigned)fail_count,
+        (unsigned)fail_last, (unsigned)lheap_header_size());
+    static const char *const HN[6] = { "<64", "<256", "<1K", "<4K", "<16K", ">=16K" };
+    for (int i = 0; i < 6; i++) {
+        n += (size_t)snprintf(dst + n, cap - n, "%s{\"size\":\"%s\",\"n\":%u,\"bytes\":%u}",
+                              i ? "," : "", HN[i], (unsigned)w.hist_n[i], (unsigned)w.hist_b[i]);
+    }
+    n += (size_t)snprintf(dst + n, cap - n, "]},");
+
+    global_State *g = G(L);
+    tally_t t[T_N] = { 0 };
+    bigtab_t top[TOP_TABLES] = { 0 };
+    uint32_t threads[MAX_SCRIPTS + 4] = { 0 };
+    int nthreads = 0;
+    GCObject *lists[4] = { g->allgc, g->finobj, g->tobefnz, g->fixedgc };
+    for (int li = 0; li < 4; li++) {
+        for (GCObject *o = lists[li]; o; o = o->next) {
+            int k;
+            size_t sz = obj_size(o, &k);
+            t[k].n++;
+            t[k].bytes += (uint32_t)sz;
+            if (k == T_TABLE) {
+                int m = 0;
+                for (int i = 1; i < TOP_TABLES; i++) { if (top[i].bytes < top[m].bytes) { m = i; } }
+                if (sz > top[m].bytes) {
+                    Table *tb = gco2t(o);
+                    top[m] = (bigtab_t){ tb, (uint32_t)sz, luaH_realasize(tb), isdummy(tb) ? 0 : sizenode(tb) };
+                }
+            } else if (k == T_THREAD && nthreads < (int)(sizeof threads / sizeof threads[0])) {
+                threads[nthreads++] = (uint32_t)sz;
+            }
+        }
+    }
+    n += (size_t)snprintf(dst + n, cap - n, "\"objects\":{");
+    uint32_t total = 0;
+    for (int k = 0; k < T_N; k++) {
+        total += t[k].bytes;
+        n += (size_t)snprintf(dst + n, cap - n, "%s\"%s\":{\"n\":%u,\"bytes\":%u}",
+                              k ? "," : "", T_NAMES[k], (unsigned)t[k].n, (unsigned)t[k].bytes);
+    }
+    n += (size_t)snprintf(dst + n, cap - n, ",\"total\":%u},\"strtab\":{\"size\":%d,\"used\":%d},"
+                          "\"tables\":[", (unsigned)total, g->strt.size, g->strt.nuse);
+    /* largest first */
+    for (int a = 0; a < TOP_TABLES; a++) {
+        for (int b = a + 1; b < TOP_TABLES; b++) {
+            if (top[b].bytes > top[a].bytes) { bigtab_t x = top[a]; top[a] = top[b]; top[b] = x; }
+        }
+    }
+    bool first = true;
+    for (int i = 0; i < TOP_TABLES && n + 160 < cap; i++) {
+        if (!top[i].bytes) { continue; }
+        char nm[64];
+        table_name(top[i].p, nm, sizeof nm);
+        n += (size_t)snprintf(dst + n, cap - n, "%s{\"bytes\":%u,\"array\":%u,\"hash\":%u,\"name\":\"%s\"}",
+                              first ? "" : ",", (unsigned)top[i].bytes, (unsigned)top[i].asize,
+                              (unsigned)top[i].hsize, nm);
+        first = false;
+    }
+    n += (size_t)snprintf(dst + n, cap - n, "],\"threads\":[");
+    for (int i = 0; i < nthreads && n + 16 < cap; i++) {
+        n += (size_t)snprintf(dst + n, cap - n, "%s%u", i ? "," : "", (unsigned)threads[i]);
+    }
+    n += (size_t)snprintf(dst + n, cap - n, "],\"unaccounted\":%d}",
+                          (int)lheap_used() - (int)total);
+    return n;
+}
+
+/* script.arena: `len` (<= 1024) raw bytes of the arena from `offset`, as hex,
+ * with where the arena is -- block headers hold absolute pointers. */
+size_t lrt_arena_json(long offset, long len, char *dst, size_t cap) {
+    size_t size = lheap_capacity();
+    if (offset < 0 || (size_t)offset >= size) { return (size_t)snprintf(dst, cap, "{\"error\":\"offset\"}"); }
+    if (len <= 0 || len > 1024) { len = 1024; }
+    if ((size_t)(offset + len) > size) { len = (long)(size - (size_t)offset); }
+    const uint8_t *p = (const uint8_t *)lheap_base() + offset;
+    size_t n = (size_t)snprintf(dst, cap, "{\"base\":%lu,\"size\":%u,\"header\":%u,\"offset\":%ld,\"len\":%ld,\"hex\":\"",
+                                (unsigned long)(uintptr_t)lheap_base(), (unsigned)size,
+                                (unsigned)lheap_header_size(), offset, len);
+    static const char HX[] = "0123456789abcdef";
+    for (long i = 0; i < len && n + 4 < cap; i++) {
+        dst[n++] = HX[p[i] >> 4];
+        dst[n++] = HX[p[i] & 15];
+    }
+    n += (size_t)snprintf(dst + n, cap - n, "\"}");
+    return n;
+}
+
+/* script.vm_restart: stop every script, close the Lua state and start a new
+ * one in a clean arena -- what a reboot does for Lua, without dropping WiFi,
+ * WireGuard or Bluetooth. Drafts are kept (they live outside the arena). */
+size_t lrt_vm_restart(char *dst, size_t cap) {
+    if (!L) { return (size_t)snprintf(dst, cap, "{\"error\":\"no Lua state\"}"); }
+    size_t before = lheap_used();
+    int stopped = 0;
+    for (int i = 0; i < MAX_SCRIPTS; i++) {
+        script_t *s = &scripts[i];
+        if (!s->used) { continue; }
+        if (s->running || s->co_ref != LUA_NOREF) { stopped += s->running ? 1 : 0; teardown(s); }
+        s->dead = false;
+        s->err[0] = 0;
+    }
+    lbind_reset();
+    memset(s_mod_use, 0, sizeof s_mod_use);
+    lua_close(L);
+    L = NULL;
+    s_ready = false;
+    lrt_init();
+    printf("lua: VM restarted (%d script(s) stopped), arena %u -> %u B\n",
+           stopped, (unsigned)before, (unsigned)lheap_used());
+    return (size_t)snprintf(dst, cap, "{\"restarted\":true,\"stopped\":%d,\"before\":%u,\"after\":%u}",
+                            stopped, (unsigned)before, (unsigned)lheap_used());
 }
 
 size_t lrt_stats_json(char *dst, size_t cap) {
