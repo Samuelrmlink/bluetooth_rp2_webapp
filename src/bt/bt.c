@@ -199,24 +199,50 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
  * it set, so that case is saved and applies from the next boot -- the reply
  * says so ("reboot_needed") rather than claiming a change it did not make.
  *
- * Kept in cfg/bt.json as {"max_mtu": n} and applied in bt_init(). */
+ * Kept in cfg/bt.json as {"max_mtu": n} and applied in bt_init(), alongside
+ * the pairing settings ("io_capability", "mitm"; see bond.c). The file is
+ * always written whole from the current state, so saving one never drops
+ * another. */
 #define BT_CFG_PATH "cfg/bt.json"
 #define MTU_MIN 23
 static uint16_t s_mtu_saved;           /* 0 = never set: BTstack's own default */
 
-static bool mtu_save(uint16_t n) {
-    char j[40];
-    int len = snprintf(j, sizeof j, "{\"max_mtu\":%u}\n", n);
+static bool cfg_save(void) {
+    char j[128];
+    int len = s_mtu_saved
+        ? snprintf(j, sizeof j, "{\"max_mtu\":%u,\"io_capability\":\"%s\",\"mitm\":%s}\n",
+                   (unsigned)s_mtu_saved, bond_io_name(), bond_mitm() ? "true" : "false")
+        : snprintf(j, sizeof j, "{\"io_capability\":\"%s\",\"mitm\":%s}\n",
+                   bond_io_name(), bond_mitm() ? "true" : "false");
     if (fs_begin_write(BT_CFG_PATH) < 0) { return false; }
     if (fs_write((const uint8_t *)j, (size_t)len) < 0) { fs_abort_write(); return false; }
     return fs_end_write() >= 0;
+}
+
+/* The pairing half of cfg/bt.json, applied once the SM is up (bond_init). */
+static void io_load(void) {
+    size_t size = 0;
+    int h = fs_begin_read(BT_CFG_PATH, &size);
+    if (h < 0) { return; }
+    char buf[160];
+    int n = fs_read(h, (uint8_t *)buf, sizeof buf - 1);
+    fs_end_read(h);
+    if (n <= 0) { return; }
+    buf[n] = 0;
+    char io[24];
+    bool have_io = api_json_str(buf, "io_capability", io, sizeof io);
+    bool mb = false;
+    int mitm = api_json_bool(buf, "mitm", &mb) ? (mb ? 1 : 0) : -1;
+    if ((have_io || mitm >= 0) && bond_set_io(have_io ? io : NULL, mitm)) {
+        printf("bt: pairing as %s, MITM %s (cfg/bt.json)\n", bond_io_name(), bond_mitm() ? "on" : "off");
+    }
 }
 
 static void mtu_load(void) {
     size_t size = 0;
     int h = fs_begin_read(BT_CFG_PATH, &size);
     if (h < 0) { return; }
-    char buf[96];
+    char buf[160];
     int n = fs_read(h, (uint8_t *)buf, sizeof buf - 1);
     fs_end_read(h);
     if (n <= 0) { return; }
@@ -238,7 +264,10 @@ static void op_bt_mtu(const char *params, api_reply_fn reply, void *ctx, long id
             api_reply_err(reply, ctx, id, "bad_request", e);
             return;
         }
-        if (!mtu_save((uint16_t)want)) {
+        uint16_t was = s_mtu_saved;
+        s_mtu_saved = (uint16_t)want;
+        if (!cfg_save()) {
+            s_mtu_saved = was;
             api_reply_err(reply, ctx, id, "fs_error", "could not save " BT_CFG_PATH);
             return;
         }
@@ -280,6 +309,7 @@ void bt_init(void) {
     bt_registry_reset();
     le_central_init();
     bond_init();
+    io_load();
 
     hci_cb.callback = &hci_handler;
     hci_add_event_handler(&hci_cb);
@@ -676,21 +706,68 @@ static void op_bond_pair(const char *params, api_reply_fn reply, void *ctx, long
     api_reply_ok(reply, ctx, id, "{\"pairing\":true}");
 }
 
+/* bond.passkey {device, passkey 0..999999} answers security.passkey_request;
+ * {device, cancel:true} refuses to pair instead. */
 static void op_bond_passkey(const char *params, api_reply_fn reply, void *ctx, long id) {
     bt_device_t *d = dev_param(params);
-    long pk = 0;
-    if (!d || !d->connected || !api_json_int(params, "passkey", &pk)) {
-        api_reply_err(reply, ctx, id, "bad_request", "need a connected device and \"passkey\"");
+    if (!d || !d->connected) {
+        api_reply_err(reply, ctx, id, "not_connected", "need a connected device"); return;
+    }
+    bool cancel = false;
+    if (api_json_bool(params, "cancel", &cancel) && cancel) {
+        bond_decline(d->con_handle, "api");
+        api_reply_ok(reply, ctx, id, "{\"declined\":true}");
         return;
     }
-    bond_supply_passkey(d->con_handle, (uint32_t)pk);
+    long pk = 0;
+    if (!api_json_int(params, "passkey", &pk) || pk < 0 || pk > 999999) {
+        api_reply_err(reply, ctx, id, "bad_request", "passkey is 0..999999"); return;
+    }
+    bond_supply_passkey(d->con_handle, (uint32_t)pk, "api");
     api_reply_ok(reply, ctx, id, "{\"supplied\":true}");
+}
+
+/* bond.confirm {device, accept} answers security.numeric_comparison. */
+static void op_bond_confirm(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bt_device_t *d = dev_param(params);
+    if (!d || !d->connected) {
+        api_reply_err(reply, ctx, id, "not_connected", "need a connected device"); return;
+    }
+    bool accept = false;
+    (void)api_json_bool(params, "accept", &accept);
+    bond_confirm(d->con_handle, accept, "api");
+    api_reply_ok(reply, ctx, id, accept ? "{\"accepted\":true}" : "{\"accepted\":false}");
+}
+
+/* bond.io {io_capability?, mitm?}: what this gateway declares for pairing.
+ * Saved to cfg/bt.json and used from the next pairing on. */
+static void op_bond_io(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char io[24];
+    bool have_io = api_json_str(params, "io_capability", io, sizeof io);
+    bool mb = false;
+    int mitm = api_json_bool(params, "mitm", &mb) ? (mb ? 1 : 0) : -1;
+    if (have_io || mitm >= 0) {
+        if (!bond_set_io(have_io ? io : NULL, mitm)) {
+            api_reply_err(reply, ctx, id, "bad_request",
+                "io_capability is no_input_no_output|display_only|display_yes_no|keyboard_only|keyboard_display");
+            return;
+        }
+        if (!cfg_save()) {
+            api_reply_err(reply, ctx, id, "fs_error", "could not save " BT_CFG_PATH); return;
+        }
+    }
+    char r[256];
+    snprintf(r, sizeof r, "{\"io_capability\":\"%s\",\"mitm\":%s,\"options\":"
+             "[\"no_input_no_output\",\"display_only\",\"display_yes_no\",\"keyboard_only\",\"keyboard_display\"]}",
+             bond_io_name(), bond_mitm() ? "true" : "false");
+    api_reply_ok(reply, ctx, id, r);
 }
 
 static void op_bond_list(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     char r[1024];
-    size_t n = (size_t)snprintf(r, sizeof(r), "{\"policy\":\"%s\",\"bonds\":", bond_policy_name(bond_policy()));
+    size_t n = (size_t)snprintf(r, sizeof(r), "{\"policy\":\"%s\",\"io_capability\":\"%s\",\"mitm\":%s,\"bonds\":",
+                                bond_policy_name(bond_policy()), bond_io_name(), bond_mitm() ? "true" : "false");
     n += bond_list_json(r + n, sizeof(r) - n);
     snprintf(r + n, sizeof(r) - n, "}");
     api_reply_ok(reply, ctx, id, r);
@@ -727,6 +804,8 @@ static const op_def_t bt_ops[] = {
     { "bond.policy",  op_bond_policy },
     { "bond.pair",    op_bond_pair },
     { "bond.passkey", op_bond_passkey },
+    { "bond.confirm", op_bond_confirm },
+    { "bond.io",      op_bond_io },
     { "bond.list",    op_bond_list },
     { "bond.remove",  op_bond_remove },
     { "gatt.read",      op_gatt_read },
@@ -749,6 +828,7 @@ static const char *const bt_topics[] = {
     "gatt.discovered", "char.value",
     "security.required", "security.bonded", "security.failed",
     "security.passkey_request", "security.numeric_comparison",
+    "security.passkey_display", "security.passkey_cancel", "security.answered",
     "bt.unhandled", NULL
 };
 

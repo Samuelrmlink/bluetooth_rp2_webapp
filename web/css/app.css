@@ -583,3 +583,13 @@ table.grid td.is-match-cur mark { background: rgba(230, 168, 61, 0.8); color: #1
 /* The cell a menu is for, while the menu is open. */
 table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -2px; background: rgba(230, 168, 61, 0.12); }
 .dev-head .dev-copy, .pane-bar .c-copy { border-color: var(--border); margin-left: 8px; }
+
+/* Pairing prompt (js/pairing.js) */
+.pair-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.pair-body p { margin: 0; }
+.pair-number { font: 600 32px ui-monospace, monospace; letter-spacing: 0.15em; text-align: center; padding: 6px 0; }
+.pair-input { display: flex; gap: 8px; }
+.pair-pin { font: 20px ui-monospace, monospace; width: 8em; letter-spacing: 0.1em; }
+.pair-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.pair-body .pane-btn { border: 1px solid var(--border); border-radius: 4px; padding: 4px 12px; }
+.pair-body [hidden] { display: none; }   /* display:flex above would override the attribute */

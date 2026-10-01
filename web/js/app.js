@@ -32,6 +32,7 @@ import { SETTINGS_SECTIONS } from './settings/index.js';
 import { GattLog } from './gattlog.js';
 import { DeviceStore } from './gattdb.js';
 import { DeviceHost } from './devices/host.js';
+import { PairingPrompt } from './pairing.js';
 
 const NUDGE_PX = 24;
 const RESIZE_PX = 32;
@@ -66,6 +67,8 @@ class App {
 
     this._buildWindows();
     this.settingsModal = new SettingsModal(this);
+    // Passkey / comparison prompts whenever pairing needs a person (pairing.js).
+    this.pairing = new PairingPrompt(this);
     // Every Settings-shaped dialog (js/modals/dialog.js). Windows are built
     // first and may already have registered theirs.
     this.dialogs = [this.settingsModal, ...(this.dialogs || [])];

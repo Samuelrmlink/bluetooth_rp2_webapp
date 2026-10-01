@@ -21,5 +21,10 @@ bool lbind_dispatch(const char *name, const char *params_json,
 
 /* Names registered from Lua, for sys.info. */
 size_t lbind_ops_json(char *dst, size_t cap);
+/* Drop a stopping script's claim on its registered ops (lbind.c). */
+int lbind_release_ops(int slot);
+/* Deliver queued pairing questions to scripts' bt.on_pairing handlers
+ * (lrt_tick; a no-op without BLE). */
+void lbind_pairing_pump(void);
 
 #endif

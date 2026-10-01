@@ -269,7 +269,37 @@ class MockGateway:
                 self.policy = p["policy"]
             return {"policy": self.policy}
         if op == "bond.list":
-            return {"policy": self.policy, "bonds": []}
+            return {"policy": self.policy, "bonds": [], "io_capability": STATE.get("io", "no_input_no_output"),
+                    "mitm": STATE.get("mitm", False)}
+        if op == "bond.io":
+            opts = ["no_input_no_output", "display_only", "display_yes_no", "keyboard_only", "keyboard_display"]
+            if "io_capability" in p:
+                if p["io_capability"] not in opts:
+                    raise ApiError("bad_request", "io_capability is " + "|".join(opts))
+                STATE["io"] = p["io_capability"]
+            if "mitm" in p:
+                STATE["mitm"] = bool(p["mitm"])
+            return {"io_capability": STATE.get("io", "no_input_no_output"), "mitm": STATE.get("mitm", False), "options": opts}
+        if op in ("bond.passkey", "bond.confirm"):
+            # As the firmware: any answer is announced so every prompt closes.
+            STATE.setdefault("answers", []).append({"op": op, **p})
+            self.send({"evt": "security.answered", "data": {"addr": p.get("device"), "by": "api"}})
+            if p.get("cancel") or p.get("accept") is False:
+                self.send({"evt": "security.failed", "data": {"addr": p.get("device"), "status": 0x13, "reason": 8}})
+            else:
+                self.send({"evt": "security.bonded", "data": {"addr": p.get("device")}})
+            return {"supplied": True}
+        if op == "test.pairing":
+            # e2e only: the firmware's question, as if a device had asked.
+            topic = {"input": "security.passkey_request", "compare": "security.numeric_comparison",
+                     "display": "security.passkey_display"}[p.get("action", "input")]
+            data = {"addr": p.get("device", "C4:11:22:33:44:55"), "action": p.get("action", "input")}
+            if "number" in p:
+                data["number"] = p["number"]
+            self.send({"evt": topic, "data": data})
+            return {"sent": topic}
+        if op == "test.answers":
+            return {"answers": STATE.get("answers", [])}
         if op.startswith("script.") or op in ("anker.set", "anker.screensaver", "test.reset"):
             return self._script_op(op, p)
         raise ApiError("unknown_op", op)

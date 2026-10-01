@@ -10,6 +10,54 @@
 static btstack_packet_callback_registration_t sm_cb;
 static bond_policy_t s_policy = BOND_POLICY_ON_DEMAND;
 
+/* What this gateway says it can do for pairing (the SMP IO capability), and
+ * whether it asks for MITM protection. With NoInputNoOutput, or with MITM off
+ * on both sides, every pairing is Just Works; a passkey or a numeric
+ * comparison only happens when someone asks for MITM and the two sides' IO
+ * capabilities allow one. Settings -> Bluetooth picks both; cfg/bt.json keeps
+ * them (bt.c). */
+static uint8_t s_io = IO_CAPABILITY_NO_INPUT_NO_OUTPUT;
+static bool s_mitm = false;
+static bond_pairing_hook_t s_hook;
+
+static const struct { const char *name; uint8_t cap; } IO_NAMES[] = {
+    { "no_input_no_output", IO_CAPABILITY_NO_INPUT_NO_OUTPUT },
+    { "display_only",       IO_CAPABILITY_DISPLAY_ONLY },
+    { "display_yes_no",     IO_CAPABILITY_DISPLAY_YES_NO },
+    { "keyboard_only",      IO_CAPABILITY_KEYBOARD_ONLY },
+    { "keyboard_display",   IO_CAPABILITY_KEYBOARD_DISPLAY },
+};
+
+const char *bond_io_name(void) {
+    for (size_t i = 0; i < sizeof IO_NAMES / sizeof IO_NAMES[0]; i++) {
+        if (IO_NAMES[i].cap == s_io) { return IO_NAMES[i].name; }
+    }
+    return "no_input_no_output";
+}
+
+bool bond_mitm(void) { return s_mitm; }
+
+static void apply_sm(void) {
+    sm_set_io_capabilities((io_capability_t)s_io);
+    sm_set_authentication_requirements(SM_AUTHREQ_BONDING | (s_mitm ? SM_AUTHREQ_MITM_PROTECTION : 0));
+}
+
+bool bond_set_io(const char *name, int mitm) {
+    if (name) {
+        size_t i = 0;
+        for (; i < sizeof IO_NAMES / sizeof IO_NAMES[0]; i++) {
+            if (strcmp(IO_NAMES[i].name, name) == 0) { break; }
+        }
+        if (i == sizeof IO_NAMES / sizeof IO_NAMES[0]) { return false; }
+        s_io = IO_NAMES[i].cap;
+    }
+    if (mitm >= 0) { s_mitm = mitm != 0; }
+    apply_sm();
+    return true;
+}
+
+void bond_set_pairing_hook(bond_pairing_hook_t fn) { s_hook = fn; }
+
 bond_policy_t bond_policy(void) { return s_policy; }
 
 const char *bond_policy_name(bond_policy_t p) {
@@ -42,8 +90,34 @@ bool bond_request(uint16_t con_handle) {
     return true;
 }
 
-bool bond_supply_passkey(uint16_t con_handle, uint32_t passkey) {
+static void emit_sec(const char *topic, uint16_t con_handle, const char *extra);
+
+/* Every answer, from whoever gave it, is announced, so a prompt open in a
+ * browser closes when a script (or another browser) answered first. */
+static void answered(uint16_t con_handle, const char *by) {
+    if (s_hook) { s_hook(con_handle, BOND_ANSWERED, 0); }
+    char extra[48];
+    snprintf(extra, sizeof extra, "\"by\":\"%s\"", by ? by : "api");
+    emit_sec("security.answered", con_handle, extra);
+}
+
+bool bond_supply_passkey(uint16_t con_handle, uint32_t passkey, const char *by) {
+    if (passkey > 999999) { return false; }
     sm_passkey_input(con_handle, passkey);
+    answered(con_handle, by);
+    return true;
+}
+
+bool bond_confirm(uint16_t con_handle, bool accept, const char *by) {
+    if (accept) { sm_numeric_comparison_confirm(con_handle); }
+    else        { sm_bonding_decline(con_handle); }
+    answered(con_handle, by);
+    return true;
+}
+
+bool bond_decline(uint16_t con_handle, const char *by) {
+    sm_bonding_decline(con_handle);
+    answered(con_handle, by);
     return true;
 }
 
@@ -75,24 +149,46 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
             break;
         case SM_EVENT_PASSKEY_INPUT_NUMBER:
             h = sm_event_passkey_input_number_get_handle(pkt);
-            /* We cannot invent this: a human has to read it off the peripheral
-             * and send it back with bond.passkey. */
+            /* We cannot invent this: it is read off the peripheral (or known
+             * to a script) and sent back -- bond.passkey, or bt.passkey/a
+             * bt.on_pairing handler in Lua. */
             emit_sec("security.passkey_request", h, "\"action\":\"input\"");
+            if (s_hook) { s_hook(h, BOND_ASK_INPUT, 0); }
             break;
         case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
             h = sm_event_numeric_comparison_request_get_handle(pkt);
             {
+                uint32_t num = sm_event_numeric_comparison_request_get_passkey(pkt);
                 char extra[64];
-                snprintf(extra, sizeof(extra), "\"action\":\"compare\",\"number\":%lu",
-                         (unsigned long)sm_event_numeric_comparison_request_get_passkey(pkt));
+                snprintf(extra, sizeof(extra), "\"action\":\"compare\",\"number\":%lu", (unsigned long)num);
                 emit_sec("security.numeric_comparison", h, extra);
+                if (s_hook) { s_hook(h, BOND_ASK_COMPARE, num); }
             }
+            break;
+        case SM_EVENT_PASSKEY_DISPLAY_NUMBER:
+            h = sm_event_passkey_display_number_get_handle(pkt);
+            {
+                /* We show, the peripheral's user types it in. Nothing to answer. */
+                uint32_t num = sm_event_passkey_display_number_get_passkey(pkt);
+                char extra[64];
+                snprintf(extra, sizeof(extra), "\"action\":\"display\",\"number\":%lu", (unsigned long)num);
+                emit_sec("security.passkey_display", h, extra);
+                if (s_hook) { s_hook(h, BOND_ASK_DISPLAY, num); }
+            }
+            break;
+        case SM_EVENT_PASSKEY_DISPLAY_CANCEL:
+            h = sm_event_passkey_display_cancel_get_handle(pkt);
+            emit_sec("security.passkey_cancel", h, NULL);
             break;
         case SM_EVENT_PAIRING_COMPLETE: {
             h = sm_event_pairing_complete_get_handle(pkt);
             uint8_t status = sm_event_pairing_complete_get_status(pkt);
             /* Discovery may be parked waiting for exactly this. */
             le_on_link_secured(h, status == ERROR_CODE_SUCCESS);
+            if (s_hook) {
+                s_hook(h, status == ERROR_CODE_SUCCESS ? BOND_DONE_OK : BOND_DONE_FAILED,
+                       sm_event_pairing_complete_get_reason(pkt));
+            }
             if (status == ERROR_CODE_SUCCESS) {
                 emit_sec("security.bonded", h, NULL);
                 printf("bt: bonded\n");
@@ -110,11 +206,11 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
 }
 
 void bond_init(void) {
-    /* Bonding on, MITM off, and no requirement imposed on the peer: we accept
-     * whatever security the peripheral asks for rather than demanding our own.
+    /* Bonding on, and by default MITM off and no requirement imposed on the
+     * peer: we accept whatever security the peripheral asks for rather than
+     * demanding our own. bond_set_io changes that.
      * Keys persist in the BTstack flash bank, so a bond survives a reboot. */
-    sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
-    sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
+    apply_sm();     /* NoInputNoOutput, no MITM until cfg/bt.json says otherwise */
 
     sm_cb.callback = &sm_handler;
     sm_add_event_handler(&sm_cb);

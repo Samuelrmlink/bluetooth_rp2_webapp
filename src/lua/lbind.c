@@ -34,12 +34,23 @@
 #if CONFIG_BT_LE
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
+#include "bt/le/bond.h"
 #include "btstack.h"
 #include "bt/le/gattserver.h"
 #endif
 
 #define MAX_LUA_OPS 24
-typedef struct { char name[40]; int fn_ref; } lua_op_t;
+/* `owners`: a bit per script slot that registered this op, plus OP_PINNED
+ * for one registered outside any script (script.eval). An op's handler is a
+ * closure, and a closure keeps alive everything it can reach -- the script's
+ * environment, its upvalues, the code it was compiled from. Ops used to be
+ * kept forever, so every script that had ever registered one stayed resident
+ * after it stopped: found 2026-10-01 with only the C1000 driver running, 58 KB
+ * of a 160 KB arena held by a stopped script's ten ops and an old copy of the
+ * Anker driver, and no free block above 2.8 KB. lbind_release_ops drops a
+ * script's claim when it goes; the op goes with its last owner. */
+#define OP_PINNED 0x80000000u
+typedef struct { char name[40]; int fn_ref; uint32_t owners; } lua_op_t;
 static lua_op_t lua_ops[MAX_LUA_OPS];
 static int n_lua_ops;
 static lua_State *gL;
@@ -108,11 +119,16 @@ static int l_ops_register(lua_State *L) {
     if (ops_lookup(name)) {
         return luaL_error(L, "'%s' is a built-in op and cannot be replaced", name);
     }
+    int slot = lrt_current_slot();
+    uint32_t bit = (slot >= 0 && slot < 31) ? (1u << slot) : OP_PINNED;
     for (int i = 0; i < n_lua_ops; i++) {
         if (strcmp(lua_ops[i].name, name) == 0) {
+            /* Registering again replaces the handler (two Anker launchers
+             * share one dispatcher) and adds this script as an owner. */
             luaL_unref(L, LUA_REGISTRYINDEX, lua_ops[i].fn_ref);
             lua_pushvalue(L, 2);
             lua_ops[i].fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+            lua_ops[i].owners |= bit;
             return 0;
         }
     }
@@ -120,8 +136,33 @@ static int l_ops_register(lua_State *L) {
     snprintf(lua_ops[n_lua_ops].name, sizeof(lua_ops[n_lua_ops].name), "%s", name);
     lua_pushvalue(L, 2);
     lua_ops[n_lua_ops].fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_ops[n_lua_ops].owners = bit;
     n_lua_ops++;
     return 0;
+}
+
+#if CONFIG_BT_LE
+static void lbind_release_pairing(int slot);
+#endif
+
+/* A script is going: drop its claim on every op, and the ops it was the last
+ * owner of. Returns how many ops were removed. */
+int lbind_release_ops(int slot) {
+    if (!gL || slot < 0 || slot >= 31) { return 0; }
+    uint32_t bit = 1u << slot;
+    int removed = 0;
+#if CONFIG_BT_LE
+    lbind_release_pairing(slot);
+#endif
+    for (int i = 0; i < n_lua_ops; ) {
+        if (!(lua_ops[i].owners & bit)) { i++; continue; }
+        lua_ops[i].owners &= ~bit;
+        if (lua_ops[i].owners) { i++; continue; }
+        luaL_unref(gL, LUA_REGISTRYINDEX, lua_ops[i].fn_ref);
+        lua_ops[i] = lua_ops[--n_lua_ops];
+        removed++;
+    }
+    return removed;
 }
 
 /* --- params: JSON object -> Lua table --------------------------------------
@@ -850,6 +891,195 @@ static int l_bt_notify_flush(lua_State *L) {
     return 0;
 }
 
+/* --- pairing ---------------------------------------------------------------
+ * A script can pair and answer the pairing questions itself -- a device with
+ * a fixed PIN printed on it needs no human at all:
+ *
+ *   bt.pair(addr)                    ask for pairing on a connected link
+ *   bt.passkey(addr, 123456)         answer a passkey request
+ *   bt.confirm(addr, true|false)     answer a numeric comparison
+ *   bt.decline(addr)                 refuse to pair
+ *   bt.pairing_state(addr)          { state = "idle"|"asking"|"bonded"|"failed",
+ *                                      action, number (while asking), reason (failed) }
+ *   bt.on_pairing(function(ev) ... end)   (nil to remove)
+ *       ev = { addr = "AA:..", action = "input"|"compare"|"display",
+ *              number = <the number to compare or to show> }
+ *       return a number for "input", true/false for "compare"; nil leaves
+ *       the question to whoever else answers (the web UI shows it too).
+ *
+ * The handler is called from the runtime's main loop, NOT inside the
+ * script's coroutine: it must answer at once and cannot sleep or wait. It
+ * belongs to the script that set it and goes when that script does
+ * (lbind_release_ops). The questions themselves always reach WebSocket
+ * clients as security.* events; an answer from anywhere closes them with
+ * security.answered.
+ *
+ * For plain blocking code there is profiles/pairing.lua on top of these:
+ * pairing.pair(addr, { pin = 123456 }) requests pairing, waits, answers and
+ * returns the outcome. */
+static bt_device_t *le_dev(lua_State *L, int idx) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, idx, a)) { luaL_error(L, "expected an address"); return NULL; }
+    bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
+    return (d && d->connected) ? d : NULL;
+}
+
+/* Where each link's pairing stands, for bt.pairing_state. */
+#define PAIR_DEV 4
+static struct { uint16_t con_handle; uint8_t state; uint8_t ask; uint32_t number; bool used; } s_pair_dev[PAIR_DEV];
+enum { PS_IDLE, PS_ASKING, PS_BONDED, PS_FAILED };
+
+static int l_bt_pair(lua_State *L) {
+    bt_device_t *d = le_dev(L, 1);
+    /* A fresh start: connection handles are reused, and an earlier link's
+     * "bonded" must not answer for this one. */
+    for (int i = 0; d && i < PAIR_DEV; i++) {
+        if (s_pair_dev[i].used && s_pair_dev[i].con_handle == d->con_handle) { s_pair_dev[i].state = PS_IDLE; }
+    }
+    lua_pushboolean(L, d && bond_request(d->con_handle));
+    return 1;
+}
+
+static int l_bt_passkey(lua_State *L) {
+    bt_device_t *d = le_dev(L, 1);
+    lua_Integer pk = luaL_checkinteger(L, 2);
+    lua_pushboolean(L, d && pk >= 0 && pk <= 999999 &&
+                       bond_supply_passkey(d->con_handle, (uint32_t)pk, "script"));
+    return 1;
+}
+
+static int l_bt_confirm(lua_State *L) {
+    bt_device_t *d = le_dev(L, 1);
+    lua_pushboolean(L, d && bond_confirm(d->con_handle, lua_toboolean(L, 2), "script"));
+    return 1;
+}
+
+static int l_bt_pairing_state(lua_State *L) {
+    bt_device_t *d = le_dev(L, 1);
+    lua_createtable(L, 0, 4);
+    const char *st = "idle";
+    if (d) {
+        for (int i = 0; i < PAIR_DEV; i++) {
+            if (!s_pair_dev[i].used || s_pair_dev[i].con_handle != d->con_handle) { continue; }
+            uint8_t v = s_pair_dev[i].state;
+            st = v == PS_ASKING ? "asking" : v == PS_BONDED ? "bonded" : v == PS_FAILED ? "failed" : "idle";
+            if (v == PS_ASKING) {
+                uint8_t a = s_pair_dev[i].ask;
+                lua_pushstring(L, a == BOND_ASK_INPUT ? "input" : a == BOND_ASK_COMPARE ? "compare" : "display");
+                lua_setfield(L, -2, "action");
+                if (a != BOND_ASK_INPUT) { lua_pushinteger(L, s_pair_dev[i].number); lua_setfield(L, -2, "number"); }
+            } else if (v == PS_FAILED) {
+                lua_pushinteger(L, s_pair_dev[i].number); lua_setfield(L, -2, "reason");
+            }
+        }
+    } else {
+        st = "not_connected";
+    }
+    lua_pushstring(L, st);
+    lua_setfield(L, -2, "state");
+    return 1;
+}
+
+static int l_bt_decline(lua_State *L) {
+    bt_device_t *d = le_dev(L, 1);
+    lua_pushboolean(L, d && bond_decline(d->con_handle, "script"));
+    return 1;
+}
+
+#define PAIR_SLOTS 31
+static int s_pair_ref[PAIR_SLOTS];          /* 0 = no handler */
+
+static void lbind_release_pairing(int slot) {
+    if (slot >= 0 && slot < PAIR_SLOTS && s_pair_ref[slot]) {
+        luaL_unref(gL, LUA_REGISTRYINDEX, s_pair_ref[slot]);
+        s_pair_ref[slot] = 0;
+    }
+}
+
+static int l_bt_on_pairing(lua_State *L) {
+    int slot = lrt_current_slot();
+    if (slot < 0 || slot >= PAIR_SLOTS) { return luaL_error(L, "bt.on_pairing is only callable from a script"); }
+    if (!lua_isnoneornil(L, 1)) { luaL_checktype(L, 1, LUA_TFUNCTION); }
+    if (s_pair_ref[slot]) { luaL_unref(L, LUA_REGISTRYINDEX, s_pair_ref[slot]); s_pair_ref[slot] = 0; }
+    if (!lua_isnoneornil(L, 1)) {
+        lua_pushvalue(L, 1);
+        s_pair_ref[slot] = luaL_ref(L, LUA_REGISTRYINDEX);
+    }
+    return 0;
+}
+
+/* Questions from the SM, waiting for the main loop. The hook runs inside the
+ * BTstack event handler, so it only copies. */
+#define PAIR_Q 4
+static struct { uint16_t con_handle; uint8_t ask; uint32_t number; bool used; } s_pair_q[PAIR_Q];
+
+static void pairing_hook(uint16_t con_handle, bond_ask_t ask, uint32_t number) {
+    int at = -1, free_i = -1;
+    for (int i = 0; i < PAIR_DEV; i++) {
+        if (s_pair_dev[i].used && s_pair_dev[i].con_handle == con_handle) { at = i; break; }
+        if (!s_pair_dev[i].used && free_i < 0) { free_i = i; }
+    }
+    if (at < 0) { at = free_i >= 0 ? free_i : 0; }
+    s_pair_dev[at].used = true;
+    s_pair_dev[at].con_handle = con_handle;
+    switch (ask) {
+        case BOND_ANSWERED:    if (s_pair_dev[at].state == PS_ASKING) { s_pair_dev[at].state = PS_IDLE; } return;
+        case BOND_DONE_OK:     s_pair_dev[at].state = PS_BONDED; return;
+        case BOND_DONE_FAILED: s_pair_dev[at].state = PS_FAILED; s_pair_dev[at].number = number; return;
+        default:
+            s_pair_dev[at].state = PS_ASKING;
+            s_pair_dev[at].ask = (uint8_t)ask;
+            s_pair_dev[at].number = number;
+            break;
+    }
+    for (int i = 0; i < PAIR_Q; i++) {
+        if (!s_pair_q[i].used) {
+            s_pair_q[i].con_handle = con_handle;
+            s_pair_q[i].ask = (uint8_t)ask;
+            s_pair_q[i].number = number;
+            s_pair_q[i].used = true;
+            return;
+        }
+    }
+}
+
+void lbind_pairing_pump(void) {
+    if (!gL) { return; }
+    for (int q = 0; q < PAIR_Q; q++) {
+        if (!s_pair_q[q].used) { continue; }
+        uint16_t ch = s_pair_q[q].con_handle;
+        uint8_t ask = s_pair_q[q].ask;
+        uint32_t number = s_pair_q[q].number;
+        s_pair_q[q].used = false;
+        bt_device_t *d = bt_registry_by_handle(ch);
+        if (!d) { continue; }
+        char addr[18];
+        snprintf(addr, sizeof addr, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 d->addr[0], d->addr[1], d->addr[2], d->addr[3], d->addr[4], d->addr[5]);
+        const char *action = ask == BOND_ASK_INPUT ? "input" : ask == BOND_ASK_COMPARE ? "compare" : "display";
+        for (int slot = 0; slot < PAIR_SLOTS; slot++) {
+            if (!s_pair_ref[slot]) { continue; }
+            int top = lua_gettop(gL);
+            lua_rawgeti(gL, LUA_REGISTRYINDEX, s_pair_ref[slot]);
+            lua_createtable(gL, 0, 3);
+            lua_pushstring(gL, addr);   lua_setfield(gL, -2, "addr");
+            lua_pushstring(gL, action); lua_setfield(gL, -2, "action");
+            if (ask != BOND_ASK_INPUT) { lua_pushinteger(gL, (lua_Integer)number); lua_setfield(gL, -2, "number"); }
+            bool done = false;
+            if (lua_pcall(gL, 1, 1, 0) != LUA_OK) {
+                printf("lua: bt.on_pairing handler failed: %s\n", lua_tostring(gL, -1));
+            } else if (ask == BOND_ASK_INPUT && lua_isinteger(gL, -1)) {
+                lua_Integer pk = lua_tointeger(gL, -1);
+                done = pk >= 0 && pk <= 999999 && bond_supply_passkey(ch, (uint32_t)pk, "script");
+            } else if (ask == BOND_ASK_COMPARE && lua_isboolean(gL, -1)) {
+                done = bond_confirm(ch, lua_toboolean(gL, -1), "script");
+            }
+            lua_settop(gL, top);
+            if (done) { break; }
+        }
+    }
+}
+
 #endif
 
 
@@ -1009,11 +1239,19 @@ void lbind_open_all(lua_State *L) {
         { "await", l_bt_await },
         { "notify_dropped", l_bt_notify_dropped },
         { "notify_flush", l_bt_notify_flush },
+        { "pair", l_bt_pair }, { "passkey", l_bt_passkey },
+        { "confirm", l_bt_confirm }, { "decline", l_bt_decline },
+        { "on_pairing", l_bt_on_pairing }, { "pairing_state", l_bt_pairing_state },
         { NULL, NULL } };
     set_table(L, "bt", bt);
+    bond_set_pairing_hook(pairing_hook);
 #endif
 
 #if CONFIG_PROTO_ANKER
     lbind_proto_open(L);
 #endif
 }
+
+#if !CONFIG_BT_LE
+void lbind_pairing_pump(void) {}
+#endif

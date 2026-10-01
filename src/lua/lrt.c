@@ -824,7 +824,9 @@ static void release_modules(int slot) {
     if (slot < 0 || slot >= MAX_SCRIPTS) { return; }
     uint32_t bit = 1u << slot;
     size_t before = lheap_used();
-    int freed = 0;
+    /* Its ops first: their handlers are what would keep the modules below
+     * (and the script's whole environment) reachable after it has gone. */
+    int freed = lbind_release_ops(slot);
     for (int i = 0; i < MAX_TRACKED_MODULES; i++) {
         if (!s_mod_use[i].name[0]) { continue; }
         if (!(s_mod_use[i].users & bit)) { continue; }
@@ -836,7 +838,7 @@ static void release_modules(int slot) {
     }
     if (freed) {
         lrt_collect();
-        printf("lua: released %d module(s) with no users left, heap %u -> %u B\n",
+        printf("lua: released %d op(s)/module(s) with no users left, heap %u -> %u B\n",
                freed, (unsigned)before, (unsigned)lheap_used());
     }
 }
@@ -1116,6 +1118,7 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
 void lrt_tick(void) {
     if (!s_ready) { return; }
     cache_tick();
+    lbind_pairing_pump();
 
     /* The watchdog half of the wait contract. A coroutine blocked on an event
      * that never arrives is exactly as stuck as one blocked forever, and
