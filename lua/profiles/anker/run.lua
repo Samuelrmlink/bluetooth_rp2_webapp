@@ -21,6 +21,7 @@ per-model schema is the last thing standing.
 local link_m = require 'profiles.anker.link'
 local schema = require 'profiles.anker.schema'
 local control = require 'profiles.anker.control'
+local setter = require 'profiles.anker.setter'
 
 local R = {}
 
@@ -339,11 +340,9 @@ function R.run(target_override)
     end
     local s = setters[p.field]
     if not s then return { error = 'unknown_field', message = tostring(p.field) .. ' has no captured setter' } end
-    local v = math.tointeger(tonumber(p.value))
-    local okv = false
-    for _, a in ipairs(s.values or {}) do if a == v then okv = true end end
-    if not okv then return { error = 'bad_value', message = ('%s takes %s'):format(p.field, table.concat(s.values, ', ')) } end
-    queue[#queue + 1] = { field = p.field, opcode = s.opcode, value = v }
+    local v, why = setter.check(s, p.value)
+    if not v then return { error = 'bad_value', message = ('%s %s'):format(p.field, why) } end
+    queue[#queue + 1] = { field = p.field, opcode = s.opcode, value = v, s = s }
     return { queued = true, field = p.field, value = v }
   end
   ops.register('anker.set', request_set)
@@ -355,12 +354,7 @@ function R.run(target_override)
     while #queue > 0 do
       local q = table.remove(queue, 1)
       local _, err = link:secure(model.poll.ft, q.opcode,
-        tlv.build{ { tag = 0xa1, enc = 'bytes', value = '\x21', type_byte = false },
-                   { tag = 0xa2, enc = 'bytes', value = '\x01' .. string.char(q.value), type_byte = false },
-                   { tag = 0xfe, enc = 'bytes',
-                     value = '\x03' .. link_m.le32(link_m.now_epoch()),
-                     type_byte = false } },
-        q.opcode | 0x0800, 4000)
+        setter.payload(q.s, q.value, link_m.now_epoch()), q.opcode | 0x0800, 4000)
       if err then log.warn(('anker: set %s=%d: %s'):format(q.field, q.value, err))
       else log.info(('anker: set %s=%d: accepted'):format(q.field, q.value)) end
     end

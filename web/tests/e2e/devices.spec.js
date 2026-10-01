@@ -44,8 +44,79 @@ test('unverified and uncaptured setters are shown, disabled, with the reason', a
   await ready(page);
   await page.waitForFunction((id) => window.__btgwApp.windows.has(id), CONTROLS);
   await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
-  await expect(control(page, 'AC charge limit').locator('input')).toBeDisabled();
-  await expect(control(page, 'AC charge limit').locator('.ctl-note')).toContainText('payload not yet captured');
+  await expect(control(page, 'AC frequency').locator('select')).toBeDisabled();
+  await expect(control(page, 'AC frequency').locator('.ctl-note')).toContainText('payload not yet captured');
+});
+
+test('AC timer: +1 h, +15 m, -15 m from the time left, a typed time, Cancel', async ({ page }) => {
+  await ready(page);
+  await page.waitForFunction((id) => window.__btgwApp.windows.has(id), CONTROLS);
+  await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
+  const t = control(page, 'AC timer');
+  const box = t.locator('.ctl-timer');
+  const secs = async () => {
+    const [h, m, s] = (await box.inputValue()).split(':').map(Number);
+    return h * 3600 + m * 60 + s;
+  };
+  await expect(box).toHaveValue('off');
+  await t.getByRole('button', { name: '+1 h' }).click();
+  await expect(t).toHaveClass(/is-pending/);
+  await expect(t).not.toHaveClass(/is-pending/, { timeout: 6000 });
+  await expect.poll(secs).toBeGreaterThan(3590);
+  // it counts down between samples
+  const a = await secs();
+  await expect.poll(secs, { timeout: 4000 }).toBeLessThan(a);
+  await t.getByRole('button', { name: '+15 m' }).click();
+  await expect.poll(secs, { timeout: 6000 }).toBeGreaterThan(4480);
+  await t.getByRole('button', { name: '\u221215 m' }).click();
+  await expect.poll(secs, { timeout: 6000 }).toBeLessThan(3600);
+  expect(await secs()).toBeGreaterThan(3570);
+  // typed
+  await box.fill('1h30m');
+  await box.press('Enter');
+  await expect.poll(secs, { timeout: 6000 }).toBeGreaterThan(5380);
+  await box.fill('soon');
+  await box.press('Enter');
+  await expect(t.locator('.ctl-note')).toContainText('not a time');
+  await expect.poll(secs).toBeGreaterThan(5300);
+  await t.getByRole('button', { name: 'Cancel' }).click();
+  await expect(box).toHaveValue('off', { timeout: 6000 });
+  await expect(t).not.toHaveClass(/is-pending/, { timeout: 6000 });
+});
+
+test('a countdown that runs out switches its output off (mock), and -15 m stops at 0', async ({ page }) => {
+  await ready(page);
+  await page.waitForFunction((id) => window.__btgwApp.windows.has(id), CONTROLS);
+  await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
+  const car = control(page, 'Car output').locator('.ctl-switch');
+  const t = control(page, 'DC timer');
+  if (await car.textContent() !== 'On') { await car.click(); await expect(car).toHaveText('On', { timeout: 6000 }); }
+  await t.locator('.ctl-timer').fill('3s');
+  await t.locator('.ctl-timer').press('Enter');
+  await expect(car).toHaveText('Off', { timeout: 10000 });
+  await expect(t.locator('.ctl-timer')).toHaveValue('off');
+  await t.getByRole('button', { name: '\u221215 m' }).click();   // from nothing: 0, not negative
+  await expect(t).not.toHaveClass(/is-pending/, { timeout: 6000 });
+  await expect(t.locator('.ctl-timer')).toHaveValue('off');
+});
+
+test('AC charge limit writes watts and follows the device', async ({ page }) => {
+  await ready(page);
+  await page.waitForFunction((id) => window.__btgwApp.windows.has(id), CONTROLS);
+  await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
+  const c = control(page, 'AC charge limit');
+  const box = c.locator('input');
+  await expect(box).toBeEnabled();
+  await expect(box).toHaveValue('600');
+  await box.fill('700');
+  await box.press('Enter');
+  await expect(c).toHaveClass(/is-pending/);
+  await expect(c).not.toHaveClass(/is-pending/, { timeout: 6000 });
+  await box.blur();
+  await expect(box).toHaveValue('700');
+  await box.fill('600');
+  await box.press('Enter');
+  await expect(c).not.toHaveClass(/is-pending/, { timeout: 6000 });
 });
 
 test('Unclassified lists every field no control claims, binary as hex', async ({ page }) => {

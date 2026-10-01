@@ -98,9 +98,15 @@ C1000_BASE = {
     "ac_output_enabled": 1, "car_output_enabled": 0, "screen_enabled": 1, "ambient_light": 0,
     "ac_frequency_hz": 60, "ac_charge_power_w": 600, "device_timeout_min": 720, "ultra_fast_charging": 0,
     "unknown_b1": 3, "capability_block": "\x02\x01\x01\x01", "fault_major": 0,
+    "ac_countdown_s": 0, "car_countdown_s": 0,
 }
 C1000_SETTERS = {"ac_output_enabled": (0, 1), "car_output_enabled": (0, 1),
-                 "ambient_light": (0, 1, 3), "screen_enabled": (0, 1)}
+                 "ambient_light": (0, 1, 3), "screen_enabled": (0, 1),
+                 # the countdown timers: seconds, 0 cancels (a range, not a list)
+                 "ac_countdown_s": range(0, 86401), "car_countdown_s": range(0, 86401),
+                 "ac_charge_power_w": range(100, 1301)}
+# A countdown running out switches its output off, as on the C1000.
+TIMER_OUTPUT = {"ac_countdown_s": "ac_output_enabled", "car_countdown_s": "car_output_enabled"}
 
 STATE = {}
 def reset_state():
@@ -137,6 +143,14 @@ class MockGateway:
             try:
                 if STATE["scripts"].get("anker", {}).get("running"):
                     c = STATE["c1000"]
+                    for f, out in TIMER_OUTPUT.items():
+                        end = STATE.setdefault("timer_end", {}).get(f)
+                        if end:
+                            left = max(0, int(end - time.time()))
+                            c[f] = left
+                            if left == 0:
+                                STATE["timer_end"].pop(f, None)
+                                c[out] = 0
                     c["ac_output_power_w"] = c["total_output_power_w"] = (22 + int(time.time()) % 5) if c["ac_output_enabled"] else 0
                     self.send({"evt": "profile.anker.telemetry", "data": dict(c)})
                 if self.scanning:
@@ -322,7 +336,15 @@ class MockGateway:
             f, v = p.get("field"), p.get("value")
             if f not in C1000_SETTERS: return {"error": "unknown_field", "message": f"{f} has no captured setter"}
             if v not in C1000_SETTERS[f]: return {"error": "bad_value", "message": f"{f} takes {C1000_SETTERS[f]}"}
-            threading.Timer(0.3, lambda: STATE["c1000"].__setitem__(f, v)).start()
+            if f in TIMER_OUTPUT:
+                def start(f=f, v=v):
+                    STATE.setdefault("timer_end", {})
+                    if v: STATE["timer_end"][f] = time.time() + v
+                    else: STATE["timer_end"].pop(f, None)
+                    STATE["c1000"][f] = v
+                threading.Timer(0.3, start).start()
+            else:
+                threading.Timer(0.3, lambda: STATE["c1000"].__setitem__(f, v)).start()
             return {"queued": True, "field": f, "value": v}
         raise ApiError("unknown_op", op)
 

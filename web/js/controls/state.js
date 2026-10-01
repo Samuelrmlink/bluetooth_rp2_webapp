@@ -15,13 +15,22 @@ export function same(a, b) {
   return Number(a) === Number(b) && !Number.isNaN(Number(a));
 }
 
+// A reported value close enough to the target to confirm a write. A
+// countdown keeps ticking between the write and the next sample, so it can
+// never equal what was sent: `tolerance` is how far off it may be.
+export function near(actual, target, tolerance = 0) {
+  if (!tolerance) return same(actual, target);
+  const a = Number(actual), t = Number(target);
+  return actual != null && Number.isFinite(a) && Math.abs(a - t) <= tolerance;
+}
+
 export class Pending {
   constructor(timeoutMs = 8000) {
     this.timeoutMs = timeoutMs;
-    this.map = new Map();   // field -> { target, since }
+    this.map = new Map();   // field -> { target, since, tolerance }
   }
 
-  begin(field, target, now = Date.now()) { this.map.set(field, { target, since: now }); }
+  begin(field, target, now = Date.now(), tolerance = 0) { this.map.set(field, { target, since: now, tolerance }); }
   cancel(field) { this.map.delete(field); }
   get(field) { return this.map.get(field); }
   get size() { return this.map.size; }
@@ -32,7 +41,7 @@ export class Pending {
     const confirmed = [];
     const expired = [];
     for (const [field, p] of this.map) {
-      if (field in sample && same(sample[field], p.target)) {
+      if (field in sample && near(sample[field], p.target, p.tolerance)) {
         confirmed.push(field);
         this.map.delete(field);
       } else if (now - p.since > this.timeoutMs) {

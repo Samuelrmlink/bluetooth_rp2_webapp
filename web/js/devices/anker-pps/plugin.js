@@ -33,12 +33,19 @@ export const controls = [
   { kind: 'switch', field: 'screen_enabled', label: 'Display', verified: true },
   { kind: 'select', field: 'ambient_light', label: 'Ambient light', verified: true,
     options: [[0, 'Off'], [1, 'On'], [3, '3 (captured; meaning unknown)']] },
+  // Shutoff timers: the output switches off when one runs out. Seconds on
+  // the wire (0x0042 / 0x0043, read back on a2 / a3); 0 cancels. A sample
+  // lands a second or two after the write, by when the timer has ticked, so
+  // it confirms within `tolerance` seconds of what was sent.
+  { kind: 'timer', field: 'ac_countdown_s', label: 'AC timer', max: 86400, tolerance: 20, verified: true },
+  { kind: 'timer', field: 'car_countdown_s', label: 'DC timer', max: 86400, tolerance: 20, verified: true },
+  // 0x0044, u16 watts, captured by the owner 2026-10-01 (700 W); read back on d1.
+  { kind: 'number', field: 'ac_charge_power_w', label: 'AC charge limit', unit: 'W', min: 100, max: 1300, step: 100,
+    verified: true },
 
   // Opcodes known, payloads never captured: shown, not writable. A guessed
   // encoding is not something to try on a power station.
   { kind: 'select', field: 'ac_frequency_hz', label: 'AC frequency', options: [[50, '50 Hz'], [60, '60 Hz']],
-    blocked: 'setter payload not yet captured' },
-  { kind: 'number', field: 'ac_charge_power_w', label: 'AC charge limit', unit: 'W', min: 100, max: 1300, step: 100,
     blocked: 'setter payload not yet captured' },
   { kind: 'select', field: 'device_timeout_min', label: 'Device auto-off',
     options: [[0, 'Never'], [30, '30 min'], [60, '1 h'], [120, '2 h'], [360, '6 h'], [720, '12 h'], [1440, '24 h']],

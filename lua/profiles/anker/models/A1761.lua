@@ -92,7 +92,8 @@ return {
   -- payload shape was captured from the official app on 2026-09-08
   -- (anker_c1000_protocol/anker-protocol.md, section 11). A setter is
   --   a1 01 21 · a2 <len> <type> <value> · fe 05 03 <epoch32 LE>
-  -- and every one here is a2 02 01 <u8>. The charge limit (0x0044), the
+  -- as a2 02 01 <u8> or (the timers) a2 05 03 <u32 LE>; profiles/anker/setter.lua
+  -- builds them. The charge limit (0x0044), the
   -- auto-off timer (0x0045) and the AC frequency (0x004D) are left out on
   -- purpose: their opcodes are known but their payloads were never captured,
   -- and a guessed encoding is not something to try on a power station.
@@ -103,6 +104,15 @@ return {
     car_output_enabled = { opcode = 0x004B, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30, bench C1000: 0 -> 1 -> 0, d8 followed
     ambient_light      = { opcode = 0x004F, enc = 'u8', values = { 0, 1, 3 }, verified = true },  -- 2026-09-30: 0 -> 1 -> 0, dc followed (3 untested)
     screen_enabled     = { opcode = 0x0052, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30: 1 -> 0 -> 1, de followed
+    -- Countdown timers, seconds, 0 = cancel; read back on a2 / a3. 0x0042 was
+    -- captured from the app (solix-esp32 docs/anker-protocol.md §5a-iii:
+    -- a2 05 03 100e0000 = 1 h); 0x0043 is the same shape, inferred then
+    -- confirmed on the bench.
+    ac_countdown_s     = { opcode = 0x0042, enc = 'u32', min = 0, max = 86400, verified = true },  -- 2026-10-01: 3600 -> a2 read 3599 and fell; 0 -> a2 0
+    car_countdown_s    = { opcode = 0x0043, enc = 'u32', min = 0, max = 86400, verified = true },  -- 2026-10-01: 3600 -> a3 read 3600 and fell; 0 -> a3 0
+    -- AC charge limit, watts; read back on d1. Captured by the owner
+    -- 2026-10-01 from the app: 700 W = a2 03 02 bc02.
+    ac_charge_power_w  = { opcode = 0x0044, enc = 'u16', min = 100, max = 1300, verified = true },  -- 2026-10-01: 700 -> 600 -> 700, d1 followed
   },
 
   -- a1 is the selector echo, not data. fe is the sequence guard the app uses

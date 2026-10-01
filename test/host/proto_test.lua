@@ -276,6 +276,32 @@ do
   check('identify rejects a mac mismatch', adv.identify(dev) == nil)
 end
 
+-- Setter payloads, held to what the official app sent (solix-esp32
+-- docs/anker-protocol.md §5a-iii: the AC countdown cancelled at epoch
+-- 0x6AA0C8EB) and to the u8 shape the switches use.
+print('\n== setters ==')
+do
+  local setter = mod('anker/setter')
+  local model = mod('anker/models/A1761')
+  local ac = model.setters.ac_countdown_s
+  eq('AC timer cancel = the captured bytes', hex(setter.payload(ac, 0, 0x6AA0C8EB)),
+     'a10121a2050300000000fe0503ebc8a06a')
+  eq('AC timer 1 h', hex(setter.payload(ac, 3600, 0x6AA0C8EB)), 'a10121a20503100e0000fe0503ebc8a06a')
+  eq('DC timer uses 0x0043', model.setters.car_countdown_s.opcode, 0x0043)
+  eq('a switch is a2 02 01 <u8>', hex(setter.payload(model.setters.car_output_enabled, 1, 0)),
+     'a10121a2020101fe050300000000')
+  eq('a timer takes 0..86400', setter.check(ac, 86400), 86400)
+  check('a timer refuses a day and a second', setter.check(ac, 86401) == nil)
+  check('a timer refuses a negative', setter.check(ac, -1) == nil)
+  check('a switch refuses 2', setter.check(model.setters.car_output_enabled, 2) == nil)
+  check('not a number is refused', setter.check(ac, 'soon') == nil)
+  local cp = model.setters.ac_charge_power_w
+  eq('charge limit 700 W = the captured bytes', hex(setter.payload(cp, 700, 0x6ABE11FD)),
+     'a10121a20302bc02fe0503fd11be6a')
+  eq('charge limit uses 0x0044', cp.opcode, 0x0044)
+  check('charge limit refuses 0', setter.check(cp, 0) == nil)
+end
+
 -- tlv.each, the report iterator schema.decode uses instead of tlv.parse (to
 -- avoid a table per item). It must hand a reader EXACTLY what tlv.parse's item
 -- would have: the same items in the same order, the same tag, the same raw

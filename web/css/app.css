@@ -409,6 +409,11 @@ table.s-table td:first-child { padding: 3px 4px; }
 .ctl-switch[aria-checked='true'] { color: var(--green); border-color: var(--green); }
 .ctl-switch:disabled, .dev-controls select:disabled, .dev-controls input:disabled { opacity: 0.45; }
 
+.ctl-value:has(.ctl-steps) { flex-wrap: wrap; }
+.ctl-timer { width: 7.5em; font: 14px ui-monospace, monospace; }
+.ctl-steps { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.ctl-step:disabled { opacity: 0.45; }
+
 table.dev-fields tr.just-changed td { background: #2a2615; transition: background 0.2s; }
 
 /* --- Sortable, resizable columns (controls/grid.js) ------------------------- */

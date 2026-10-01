@@ -65,7 +65,7 @@ export class ControlsWindow {
     // own network, and then nothing here can switch it back on.
     const ask = c.confirm?.[value];
     if (ask && !window.confirm(ask)) { ctl.setPending(null); return; }
-    this.pending.begin(c.field, value);
+    this.pending.begin(c.field, value, Date.now(), c.tolerance);
     ctl.setPending(value);
     try {
       await this.plugin.write(this.ctx, c, value);
@@ -95,6 +95,7 @@ export class ControlsWindow {
   }
 
   render() {
+    for (const { ctl } of this.controls) ctl.tick?.();
     this._age.textContent = ageText(this.dev);
     this._age.classList.toggle('is-gone', !!this.dev.gone);
   }
