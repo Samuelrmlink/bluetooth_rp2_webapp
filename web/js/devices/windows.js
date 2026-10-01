@@ -58,6 +58,11 @@ export class ControlsWindow {
 
   async _write(c, ctl, value) {
     if (this.dev.gone) { ctl.flash('device not heard from'); return; }
+    // A control may ask before a value that is hard to undo from here
+    // (`confirm: { [value]: 'question' }`): AC off can cut the gateway's
+    // own network, and then nothing here can switch it back on.
+    const ask = c.confirm?.[value];
+    if (ask && !window.confirm(ask)) { ctl.setPending(null); return; }
     this.pending.begin(c.field, value);
     ctl.setPending(value);
     try {

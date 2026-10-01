@@ -25,8 +25,11 @@ export const controls = [
   // change from here has been seen to move the matching telemetry field on
   // the bench C1000.
   { kind: 'switch', field: 'car_output_enabled', label: 'Car output', verified: true },
-  { kind: 'switch', field: 'ac_output_enabled', label: 'AC output', verified: false,
-    why: 'captured, not yet tested on this unit — it switches the outlet\'s load' },
+  // Verified 2026-09-30: off from here switched the outlet off (seen by the
+  // owner; the network it powers dropped, so no telemetry got out). On was
+  // switched by hand afterwards. Asks first: off can cut this gateway's link.
+  { kind: 'switch', field: 'ac_output_enabled', label: 'AC output', verified: true,
+    confirm: { 0: 'Switch the AC outlet OFF?\n\nEverything plugged into it loses power. If the gateway or its network is powered from it, this page loses the connection and the outlet must be switched back on at the C1000.' } },
   { kind: 'switch', field: 'screen_enabled', label: 'Display', verified: true },
   { kind: 'select', field: 'ambient_light', label: 'Ambient light', verified: true,
     options: [[0, 'Off'], [1, 'On'], [3, '3 (captured; meaning unknown)']] },

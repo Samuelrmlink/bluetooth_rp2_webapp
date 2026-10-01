@@ -44,8 +44,6 @@ test('unverified and uncaptured setters are shown, disabled, with the reason', a
   await ready(page);
   await page.waitForFunction((id) => window.__btgwApp.windows.has(id), CONTROLS);
   await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
-  await expect(control(page, 'AC output').locator('.ctl-switch')).toBeDisabled();
-  await expect(control(page, 'AC output').locator('.ctl-note')).toContainText('not yet tested');
   await expect(control(page, 'AC charge limit').locator('input')).toBeDisabled();
   await expect(control(page, 'AC charge limit').locator('.ctl-note')).toContainText('payload not yet captured');
 });
@@ -59,4 +57,24 @@ test('Unclassified lists every field no control claims, binary as hex', async ({
   await expect(fields.filter({ hasText: 'unknown_b1' })).toHaveCount(1);
   await expect(fields.filter({ hasText: /^battery_pct$/ })).toHaveCount(0);
   await expect(page.locator('.dev-fields tbody tr').filter({ hasText: 'capability_block' }).locator('td').nth(1)).toHaveText('02 01 01 01  (hex)');
+});
+
+test('AC output asks before switching off, and a No sends nothing', async ({ page }) => {
+  await ready(page);
+  await page.waitForFunction((id) => window.__btgwApp.windows.has(id), CONTROLS);
+  await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
+  const ac = control(page, 'AC output').locator('.ctl-switch');
+  await expect(ac).toHaveText('On');
+  const asked = [];
+  page.once('dialog', (d) => { asked.push(d.message()); d.dismiss(); });
+  await ac.click();
+  await expect.poll(() => asked.length).toBe(1);
+  expect(asked[0]).toContain('AC outlet OFF');
+  await page.waitForTimeout(1500);
+  await expect(ac).toHaveText('On');
+  page.once('dialog', (d) => d.accept());
+  await ac.click();
+  await expect(ac).toHaveText('Off');
+  await ac.click();                      // on: no question
+  await expect(ac).toHaveText('On');
 });

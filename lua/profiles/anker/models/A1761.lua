@@ -99,7 +99,7 @@ return {
   -- `verified` is per field, set once changing it from the app has been seen
   -- to move the matching tag -- the rule this file states for names.
   setters = {
-    ac_output_enabled  = { opcode = 0x004A, enc = 'u8', values = { 0, 1 } },
+    ac_output_enabled  = { opcode = 0x004A, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30: 1 -> 0 switched the outlet off (owner saw it; the network it powers dropped before d7 could be reported); 0 -> 1 not yet sent from here
     car_output_enabled = { opcode = 0x004B, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30, bench C1000: 0 -> 1 -> 0, d8 followed
     ambient_light      = { opcode = 0x004F, enc = 'u8', values = { 0, 1, 3 }, verified = true },  -- 2026-09-30: 0 -> 1 -> 0, dc followed (3 untested)
     screen_enabled     = { opcode = 0x0052, enc = 'u8', values = { 0, 1 }, verified = true },  -- 2026-09-30: 1 -> 0 -> 1, de followed
