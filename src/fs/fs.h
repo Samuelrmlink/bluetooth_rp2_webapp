@@ -75,6 +75,13 @@ int fs_write(const uint8_t *data, size_t len);
 int fs_end_write(void);
 void fs_abort_write(void);
 
+/* Told the name of every file that was written (on fs_end_write), renamed
+ * to (fs_rename) or deleted, after the fact. One listener: the Lua runtime,
+ * which recompiles a changed module into its bytecode cache. Called from
+ * whatever context did the write, so it must only take a note. */
+typedef void (*fs_change_fn)(const char *name);
+void fs_on_change(fs_change_fn fn);
+
 int fs_begin_read(const char *name, size_t *size);
 int fs_read(int h, uint8_t *buf, size_t cap);
 int fs_rewind(int h, size_t n);

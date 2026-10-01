@@ -165,3 +165,29 @@ test('Unclassified: Copy all puts the table, as shown, on the clipboard', async 
   expect(lines[1]).toBe('Field\tValue\tChanged');
   expect(lines.some((l) => l.startsWith('unknown_b1\t'))).toBe(true);
 });
+
+test('two devices at once: each its own windows and tabs, named in the picker', async ({ page }) => {
+  const SCP = 'anker-scp.controls@7CE913601FD8';
+  await ready(page);
+  await page.waitForFunction((ids) => ids.every((id) => window.__btgwApp.windows.has(id)), [CONTROLS, SCP]);
+  const groups = await page.$$eval('#tiles .tile .pane-pick >> nth=0', (s) => [...s[0].querySelectorAll('optgroup')].map((g) => g.label));
+  expect(groups).toEqual(expect.arrayContaining(['C1000', 'A2687']));
+  await page.evaluate((id) => window.__btgwApp.show(id), SCP);
+  await expect(control(page, 'USB-C1').locator('.ctl-readout')).toHaveText('20.08 V · 2.98 A · 59.8 W');
+  await expect(control(page, 'USB-C3').locator('.ctl-readout')).toHaveText('idle');
+  await expect(control(page, 'USB-C2 port').locator('.ctl-readout')).toHaveText('on · 60W cable');
+  // the closed picker says whose Controls these are
+  const picked = await page.evaluate((id) => {
+    const t = [...document.querySelectorAll('#tiles .tile')].find((x) => x.dataset.pane === id);
+    const s = t.querySelector('.pane-pick');
+    return s.options[s.selectedIndex].textContent;
+  }, SCP);
+  expect(picked).toBe('A2687 · Controls');
+  // tabbed: both devices' Controls are tabs of their own
+  await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
+  await page.keyboard.press('Alt+Shift+KeyT');
+  await page.evaluate((id) => window.__btgwApp.show(id), SCP);
+  const tabs = await page.$$eval('.tab', (t) => t.map((x) => x.textContent.trim()));
+  expect(tabs.some((t) => t.includes('C1000 · Controls'))).toBe(true);
+  expect(tabs.some((t) => t.includes('A2687 · Controls'))).toBe(true);
+});

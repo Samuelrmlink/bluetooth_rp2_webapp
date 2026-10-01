@@ -19,7 +19,9 @@ export const PLUGINS = [
   {
     id: 'anker-scp',
     match: (topic, d) => topic === 'profile.anker.telemetry' && SCP.has(d.product_code),
-    name: (d) => d.model_name || 'Anker charger',
+    // "Anker Prime 160W 3-Port GaN Charger (smart display)" is too long for a
+    // tab; the model code is what it is called on the bench.
+    name: (d) => d.product_code || 'Anker charger',
     module: './anker-scp/plugin.js',
   },
   {

@@ -149,7 +149,9 @@ export class DeviceHost {
     for (const spec of specs) {
       const id = `${dev.plugin.id}.${spec.kind}@${dev.key}`;
       const win = this.app.addWindow(id, {
-        title: `${dev.name} · ${spec.title}`, group: dev.name, short: spec.title,
+        // short is what a picker shows CLOSED: with two devices, "Controls"
+        // alone does not say whose -- so it carries the device name too.
+        title: `${dev.name} · ${spec.title}`, group: dev.name, short: `${dev.name} · ${spec.title}`,
       }, (el) => new LazyWindow(this, dev, spec, el));
       dev.windows.set(id, win);
     }

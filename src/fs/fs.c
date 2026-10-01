@@ -323,11 +323,21 @@ bool fs_stat(const char *name, size_t *size) {
     return true;
 }
 
+static fs_change_fn change_hook;
+static char wname[FS_PATH_MAX + 1];
+
+void fs_on_change(fs_change_fn fn) { change_hook = fn; }
+
+static void changed(const char *name) {
+    if (change_hook) { change_hook(name); }
+}
+
 int fs_delete(const char *name) {
     if (!mounted || !fs_valid_path(name) || fs_is_dir(name)) {
         return -1;
     }
     int err = lfs_remove(&lfs, name);
+    if (err >= 0) { changed(name); }
     return err < 0 ? err : 0;
 }
 
@@ -346,6 +356,7 @@ int fs_rename(const char *from, const char *to) {
     if (err == LFS_ERR_EXIST) {
         return 1;
     }
+    if (err >= 0) { changed(from); changed(to); }
     return err < 0 ? err : 0;
 }
 
@@ -353,6 +364,7 @@ int fs_begin_write(const char *name) {
     if (!mounted || !fs_valid_path(name) || fs_is_dir(name) || wopen) {
         return -1;
     }
+    snprintf(wname, sizeof wname, "%s", name);
     ensure_parent_dirs(name);
     int err = lfs_file_open(&lfs, &wfile, name, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
     if (err < 0) {
@@ -384,6 +396,7 @@ int fs_end_write(void) {
     }
     int err = lfs_file_close(&lfs, &wfile);
     wopen = false;
+    if (err >= 0) { changed(wname); }
     return err;
 }
 

@@ -385,13 +385,12 @@ static void module_forget(const char *name) {
 }
 
 
-static bool read_module_src(const char *name, const char **src, size_t *len,
-                            uint8_t *tier) {
-    /* dots -> slashes, and nothing else: no "..", no leading slash, so a
-     * module name cannot climb out of lua/. */
-    char rel[64];
+/* A module name as a relative path: dots -> slashes, and nothing else -- no
+ * "..", no leading slash, so a module name cannot climb out of lua/. */
+static bool module_rel(const char *name, char *rel, size_t cap) {
     size_t j = 0;
-    for (size_t i = 0; name[i] && j + 1 < sizeof rel; i++) {
+    for (size_t i = 0; name[i]; i++) {
+        if (j + 1 >= cap) { return false; }
         char ch = name[i];
         if (ch == '.') { ch = '/'; }
         if (ch == '/' && (j == 0 || rel[j - 1] == '/')) { return false; }
@@ -402,7 +401,13 @@ static bool read_module_src(const char *name, const char **src, size_t *len,
         rel[j++] = ch;
     }
     rel[j] = 0;
-    if (!j) { return false; }
+    return j > 0;
+}
+
+static bool read_module_src(const char *name, const char **src, size_t *len,
+                            uint8_t *tier) {
+    char rel[64];
+    if (!module_rel(name, rel, sizeof rel)) { return false; }
 
     char path[96];
     snprintf(path, sizeof path, "staged/%s.lua", rel);
@@ -435,6 +440,233 @@ static bool module_is_current(const char *name) {
     uint8_t tier = SRC_TIER_NONE;
     if (!read_module_src(name, &src, &len, &tier)) { return true; }
     return tier == u->tier && fnv1a(src, len) == u->hash;
+}
+
+/* --- the bytecode cache ----------------------------------------------------
+ * Compiling Lua on the board costs about twice what the compiled module
+ * occupies, all at once, and lands as a run of growing arrays across a
+ * first-fit arena: the driver's run.lua peaks at ~40 KB to leave ~17 KB.
+ * With one device profile streaming, a second device's modules could not be
+ * compiled at all ("not enough memory", largest free block ~12 KB).
+ *
+ * So a module under lua/ is compiled ONCE, when it changes, and kept as
+ * stripped bytecode in cache/<path>.luac; require() loads that instead, at
+ * about a quarter of the peak. The .lua stays the only source of truth:
+ *
+ *   - the cache file's header carries the fnv1a and length of the source it
+ *     was compiled from, and is used only while they match the .lua on
+ *     flash -- an edited, uploaded or renamed module is never run stale;
+ *   - a write to lua/ (fs_on_change) queues the module, and lrt_tick
+ *     recompiles it on the next tick -- normally long before it is next
+ *     required;
+ *   - at boot every module is checked, so a cache missed for any reason
+ *     (out of memory at the time, the filesystem busy) is rebuilt while the
+ *     arena is still empty;
+ *   - a miss in require() compiles the source as before, then caches it.
+ *
+ * Only lua/ (committed) modules are cached. A staged draft is what is being
+ * edited, so it is compiled from source, with its line numbers. Stripped
+ * bytecode has none: an error in a cached module reads "?:-1". Push the
+ * file again (or delete its .luac) and that module compiles from source
+ * until it is next cached. Top-level lua/*.lua are scripts, not modules,
+ * and are not cached. */
+#define CACHE_HDR 16
+#define CACHE_VER 1
+
+static void cache_path(const char *rel, char *out, size_t cap) {
+    snprintf(out, cap, "cache/%s.luac", rel);
+}
+
+static void put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+/* "BTGWLC", a version, the Lua version, then the source's hash and length. */
+static void cache_header(uint8_t h[CACHE_HDR], uint32_t hash, uint32_t srclen) {
+    memcpy(h, "BTGWLC", 6);
+    h[6] = CACHE_VER;
+    h[7] = (uint8_t)LUA_VERSION_NUM;
+    put32(h + 8, hash);
+    put32(h + 12, srclen);
+}
+
+/* Does the cache file exist and say it was compiled from exactly this
+ * source? Reads only the header. */
+static bool cache_matches(const char *path, uint32_t hash, uint32_t srclen) {
+    size_t sz = 0;
+    if (!fs_stat(path, &sz) || sz <= CACHE_HDR || sz > DRAFT_MAX) { return false; }
+    int h = fs_begin_read(path, NULL);
+    if (h < 0) { return false; }
+    uint8_t got[CACHE_HDR], want[CACHE_HDR];
+    int n = fs_read(h, got, CACHE_HDR);
+    fs_end_read(h);
+    cache_header(want, hash, srclen);
+    return n == CACHE_HDR && memcmp(got, want, CACHE_HDR) == 0;
+}
+
+static int cache_writer(lua_State *Ls, const void *p, size_t sz, void *ud) {
+    (void)Ls; (void)ud;
+    return fs_write((const uint8_t *)p, sz) < 0 ? 1 : 0;
+}
+
+/* Dump the function on top of the stack as this module's cache. False if it
+ * could not be written -- typically another write holding the filesystem's
+ * one write slot -- which costs nothing but a compile next time. */
+static bool cache_store(lua_State *Ls, const char *rel, uint32_t hash, uint32_t srclen) {
+    char path[96];
+    cache_path(rel, path, sizeof path);
+    if (fs_begin_write(path) < 0) { return false; }
+    uint8_t hdr[CACHE_HDR];
+    cache_header(hdr, hash, srclen);
+    bool ok = fs_write(hdr, CACHE_HDR) >= 0 && lua_dump(Ls, cache_writer, NULL, 1) == 0;
+    if (!ok) { fs_abort_write(); fs_delete(path); return false; }
+    if (fs_end_write() < 0) { fs_delete(path); return false; }
+    return true;
+}
+
+/* Push this module's cached chunk and return true, or push nothing and
+ * return false. Overwrites src_buf. */
+static bool cache_load(lua_State *Ls, const char *rel, const char *chunkname,
+                       uint32_t hash, uint32_t srclen) {
+    char path[96];
+    cache_path(rel, path, sizeof path);
+    if (!cache_matches(path, hash, srclen)) { return false; }
+    size_t len = 0;
+    if (!read_fs(path, src_buf, sizeof(src_buf), &len) || len <= CACHE_HDR) { return false; }
+    if (luaL_loadbufferx(Ls, src_buf + CACHE_HDR, len - CACHE_HDR, chunkname, "b") != LUA_OK) {
+        printf("lua: cache for %s unusable (%s); compiling the source\n", rel, lua_tostring(Ls, -1));
+        lua_pop(Ls, 1);
+        fs_delete(path);
+        return false;
+    }
+    return true;
+}
+
+/* Bring one module's cache up to date with its source: compile and store
+ * if it is missing or stale, delete it if the source has gone. */
+static void cache_refresh(const char *name) {
+    char rel[64], path[96];
+    if (!module_rel(name, rel, sizeof rel)) { return; }
+    cache_path(rel, path, sizeof path);
+    const char *src = NULL;
+    size_t len = 0;
+    uint8_t tier = SRC_TIER_NONE;
+    if (!read_module_src(name, &src, &len, &tier)) {
+        if (fs_stat(path, NULL)) { fs_delete(path); }
+        return;
+    }
+    if (tier != SRC_TIER_COMMITTED) { return; }
+    uint32_t hash = fnv1a(src, len);
+    if (cache_matches(path, hash, (uint32_t)len)) { return; }
+    char chunk[80];
+    snprintf(chunk, sizeof chunk, "@%s", name);
+    int top = lua_gettop(L);
+    if (luaL_loadbufferx(L, src, len, chunk, "t") == LUA_OK) {
+        if (cache_store(L, rel, hash, (uint32_t)len)) {
+            size_t sz = 0;
+            fs_stat(path, &sz);
+            printf("lua: cached %s (%u B source -> %u B)\n", name, (unsigned)len, (unsigned)sz);
+        } else {
+            printf("lua: %s compiled but its cache could not be written\n", name);
+        }
+    } else {
+        printf("lua: %s not cached: %s\n", name, lua_tostring(L, -1));
+    }
+    lua_settop(L, top);
+    lrt_collect();
+}
+
+/* Modules waiting to be (re)compiled, one per tick so a boot or a burst of
+ * uploads never holds the main loop for long. */
+#define CACHE_QUEUE 32
+static char s_cache_q[CACHE_QUEUE][48];
+static bool s_cache_scan;     /* walk lua/ for every module, then queue them */
+
+static void cache_enqueue(const char *name) {
+    int free_i = -1;
+    for (int i = 0; i < CACHE_QUEUE; i++) {
+        if (!s_cache_q[i][0]) { if (free_i < 0) { free_i = i; } continue; }
+        if (strcmp(s_cache_q[i], name) == 0) { return; }
+    }
+    if (free_i < 0) { s_cache_scan = true; return; }   /* full: check everything */
+    snprintf(s_cache_q[free_i], sizeof s_cache_q[free_i], "%s", name);
+}
+
+/* "lua/profiles/acme/run.lua" -> "profiles.acme.run"; false for anything
+ * that is not a module (outside lua/, not .lua, or a top-level script). */
+static bool module_of_path(const char *path, char *name, size_t cap) {
+    if (strncmp(path, "lua/", 4) != 0) { return false; }
+    const char *rel = path + 4;
+    size_t n = strlen(rel);
+    if (n < 5 || strcmp(rel + n - 4, ".lua") != 0 || !memchr(rel, '/', n - 4)) { return false; }
+    if (n - 4 >= cap) { return false; }
+    for (size_t i = 0; i < n - 4; i++) { name[i] = rel[i] == '/' ? '.' : rel[i]; }
+    name[n - 4] = 0;
+    return true;
+}
+
+/* fs_on_change: only takes a note -- it runs in whatever context wrote. */
+static void on_fs_change(const char *path) {
+    char name[48];
+    if (module_of_path(path, name, sizeof name)) { cache_enqueue(name); }
+}
+
+typedef struct { char dirs[8][64]; int ndirs; char files[CACHE_QUEUE][64]; int nfiles; const char *at; } walk_t;
+static void walk_cb(const char *entry, bool is_dir, size_t size, void *ctx) {
+    (void)size;
+    walk_t *w = ctx;
+    char full[64];
+    if (snprintf(full, sizeof full, "%s/%s", w->at, entry) >= (int)sizeof full) { return; }
+    if (is_dir) {
+        if (w->ndirs < 8) { snprintf(w->dirs[w->ndirs++], 64, "%s", full); }
+    } else if (w->nfiles < CACHE_QUEUE) {
+        snprintf(w->files[w->nfiles++], 64, "%s", full);
+    }
+}
+
+static void cache_scan(void) {
+    static walk_t w;     /* ~2.6 KB: off the stack */
+    memset(&w, 0, sizeof w);
+    snprintf(w.dirs[w.ndirs++], 64, "lua");
+    for (int d = 0; d < w.ndirs; d++) {
+        w.at = w.dirs[d];
+        fs_walk(w.dirs[d], walk_cb, &w);
+    }
+    for (int i = 0; i < w.nfiles; i++) {
+        char name[48];
+        if (module_of_path(w.files[i], name, sizeof name)) { cache_enqueue(name); }
+    }
+}
+
+static void cache_tick(void) {
+    if (s_cache_scan) { s_cache_scan = false; cache_scan(); }
+    for (int i = 0; i < CACHE_QUEUE; i++) {
+        if (!s_cache_q[i][0]) { continue; }
+        char name[48];
+        snprintf(name, sizeof name, "%s", s_cache_q[i]);
+        s_cache_q[i][0] = 0;
+        cache_refresh(name);
+        return;
+    }
+}
+
+/* Is the value at idx a script environment (or the globals)? Stripped
+ * bytecode keeps no upvalue names, so require cannot find the caller's
+ * environment by the name "_ENV" when the caller is a cached module; an
+ * environment is recognisable anyway -- lrt gives every script a table whose
+ * metatable's __index is the global table. */
+static bool is_env_table(lua_State *Ls, int idx) {
+    if (!lua_istable(Ls, idx)) { return false; }
+    idx = lua_absindex(Ls, idx);
+    lua_pushglobaltable(Ls);
+    bool env = lua_rawequal(Ls, idx, -1);
+    if (!env && lua_getmetatable(Ls, idx)) {
+        lua_getfield(Ls, -1, "__index");
+        env = lua_rawequal(Ls, -1, -3);
+        lua_pop(Ls, 2);
+    }
+    lua_pop(Ls, 1);
+    return env;
 }
 
 static int l_require(lua_State *Ls) {
@@ -473,8 +705,20 @@ static int l_require(lua_State *Ls) {
 
     char chunkname[80];
     snprintf(chunkname, sizeof chunkname, "@%s", name);
-    if (luaL_loadbuffer(Ls, src, len, chunkname) != LUA_OK) {
-        return luaL_error(Ls, "module '%s': %s", name, lua_tostring(Ls, -1));
+    char rel[64];
+    bool cacheable = tier == SRC_TIER_COMMITTED && module_rel(name, rel, sizeof rel);
+    if (!(cacheable && cache_load(Ls, rel, chunkname, hash, (uint32_t)len))) {
+        /* Not cached (or stale): compile the source. cache_load may have
+         * used src_buf, so read it again. */
+        if (cacheable && !read_module_src(name, &src, &len, &tier)) {
+            return luaL_error(Ls, "module '%s' not found in staged/ or lua/", name);
+        }
+        if (luaL_loadbufferx(Ls, src, len, chunkname, "t") != LUA_OK) {
+            return luaL_error(Ls, "module '%s': %s", name, lua_tostring(Ls, -1));
+        }
+        if (cacheable && cache_store(Ls, rel, hash, (uint32_t)len)) {
+            printf("lua: cached %s on first use\n", name);
+        }
     }
 
     /*
@@ -503,6 +747,17 @@ static int l_require(lua_State *Ls) {
             }
             lua_pop(Ls, 1);                     /* not this one */
         }
+        /* A cached (stripped) caller has no upvalue names: recognise its
+         * environment by what it is instead. */
+        for (int i = 1; !have_env; i++) {
+            if (!lua_getupvalue(Ls, -1, i)) { break; }
+            if (is_env_table(Ls, -1)) {
+                lua_remove(Ls, -2);
+                have_env = true;
+            } else {
+                lua_pop(Ls, 1);
+            }
+        }
         if (!have_env) { lua_pop(Ls, 1); }      /* drop the caller function */
     }
     if (!have_env) { lua_pushglobaltable(Ls); }
@@ -524,7 +779,7 @@ static int l_require(lua_State *Ls) {
  * restart" ran the pushed file rather than the cached copy (a freshly
  * uploaded profile once appeared to ignore a step just added to it). That
  * also meant a second script requiring the same modules compiled its own
- * copy of all of them -- two Anker launchers, two drivers' worth of code, on
+ * copy of all of them -- two launchers of one profile, two drivers' worth of code, on
  * an arena that holds one. require() now revalidates a cache hit against the
  * file instead (module_is_current): an edited module still reloads, an
  * unchanged one is shared. */
@@ -860,6 +1115,7 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
 /* --- the scheduler -------------------------------------------------------- */
 void lrt_tick(void) {
     if (!s_ready) { return; }
+    cache_tick();
 
     /* The watchdog half of the wait contract. A coroutine blocked on an event
      * that never arrives is exactly as stuck as one blocked forever, and
@@ -1189,6 +1445,11 @@ void lrt_init(void) {
     lua_pushcfunction(L, l_require); lua_setglobal(L, "require");
 
     lbind_open_all(L);
+
+    /* Recompile a module into the bytecode cache when its source changes,
+     * and check every module once now, while the arena is empty. */
+    fs_on_change(on_fs_change);
+    s_cache_scan = true;
 
     s_ready = true;
     printf("lua: 5.4.8 up, %u KB arena, %d-instruction slice\n",

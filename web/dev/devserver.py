@@ -100,6 +100,22 @@ C1000_BASE = {
     "unknown_b1": 3, "capability_block": "\x02\x01\x01\x01", "fault_major": 0,
     "ac_countdown_s": 0, "car_countdown_s": 0,
 }
+# The A2687 charger, alongside: on the bench lua/anker2.lua drives it while
+# lua/anker.lua drives the C1000. The mock publishes both while "anker" runs.
+# Shape from a real report (2026-10-01); ports are tables, as in the model.
+A2687_BASE = {
+    "addr": "7C:E9:13:60:1F:D8", "product_type": "B405", "product_code": "A2687", "cipher": "gcm",
+    "model_name": "Anker Prime 160W 3-Port GaN Charger (smart display)", "serial": "ASHDJW61F45100348",
+    "c1_power": {"mv": 20080, "ma": 2980, "watts": 59.8, "charging": True},
+    "c2_power": {"mv": 5096, "ma": 100, "watts": 0.5, "charging": True},
+    "c3_power": {"mv": 0, "ma": 0, "watts": 0.0, "charging": False},
+    "c1_control": {"on": True, "countdown_s": 300, "countdown_remain_s": 300, "vid": 0, "cable": "100W", "countdown_active": False},
+    "c2_control": {"on": True, "countdown_s": 300, "countdown_remain_s": 300, "vid": 0, "cable": "60W", "countdown_active": False},
+    "c3_control": {"on": False, "countdown_s": 300, "countdown_remain_s": 300, "vid": 0, "cable": "none", "countdown_active": False},
+    "fixed_allocation": "c1_priority", "backlight_pct": 25, "screen_off": "12h", "error_code": 0,
+    "charging_protocol": 0, "package_version": 1606, "language": "en", "direction": "up",
+}
+
 C1000_SETTERS = {"ac_output_enabled": (0, 1), "car_output_enabled": (0, 1),
                  "ambient_light": (0, 1, 3), "screen_enabled": (0, 1),
                  # the countdown timers: seconds, 0 cancels (a range, not a list)
@@ -153,6 +169,7 @@ class MockGateway:
                                 c[out] = 0
                     c["ac_output_power_w"] = c["total_output_power_w"] = (22 + int(time.time()) % 5) if c["ac_output_enabled"] else 0
                     self.send({"evt": "profile.anker.telemetry", "data": dict(c)})
+                    self.send({"evt": "profile.anker.telemetry", "data": dict(A2687_BASE)})
                 if self.scanning:
                     for d in self.devices.values():
                         d["rssi"] = max(-95, min(-40, d["rssi"] + (hash(time.time()) % 5) - 2))
