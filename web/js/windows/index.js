@@ -3,6 +3,7 @@
 import { ConsoleWindow } from './console.js';
 import { ScannerWindow } from './scanner.js';
 import { GattWindow } from './gatt.js';
+import { GattEventsWindow } from './gattevents.js';
 import { HardwareWindow } from './hardware.js';
 import { EditorWindow } from './editor.js';
 
@@ -10,6 +11,7 @@ export const BUILTIN_WINDOWS = [
   { id: 'editor', title: 'Editor', group: 'Tools', create: EditorWindow },
   { id: 'scanner', title: 'Scanner', group: 'Tools', create: ScannerWindow },
   { id: 'gatt', title: 'GATT', group: 'Tools', create: GattWindow },
+  { id: 'gatt-events', title: 'GATT Events', group: 'Tools', create: GattEventsWindow },
   { id: 'console', title: 'Console', group: 'Tools', create: ConsoleWindow },
   { id: 'hardware', title: 'Hardware', group: 'Tools', create: HardwareWindow },
 ];

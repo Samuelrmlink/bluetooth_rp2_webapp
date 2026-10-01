@@ -215,7 +215,9 @@ export class Nav {
     const origin = inScope && active !== scope ? active : null;
 
     // A list: Space/Enter enter it; once entered it takes the keys.
-    const listEl = origin?.closest?.('[data-navlist]');
+    // Only when focus is ON the list: a control inside it (a GATT
+    // characteristic's panel) is an ordinary control -- Space presses it.
+    const listEl = origin?.matches?.('[data-navlist]') ? origin : null;
     const ctl = listEl && this._lists.get(listEl);
     if (ctl) {
       if (listEl.hasAttribute('data-nav-active')) return this._listKey(e, listEl, ctl);

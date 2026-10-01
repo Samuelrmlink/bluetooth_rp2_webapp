@@ -29,6 +29,7 @@ import { HelpModal } from './modals/help.js';
 import { readLayoutStore, writeLayoutStore, readPrefs, writePrefs } from './prefs.js';
 import { BUILTIN_WINDOWS, DEFAULT_TREE } from './windows/index.js';
 import { SETTINGS_SECTIONS } from './settings/index.js';
+import { GattLog } from './gattlog.js';
 import { DeviceStore } from './gattdb.js';
 import { DeviceHost } from './devices/host.js';
 
@@ -53,6 +54,12 @@ class App {
     // One mirror of the devices the gateway knows, shared by every window
     // that shows them, so the Scanner and GATT can never disagree.
     this.devices = new DeviceStore().bind(this.ws);
+    // Every GATT value and operation result, for every window that shows them
+    // (GATT, GATT Events, and the events split inside GATT in tabbed view).
+    this.gattLog = new GattLog(500);
+    const gl = this.bus.owner();
+    gl.on('char.value', (d) => this.gattLog.add({ addr: d.addr, id: d.id, uuid: d.uuid, src: d.source || 'notify', hex: d.value || '' }));
+    gl.on('gatt.op_failed', (d) => this.gattLog.add({ addr: d.addr, src: 'error', note: `${d.op} failed, ATT error 0x${Number(d.att_error).toString(16).padStart(2, '0')} (characteristic #${d.chr})` }));
     this.windows = new Map();       // pane id -> window instance
     this._visible = new Set();      // pane ids currently in a tile or float
 
@@ -391,6 +398,10 @@ class App {
   }
 
   get layoutMode() { return this._layout.override; }
+
+  // Whether the workspace is showing tabs right now (forced on a small screen
+  // or chosen) -- the GATT window offers its events split only then.
+  get tabsMode() { return this._layout?.mode === 'tabs'; }
 
   syncLayoutButtons() {
     const tabs = this._layout.mode === 'tabs';

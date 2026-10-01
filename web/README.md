@@ -37,6 +37,23 @@ subscribe through it and everything is dropped with it). Optional:
 while active (the editor claims `editor`). Register built-ins in
 `js/windows/index.js`.
 
+## GATT
+
+**GATT** lists a connected device's services and characteristics. Each characteristic opens (click,
+or Enter) into a panel with only what it permits — Read, Notify / Indicate toggles, a write box (with a
+"with response" choice only when both kinds of write are allowed) — plus its permissions, its last
+value, and a format: Hex, Decimal (one number per byte, `100 0 255`) or String (`\xNN` for other
+bytes). The format is used both to show values and to type them, and is remembered per
+service/characteristic UUID in the browser. 16-bit UUIDs always show, with names when known;
+128-bit ones show as a name or abbreviated — hover, or click for the whole UUID and Copy — or in full
+with **UUID-128**. **MTU** shows the connection's MTU and sets what new connections ask for
+(`bt.mtu`, firmware 1.84+, 23–255 on this build, kept in `cfg/bt.json`; raising it back to the maximum
+takes a reboot, a BTstack limit).
+
+**GATT Events** is every value, write and failure from the shared log (`js/gattlog.js`). In tabbed
+view, where it cannot sit beside GATT, GATT's **Events** button splits it into the GATT window
+instead, side by side or stacked, with a resize handle.
+
 ## Tables
 
 Every table (Scanner, GATT value log, Unclassified) is built with

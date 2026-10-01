@@ -40,8 +40,27 @@ MOCK_TREE = {
         {"id": "2", "uuid": "180f", "characteristics": [
             {"id": "2.0", "uuid": "2a19", "properties": 18, "flags": ["read", "notify"],
              "descriptors": [{"id": "2.0.0", "uuid": "2902"}]}]},
+        # A vendor service: 128-bit UUIDs, and every kind of write.
+        {"id": "3", "uuid": "12345678-1234-5678-9abc-def012345678", "characteristics": [
+            {"id": "3.0", "uuid": "12345678-1234-5678-9abc-def012345679", "properties": 14,
+             "flags": ["read", "write_no_response", "write"], "descriptors": []},
+            {"id": "3.1", "uuid": "12345678-1234-5678-9abc-def01234567a", "properties": 4,
+             "flags": ["write_no_response"], "descriptors": []},
+            {"id": "3.2", "uuid": "12345678-1234-5678-9abc-def01234567b", "properties": 32,
+             "flags": ["indicate"], "descriptors": [{"id": "3.2.0", "uuid": "2902"}]}]},
     ],
 }
+
+# What a read returns, per characteristic id; writes to a readable one update it.
+MOCK_VALUES_BASE = {"0.0": "6d6f636b", "2.0": "57", "3.0": "0102"}
+MOCK_VALUES = dict(MOCK_VALUES_BASE)
+
+def _chr(cid):
+    for s in MOCK_TREE["services"]:
+        for c in s["characteristics"]:
+            if c["id"] == cid:
+                return c
+    return None
 
 # --- device state shared by every connection, as on a real gateway ----------
 #
@@ -92,6 +111,7 @@ def reset_state():
                         if f"lua/{m.replace('.', '/')}.lua" in STATE["fs"]}
     STATE["c1000"] = dict(C1000_BASE)
     STATE["drafts"] = {}
+    MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
 
 def script_file(name, tier):
@@ -103,7 +123,7 @@ class MockGateway:
         self.send = send
         self.devices = {d["addr"]: dict(d) for d in MOCK_DEVICES}
         self.scanning = False
-        self.subscribed = set()
+        self.subscribed = set()     # (addr, id, mode)
         self.policy = "on_demand"
         threading.Thread(target=self._tick, daemon=True).start()
 
@@ -121,10 +141,11 @@ class MockGateway:
                         d["rssi"] = max(-95, min(-40, d["rssi"] + (hash(time.time()) % 5) - 2))
                         self.send({"evt": "scan.device", "data": d})
                 for key in list(self.subscribed):
-                    addr, cid = key
+                    addr, cid, mode = key
                     hr = 60 + (hr + 3) % 40
+                    c = _chr(cid) or {"uuid": "2a37"}
                     self.send({"evt": "char.value", "data": {
-                        "addr": addr, "id": cid, "uuid": "2a37", "source": "notify",
+                        "addr": addr, "id": cid, "uuid": c["uuid"], "source": mode,
                         "len": 2, "value": "00%02x" % hr}})
             except Exception:
                 return
@@ -168,18 +189,37 @@ class MockGateway:
         if op == "gatt.read":
             d = self.devices.get(p.get("device"))
             if not d or not d["connected"]: raise ApiError("not_connected", "not connected")
+            cid = p.get("id", "0.0")
+            c = _chr(cid)
+            if not c or "read" not in c["flags"]: raise ApiError("not_permitted", "not readable")
+            v = MOCK_VALUES.get(cid, "")
             self.send({"evt": "char.value", "data": {
-                "addr": d["addr"], "id": p.get("id", "0.0"), "uuid": "2a00",
-                "source": "read", "len": 4, "value": "6d6f636b"}})
+                "addr": d["addr"], "id": cid, "uuid": c["uuid"],
+                "source": "read", "len": len(v) // 2, "value": v}})
             return {"reading": True}
         if op == "gatt.write":
+            cid = p.get("id", "")
+            c = _chr(cid)
+            if not c or not ({"write", "write_no_response"} & set(c["flags"])): raise ApiError("not_permitted", "not writable")
+            STATE.setdefault("gatt_writes", []).append({"id": cid, "value": p.get("value", ""), "response": p.get("response", True)})
+            if "read" in c["flags"]: MOCK_VALUES[cid] = p.get("value", "")
             return {"written": len(p.get("value", "")) // 2, "response": p.get("response", True)}
+        if op == "test.gatt_writes":
+            return {"writes": STATE.get("gatt_writes", [])}
+        if op == "bt.mtu":
+            if "max_mtu" in p:
+                v = int(p["max_mtu"])
+                if v < 23 or v > 255: raise ApiError("bad_request", "max_mtu is 23..255 on this build")
+                STATE["max_mtu"] = v
+            m = STATE.get("max_mtu", 255)
+            return {"max_mtu": m, "ceiling": 255, "saved": STATE.get("max_mtu", 0), "reboot_needed": False,
+                    "links": [{"addr": d["addr"], "mtu": MOCK_TREE["mtu"]} for d in self.devices.values() if d["connected"]]}
         if op == "gatt.subscribe":
             d = self.devices.get(p.get("device"))
             if not d or not d["connected"]: raise ApiError("not_connected", "not connected")
-            key = (d["addr"], p.get("id", "1.0"))
-            if p.get("mode") == "off": self.subscribed.discard(key)
-            else: self.subscribed.add(key)
+            cid = p.get("id", "1.0")
+            self.subscribed = {k for k in self.subscribed if not (k[0] == d["addr"] and k[1] == cid)}
+            if p.get("mode") != "off": self.subscribed.add((d["addr"], cid, p.get("mode", "notify")))
             return {"mode": p.get("mode", "notify")}
         if op == "bond.policy":
             if "policy" in p:

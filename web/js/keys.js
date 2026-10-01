@@ -162,6 +162,13 @@ export const BINDINGS = [
   { id: 'scanner-filter-prev', group: 'Scanner', keys: 'Alt+Shift+N in a filter box', combos: ['Mod+Shift+KeyN'], when: 'scanner-filter', label: 'Previous filter box' },
   { id: 'scanner-list', group: 'Scanner', keys: 'Enter / L in the list', combos: [], when: 'scanner', label: 'Connect or disconnect the selected device / show it in GATT' },
   { id: 'table-columns', group: 'Scanner', keys: 'click a column heading', combos: [], when: 'scanner', label: 'Sort ascending, descending, back to default; drag its right edge to resize (every table)' },
+  // The GATT window's tree (context 'gatt'; 'gatt-panel' inside an open panel).
+  { id: 'gatt-move', group: 'GATT', keys: 'j / k, gg / G', combos: [], when: 'gatt', label: 'In the tree: move between services and characteristics' },
+  { id: 'gatt-open', group: 'GATT', keys: 'Enter / Space', combos: [], when: 'gatt', label: 'Open or close a characteristic\'s panel (or a service)' },
+  { id: 'gatt-into', group: 'GATT', keys: 'l / →', combos: [], when: 'gatt', label: 'Into an open panel\'s controls (opens it first if closed); h / ← closes, or goes to the service' },
+  { id: 'gatt-back', group: 'GATT', keys: 'Esc in a panel', combos: [], when: 'gatt-panel', label: 'Back to the characteristic\'s row' },
+  { id: 'gatt-uuid', group: 'GATT', keys: 'click a 128-bit UUID', combos: [], when: 'gatt', label: 'Show it whole, with Copy (or turn on UUID-128 in the bar)' },
+  { id: 'gatt-events-split', group: 'GATT', keys: 'Events button', combos: [], when: 'gatt', label: 'Tabbed view: GATT Events beside or below the tree, with a resize handle' },
   { id: 'help', group: 'Everywhere', keys: '?', combos: ['?', 'Mod+Slash'], when: 'always', label: 'Show / hide this list' },
   // No combos: typing is not a binding, it goes to the filter box. Listed so
   // that the one place people look for what the keys do says so.
@@ -169,7 +176,7 @@ export const BINDINGS = [
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
-export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'Everywhere'];
+export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'GATT', 'Everywhere'];
 
 // The banner's contents per context: short, and only what applies now.
 // `tiled` marks entries that make no sense in tabs mode.
@@ -237,6 +244,20 @@ export const HINTS = {
 
 // The Scanner is the workspace plus a way into its filters; inside one,
 // Alt+N means the next box.
+HINTS.gatt = [
+  { keys: 'Space', label: 'into the tree' },
+  { keys: 'J/K', label: 'move' },
+  { keys: 'Enter', label: 'open / close' },
+  { keys: 'L', label: 'into the panel' },
+  { keys: 'Alt+HJKL', label: 'focus window' },
+  { keys: 'Alt+N', label: 'next window' },
+];
+HINTS['gatt-panel'] = [
+  { keys: 'HJKL', label: 'controls' },
+  { keys: 'Space', label: 'press' },
+  { keys: 'Esc', label: 'back to the row' },
+  { keys: 'Alt+HJKL', label: 'focus window' },
+];
 HINTS.scanner = [{ keys: '/', label: 'filter' }, { keys: 'Enter', label: 'connect' }, ...HINTS.workspace];
 HINTS['scanner-filter'] = [
   { keys: 'Alt+N', label: 'next filter' },
@@ -272,7 +293,7 @@ export function matches(e, combo) {
 
 // Contexts that are the workspace with something extra: every workspace
 // binding (Alt+hjkl and the rest) applies in them too, plus their own.
-const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-filter']);
+const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-filter', 'gatt', 'gatt-panel']);
 
 function applies(b, context) {
   const w = Array.isArray(b.when) ? b.when : [b.when];

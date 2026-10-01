@@ -22,9 +22,12 @@
 #define ENABLE_LE_SECURE_CONNECTIONS
 #define ENABLE_L2CAP_LE_CREDIT_BASED_FLOW_CONTROL_MODE
 
-/* 517 is the largest ATT MTU that fits an LE Data Length Extension PDU, and
- * some peripherals negotiate right up to it. Anker's answer 253, but the point
- * of this firmware is that it works with peripherals we have never seen. */
+/* The ATT MTU ceiling is HCI_ACL_PAYLOAD_SIZE (below) less the 4-byte L2CAP
+ * header: 255 on the LE-only build. (An earlier note here said 517, the most
+ * an LE Data Length Extension PDU allows -- nothing configured that.) Going
+ * past 255 means a larger HCI_ACL_PAYLOAD_SIZE, which costs RAM in every ACL
+ * buffer. The value a connection actually asks for is set at runtime by the
+ * bt.mtu op (src/bt/bt.c), saved in cfg/bt.json. */
 /* Room for the LOCAL ATT database, which att_db_util builds at RUNTIME rather
  * than compile_gatt.py building it at compile time. A central still needs one:
  * the peer can act as a GATT client over the same connection and read our GAP

@@ -17,6 +17,7 @@
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
 #include "bt/le/bond.h"
+#include "fs/fs.h"
 #include "autoconf.h"
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"   /* wifi_bt_hold(): keep the BT controller off the bus during WiFi's boot join */
@@ -185,8 +186,90 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
     }
 }
 
+/* --- ATT MTU ----------------------------------------------------------------
+ * The MTU a connection asks for. BTstack exchanges it once, automatically,
+ * as each connection comes up, offering l2cap_max_le_mtu() -- and the spec
+ * allows one exchange per connection, so a new value applies to the NEXT
+ * connection, not to one already up.
+ *
+ * The ceiling is l2cap_max_mtu(): HCI_ACL_PAYLOAD_SIZE less the L2CAP
+ * header, 255 on this LE-only build (include/btstack_config.h). Lowering is
+ * immediate (l2cap_set_max_le_mtu). Raising back to the ceiling is not:
+ * BTstack takes a value only BELOW the ceiling and never clears the override
+ * it set, so that case is saved and applies from the next boot -- the reply
+ * says so ("reboot_needed") rather than claiming a change it did not make.
+ *
+ * Kept in cfg/bt.json as {"max_mtu": n} and applied in bt_init(). */
+#define BT_CFG_PATH "cfg/bt.json"
+#define MTU_MIN 23
+static uint16_t s_mtu_saved;           /* 0 = never set: BTstack's own default */
+
+static bool mtu_save(uint16_t n) {
+    char j[40];
+    int len = snprintf(j, sizeof j, "{\"max_mtu\":%u}\n", n);
+    if (fs_begin_write(BT_CFG_PATH) < 0) { return false; }
+    if (fs_write((const uint8_t *)j, (size_t)len) < 0) { fs_abort_write(); return false; }
+    return fs_end_write() >= 0;
+}
+
+static void mtu_load(void) {
+    size_t size = 0;
+    int h = fs_begin_read(BT_CFG_PATH, &size);
+    if (h < 0) { return; }
+    char buf[96];
+    int n = fs_read(h, (uint8_t *)buf, sizeof buf - 1);
+    fs_end_read(h);
+    if (n <= 0) { return; }
+    buf[n] = 0;
+    long v = 0;
+    if (!api_json_int(buf, "max_mtu", &v) || v < MTU_MIN || v > l2cap_max_mtu()) { return; }
+    s_mtu_saved = (uint16_t)v;
+    if (v < l2cap_max_mtu()) { l2cap_set_max_le_mtu((uint16_t)v); }
+    printf("bt: ATT MTU %u requested (cfg/bt.json)\n", (unsigned)l2cap_max_le_mtu());
+}
+
+static void op_bt_mtu(const char *params, api_reply_fn reply, void *ctx, long id) {
+    long want = 0;
+    bool reboot_needed = false;
+    if (api_json_int(params, "max_mtu", &want)) {
+        if (want < MTU_MIN || want > l2cap_max_mtu()) {
+            char e[80];
+            snprintf(e, sizeof e, "max_mtu is %d..%u on this build", MTU_MIN, (unsigned)l2cap_max_mtu());
+            api_reply_err(reply, ctx, id, "bad_request", e);
+            return;
+        }
+        if (!mtu_save((uint16_t)want)) {
+            api_reply_err(reply, ctx, id, "fs_error", "could not save " BT_CFG_PATH);
+            return;
+        }
+        s_mtu_saved = (uint16_t)want;
+        if (want < l2cap_max_mtu()) { l2cap_set_max_le_mtu((uint16_t)want); }
+        else { reboot_needed = l2cap_max_le_mtu() != l2cap_max_mtu(); }
+    }
+    char *r = api_scratch();
+    size_t cap = api_scratch_size();
+    size_t n = (size_t)snprintf(r, cap,
+        "{\"max_mtu\":%u,\"ceiling\":%u,\"saved\":%u,\"reboot_needed\":%s,\"links\":[",
+        (unsigned)l2cap_max_le_mtu(), (unsigned)l2cap_max_mtu(), (unsigned)s_mtu_saved,
+        reboot_needed ? "true" : "false");
+    bool first = true;
+    for (size_t i = 0; i < bt_registry_count() && n + 48 < cap; i++) {
+        bt_device_t *d = bt_registry_at(i);
+        if (!d || !d->connected) { continue; }
+        uint16_t mtu = 0;
+        gatt_client_get_mtu(d->con_handle, &mtu);
+        n += (size_t)snprintf(r + n, cap - n, "%s{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"mtu\":%u}",
+                              first ? "" : ",", d->addr[0], d->addr[1], d->addr[2], d->addr[3],
+                              d->addr[4], d->addr[5], (unsigned)mtu);
+        first = false;
+    }
+    snprintf(r + n, cap - n, "]}");
+    api_reply_ok(reply, ctx, id, r);
+}
+
 void bt_init(void) {
     l2cap_init();
+    mtu_load();
     sm_init();
     /* SM configuration belongs to bond.c, which owns the policy. */
     gatt_client_init();
@@ -634,6 +717,7 @@ static const op_def_t bt_ops[] = {
     { "dev.list",       op_dev_list },
     { "gatt.tree",      op_gatt_tree },
     { "bt.state",   op_bt_state },
+    { "bt.mtu",     op_bt_mtu },
     { "scan.start", op_scan_start },
     { "scan.stop",  op_scan_stop },
     { "scan.list",  op_scan_list },
