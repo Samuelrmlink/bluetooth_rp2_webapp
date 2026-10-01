@@ -70,8 +70,8 @@ export const BINDINGS = [
   { id: 'focus-down', group: 'Windows', keys: 'Alt+J / Alt+↓', combos: ['Mod+KeyJ', 'Mod+ArrowDown'], when: 'workspace', label: 'Focus the window below' },
   { id: 'focus-up', group: 'Windows', keys: 'Alt+K / Alt+↑', combos: ['Mod+KeyK', 'Mod+ArrowUp'], when: 'workspace', label: 'Focus the window above' },
   { id: 'focus-right', group: 'Windows', keys: 'Alt+L / Alt+→', combos: ['Mod+KeyL', 'Mod+ArrowRight'], when: 'workspace', label: 'Focus the window to the right (in tabbed view: the next tab)' },
-  { id: 'cycle-next', group: 'Windows', keys: 'Alt+N', combos: ['Mod+KeyN'], when: ['workspace', 'settings', 'popover'], label: 'Focus the next window (tiles, floating, Settings)' },
-  { id: 'cycle-prev', group: 'Windows', keys: 'Alt+Shift+N', combos: ['Mod+Shift+KeyN'], when: ['workspace', 'settings', 'popover'], label: 'Focus the previous window' },
+  { id: 'cycle-next', group: 'Windows', keys: 'Alt+N', combos: ['Mod+KeyN'], when: ['workspace', 'settings', 'popover'], label: 'Next window (tiled) / next tab (tabbed), and Settings when open' },
+  { id: 'cycle-prev', group: 'Windows', keys: 'Alt+Shift+N', combos: ['Mod+Shift+KeyN'], when: ['workspace', 'settings', 'popover'], label: 'Previous window (tiled) / previous tab (tabbed)' },
   // Alt+1..9. One row in the help overlay for all nine: the other eight are
   // real bindings the matcher needs, but a table listing them one per line
   // would say the same thing nine times, and a binding with no `group` is
@@ -138,6 +138,23 @@ export const BINDINGS = [
   { id: 'editor-stop', group: 'Editor', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
   { id: 'editor-sidebar', group: 'Editor', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
   { id: 'editor-files', group: 'Editor', keys: 'j / k, l, h', combos: [], when: 'editor', label: 'In the file list: move, open or expand, collapse' },
+  { id: 'editor-to-files', group: 'Editor', keys: 'Ctrl+H', combos: ['Ctrl+KeyH'], when: 'editor', label: 'Move to the file list (opens the sidebar if it is shut)' },
+  { id: 'editor-to-text', group: 'Editor', keys: 'Ctrl+L', combos: ['Ctrl+KeyL'], when: 'editor', label: 'Move back into the text' },
+  { id: 'editor-vim-toggle', group: 'Editor', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },
+  // Vim, in normal mode (editor/vim.js). No combos: the editor's own key
+  // handler takes these inside the text; listed so help can find them.
+  { id: 'vim-search', group: 'Editor', keys: '/text  ?text', combos: [], when: 'editor', label: 'Vim: search forward / backward — every match highlighted' },
+  { id: 'vim-search-next', group: 'Editor', keys: 'n  N', combos: [], when: 'editor', label: 'Vim: next / previous match (wraps)' },
+  { id: 'vim-search-word', group: 'Editor', keys: '*  #', combos: [], when: 'editor', label: 'Vim: search for the word under the cursor, forward / backward' },
+  { id: 'vim-noh', group: 'Editor', keys: ':noh', combos: [], when: 'editor', label: 'Vim: clear the search highlight' },
+  { id: 'vim-write', group: 'Editor', keys: ':w  :w path', combos: [], when: 'editor', label: 'Vim: save / write a copy to another file (and stay on this one)' },
+  { id: 'vim-quit', group: 'Editor', keys: ':q  :q!  ZQ', combos: [], when: 'editor', label: 'Vim: close the file (refused with unsaved changes) / close, discarding them' },
+  { id: 'vim-wq', group: 'Editor', keys: ':wq  :x  ZZ', combos: [], when: 'editor', label: 'Vim: save and close (:x and ZZ only write if modified)' },
+  { id: 'vim-edit', group: 'Editor', keys: ':e path  :e!', combos: [], when: 'editor', label: 'Vim: open a file (a new one if missing) / revert to what is on the device' },
+  { id: 'vim-line', group: 'Editor', keys: ':12  :$', combos: [], when: 'editor', label: 'Vim: go to line 12 / the last line' },
+  { id: 'vim-run', group: 'Editor', keys: ':run  :stop', combos: [], when: 'editor', label: 'Vim: run the buffer as a draft / stop the script (F5 / Shift+F5)' },
+  { id: 'vim-visual', group: 'Editor', keys: 'v  V, then y d c p P', combos: [], when: 'editor', label: 'Vim: select characters / lines (or drag with the mouse or a finger), then yank, delete, change, or paste over' },
+  { id: 'vim-clipboard', group: 'Editor', keys: 'y  /  Ctrl+V', combos: [], when: 'editor', label: 'Vim: a yank also copies to the system clipboard; paste (Ctrl+V or the phone\'s Paste) in normal mode inserts like p' },
   // The Scanner's. 'scanner-filter' is the Scanner with a filter box
   // focused: there Alt+N steps between the boxes instead of the windows.
   { id: 'scanner-filter', group: 'Scanner', keys: '/', combos: ['Slash'], when: 'scanner', label: 'Jump to the filter boxes (they filter as you type, scanning or not)' },
@@ -160,7 +177,9 @@ export const HINTS = {
   editor: [
     { keys: 'Ctrl+S', label: 'save' },
     { keys: 'F5', label: 'run' },
-    { keys: 'Alt+B', label: 'files' },
+    { keys: 'Ctrl+H/L', label: 'files / text' },
+    { keys: '/', label: 'search' },
+    { keys: ':', label: 'command' },
     { keys: 'Esc', label: 'leave the text' },
     { keys: 'Alt+HJKL', label: 'focus window' },
   ],

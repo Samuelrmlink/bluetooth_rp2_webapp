@@ -120,3 +120,22 @@ test('scanner connects by its button; columns sort and resize, and are remembere
   await expect(page.locator('.s-table tr.is-connected')).toHaveCount(1);
   await expect(rows.filter({ hasText: 'HRM-9000' }).locator('.s-conn')).toHaveText('Disconnect');
 });
+
+test('tabbed view: Alt+N visits every tab in order, one at a time; Alt+Shift+N goes back', async ({ page }) => {
+  await ready(page);
+  await page.keyboard.press('Alt+Shift+KeyT');
+  await expect(page.locator('#tabbar')).toBeVisible();
+  const tabs = await page.$$eval('#tabbar .tab', (b) => b.map((x) => x.dataset.pane));
+  expect(tabs.length).toBeGreaterThanOrEqual(5);
+  const active = () => page.$eval('#tabbar .tab.active', (b) => b.dataset.pane);
+  // From wherever it starts, n presses visit n consecutive tabs and wrap.
+  const start = tabs.indexOf(await active());
+  for (let k = 1; k <= tabs.length; k++) {
+    await page.keyboard.press('Alt+KeyN');
+    await expect.poll(active).toBe(tabs[(start + k) % tabs.length]);
+  }
+  for (let k = 1; k <= 2; k++) {
+    await page.keyboard.press('Alt+Shift+KeyN');
+    await expect.poll(active).toBe(tabs[(start - k + tabs.length) % tabs.length]);
+  }
+});

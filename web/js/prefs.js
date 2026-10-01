@@ -83,10 +83,21 @@ const PREF_DEFAULTS = {
   sidebarWidth: 220,      // px
 };
 
+function touchFirst() {
+  try {
+    return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  } catch {
+    return false;
+  }
+}
+
 export function readPrefs() {
   const rec = readJSON(PREFS_KEY) || {};
   const out = { ...PREF_DEFAULTS, ...rec };
-  if (typeof out.vim !== 'boolean') out.vim = PREF_DEFAULTS.vim;
+  // Never chosen: off on a touch-first device, where vim's normal mode would
+  // leave an on-screen keyboard with nothing to type into; on everywhere else.
+  if (typeof rec.vim !== 'boolean') out.vim = !touchFirst();
+  else if (typeof out.vim !== 'boolean') out.vim = PREF_DEFAULTS.vim;
   if (typeof out.sidebar !== 'boolean') out.sidebar = PREF_DEFAULTS.sidebar;
   if (!Number.isFinite(out.sidebarWidth) || out.sidebarWidth < 120 || out.sidebarWidth > 600) {
     out.sidebarWidth = PREF_DEFAULTS.sidebarWidth;

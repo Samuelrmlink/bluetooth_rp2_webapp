@@ -298,7 +298,7 @@ class App {
     // Window-specific actions (the editor's save/run/sidebar) are looked up on
     // whichever window is active, so a binding only does something where it
     // means something.
-    for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar',
+    for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar', 'editor-to-files', 'editor-to-text',
       'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev']) {
       actions[id] = () => activeWin()?.action?.(id);
     }
@@ -343,6 +343,7 @@ class App {
   }
 
   _cycleWindow(step) {
+    if (this._layout.mode === 'tabs') { this._cycleTab(step); return; }
     const ring = this._layout.ring().map((id) => ({ kind: 'win', id }));
     if (this.settingsModal.isOpen) ring.push({ kind: 'settings' });
     if (!ring.length) return;
@@ -353,6 +354,23 @@ class App {
     const next = ring[(((i + step) % n) + n) % n];
     if (next.kind === 'settings') this.settingsModal.focusPanel();
     else this._layout.focus(next.id, { dom: true });
+  }
+
+  // Tabbed mode: one tab at a time, in the tab bar's order, wrapping; an open
+  // Settings panel is one more stop past either end. Showing a tab is what
+  // clicking it does (showPane), and the keyboard stays on the window.
+  _cycleTab(step) {
+    const ids = this._layout.tabOrder();
+    const n = ids.length;
+    if (!n) return;
+    const show = (k) => {
+      this._layout.showPane(ids[((k % n) + n) % n]);
+      this._layout.focus(this._layout.activeId, { dom: true });
+    };
+    if (this.getContext() === 'settings') { show(step > 0 ? 0 : n - 1); return; }
+    const j = Math.max(0, this._layout.activeTabIndex()) + step;
+    if (this.settingsModal.isOpen && (j >= n || j < 0)) { this.settingsModal.focusPanel(); return; }
+    show(j);
   }
 
   // --- toolbar -----------------------------------------------------------------

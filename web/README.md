@@ -95,10 +95,20 @@ Markers: grey (on the device, unmodified), bright with `●` (unsaved), green `L
 but the file has changed since). The arena state comes from the firmware's
 `script.loaded` (1.80+).
 
-Vim keys (toggle in Settings → UI): normal, insert, visual, visual line;
-`hjkl w b e 0 ^ $ gg G` with counts; `d c y` + motion, `dd cc yy D C Y x X p P J`;
-`i a I A o O`; `u` / Ctrl+R; `:w :q :wq :<line>`; `/pat n N`. Esc: insert →
-normal → leave the text → Alt+hjkl between windows.
+Vim keys — toggle with the **VIM** button in the title bar or in Settings → UI
+(off by default on a touch-first device; off, the text is an ordinary text box):
+normal, insert, visual, visual line; `hjkl w b e 0 ^ $ gg G` with counts;
+`d c y` + motion, `dd cc yy D C Y x X p P J`; `i a I A o O`; `u` / Ctrl+R.
+Visual (`v`, `V`, or drag with the mouse or a finger): `y d x c`, and `p`/`P` paste over the selection.
+Search: `/text` `?text` (every match highlighted as you type), `n N`, `*` `#` (word under the cursor), `:noh`.
+Commands: `:w`, `:w path` (a copy; stays on this file), `:q` (refused with unsaved changes), `:q!`,
+`:wq`, `:x`/`ZZ`, `ZQ`, `:e path` (a new buffer if it does not exist), `:e!` (revert), `:12`, `:$`,
+`:run`, `:stop`. Ctrl+H moves to the file list, Ctrl+L back to the text. Esc: insert → normal →
+leave the text → Alt+hjkl between windows.
+
+Clipboard: a yank also copies to the system clipboard; text copied elsewhere comes in with a normal
+paste (Ctrl+V, the phone's Paste), which in normal mode inserts like `p`. The page cannot read the
+clipboard on demand: the gateway serves plain http, which is not a secure context (`js/clipboard.js`).
 
 The editor keeps its own undo history, not the textarea's: Chrome ends a typing
 undo group whenever any text on the page changes between keystrokes, which a

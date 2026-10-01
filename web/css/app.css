@@ -88,7 +88,7 @@ table.grid tbody tr:hover { background: #1a1c20; }
 table.grid tbody tr[aria-selected='true'] { background: #1f2a24; box-shadow: inset 2px 0 0 var(--green); }
 
 table.s-table tr.is-connected td:nth-child(2) { color: var(--green); }
-table.s-table td:first-child { padding: 1px 4px; }
+table.s-table td:first-child { padding: 3px 4px; }
 
 .pane-btn.on {
   color: var(--green);
@@ -230,6 +230,15 @@ table.s-table td:first-child { padding: 1px 4px; }
 .ed-notice.warn { color: var(--orange); }
 .ed-notice.err { color: var(--red); }
 .ed-titlebar .spacer { flex: 1 1 auto; }
+/* Vim keys on/off: a text badge rather than an icon, green when on. */
+.ed-titlebar .ed-b-keys {
+  width: auto;
+  padding: 0 6px;
+  font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+}
+.ed-titlebar .ed-b-keys.on { color: var(--green); }
 
 .ed-main {
   flex: 1 1 auto;
@@ -338,6 +347,7 @@ table.s-table td:first-child { padding: 1px 4px; }
   min-height: 100%;
 }
 
+.ed-find,
 .ed-hl,
 .ed-input {
   grid-area: 1 / 1;
@@ -356,6 +366,14 @@ table.s-table td:first-child { padding: 1px 4px; }
   color: var(--fg);
   pointer-events: none;
 }
+
+/* Search matches: under the coloured text, only the marks visible. */
+.ed-find {
+  color: transparent;
+  pointer-events: none;
+}
+.ed-find mark { color: transparent; background: rgba(230, 168, 61, 0.28); border-radius: 2px; }
+.ed-find mark.cur { background: rgba(230, 168, 61, 0.7); }
 
 .ed-input {
   resize: none;
@@ -488,7 +506,7 @@ table.grid.is-resizing .col-resize::after { background: var(--green); }
 table.grid.is-resizing { cursor: col-resize; user-select: none; }
 
 /* The row's action, visibly a button; green once connected. */
-.s-table .s-conn { border-color: var(--border); padding: 2px 8px; }
+.s-table .s-conn { border-color: var(--border); padding: 3px 8px; line-height: 1.2; }
 .s-table .s-conn:hover:not(:disabled) { color: var(--green); border-color: var(--green); }
 .s-table tr.is-connected .s-conn { color: var(--orange); }
 .s-table .s-conn:disabled { opacity: 0.4; cursor: default; }

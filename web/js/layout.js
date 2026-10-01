@@ -927,6 +927,20 @@ export class LayoutManager {
     return (this._mode === 'tabs' ? ws.filter((w) => w.kind === 'leaf') : ws).map((w) => w.id);
   }
 
+  // Tabbed mode's own order: the tab bar lists every registered pane, in the
+  // order they were registered (_buildTabs) -- NOT ring(), which is the tiles
+  // of the tree kept behind the tabs and would skip every pane that is not in
+  // one. Alt+N walks this.
+  tabOrder() {
+    return [...this._panes.keys()];
+  }
+
+  activeTabIndex() {
+    const a = this.layout.find(this.active);
+    const leaf = a && a.kind === 'leaf' ? a : this.layout.leaves()[0];
+    return this.tabOrder().indexOf(leaf?.pane);
+  }
+
   focusNext(step) {
     const ring = this.ring();
     if (!ring.length) return false;

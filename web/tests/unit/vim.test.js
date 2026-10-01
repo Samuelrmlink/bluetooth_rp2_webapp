@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { initialState, handle, modeLabel } from '../../js/editor/vim.js';
+import { initialState, handle, modeLabel, searchMatches } from '../../js/editor/vim.js';
 
 // Run keys over text; `|` marks the cursor before and after. Keys are single
 // characters, or <Esc> <Enter> <BS> <C-r>. Edits are applied exactly as the
@@ -9,6 +9,7 @@ function run(src, keys, st = initialState()) {
   let cursor = src.indexOf('|');
   let text = src.replace('|', '');
   const actions = [];
+  const yanks = [];
   for (const k of keys.match(/<[^>]+>|./gs)) {
     const ctrl = k.startsWith('<C-');
     const key = { '<Esc>': 'Escape', '<Enter>': 'Enter', '<BS>': 'Backspace' }[k] || (ctrl ? k[3] : k);
@@ -20,10 +21,12 @@ function run(src, keys, st = initialState()) {
       continue;
     }
     if (r.edit) text = text.slice(0, r.edit.from) + r.edit.insert + text.slice(r.edit.to);
-    if (r.action) actions.push(r.action);
+    // a : command is recorded with its detail -- 'ex:w! path'
+    if (r.action) actions.push(r.ex ? `ex:${r.ex.cmd}${r.ex.force ? '!' : ''}${r.ex.arg ? ' ' + r.ex.arg : ''}` : r.action);
+    if (r.yank !== undefined) yanks.push(r.yank);
     cursor = r.cursor;
   }
-  return { out: text.slice(0, cursor) + '|' + text.slice(cursor), st, actions };
+  return { out: text.slice(0, cursor) + '|' + text.slice(cursor), st, actions, yanks };
 }
 
 const CASES = [
@@ -71,6 +74,19 @@ const CASES = [
   ['dd on the last line, then P, restores it', 'a\n|b', 'ddP', '|b\na'],
   ['/ searches, n repeats', '|x foo y foo', '/foo<Enter>n', 'x foo y |foo'],
   ['N searches back', 'x foo y |foo', '/foo<Enter>N', 'x foo y |foo'],
+  ['n wraps past the end', 'x |foo y foo', '/foo<Enter>n', 'x |foo y foo'],
+  ['? searches backwards, n keeps going back', 'foo a foo b |foo', '?foo<Enter>n', '|foo a foo b foo'],
+  ['N after ? goes forwards', '|foo a foo b foo', '?foo<Enter>N', '|foo a foo b foo'],
+  ['? from the very start wraps to the last match', '|foo a foo', '?foo<Enter>', 'foo a |foo'],
+  ['an empty / repeats the last search', '|ab ab ab', '/ab<Enter>/<Enter>', 'ab ab |ab'],
+  ['* finds the next whole word', '|foo foobar foo', '*', 'foo foobar |foo'],
+  ['# finds the previous whole word', 'foo foobar |foo', '#', '|foo foobar foo'],
+  ['* from inside a word', 'f|oo x foo', '*', 'foo x |foo'],
+  [':$ goes to the last line', '|a\nb\n  c', ':$<Enter>', 'a\nb\n  |c'],
+  ['v p replaces the selection', '|ab cd', 'yewvep', 'ab a|b'],
+  ['v P replaces and keeps the register for again', '|x y z', 'ylwvPwvP', 'x x |x'],
+  ['v p leaves the replaced text in the register', '|ab cd', 'yewvepbp', 'ab ac|db'],
+  ['V p with a line replaces the line', '|a\nb\nc', 'yyjVp', 'a\n|a\nc'],
   [':3 goes to a line', '|a\nb\nc', ':3<Enter>', 'a\nb\n|c'],
   ['Esc cancels a pending operator', '|abc', 'd<Esc>x', '|bc'],
 ];
@@ -83,8 +99,46 @@ test('vim: u and Ctrl+R are the browser\'s undo and redo', () => {
   assert.deepEqual(run('|a', 'u<C-r>').actions, ['undo', 'redo']);
 });
 
-test('vim: :w :q :wq ask the editor, and unknown commands are reported', () => {
-  assert.deepEqual(run('|a', ':w<Enter>:q<Enter>:wq<Enter>:foo<Enter>').actions, ['save', 'quit', 'save-quit', 'unknown']);
+test('vim: : commands are handed to the editor with their ! and argument', () => {
+  assert.deepEqual(run('|a', ':w<Enter>:q<Enter>:q!<Enter>:wq<Enter>:x<Enter>:foo<Enter>').actions,
+    ['ex:w', 'ex:q', 'ex:q!', 'ex:wq', 'ex:x', 'unknown']);
+  assert.deepEqual(run('|a', ':w lua/new.lua<Enter>:e! <Enter>:e cfg/x.json<Enter>:run<Enter>:stop<Enter>').actions,
+    ['ex:w lua/new.lua', 'ex:e!', 'ex:e cfg/x.json', 'ex:run', 'ex:stop']);
+  assert.deepEqual(run('|a', ':write<Enter>:quit!<Enter>:xit<Enter>').actions, ['ex:w', 'ex:q!', 'ex:x']);
+});
+
+test('vim: ZZ is :x and ZQ is :q!', () => {
+  assert.deepEqual(run('|a', 'ZZZQ').actions, ['ex:x', 'ex:q!']);
+  assert.deepEqual(run('|a', 'Zx').actions, [], 'Z then anything else does nothing');
+});
+
+test('vim: search highlights until :noh, and says when it wraps or misses', () => {
+  let r = run('|a b a', '/a<Enter>');
+  assert.equal(r.st.hl, true);
+  assert.equal(run('|a b a', '/a<Enter>:noh<Enter>').st.hl, false);
+  assert.equal(run('|a b a', '/a<Enter>:noh<Enter>n').st.hl, true, 'n turns it back on');
+  r = run('a b |a', '/a<Enter>');
+  assert.deepEqual(r.actions, ['info'], 'wrapped past the end');
+  r = run('|abc', '/zz<Enter>');
+  assert.deepEqual(r.actions, ['info']);
+  assert.equal(r.out, '|abc', 'not found: the cursor stays');
+  assert.deepEqual(run('|abc', 'n').actions, ['info'], 'n with no search yet');
+});
+
+test('vim: searchMatches finds every match, whole words when asked', () => {
+  assert.deepEqual(searchMatches('foo foobar foo', 'foo'), [0, 4, 11]);
+  assert.deepEqual(searchMatches('foo foobar foo', 'foo', true), [0, 11]);
+  assert.deepEqual(searchMatches('aaaa', 'aa'), [0, 1, 2], 'overlapping, as vim highlights them');
+  assert.deepEqual(searchMatches('abc', ''), []);
+  assert.equal(searchMatches('x'.repeat(100), 'x', false, 10).length, 10, 'capped');
+});
+
+test('vim: yanks are reported so the editor can copy them to the clipboard', () => {
+  assert.deepEqual(run('|ab cd', 'yw').yanks, ['ab ']);
+  assert.deepEqual(run('|ab\ncd', 'yy').yanks, ['ab\n']);
+  assert.deepEqual(run('|ab\ncd', 'Y').yanks, ['ab\n']);
+  assert.deepEqual(run('a|bcd', 'vly').yanks, ['bc']);
+  assert.deepEqual(run('|abc', 'x').yanks, [], 'a delete is not a yank');
 });
 
 test('vim: Esc with nothing to cancel means "leave the text"', () => {
@@ -105,4 +159,5 @@ test('vim: the mode label', () => {
   assert.equal(modeLabel(run('|a', 'V').st), '-- VISUAL LINE --');
   assert.equal(modeLabel(run('|a', '2d').st), '-- NORMAL --  2d');
   assert.equal(modeLabel(run('|a', ':wq').st), ':wq');
+  assert.equal(modeLabel(run('|a', '?ab').st), '?ab');
 });

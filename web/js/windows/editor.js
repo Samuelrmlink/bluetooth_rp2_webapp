@@ -24,7 +24,8 @@ import { EditorCore } from '../editor/core.js';
 import { FileTree } from '../editor/filetree.js';
 import { languageOf } from '../editor/highlight.js';
 import { arenaMarks, shownArena, scriptNameOf, shadowedBy } from '../editor/status.js';
-import { initialState, handle as vimHandle, modeLabel, clampNormal } from '../editor/vim.js';
+import { initialState, handle as vimHandle, modeLabel, clampNormal, searchMatches } from '../editor/vim.js';
+import { copyText } from '../clipboard.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -46,6 +47,7 @@ export class EditorWindow {
     el.innerHTML = `
       <div class="ed-titlebar">
         <button type="button" class="tool-btn ed-b-sidebar" title="Files (Alt+B)" aria-label="Toggle file sidebar">${icon('sidebar')}</button>
+        <button type="button" class="tool-btn ed-b-keys" aria-pressed="false" title="Vim keys on/off — off, the text behaves like any text box (also Settings → UI)">VIM</button>
         <span class="ed-title"><span class="ed-name">No file open</span><span class="ed-state"></span></span>
         <span class="ed-notice"></span>
         <span class="spacer"></span>
@@ -105,9 +107,32 @@ export class EditorWindow {
     this.vimOn = !!this.app.prefs.vim;
     this.vst = initialState();
     this.vcur = 0;
+    this._painted = null;           // the selection _vimPaint last set
     this.core.ta.addEventListener('keydown', (e) => this._vimKey(e));
-    this.core.ta.addEventListener('mouseup', () => this._vimSync());
-    this.core.ta.addEventListener('focus', () => this._vimSync());
+    // A selection made with the mouse or a finger, in normal mode, becomes
+    // visual mode -- so y / d / c / p act on it. 'select' and selectionchange
+    // also fire for the selection _vimPaint sets itself; _painted tells them apart.
+    // Not WHILE a pointer is down: repainting the block cursor mid-drag
+    // resets the browser's drag anchor, so a drag could never select more
+    // than one character. The release decides.
+    this._pointerDown = false;
+    this.core.ta.addEventListener('pointerdown', () => { this._pointerDown = true; });
+    window.addEventListener('pointerup', () => {
+      if (!this._pointerDown) return;
+      this._pointerDown = false;
+      if (document.activeElement === this.core.ta) this._vimSync();
+    }, true);
+    window.addEventListener('pointercancel', () => { this._pointerDown = false; }, true);
+    for (const ev of ['select', 'focus']) {
+      this.core.ta.addEventListener(ev, () => { if (!this._pointerDown) this._vimSync(); });
+    }
+    document.addEventListener('selectionchange', () => {
+      if (!this._pointerDown && document.activeElement === this.core.ta) this._vimSync();
+    });
+    // A paste in normal or visual mode (Ctrl+V, the phone's Paste) puts the
+    // clipboard in as p would -- the only way the system clipboard reaches
+    // the editor over http, where pages cannot read it on demand.
+    this.core.ta.addEventListener('paste', (e) => this._vimPaste(e));
     this.core.onChange = (text) => this._edited(text);
     this.core.onCursor = (l, c) => { this._sPos.textContent = `Ln ${l}, Col ${c}`; };
 
@@ -127,6 +152,8 @@ export class EditorWindow {
     });
 
     q('.ed-b-sidebar').addEventListener('click', () => this.toggleSidebar());
+    this._keysBtn = q('.ed-b-keys');
+    this._keysBtn.addEventListener('click', () => this.app.setPref('vim', !this.vimOn));
     q('.ed-b-save').addEventListener('click', () => this.save());
     q('.ed-b-run').addEventListener('click', () => this.run());
     q('.ed-b-stop').addEventListener('click', () => this.stop());
@@ -169,6 +196,8 @@ export class EditorWindow {
     this.vst = initialState();
     const p = this.core.ta.selectionStart;
     this.core.ta.setSelectionRange(p, p);
+    this._painted = null;
+    this._updateFind();
     this._renderTitle();
   }
 
@@ -221,22 +250,108 @@ export class EditorWindow {
     switch (r.action) {
       case 'undo': this.core.undo(); this.vcur = clampNormal(this.core.value, this.core.ta.selectionStart); break;
       case 'redo': this.core.redo(); this.vcur = clampNormal(this.core.value, this.core.ta.selectionStart); break;
-      case 'save': this.save(); break;
-      case 'save-quit': this.save().then(() => this.core.ta.blur()); break;
-      case 'quit': this.core.ta.blur(); break;
+      case 'ex': this._ex(r.ex); break;
+      case 'info': this._say(r.message || ''); break;
       case 'unknown': this._say(r.message || 'Unknown command', 'warn'); break;
       default: break;
     }
+    if (r.yank !== undefined) this._yanked(r.yank);
     this._vimPaint();
+    this._updateFind();
     this._renderTitle();
   }
 
-  // A click moves vim's cursor to where it landed.
+  // Yanks go to the system clipboard too (vim's clipboard=unnamedplus), so
+  // what is yanked here pastes anywhere else.
+  async _yanked(text) {
+    const ok = await copyText(text);
+    this._vimPaint();                 // the copy borrowed the selection
+    const n = text.length;
+    this._say(ok ? `Yanked ${n} character${n === 1 ? '' : 's'} (copied to the clipboard)` : `Yanked ${n} characters`);
+  }
+
+  _vimPaste(e) {
+    if (!this.vimOn || this.vst.mode === 'insert' || this.core.readOnly) return;
+    const text = e.clipboardData?.getData('text/plain');
+    e.preventDefault();
+    if (!text) return;
+    // As p would, from a register holding the clipboard -- without replacing
+    // the editor's own register.
+    const keep = this.vst.reg;
+    const visual = this.vst.mode === 'visual' || this.vst.mode === 'vline';
+    const tmp = { ...this.vst, reg: { text, linewise: text.endsWith('\n') } };
+    const r = vimHandle(tmp, visual ? 'P' : 'p', this.core.value, this._vimCursor());
+    r.state = { ...r.state, reg: keep };
+    this._vimApply(r);
+  }
+
+  // The search highlight: what is being typed after / or ?, else the last
+  // search while it is on (until :noh). Called after anything that can move
+  // the cursor, change the text, or change the search.
+  _updateFind() {
+    const st = this.vst;
+    let pat = '', word = false;
+    if (this.vimOn && this.path) {
+      if (st.cmd && (st.cmd[0] === '/' || st.cmd[0] === '?') && st.cmd.length > 1) pat = st.cmd.slice(1);
+      else if (st.hl && st.search) { pat = st.search; word = st.word; }
+    }
+    if (!pat) { this.core.setFind(null); return; }
+    const at = searchMatches(this.core.value, pat, word);
+    this.core.setFind(at, pat.length, at.includes(this.vcur) ? this.vcur : -1);
+  }
+
+  // --- : commands ------------------------------------------------------------------
+
+  async _ex({ cmd, arg, force }) {
+    const b = this.path && this.buffers.get(this.path);
+    const dirty = !!b && this._isDirty(b);
+    switch (cmd) {
+      case 'w':
+        if (arg) return this.writeCopy(arg);
+        return this.save();
+      case 'q':
+        if (!this.path) return undefined;
+        if (dirty && !force) { this._say('E37: No write since last change (add ! to override)', 'warn'); return undefined; }
+        return this.close();
+      case 'wq':
+        if (await this.save()) this.close();
+        return undefined;
+      case 'x':                        // write only if modified, then close
+        if (!dirty || await this.save()) this.close();
+        return undefined;
+      case 'e':
+        if (arg) return this.open(arg, { create: true });
+        if (!this.path) return undefined;
+        if (dirty && !force) { this._say('E37: No write since last change (add ! to override)', 'warn'); return undefined; }
+        this.buffers.delete(this.path);              // :e! -- back to what is on the device
+        return this.open(this.path);
+      case 'run': return this.run();
+      case 'stop': return this.stop();
+      default: return undefined;
+    }
+  }
+
+  // A click moves vim's cursor to where it landed; a drag (or a touch
+  // selection) becomes visual mode over what was selected.
   _vimSync() {
     if (!this.vimOn || this.vst.mode === 'insert') return;
-    this.vcur = clampNormal(this.core.value, this.core.ta.selectionStart);
-    if (this.vst.mode !== 'normal') this.vst = { ...this.vst, mode: 'normal' };
+    const ta = this.core.ta;
+    const a = ta.selectionStart, b = ta.selectionEnd;
+    const p = this._painted;
+    if (p && p[0] === a && p[1] === b) return;           // our own selection
+    const t = this.core.value;
+    // A one-character selection is how normal mode draws its cursor, so only
+    // a longer one is the user selecting.
+    if (b - a > 1) {
+      const back = ta.selectionDirection === 'backward';
+      this.vst = { ...this.vst, mode: 'visual', anchor: back ? b - 1 : a };
+      this.vcur = back ? a : b - 1;
+    } else {
+      this.vcur = clampNormal(t, a);
+      if (this.vst.mode !== 'normal') this.vst = { ...this.vst, mode: 'normal' };
+    }
     this._vimPaint();
+    this._updateFind();
     this._renderTitle();
   }
 
@@ -245,7 +360,7 @@ export class EditorWindow {
     const t = ta.value;
     const c = Math.max(0, Math.min(this.vcur, t.length));
     const st = this.vst;
-    if (!this.vimOn || st.mode === 'insert') { ta.setSelectionRange(c, c); return; }
+    if (!this.vimOn || st.mode === 'insert') { ta.setSelectionRange(c, c); this._painted = [c, c]; return; }
     if (st.mode === 'visual' || st.mode === 'vline') {
       let a = Math.min(st.anchor, c), b = Math.max(st.anchor, c) + 1;
       if (st.mode === 'vline') {
@@ -254,12 +369,14 @@ export class EditorWindow {
         b = e < 0 ? t.length : e;
       }
       ta.setSelectionRange(a, Math.min(b, t.length), c < st.anchor ? 'backward' : 'forward');
+      this._painted = [a, Math.min(b, t.length)];
       return;
     }
     // normal: a one-character selection is the block cursor, except on an
     // empty line or at the very end, where there is no character to cover
     const block = c < t.length && t[c] !== '\n' ? 1 : 0;
     ta.setSelectionRange(c, c + block);
+    this._painted = [c, c + block];
   }
 
   // Active editor window -> the 'editor' context: the workspace bindings
@@ -271,7 +388,24 @@ export class EditorWindow {
     if (id === 'editor-run') return this.run();
     if (id === 'editor-stop') return this.stop();
     if (id === 'editor-sidebar') return this.toggleSidebar();
+    if (id === 'editor-to-files') return this.focusFiles();
+    if (id === 'editor-to-text') return this.focusText();
     return undefined;
+  }
+
+  // Ctrl+H: into the file list, ready for j/k (opening the sidebar if it is
+  // shut). Ctrl+L: back into the text.
+  focusFiles() {
+    if (this._sidebar.hidden) { this._applySidebar(true); this.app.setPref('sidebar', true); }
+    this._files.focus({ preventScroll: true });
+    this._files.setAttribute('data-nav-active', '');
+    this.tree.listController().enter();
+    this.tree.invalidate();
+  }
+
+  focusText() {
+    this.core.focus();
+    this._vimSync();
   }
 
   // --- visibility and polling ------------------------------------------------------
@@ -313,28 +447,63 @@ export class EditorWindow {
     return { dirty: !!b && this._isDirty(b), arena: shownArena(this.marks.get(path), b?.base) };
   }
 
-  async open(path) {
+  // { create: true } (from :e) opens a path that does not exist yet as a new,
+  // unsaved buffer -- as vim does -- rather than reporting it missing.
+  async open(path, { create = false } = {}) {
     let b = this.buffers.get(path);
     if (!b) {
       if (/\.(gz|png|ico|bin)$/i.test(path)) {
         b = { text: '', base: fnv1a(''), lang: 'text', binary: true };
       } else {
         const r = await fs.readText(path);
+        if (!r.ok && create && r.status === 404) {
+          this.buffers.set(path, { text: '', base: '', lang: languageOf(path), binary: false });
+          this._openBuffer(path);
+          this._say(`"${path}" [New] — :w writes it to the device`);
+          return true;
+        }
         if (!r.ok) { this._say(`Could not open ${path}: ${r.error}`, 'err'); return false; }
         b = { text: r.text, base: fnv1a(r.text), lang: languageOf(path), binary: r.text.includes('\0') };
       }
       this.buffers.set(path, b);
     }
+    this._openBuffer(path);
+    this._say(b.binary ? 'Binary file — download it to inspect it.' : '');
+    return true;
+  }
+
+  _openBuffer(path) {
+    const b = this.buffers.get(path);
     this.path = path;
     this.core.setValue(b.binary ? '' : b.text, b.lang);
     this.core.readOnly = b.binary;
-    this.vst = initialState();
+    // A fresh vim state, but the last search survives a change of file, as in vim.
+    const { search, word, sdir, hl } = this.vst;
+    this.vst = { ...initialState(), search, word, sdir, hl };
     this.vcur = 0;
-    this._say(b.binary ? 'Binary file — download it to inspect it.' : '');
+    this._painted = null;
     this.tree.reveal(path);
+    this._updateFind();
     this._renderTitle();
     this.core.focus();
-    return true;
+  }
+
+  // :q -- close the file. Its buffer goes with it (unsaved changes too: the
+  // caller has already asked, or was told to with !). Focus moves to the file
+  // list, where the next file is picked.
+  close() {
+    if (!this.path) return;
+    const was = this.path;
+    this.buffers.delete(was);
+    this.path = null;
+    this.core.setValue('', 'text');
+    this.core.readOnly = true;
+    this.vst = { ...initialState(), search: this.vst.search, word: this.vst.word, sdir: this.vst.sdir, hl: this.vst.hl };
+    this.core.setFind(null);
+    this._say(`Closed ${was}`);
+    this.tree.invalidate();
+    this._renderTitle();
+    this.focusFiles();
   }
 
   _edited(text) {
@@ -342,17 +511,19 @@ export class EditorWindow {
     if (!b) return;
     b.text = text;
     this.tree.invalidate();
+    this._updateFind();
     this._renderTitle();
   }
 
   // --- the verbs ----------------------------------------------------------------
 
+  // True when the file was written.
   async save() {
     const b = this.buffers.get(this.path);
-    if (!b || b.binary) return;
+    if (!b || b.binary) return false;
     const text = this.core.value;
     const r = await fs.write(this.path, text);
-    if (!r.ok) { this._say(`Save failed: ${r.error}`, 'err'); return; }
+    if (!r.ok) { this._say(`Save failed: ${r.error}`, 'err'); return false; }
     b.text = text;
     b.base = fnv1a(text);
     this._say(`Saved ${this.path}`);
@@ -364,6 +535,18 @@ export class EditorWindow {
     // a closed one (every new file, in a fresh session) would not appear.
     await this.tree.refresh();
     this.tree.reveal(this.path);
+    return true;
+  }
+
+  // :w <path> -- write the buffer to another file and stay on this one, as
+  // vim does.
+  async writeCopy(path) {
+    if (!this.path && !this.core.value) return false;
+    const r = await fs.write(path, this.core.value);
+    if (!r.ok) { this._say(`Write to ${path} failed: ${r.error}`, 'err'); return false; }
+    this._say(`"${path}" written`);
+    await this.tree.refresh();
+    return true;
   }
 
   async run() {
@@ -537,6 +720,8 @@ export class EditorWindow {
     this._sArena.textContent = this.runtime
       ? `arena ${Math.round(this.runtime.used / 1024)}/${Math.round(this.runtime.arena_bytes / 1024)} KB` : '';
     this._sMode.textContent = this.vimOn ? modeLabel(this.vst) : '';
+    this._keysBtn.setAttribute('aria-pressed', String(this.vimOn));
+    this._keysBtn.classList.toggle('on', this.vimOn);
   }
 
   render() {

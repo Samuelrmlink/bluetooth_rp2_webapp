@@ -10,7 +10,7 @@
 //
 // DOM-free, so it is unit-tested directly (tests/unit/highlight.test.js).
 
-const esc = (s) => s.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'));
+export const esc = (s) => s.replace(/[&<>]/g, (c) => (c === '&' ? '&amp;' : c === '<' ? '&lt;' : '&gt;'));
 const span = (cls, s) => `<span class="tk-${cls}">${esc(s)}</span>`;
 
 const LUA_KW = new Set(('and break do else elseif end for function goto if in local not or ' +

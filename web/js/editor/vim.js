@@ -14,12 +14,28 @@
 //   operators  d c y + motion; dd cc yy D C Y x X p P J
 //   insert     i a I A o O
 //   undo       u, Ctrl+R
-//   commands   :w :q :wq :<line>   /pattern  n N
+//   visual     y d x c, p P (replace the selection), o, v/V to switch
+//   search     /pat ?pat  n N  * #  (all matches highlighted until :noh)
+//   commands   :w [path] :w! :q :q! :wq :x :e path :e! :<line> :$ :noh
+//              :run :stop   and ZZ (= :x) ZQ (= :q!)
 // Not included (later, if wanted): macros, named registers, text objects,
 // block visual, `.` repeat.
+//
+// What the editor must do with a result beyond the edit and the cursor:
+//   action 'ex'       a : command for the editor: { ex: { cmd, arg, force } }
+//   action 'info'     a message to show (`message`), nothing else
+//   action 'unknown'  an unknown : command (`message`)
+//   yank: text        text was yanked -- the editor also copies it to the
+//                     system clipboard
 
 export function initialState() {
-  return { mode: 'normal', count: '', op: null, g: false, reg: { text: '', linewise: false }, anchor: 0, want: null, cmd: null, search: '' };
+  return {
+    mode: 'normal', count: '', op: null, g: false, z: false, reg: { text: '', linewise: false },
+    anchor: 0, want: null, cmd: null,
+    // the last search: pattern, whole-word (from * and #), direction, and
+    // whether its matches are highlighted (:noh turns that off)
+    search: '', word: false, sdir: 1, hl: false,
+  };
 }
 
 // --- text geometry -------------------------------------------------------------
@@ -125,7 +141,7 @@ export function handle(state, key, text, cursor, ctrl = false) {
   const st = { ...state };
   const out = (extra) => ({ state: st, cursor, ...extra });
   const n = Math.max(1, Number(st.count) || 1);
-  const reset = () => { st.count = ''; st.op = null; st.g = false; };
+  const reset = () => { st.count = ''; st.op = null; st.g = false; st.z = false; };
 
   // --- command line (: and /) ---------------------------------------------------
   if (st.cmd !== null) {
@@ -133,16 +149,13 @@ export function handle(state, key, text, cursor, ctrl = false) {
     if (key === 'Backspace') { if (st.cmd.length <= 1) st.cmd = null; else st.cmd = st.cmd.slice(0, -1); return out({}); }
     if (key === 'Enter') {
       const line = st.cmd; st.cmd = null;
-      if (line[0] === '/') {
-        st.search = line.slice(1);
-        return out({ cursor: find(text, st.search, cursor, 1) ?? cursor });
+      if (line[0] === '/' || line[0] === '?') {
+        // An empty pattern repeats the last one, as in vim.
+        if (line.length > 1) { st.search = line.slice(1); st.word = false; }
+        st.sdir = line[0] === '/' ? 1 : -1;
+        return searchStep(st, text, cursor, st.sdir, out);
       }
-      const c = line.slice(1).trim();
-      if (/^\d+$/.test(c)) return out({ cursor: firstNonBlank(text, lineAt(text, Math.max(0, Number(c) - 1))) });
-      if (c === 'w') return out({ action: 'save' });
-      if (c === 'q' || c === 'q!') return out({ action: 'quit' });
-      if (c === 'wq' || c === 'x') return out({ action: 'save-quit' });
-      return out({ action: 'unknown', message: `Not an editor command: ${c}` });
+      return ex(st, line.slice(1).trim(), text, out);
     }
     if (key.length === 1) st.cmd += key;
     return out({});
@@ -181,10 +194,28 @@ export function handle(state, key, text, cursor, ctrl = false) {
     key = 'gg';
   } else if (key === 'g') { st.g = true; return out({}); }
 
-  if (key === ':' || key === '/') { reset(); st.cmd = key; return out({}); }
+  if (st.z) {
+    st.z = false;
+    reset();
+    if (key === 'Z') return out({ action: 'ex', ex: { cmd: 'x', arg: '', force: false } });
+    if (key === 'Q') return out({ action: 'ex', ex: { cmd: 'q', arg: '', force: true } });
+    return out({});
+  }
+  if (key === 'Z' && !visual) { st.z = true; return out({}); }
+
+  if (key === ':' || key === '/' || key === '?') { reset(); st.cmd = key; return out({}); }
   if (key === 'n' || key === 'N') {
     reset();
-    return out({ cursor: st.search ? find(text, st.search, cursor, key === 'n' ? 1 : -1) ?? cursor : cursor });
+    if (!st.search) return out({ action: 'info', message: 'No previous search' });
+    return searchStep(st, text, cursor, key === 'n' ? st.sdir : -st.sdir, out);
+  }
+  if ((key === '*' || key === '#') && !visual) {
+    reset();
+    const w = wordAt(text, cursor);
+    if (!w) return out({ action: 'info', message: 'No word under the cursor' });
+    st.search = w.word; st.word = true; st.sdir = key === '*' ? 1 : -1;
+    // from the word's start, so the next/previous OTHER occurrence is found
+    return searchStep(st, text, w.from, st.sdir, out);
   }
 
   // visual-mode verbs act on the selection
@@ -199,10 +230,28 @@ export function handle(state, key, text, cursor, ctrl = false) {
       st.mode = st.mode === m ? 'normal' : m;
       return out({});
     }
+    if (key === 'p' || key === 'P') {
+      // Replace the selection with the register. p leaves what it replaced in
+      // the register (vim's behaviour); P keeps the register for pasting again.
+      const { text: r, linewise } = st.reg;
+      reset();
+      st.mode = 'normal';
+      if (!r) return out({});
+      let insert = r;
+      if (linewise && !range.linewise) insert = '\n' + (r.endsWith('\n') ? r : r + '\n');
+      else if (!linewise && range.linewise) insert = r + '\n';
+      else if (linewise && range.linewise && !r.endsWith('\n')) insert = r + '\n';
+      if (key === 'p') st.reg = { text: text.slice(range.from, range.to), linewise: range.linewise };
+      const edit = { from: range.from, to: range.to, insert };
+      // vim leaves the cursor on the last pasted character (charwise), or on
+      // the first of the pasted lines
+      const at = linewise || range.linewise ? range.from + (insert[0] === '\n' ? 1 : 0) : range.from + insert.length - 1;
+      return out({ edit, cursor: clampNormal(apply(text, edit), at) });
+    }
     if (key === 'd' || key === 'x' || key === 'y' || key === 'c') {
       st.reg = { text: text.slice(range.from, range.to), linewise: range.linewise };
       reset();
-      if (key === 'y') { st.mode = 'normal'; return out({ cursor: range.from }); }
+      if (key === 'y') { st.mode = 'normal'; return out({ cursor: range.from, yank: st.reg.text }); }
       const edit = { from: range.from, to: range.to, insert: key === 'c' && range.linewise ? '\n' : '' };
       if (key === 'c') { st.mode = 'insert'; return out({ edit, cursor: range.from }); }
       st.mode = 'normal';
@@ -276,7 +325,7 @@ export function handle(state, key, text, cursor, ctrl = false) {
     case 'Y': {
       reset();
       st.reg = { text: text.slice(ls, Math.min(text.length, le + 1)) + (le >= text.length ? '\n' : ''), linewise: true };
-      return out({});
+      return out({ yank: st.reg.text });
     }
     case 'p': case 'P': {
       reset();
@@ -315,7 +364,7 @@ function operate(st, op, r, text, out) {
     if (!body.endsWith('\n')) body += '\n';
   }
   st.reg = { text: body, linewise: r.linewise };
-  if (op === 'y') return out({ cursor: r.linewise ? lineStart(text, r.from + (text[r.from] === '\n' ? 1 : 0)) : r.from });
+  if (op === 'y') return out({ cursor: r.linewise ? lineStart(text, r.from + (text[r.from] === '\n' ? 1 : 0)) : r.from, yank: body });
   if (op === 'c') {
     st.mode = 'insert';
     // cc keeps the line itself, empties it: replace with the line break
@@ -329,15 +378,76 @@ function operate(st, op, r, text, out) {
   return out({ edit, cursor: clampNormal(after, at) });
 }
 
-// Plain-text search, wrapping around; dir 1 forward from after `from`, -1 back.
-function find(text, pat, from, dir) {
+// --- search --------------------------------------------------------------------
+// Plain text, case-sensitive. `word` (from * and #) matches only where the
+// pattern is not part of a longer word -- vim's \<word\>.
+const isWordCh = (c) => c !== undefined && /\w/.test(c);
+function matchAt(text, pat, i, word) {
+  if (!word) return true;
+  return !isWordCh(text[i - 1]) && !isWordCh(text[i + pat.length]);
+}
+
+// Every match, in order, as start offsets -- for the highlight layer. Capped:
+// past `limit` the highlight stops (the search itself still works).
+export function searchMatches(text, pat, word = false, limit = 5000) {
+  const out = [];
+  if (!pat) return out;
+  for (let k = text.indexOf(pat); k >= 0 && out.length < limit; k = text.indexOf(pat, k + 1)) {
+    if (matchAt(text, pat, k, word)) out.push(k);
+  }
+  return out;
+}
+
+// The next match from `from` in direction `dir`, wrapping: { pos, wrapped } or null.
+function find(text, pat, from, dir, word = false) {
   if (!pat) return null;
   if (dir > 0) {
-    const k = text.indexOf(pat, from + 1);
-    return k >= 0 ? k : (text.indexOf(pat) >= 0 ? text.indexOf(pat) : null);
+    for (let k = text.indexOf(pat, from + 1); k >= 0; k = text.indexOf(pat, k + 1)) if (matchAt(text, pat, k, word)) return { pos: k, wrapped: false };
+    for (let k = text.indexOf(pat); k >= 0 && k <= from; k = text.indexOf(pat, k + 1)) if (matchAt(text, pat, k, word)) return { pos: k, wrapped: true };
+    return null;
   }
-  const k = text.lastIndexOf(pat, from - 1);
-  return k >= 0 ? k : (text.lastIndexOf(pat) >= 0 ? text.lastIndexOf(pat) : null);
+  // (from 0 there is nothing before: lastIndexOf(pat, -1) would answer 0)
+  for (let k = from > 0 ? text.lastIndexOf(pat, from - 1) : -1; k >= 0; k = k > 0 ? text.lastIndexOf(pat, k - 1) : -1) if (matchAt(text, pat, k, word)) return { pos: k, wrapped: false };
+  for (let k = text.lastIndexOf(pat); k >= from && k >= 0; k = k > 0 ? text.lastIndexOf(pat, k - 1) : -1) if (matchAt(text, pat, k, word)) return { pos: k, wrapped: true };
+  return null;
+}
+
+function searchStep(st, text, cursor, dir, out) {
+  st.hl = true;
+  const f = find(text, st.search, cursor, dir, st.word);
+  if (!f) return out({ action: 'info', message: `Pattern not found: ${st.search}` });
+  return out({
+    cursor: f.pos,
+    ...(f.wrapped ? { action: 'info', message: dir > 0 ? 'search hit BOTTOM, continuing at TOP' : 'search hit TOP, continuing at BOTTOM' } : {}),
+  });
+}
+
+function wordAt(text, i) {
+  if (!isWordCh(text[i])) {
+    // vim takes the next word on the line when the cursor is not on one
+    const e = lineEnd(text, i);
+    while (i < e && !isWordCh(text[i])) i++;
+    if (i >= e) return null;
+  }
+  let a = i, b = i;
+  while (a > 0 && isWordCh(text[a - 1])) a--;
+  while (b < text.length && isWordCh(text[b])) b++;
+  return { word: text.slice(a, b), from: a };
+}
+
+// --- : commands ----------------------------------------------------------------
+// Movement and :noh are handled here; everything that touches files is handed
+// to the editor as { action: 'ex', ex: { cmd, arg, force } }.
+const EX = { w: 'w', write: 'w', q: 'q', quit: 'q', wq: 'wq', x: 'x', xit: 'x', e: 'e', edit: 'e', run: 'run', stop: 'stop' };
+function ex(st, c, text, out) {
+  if (c === '') return out({});
+  if (/^\d+$/.test(c)) return out({ cursor: firstNonBlank(text, lineAt(text, Math.max(0, Number(c) - 1))) });
+  if (c === '$') return out({ cursor: firstNonBlank(text, lineAt(text, lineCount(text) - 1)) });
+  if (c === 'noh' || c === 'nohlsearch') { st.hl = false; return out({}); }
+  const m = /^([a-z]+)(!?)\s*(.*)$/.exec(c);
+  const cmd = m && EX[m[1]];
+  if (!cmd) return out({ action: 'unknown', message: `Not an editor command: ${c}` });
+  return out({ action: 'ex', ex: { cmd, force: m[2] === '!', arg: m[3].trim() } });
 }
 
 export function modeLabel(st) {

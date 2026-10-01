@@ -18,7 +18,7 @@
 //
 // Highlighting runs at most once a frame, after the text changes.
 
-import { highlight } from './highlight.js';
+import { highlight, esc } from './highlight.js';
 import { History } from './history.js';
 
 export class EditorCore {
@@ -27,6 +27,7 @@ export class EditorCore {
       <div class="ed-scroll">
         <div class="ed-gutter" aria-hidden="true"></div>
         <div class="ed-code">
+          <pre class="ed-find" aria-hidden="true"></pre>
           <pre class="ed-hl" aria-hidden="true"></pre>
           <textarea class="ed-input" wrap="off" spellcheck="false" autocomplete="off"
                     autocapitalize="off" autocorrect="off" aria-label="File contents"></textarea>
@@ -35,6 +36,11 @@ export class EditorCore {
     this.scroll = host.querySelector('.ed-scroll');
     this.gutter = host.querySelector('.ed-gutter');
     this.pre = host.querySelector('.ed-hl');
+    // Search matches: a third layer UNDER the coloured text, same font and
+    // padding, its text transparent -- only the <mark> backgrounds show.
+    this.findPre = host.querySelector('.ed-find');
+    this._find = null;             // { at: [offsets], len, cur } or null
+    this._findDirty = false;
     this.ta = host.querySelector('.ed-input');
     this.lang = 'text';
     // Our own undo history: Chrome's cannot survive a live highlight layer
@@ -137,6 +143,18 @@ export class EditorCore {
     this._changed();
   }
 
+  // Highlight these matches (offsets of `len` characters; `cur` is the one
+  // the cursor is on), or none. Cheap to call every keystroke: it only marks
+  // the layer for the next frame, and only when something changed.
+  setFind(at, len, cur = -1) {
+    const next = at && at.length && len ? { at, len, cur } : null;
+    const same = (a, b) => (!a && !b) || (a && b && a.len === b.len && a.cur === b.cur &&
+      a.at.length === b.at.length && a.at.every((v, i) => v === b.at[i]));
+    if (same(next, this._find)) return;
+    this._find = next;
+    this._findDirty = true;
+  }
+
   // Line/column of the caret, 1-based, for the status bar.
   _cursor() {
     const pos = this.ta.selectionStart;
@@ -146,8 +164,25 @@ export class EditorCore {
     this.onCursor?.(line, col);
   }
 
+  _renderFind() {
+    this._findDirty = false;
+    const f = this._find;
+    if (!f) { this.findPre.textContent = ''; return; }
+    const t = this.ta.value;
+    let html = '';
+    let k = 0;
+    for (const a of f.at) {
+      if (a < k) continue;                       // overlapping: the first wins
+      html += esc(t.slice(k, a)) + `<mark${a === f.cur ? ' class="cur"' : ''}>${esc(t.slice(a, a + f.len))}</mark>`;
+      k = a + f.len;
+    }
+    // Only up to the last mark: what follows has nothing to show.
+    this.findPre.innerHTML = html;
+  }
+
   // Called from the app's frame loop while the window is visible.
   render() {
+    if (this._findDirty || (this._dirty && this._find)) this._renderFind();
     if (!this._dirty) return;
     this._dirty = false;
     const text = this.ta.value;
