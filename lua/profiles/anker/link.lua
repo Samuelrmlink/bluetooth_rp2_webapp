@@ -75,9 +75,23 @@ end
 -- GATT operations are queued per link in C (src/bt/le/central.h), so a write
 -- issued straight after bt.subscribe is no longer refused and needs neither
 -- the retry loop nor the sleep the two old copies used.
+--
+-- The queue holds 4 operations per link (central.c OP_QUEUE_DEPTH), so a
+-- burst -- a screensaver window is 10 data packets back to back -- fills it,
+-- and bt.write refuses until a write completes. Refused used to mean failed:
+-- the 5th packet of the first window to the A2687 was dropped, the rest went
+-- out of order, and the charger answered 0x12. Wait for room instead, up to
+-- two seconds; a link that is gone still fails at once.
 function Link:send(ft, opcode, payload, encrypted)
   local f = assert(frame.build(ft, opcode, encrypted and true or false, 0, payload))
-  return bt.write(self.addr, self.cmd, bytes.hex(f), true)
+  local hex = bytes.hex(f)
+  local give_up = sys.ms() + 2000
+  while true do
+    local ok, why = bt.write(self.addr, self.cmd, hex, true)
+    if ok then return true end
+    if why == 'not connected' or sys.ms() > give_up then return false, why end
+    sys.sleep(10)
+  end
 end
 
 function Link:decode(f, body)
