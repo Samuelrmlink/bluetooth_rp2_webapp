@@ -169,6 +169,15 @@ export class FileTree {
         }
         row.appendChild(badges);
       }
+      // The menu, for a finger: CSS shows it on coarse pointers only. Out of
+      // the tab order -- the keyboard has m / Shift+F10 for the same thing.
+      const more = document.createElement('button');
+      more.type = 'button';
+      more.className = 'ft-more';
+      more.tabIndex = -1;
+      more.textContent = '⋯';
+      more.setAttribute('aria-label', `Menu for ${node.name}`);
+      row.appendChild(more);
       frag.appendChild(row);
     }
     this.host.replaceChildren(frag);
