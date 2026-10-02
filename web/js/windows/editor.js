@@ -28,6 +28,7 @@ import { initialState, handle as vimHandle, modeLabel, clampNormal, searchMatche
 import { copyText } from '../clipboard.js';
 import { openCellMenu } from '../controls/cellmenu.js';
 import { fileMenuItems } from '../editor/filemenu.js';
+import { LongPress } from '../editor/longpress.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -144,21 +145,40 @@ export class EditorWindow {
       onError: (m) => this.app.log('!', m),
     });
     // Right-click a file or folder: its menu (openFileMenu). The keyboard
-    // equivalent is m / Shift+F10 / the Menu key in the list (attachKeys).
+    // equivalent is m / Shift+F10 / the Menu key in the list (attachKeys);
+    // on a touch screen, a long press on the row, or its ⋯ button.
     this._fileMenu = document.createElement('div');
     this._fileMenu.className = 's-menu ed-file-menu';
+    this._press = new LongPress({ onFire: (p) => this._rowMenu(p) });
+    // On the window, not the list: opening the menu re-renders the rows, and
+    // a row taken out of the page no longer passes its pointer's events up;
+    // and every pointerdown, anywhere, must reach the press (longpress.js).
+    window.addEventListener('pointerdown', (e) => {
+      const row = this._files.contains(e.target) && !e.target.closest('.ft-more') && e.target.closest('.ft-row');
+      this._press.down({ id: e.pointerId, x: e.clientX, y: e.clientY, type: e.pointerType, key: row ? row.dataset.path : null, primary: e.isPrimary });
+    }, true);
+    window.addEventListener('pointermove', (e) => this._press.move({ id: e.pointerId, x: e.clientX, y: e.clientY }));
+    window.addEventListener('pointerup', (e) => this._press.up({ id: e.pointerId }));
+    window.addEventListener('pointercancel', (e) => this._press.up({ id: e.pointerId }));
+    // The click that follows a long press, wherever it lands: the menu has
+    // just opened under the finger, and the lift must not press Delete…
+    // (detail 0 is a keyboard's click, never the finger's).
+    window.addEventListener('click', (e) => {
+      if (e.detail > 0 && this._press.takeClick()) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
     this._files.addEventListener('contextmenu', (e) => {
       const row = e.target.closest('.ft-row');
       if (!row) return;
       e.preventDefault();
-      this.tree.sel = row.dataset.path;
-      this.tree.invalidate();
-      this.tree.render();
-      this.openFileMenu(row.dataset.path);
+      // Mobile browsers send their own contextmenu on a long press: that is
+      // the press firing (early, perhaps), never a second menu.
+      if (this._press.active || e.pointerType === 'touch' || e.pointerType === 'pen') { this._press.fire(); return; }
+      this._rowMenu(row.dataset.path);
     });
     this._files.addEventListener('click', (e) => {
       const row = e.target.closest('.ft-row');
       if (!row) return;
+      if (e.target.closest('.ft-more')) { this._rowMenu(row.dataset.path); return; }   // the row's menu, not the row
       this.tree.sel = row.dataset.path;
       const n = this.tree.find(row.dataset.path);
       if (n?.dir) this.tree.toggle(n);
@@ -689,9 +709,19 @@ export class EditorWindow {
     this.tree.refresh();
   }
 
-  // The menu for one file or folder: right-click, or m / Shift+F10 / the Menu
-  // key in the list. Items come from editor/filemenu.js (tested); the path
-  // itself is the last item and copies.
+  // A pointer asked for a row's menu: select the row too, since the
+  // keyboard's menu is always the selected row's.
+  _rowMenu(path) {
+    this.tree.sel = path;
+    this.tree.invalidate();
+    this.tree.render();
+    this.openFileMenu(path);
+  }
+
+  // The menu for one file or folder: right-click, a long press or the ⋯
+  // button on a touch screen, or m / Shift+F10 / the Menu key in the list.
+  // Items come from editor/filemenu.js (tested); the path itself is the last
+  // item and copies.
   openFileMenu(path) {
     const node = this.tree.find(path);
     if (!node) return false;
