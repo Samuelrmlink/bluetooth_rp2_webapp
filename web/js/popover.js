@@ -58,7 +58,19 @@ export class Popover {
     // frame late, so the one that scrolled the anchor into view (or a
     // finger's momentum scroll, just before the tap that opened this) would
     // otherwise close it as soon as it opened.
-    window.addEventListener('scroll', () => { if (performance.now() - this._openedAt > 200) this.close(); }, true);
+    //
+    // And only a scroll that moves the anchor: the page, or something the
+    // anchor is inside. Any scroll at all used to close it -- the Console,
+    // auto-scrolling a log line in its own tile every few hundred ms, closed
+    // the editor's file menu half a second after it opened on a desktop or
+    // an iPad (a phone shows one window at a time, so it never happened there).
+    window.addEventListener('scroll', (e) => {
+      if (!this.isOpen || performance.now() - this._openedAt <= 200) return;
+      const t = e.target;
+      const moves = t === document || t === document.documentElement || t === document.body
+        || !this._anchor || (t.contains && t.contains(this._anchor));
+      if (moves) this.close();
+    }, true);
   }
 
   get isOpen() {

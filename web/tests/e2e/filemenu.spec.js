@@ -77,3 +77,24 @@ test('rename a file that is not open, from its menu', async ({ page }) => {
   await menu(page).getByRole('button', { name: 'Delete…' }).click();
   await expect(row(page, 'lua/zz_menu2.lua')).toHaveCount(0);
 });
+
+test('another window scrolling (the Console logging) leaves the menu open; the file list scrolling closes it', async ({ page }) => {
+  await editor(page);
+  await row(page, 'lua/anker.lua').click({ button: 'right' });
+  await expect(menu(page)).toBeVisible();
+  await page.waitForTimeout(300);                                   // past the popover's 200 ms grace
+  // something elsewhere scrolls, as the Console does when a line arrives
+  await page.evaluate(() => {
+    const other = document.createElement('div');
+    other.style.cssText = 'position:fixed;left:0;bottom:0;width:50px;height:50px;overflow:auto';
+    other.innerHTML = '<div style="height:500px"></div>';
+    document.body.appendChild(other);
+    other.scrollTop = 100;
+    other.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(200);
+  await expect(menu(page)).toBeVisible();
+  // the list the row is in scrolls: the menu would be left floating -- it closes
+  await page.evaluate(() => document.querySelector('.ed-files').dispatchEvent(new Event('scroll')));
+  await expect(menu(page)).toBeHidden();
+});
