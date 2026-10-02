@@ -210,7 +210,7 @@ def t_script_loaded_reports_arena():
     if "s->src_hash = hash" not in c or "module_set_src(name, tier, hash)" not in c:
         return False, "a load path no longer records what it compiled"
     req = c[c.index("static int l_require"):]
-    if req.index("uint32_t hash = fnv1a(src, len)") > req.index("lua_call(Ls, 0, 1)"):
+    if req.index("module_identity(name, &tier, &hash, &stored)") > req.index("lua_call(Ls, 0, 1)"):
         return False, "module hash taken after lua_call -- src_buf may hold another module by then"
     if "2166136261u" not in c or "16777619u" not in c:
         return False, "fnv1a constants changed; the web editor hashes with the standard ones"
@@ -218,6 +218,37 @@ def t_script_loaded_reports_arena():
         return False, "script.loaded must report truncation rather than overflow the frame"
     return True, "registered, recorded on both load paths, hashed before running"
 
+
+def t_no_nested_flash_safe():
+    """SDK 2.3.0's pico_bootrom helpers (rom_explicit_buy, rom_flash_op ...)
+    run themselves under flash_safe_execute(). Calling one from INSIDE our
+    own flash_safe_execute() nests the safe zone, whose single saved
+    interrupt state per core is then overwritten with "disabled": PRIMASK
+    stays set forever and USB-NCM dies on the spot (fw 1.95 confirm). So no
+    callback handed to flash_safe_execute may call a rom_* helper."""
+    import re
+    bad = []
+    for root, _, files in os.walk(os.path.join(ROOT, "src")):
+        for fn in files:
+            if not fn.endswith(".c"):
+                continue
+            c = open(os.path.join(root, fn)).read()
+            for cb in set(re.findall(r"flash_safe_execute\(\s*(\w+)", c)):
+                m = re.search(r"\b(?:static\s+)?void\s+" + cb + r"\s*\([^)]*\)\s*\{", c)
+                if not m:
+                    continue
+                depth, i = 0, m.end() - 1
+                while True:
+                    depth += {"{": 1, "}": -1}.get(c[i], 0)
+                    i += 1
+                    if depth == 0:
+                        break
+                body = c[m.end():i]
+                if re.search(r"\brom_(?!get_boot_info|func_lookup)\w+\s*\(", body):
+                    bad.append(f"{fn}:{cb}")
+    if bad:
+        return False, "rom_* helper inside flash_safe_execute: " + ", ".join(bad)
+    return True, "no rom_* helper runs inside our own flash_safe_execute"
 
 def t_wg_confirmed_exists():
     """wifi.c's AP policy keys on wg_is_confirmed(); if it were removed or its
@@ -293,6 +324,28 @@ def t_anker_model_schemas():
     if unverified:
         detail += f", {len(unverified)} unverified ({', '.join(sorted(unverified))})"
     return True, detail
+
+def t_inflate():
+    """The board's gzip inflater (src/util/inflate.c) against zlib: Python
+    writes streams at every level and with every optional header field, over
+    random data and the repo's own Lua and JS, plus truncated and corrupted
+    copies; the C side must reproduce each byte for byte, fed in odd-sized
+    pieces, and reject every corrupt one without crashing."""
+    tmp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_gz")
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_inflate")
+    rc, out = sh(f"python3 test/host/mkgz.py {tmp}")
+    if rc:
+        return False, (out.strip().splitlines() or ["mkgz failed"])[-1][:90]
+    rc, out = sh(f"gcc -O1 -Wall -Wextra -Isrc -o {binp} test/host/inflate_test.c src/util/inflate.c")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "inflate harness build failed"
+    rc, out = sh(f"{binp} {tmp}")
+    last = (out.strip().splitlines() or ["no output"])[-1]
+    if rc != 0:
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), last)
+        return False, first[:100]
+    return True, last
 
 def t_lua_wait():
     """The wait/wake contract. These are the races -- a disconnect arriving
@@ -567,6 +620,8 @@ def main():
     step(0, "neg constants agree with the Lua profile", t_neg_constants_agree)
     step(0, "protocol Lua on a host", t_lua_proto)
     step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
+    step(0, "gzip inflate matches zlib, rejects corrupt input", t_inflate)
+    step(0, "flash_safe_execute is never nested (interrupts stay on)", t_no_nested_flash_safe)
     step(0, "the wait/wake contract and its races", t_lua_wait)
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)

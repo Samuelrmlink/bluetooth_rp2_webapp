@@ -81,6 +81,19 @@ export function write(path, data) {
 
 export const remove = (path) => send('DELETE', fsPath(path), undefined, 'json');
 
+// A folder, parents and all (fw 1.95: PUT with a trailing slash). Files need
+// none -- a PUT makes its parents -- so this is for empty folders.
+export const mkdir = (path) => send('PUT', fsPath(path) + '/', '', 'json');
+
+// A folder ('' = everything) as a tar archive, streamed by the device
+// (fw 1.95). A URL rather than a fetch: the browser saves it straight to
+// disk, with its progress, and nothing is held in the page. The board has no
+// clock, so the archive's file times are the time asked for.
+export function tarUrl(folder = '') {
+  const p = folder ? '/api/tar/' + String(folder).split('/').map(encodeURIComponent).join('/') : '/api/tar/';
+  return apiUrl(`${p}?mtime=${Math.floor(Date.now() / 1000)}`);
+}
+
 // The device takes a JSON body here, as text/plain so a cross-origin dev page
 // does not provoke a CORS preflight it would not answer.
 export function rename(from, to) {

@@ -494,3 +494,235 @@ void fs_end_read(int h) {
     lfs_file_close(&lfs, &rfiles[h]);
     ropen[h] = false;
 }
+
+/* --- folders as tar -----------------------------------------------------------
+ * GET /api/tar/<folder> (http.c) streams a folder -- or the whole filesystem
+ * -- as a ustar archive, straight out of LittleFS: nothing is staged, the
+ * board never holds more than one 512 B header. Files go in exactly as
+ * stored (a .gz stays compressed), folders get entries of their own so an
+ * empty one survives a restore.
+ *
+ * Names are relative to the folder's parent: downloading "lua" gives
+ * "lua/anker.lua", ...; the whole filesystem gives "cfg/...", "lua/...".
+ *
+ * fs_tar_begin walks once to compute the exact length (Content-Length, so a
+ * cut-off download is visible); fs_tar_read then produces it a piece at a
+ * time. A file whose size changed in between is padded or cut to the size
+ * its header promised; if the walk itself no longer matches the promised
+ * length, http.c aborts the connection rather than finish a wrong archive.
+ * One archive at a time: the state is static. */
+#define TAR_DEPTH 8
+
+typedef struct {
+    bool active;
+    char path[FS_PATH_MAX + 1];      /* the current entry's path on the filesystem */
+    size_t base;                     /* where archive names start within path */
+    lfs_dir_t dirs[TAR_DEPTH];
+    size_t dlen[TAR_DEPTH];          /* path length of each open directory */
+    int depth;
+    uint32_t mtime;
+    uint8_t hdr[512];
+    size_t hdr_pos, hdr_len;         /* header bytes still to send */
+    lfs_file_t file;
+    bool file_open;
+    uint32_t data_left;              /* file bytes still to send (header's size) */
+    uint32_t pad_left;               /* zero bytes after the data */
+    uint32_t end_left;               /* the two closing zero blocks */
+    bool walked_out;                 /* every directory read to the end */
+} tar_state_t;
+
+static tar_state_t tar;
+
+static uint32_t pad512(uint32_t n) { return (512u - (n & 511u)) & 511u; }
+
+static void octal(uint8_t *f, size_t w, uint32_t v) {
+    f[w - 1] = 0;
+    for (size_t i = w - 1; i-- > 0;) { f[i] = (uint8_t)('0' + (v & 7u)); v >>= 3; }
+}
+
+/* A ustar header for `name` (archive name; folders end in '/'). Names up to
+ * 100 bytes go in `name`; longer ones are split at a '/' into prefix (155)
+ * and name (100). False if it cannot be split -- never with FS_PATH_MAX 128. */
+static bool tar_header(uint8_t *h, const char *name, bool dir, uint32_t size, uint32_t mtime) {
+    memset(h, 0, 512);
+    size_t n = strlen(name);
+    if (n <= 100) {
+        memcpy(h, name, n);
+    } else {
+        size_t cut = 0;
+        for (size_t i = 0; i < n && i <= 155; i++) {
+            if (name[i] == '/' && n - i - 1 <= 100 && n - i - 1 > 0) { cut = i; break; }
+        }
+        if (!cut) { return false; }
+        memcpy(h + 345, name, cut);                 /* prefix */
+        memcpy(h, name + cut + 1, n - cut - 1);     /* name */
+    }
+    octal(h + 100, 8, dir ? 0755u : 0644u);
+    octal(h + 108, 8, 0);
+    octal(h + 116, 8, 0);
+    octal(h + 124, 12, dir ? 0 : size);
+    octal(h + 136, 12, mtime);
+    h[156] = dir ? '5' : '0';
+    memcpy(h + 257, "ustar", 6);                    /* "ustar\0" */
+    memcpy(h + 263, "00", 2);
+    memcpy(h + 265, "btgw", 4);
+    memcpy(h + 297, "btgw", 4);
+    memset(h + 148, ' ', 8);
+    uint32_t sum = 0;
+    for (int i = 0; i < 512; i++) { sum += h[i]; }
+    octal(h + 148, 7, sum);                         /* 6 digits, NUL ... */
+    h[155] = ' ';                                   /* ... then a space */
+    return true;
+}
+
+/* The archive's length for this folder: a pass over the same walk. */
+static int tar_count(char *path, size_t len, uint64_t *total) {
+    lfs_dir_t d;
+    if (lfs_dir_open(&lfs, &d, len ? path : "/") < 0) { return -1; }
+    struct lfs_info info;
+    int rc = 0;
+    while (rc == 0 && lfs_dir_read(&lfs, &d, &info) > 0) {
+        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) { continue; }
+        size_t n = (size_t)snprintf(path + len, FS_PATH_MAX + 1 - len, "%s%s", len ? "/" : "", info.name);
+        if (len + n > FS_PATH_MAX) { rc = -1; break; }
+        *total += 512;
+        if (info.type == LFS_TYPE_DIR) {
+            rc = tar_count(path, len + n, total);
+        } else {
+            *total += info.size + pad512(info.size);
+        }
+        path[len] = 0;
+    }
+    lfs_dir_close(&lfs, &d);
+    return rc;
+}
+
+void fs_tar_end(void) {
+    if (!tar.active) { return; }
+    if (tar.file_open) { lfs_file_close(&lfs, &tar.file); }
+    for (int i = 0; i < tar.depth; i++) { lfs_dir_close(&lfs, &tar.dirs[i]); }
+    memset(&tar, 0, sizeof tar);
+}
+
+bool fs_tar_busy(void) { return tar.active; }
+
+int fs_tar_begin(const char *folder, uint32_t mtime, uint64_t *length) {
+    if (!mounted) { return -1; }
+    if (tar.active) { return -2; }
+    const char *f = folder ? folder : "";
+    if (f[0] && !fs_is_dir(f)) { return -3; }
+    memset(&tar, 0, sizeof tar);
+    snprintf(tar.path, sizeof tar.path, "%s", f);
+    size_t len = strlen(tar.path);
+    const char *slash = strrchr(tar.path, '/');
+    tar.base = slash ? (size_t)(slash - tar.path) + 1 : 0;
+    tar.mtime = mtime;
+    uint64_t total = 1024;                           /* the end blocks */
+    if (len) { total += 512; }                       /* the folder's own entry */
+    if (tar_count(tar.path, len, &total) < 0) { tar.path[0] = 0; return -1; }
+    tar.path[len] = 0;
+    if (lfs_dir_open(&lfs, &tar.dirs[0], len ? tar.path : "/") < 0) { return -1; }
+    tar.dlen[0] = len;
+    tar.depth = 1;
+    tar.active = true;
+    tar.end_left = 1024;
+    if (len) {                                       /* "lua/" first */
+        char nm[FS_PATH_MAX + 2];
+        snprintf(nm, sizeof nm, "%s/", tar.path + tar.base);
+        tar_header(tar.hdr, nm, true, 0, mtime);
+        tar.hdr_len = 512;
+    }
+    *length = total;
+    return 0;
+}
+
+/* Prepare the next entry's header (and open its file). False when the
+ * walk is over. */
+static bool tar_next(void) {
+    struct lfs_info info;
+    while (tar.depth > 0) {
+        lfs_dir_t *d = &tar.dirs[tar.depth - 1];
+        size_t dl = tar.dlen[tar.depth - 1];
+        int r = lfs_dir_read(&lfs, d, &info);
+        if (r <= 0) {
+            lfs_dir_close(&lfs, d);
+            tar.depth--;
+            continue;
+        }
+        if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) { continue; }
+        size_t n = (size_t)snprintf(tar.path + dl, sizeof tar.path - dl, "%s%s", dl ? "/" : "", info.name);
+        if (dl + n > FS_PATH_MAX) { tar.path[dl] = 0; continue; }   /* cannot happen: fs_valid_path */
+        size_t plen = dl + n;
+        if (info.type == LFS_TYPE_DIR) {
+            char nm[FS_PATH_MAX + 2];
+            snprintf(nm, sizeof nm, "%s/", tar.path + tar.base);
+            tar_header(tar.hdr, nm, true, 0, tar.mtime);
+            if (tar.depth < TAR_DEPTH && lfs_dir_open(&lfs, &tar.dirs[tar.depth], tar.path) >= 0) {
+                tar.dlen[tar.depth++] = plen;
+            }
+        } else {
+            tar_header(tar.hdr, tar.path + tar.base, false, info.size, tar.mtime);
+            tar.file_open = lfs_file_open(&lfs, &tar.file, tar.path, LFS_O_RDONLY) >= 0;
+            tar.data_left = info.size;
+            tar.pad_left = pad512(info.size);
+        }
+        tar.hdr_pos = 0;
+        tar.hdr_len = 512;
+        return true;
+    }
+    tar.walked_out = true;
+    return false;
+}
+
+/* Up to `cap` bytes of the archive. 0 once it is all out; < 0 on error. */
+int fs_tar_read(uint8_t *buf, size_t cap) {
+    if (!tar.active) { return -1; }
+    size_t out = 0;
+    while (out < cap) {
+        if (tar.hdr_pos < tar.hdr_len) {
+            size_t k = tar.hdr_len - tar.hdr_pos;
+            if (k > cap - out) { k = cap - out; }
+            memcpy(buf + out, tar.hdr + tar.hdr_pos, k);
+            tar.hdr_pos += k;
+            out += k;
+            continue;
+        }
+        if (tar.data_left) {
+            size_t k = tar.data_left < cap - out ? tar.data_left : cap - out;
+            lfs_ssize_t got = tar.file_open ? lfs_file_read(&lfs, &tar.file, buf + out, k) : 0;
+            if (got < 0) { return (int)got; }
+            if ((size_t)got < k) { memset(buf + out + got, 0, k - (size_t)got); }  /* shrank: pad */
+            tar.data_left -= (uint32_t)k;
+            out += k;
+            continue;
+        }
+        if (tar.file_open) { lfs_file_close(&lfs, &tar.file); tar.file_open = false; }
+        if (tar.pad_left) {
+            size_t k = tar.pad_left < cap - out ? tar.pad_left : cap - out;
+            memset(buf + out, 0, k);
+            tar.pad_left -= (uint32_t)k;
+            out += k;
+            continue;
+        }
+        if (!tar.walked_out && tar_next()) { continue; }
+        if (tar.end_left) {
+            size_t k = tar.end_left < cap - out ? tar.end_left : cap - out;
+            memset(buf + out, 0, k);
+            tar.end_left -= (uint32_t)k;
+            out += k;
+            continue;
+        }
+        break;
+    }
+    return (int)out;
+}
+
+/* PUT /api/fs/<path>/ -- an (empty) folder, parents included. */
+int fs_mkdir(const char *path) {
+    if (!mounted || !fs_valid_path(path)) { return -1; }
+    if (fs_is_dir(path)) { return 0; }
+    char child[FS_PATH_MAX + 2];
+    snprintf(child, sizeof child, "%s/x", path);
+    ensure_parent_dirs(child);                    /* makes every prefix of path, path included */
+    return fs_is_dir(path) ? 0 : -1;
+}

@@ -51,9 +51,12 @@ typedef struct {
     int    n_subs;
 } flist_t;
 
-static bool ends_lua(const char *name) {
+/* The length of a Lua source's name without its suffix (.lua, or .lua.gz
+ * for a compressed one), or 0 when it is not one. */
+static size_t lua_stem(const char *name) {
     size_t n = strlen(name);
-    return n > 4 && strcmp(name + n - 4, ".lua") == 0;
+    if (n > 7 && strcmp(name + n - 7, ".lua.gz") == 0) { return n - 7; }
+    return n > 4 && strcmp(name + n - 4, ".lua") == 0 ? n - 4 : 0;
 }
 
 static void flist_cb(const char *name, bool is_dir, size_t size, void *ctx) {
@@ -68,7 +71,8 @@ static void flist_cb(const char *name, bool is_dir, size_t size, void *ctx) {
         }
         return;
     }
-    if (!ends_lua(name)) {
+    size_t stem_len = lua_stem(name);
+    if (!stem_len) {
         return;
     }
     if (f->n + 128 >= f->cap) {
@@ -77,7 +81,7 @@ static void flist_cb(const char *name, bool is_dir, size_t size, void *ctx) {
     /* The name is what script.source takes: no directory for a top-level
      * script, "<sub>/<stem>" for a module. */
     char stem[40];
-    snprintf(stem, sizeof stem, "%.*s", (int)(strlen(name) - 4), name);
+    snprintf(stem, sizeof stem, "%.*s", (int)stem_len, name);
 
     bool staged = strcmp(f->dir, "staged") == 0;
     f->n += (size_t)snprintf(f->out + f->n, f->cap - f->n,

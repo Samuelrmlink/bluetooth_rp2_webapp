@@ -29,6 +29,10 @@ import { copyText } from '../clipboard.js';
 import { openCellMenu } from '../controls/cellmenu.js';
 import { fileMenuItems, fileInfo, dirInfo, folderSize, sizeInfo } from '../editor/filemenu.js';
 import { LongPress } from '../editor/longpress.js';
+import { RestoreDialog } from '../editor/restore.js';
+import { ImagePreview } from '../editor/preview.js';
+import { isGz, plainName, imageKind, imageType, isWebAsset, shadowInfo, gzipText } from '../gz.js';
+import { bytes } from '../editor/filemenu.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -60,8 +64,10 @@ export class EditorWindow {
         <button type="button" class="tool-btn ed-b-new" title="New file" aria-label="New file">${icon('new')}</button>
         <button type="button" class="tool-btn ed-b-upload" title="Upload files from this computer" aria-label="Upload">${icon('upload')}</button>
         <button type="button" class="tool-btn ed-b-download" title="Download this file" aria-label="Download">${icon('download')}</button>
+        <button type="button" class="tool-btn ed-b-svg" title="Show the SVG as a picture or as text" hidden>Text</button>
         <button type="button" class="tool-btn ed-b-more" title="More" aria-label="More actions">${icon('more')}</button>
         <input type="file" class="ed-upload-input" multiple hidden>
+        <input type="file" class="ed-tar-input" accept=".tar,application/x-tar" hidden>
       </div>
       <div class="ed-main">
         <aside class="ed-sidebar">
@@ -87,6 +93,9 @@ export class EditorWindow {
         <button type="button" class="pane-btn" data-act="rename">Rename / move…</button>
         <button type="button" class="pane-btn" data-act="delete">Delete…</button>
         <button type="button" class="pane-btn" data-act="reload">Reload from the device</button>
+        <hr>
+        <button type="button" class="pane-btn" data-act="tarall">Download everything (.tar)</button>
+        <button type="button" class="pane-btn" data-act="restore">Restore archive… (.tar)</button>
       </div>`;
     const q = (s) => el.querySelector(s);
     this.el = el;
@@ -104,8 +113,14 @@ export class EditorWindow {
     this._more = q('.ed-more-menu');
     this._moreBtn = q('.ed-b-more');
     this._upload = q('.ed-upload-input');
+    this._tarInput = q('.ed-tar-input');
+    this._svgBtn = q('.ed-b-svg');
 
     this.core = new EditorCore(q('.ed-surface'));
+    this.preview = new ImagePreview(q('.ed-surface'));
+    this.restorer = new RestoreDialog(this.app, {
+      onDone: async ({ target }) => { await this.tree.refresh(); if (target) this.tree.reveal(target); this._poll(); },
+    });
     // Vim: a pure reducer (editor/vim.js) driven from here. vcur is vim's
     // logical cursor -- in normal mode the textarea shows it as a one-
     // character selection, which is what makes it look like a block.
@@ -198,6 +213,12 @@ export class EditorWindow {
     q('.ed-b-upload').addEventListener('click', () => { this._uploadDir = undefined; this._upload.click(); });
     q('.ed-b-download').addEventListener('click', () => this.download());
     this._upload.addEventListener('change', () => this.upload([...this._upload.files], this._uploadDir));
+    this._tarInput.addEventListener('change', () => {
+      const f = this._tarInput.files[0];
+      this._tarInput.value = '';
+      if (f) this.restorer.open(f, this._tarTarget || '');
+    });
+    this._svgBtn.addEventListener('click', () => this._toggleSvg());
     this._moreBtn.addEventListener('click', () => this.app.popover.toggle(this._moreBtn, this._more, 'editor-more'));
     this._more.addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
@@ -506,10 +527,23 @@ export class EditorWindow {
   async open(path, { create = false } = {}) {
     let b = this.buffers.get(path);
     if (!b) {
-      if (/\.(gz|png|ico|bin)$/i.test(path)) {
+      const img = imageKind(path);
+      if (img) {
+        // a picture: shown, not edited -- except an SVG, which is text too
+        const r = await fs.readBlob(path);
+        if (!r.ok) { this._say(`Could not open ${path}: ${r.error}`, 'err'); return false; }
+        const blob = new Blob([r.blob], { type: imageType(path) });
+        const text = img === 'svg' ? await blob.text() : '';
+        b = { text, base: fnv1a(text), lang: 'text', binary: img !== 'svg', image: img, blob, showText: false };
+      } else if (/\.(bin|luac|bak)$/i.test(path)) {
         b = { text: '', base: fnv1a(''), lang: 'text', binary: true };
       } else {
+        // a .gz arrives as its text: the device sends it Content-Encoding: gzip
         const r = await fs.readText(path);
+        if (!r.ok && r.offline && isGz(path)) {
+          this._say(`Could not open ${path}: the browser could not unpack it — is it really gzip?`, 'err');
+          return false;
+        }
         if (!r.ok && create && r.status === 404) {
           this.buffers.set(path, { text: '', base: '', lang: languageOf(path), binary: false });
           this._openBuffer(path);
@@ -522,8 +556,37 @@ export class EditorWindow {
       this.buffers.set(path, b);
     }
     this._openBuffer(path);
-    this._say(b.binary ? 'Binary file — download it to inspect it.' : '');
+    this._say(b.image === 'bitmap' ? '' : b.binary ? 'Binary file — download it to inspect it.' : '');
+    // plain wins: x.lua runs, not x.lua.gz, when both are there
+    const sh = shadowInfo(path, this._siblings(path));
+    if (sh?.shadowed) this._say(`${sh.by} is in this folder too, and wins: it is what the device uses, not this file.`, 'warn');
     return true;
+  }
+
+  // The names in a file's folder, as the tree last listed them.
+  _siblings(path) {
+    const dir = path.split('/').slice(0, -1).join('/');
+    const parent = dir ? this.tree.find(dir) : this.tree.root;
+    return (parent?.children || []).map((c) => c.name);
+  }
+
+  // An SVG: picture or text.
+  _toggleSvg() {
+    const b = this.path && this.buffers.get(this.path);
+    if (!b || b.image !== 'svg') return;
+    b.text = this.core.value;
+    b.showText = !b.showText;
+    this._showPreview(b);
+  }
+
+  _showPreview(b) {
+    const picture = b.image === 'bitmap' || (b.image === 'svg' && !b.showText);
+    this._svgBtn.hidden = b.image !== 'svg';
+    this._svgBtn.textContent = picture ? 'Text' : 'Preview';
+    if (!picture) { this.preview.hide(); return; }
+    const n = this.tree.find(this.path);
+    const blob = b.image === 'svg' ? new Blob([b.text], { type: 'image/svg+xml' }) : b.blob;
+    this.preview.show(blob, { note: n && !n.dir ? fileInfo(n) : '' });
   }
 
   _openBuffer(path) {
@@ -531,6 +594,8 @@ export class EditorWindow {
     this.path = path;
     this.core.setValue(b.binary ? '' : b.text, b.lang);
     this.core.readOnly = b.binary;
+    if (b.image) this._showPreview(b);
+    else { this.preview.hide(); this._svgBtn.hidden = true; }
     // A fresh vim state, but the last search survives a change of file, as in vim.
     const { search, word, sdir, hl } = this.vst;
     this.vst = { ...initialState(), search, word, sdir, hl };
@@ -552,6 +617,8 @@ export class EditorWindow {
     this.path = null;
     this.core.setValue('', 'text');
     this.core.readOnly = true;
+    this.preview.hide();
+    this._svgBtn.hidden = true;
     this.vst = { ...initialState(), search: this.vst.search, word: this.vst.word, sdir: this.vst.sdir, hl: this.vst.hl };
     this.core.setFind(null);
     this._say(`Closed ${was}`);
@@ -575,12 +642,30 @@ export class EditorWindow {
   async save() {
     const b = this.buffers.get(this.path);
     if (!b || b.binary) return false;
+    const path = this.path;
     const text = this.core.value;
-    const r = await fs.write(this.path, text);
-    if (!r.ok) { this._say(`Save failed: ${r.error}`, 'err'); return false; }
+    // A .gz stays compressed: the browser packs it, the board cannot.
+    const body = isGz(path) ? await gzipText(text) : text;
+    // A file of the web UI keeps the version it replaces as <file>.bak --
+    // renamed, so the .bak is the stored bytes exactly.
+    let bak = null;
+    if (isWebAsset(path) && b.base !== '') {
+      bak = `${path}.bak`;
+      await fs.remove(bak);
+      const mv = await fs.rename(path, bak);
+      if (!mv.ok && mv.status !== 404) { this._say(`Save stopped: could not keep ${bak} (${mv.error})`, 'err'); return false; }
+      if (!mv.ok) bak = null;                      // nothing there to keep
+    }
+    const r = await fs.write(path, body);
+    if (!r.ok) {
+      if (bak) await fs.rename(bak, path);         // put the old one back
+      this._say(`Save failed: ${r.error}`, 'err');
+      return false;
+    }
     b.text = text;
     b.base = fnv1a(text);
-    this._say(`Saved ${this.path}`);
+    const packed = typeof body === 'string' ? '' : ` (stored compressed: ${bytes(body.size)} for ${bytes(new TextEncoder().encode(text).length)} of text)`;
+    this._say(`Saved ${path}${packed}${bak ? ` — the previous version is ${bak.split('/').pop()}` : ''}`);
     await this._poll();
     // Saved, but is it what will run? draft > staged > committed.
     const by = shadowedBy(this.path, this.list);
@@ -742,10 +827,12 @@ export class EditorWindow {
     if (node.dir && !node.children) await this.tree.load(node);
     const row = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`);
     if (!row) return false;
+    const siblings = node.dir ? [] : this._siblings(path);
     const items = fileMenuItems(node, {
       isOpen: this.path === path,
       script: scriptNameOf(path),
       empty: node.dir && node.children?.length === 0,
+      hasBak: siblings.includes(`${node.name}.bak`),
     }).map((it) => ({ label: it.label, keep: it.keep, cls: it.danger ? 'sm-danger' : '', fn: () => this._fileAct(it.id, node) }));
     this.tree.menuPath = path;
     this.tree.invalidate();
@@ -753,11 +840,17 @@ export class EditorWindow {
     const anchor = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`) || row;
     this._menu = openCellMenu(this.app, {
       anchor, menuEl: this._fileMenu, title: node.dir ? `${path}/` : path, items, value: path,
-      info: node.dir ? dirInfo(node.children) : fileInfo(node),
+      info: node.dir ? dirInfo(node.children) : this._fileLine(node, siblings),
       wrap: this._files, paneId: 'editor-file-menu',
       onClose: () => { this.tree.menuPath = null; this.tree.invalidate(); this._menu = null; },
     });
     return this._menu;
+  }
+
+  _fileLine(node, siblings) {
+    const sh = shadowInfo(node.path, siblings);
+    const note = !sh ? '' : sh.shadowed ? ` · not used: ${sh.by} wins` : ` · wins over ${sh.by}`;
+    return fileInfo(node) + note;
   }
 
   // Calculate size: every file under the folder, listed one folder at a time,
@@ -788,8 +881,68 @@ export class EditorWindow {
       case 'new': return this.newFile(p);
       case 'upload': this._uploadDir = p; return this._upload.click();
       case 'refresh': return this.tree.refresh(node).then(() => this.tree.invalidate());
+      case 'tar': return this.downloadTar(p);
+      case 'untar': this._tarTarget = p; return this._tarInput.click();
+      case 'compress': return this.convert(p, true);
+      case 'decompress': return this.convert(p, false);
+      case 'restore-bak': return this.restoreBak(p);
       default: return undefined;
     }
+  }
+
+  // A folder ('' = everything) as a .tar, streamed by the device straight
+  // into the browser's download.
+  downloadTar(folder = '') {
+    const a = document.createElement('a');
+    a.href = fs.tarUrl(folder);
+    a.download = `${folder ? folder.split('/').pop() : 'btgw'}.tar`;
+    a.click();
+    this._say(`Downloading ${folder ? `${folder}/` : 'the whole filesystem'} as a .tar`);
+  }
+
+  _act_tarall() { return this.downloadTar(''); }
+  _act_restore() { this._tarTarget = ''; this._tarInput.click(); }
+
+  // Store compressed (x -> x.gz) or uncompressed (x.gz -> x). The browser
+  // does the packing; the old name goes once the new one is written.
+  async convert(path, compress) {
+    const to = compress ? `${path}.gz` : plainName(path);
+    const b = this.buffers.get(path);
+    if (b && this._isDirty(b)) { this._say(`Save ${path} first.`, 'warn'); return false; }
+    if (this._siblings(path).includes(to.split('/').pop()) && !confirm(`${to} exists. Replace it?`)) return false;
+    const r = await fs.readBlob(path);            // a .gz arrives unpacked
+    if (!r.ok) { this._say(`Could not read ${path}: ${r.error}`, 'err'); return false; }
+    const body = compress ? await gzipText(r.blob) : r.blob;
+    const w = await fs.write(to, body);
+    if (!w.ok) { this._say(`Could not write ${to}: ${w.error}`, 'err'); return false; }
+    const d = await fs.remove(path);
+    if (!d.ok) this._say(`Wrote ${to}, but could not remove ${path}: ${d.error}`, 'warn');
+    else if (compress) this._say(`Stored compressed: ${to}, ${bytes(body.size)} (was ${bytes(r.blob.size)})`);
+    else this._say(`Stored uncompressed: ${to}, ${bytes(body.size)}`);
+    if (b) { this.buffers.delete(path); this.buffers.set(to, b); }
+    if (this.path === path) this.path = to;
+    await this.tree.refresh();
+    this.tree.reveal(to);
+    this._renderTitle();
+    this._poll();
+    return true;
+  }
+
+  // Swap a file with its .bak: the version before the last save comes back,
+  // and the one it replaces becomes the .bak -- so doing it twice undoes it.
+  async restoreBak(path) {
+    const bak = `${path}.bak`, tmp = `${path}.swap`;
+    if (!confirm(`Bring back ${bak.split('/').pop()}? The current ${path.split('/').pop()} becomes the .bak.`)) return false;
+    const steps = [[path, tmp], [bak, path], [tmp, bak]];
+    for (const [from, to] of steps) {
+      const r = await fs.rename(from, to);
+      if (!r.ok) { this._say(`Restore stopped at ${from} → ${to}: ${r.error}`, 'err'); await this.tree.refresh(); return false; }
+    }
+    this.buffers.delete(path);
+    await this.tree.refresh();
+    if (this.path === path) await this.open(path);
+    this._say(`Restored ${path} from its .bak (reload the page to use a restored web file)`);
+    return true;
   }
 
   async newFile(dir = this.tree.currentDir) {
@@ -836,7 +989,8 @@ export class EditorWindow {
     }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = path.split('/').pop();
+    // a .gz arrives unpacked (Content-Encoding), so it is saved as what it holds
+    a.download = (isGz(path) ? plainName(path) : path).split('/').pop();
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }

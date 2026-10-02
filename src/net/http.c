@@ -34,6 +34,11 @@
 
 static char json_buf[4096];
 static uint8_t file_chunk[FILE_CHUNK];
+/* The tar stream's own buffer: unlike a file it cannot be rewound, so what
+ * TCP did not take yet waits here for the next pump. One archive at a time
+ * (fs.c), so one buffer. */
+static uint8_t tar_buf[FILE_CHUNK];
+static size_t tar_buf_len, tar_buf_pos;
 
 typedef struct {
     struct tcp_pcb *pcb;
@@ -45,6 +50,8 @@ typedef struct {
     bool taking_fs_body;
     bool taking_post_body;
     bool sending_file;
+    bool sending_tar;       /* streaming a folder as tar (fs_tar_*) */
+    uint64_t tar_left;      /* archive bytes still to send */
     char fs_name[FS_PATH_MAX + 1];
     char method[8];
     char path[96];
@@ -137,6 +144,9 @@ static void conn_cleanup(http_conn_t *c) {
     if (c->sending_file) {
         fs_end_read(c->file_h);
     }
+    if (c->sending_tar) {
+        fs_tar_end();
+    }
 }
 
 static void conn_reset(http_conn_t *c) {
@@ -145,7 +155,7 @@ static void conn_reset(http_conn_t *c) {
 }
 
 static bool conn_held(const http_conn_t *c) {
-    return c->sending_file || c->closing || c->pending_file || c->is_ws;
+    return c->sending_file || c->sending_tar || c->closing || c->pending_file || c->is_ws;
 }
 
 static void conn_drop(struct tcp_pcb *tpcb) {
@@ -385,6 +395,7 @@ static const char *mime_of(const char *name) {
 }
 
 static err_t http_start_file(http_conn_t *c, struct tcp_pcb *tpcb, const char *name, bool gzipped);
+static err_t http_finish_file(http_conn_t *c, struct tcp_pcb *tpcb, int rc);
 static void http_kick_pending(void);
 
 static void http_try_close(http_conn_t *c, struct tcp_pcb *tpcb) {
@@ -392,6 +403,10 @@ static void http_try_close(http_conn_t *c, struct tcp_pcb *tpcb) {
         fs_end_read(c->file_h);
         c->sending_file = false;
         c->file_h = -1;
+    }
+    if (c->sending_tar) {
+        fs_tar_end();
+        c->sending_tar = false;
     }
     c->closing = true;
     if (tcp_close(tpcb) == ERR_OK) {
@@ -428,6 +443,95 @@ static int http_pump_file(http_conn_t *c, struct tcp_pcb *tpcb) {
     }
     tcp_output(tpcb);
     return c->file_left == 0 ? 1 : 0;
+}
+
+/* Same contract as http_pump_file. -1 also when the walk no longer matches
+ * the length promised in Content-Length (a folder changed mid-download):
+ * aborting shows the browser a failed download instead of a wrong archive. */
+static int http_pump_tar(http_conn_t *c, struct tcp_pcb *tpcb) {
+    while (c->tar_left) {
+        if (tar_buf_pos == tar_buf_len) {
+            size_t want = sizeof(tar_buf) < c->tar_left ? sizeof(tar_buf) : (size_t)c->tar_left;
+            int n = fs_tar_read(tar_buf, want);
+            if (n <= 0) {
+                return -1;                      /* shorter than promised */
+            }
+            tar_buf_len = (size_t)n;
+            tar_buf_pos = 0;
+        }
+        u16_t room = tcp_sndbuf(tpcb);
+        if (room < 32) {
+            break;
+        }
+        size_t k = tar_buf_len - tar_buf_pos;
+        if (k > room) {
+            k = room;
+        }
+        if (tcp_write(tpcb, tar_buf + tar_buf_pos, (u16_t)k, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+            break;                              /* kept in tar_buf for the next pump */
+        }
+        tar_buf_pos += k;
+        c->tar_left -= k;
+        c->retries = 0;
+    }
+    tcp_output(tpcb);
+    if (c->tar_left) {
+        return 0;
+    }
+    uint8_t probe;
+    return fs_tar_read(&probe, 1) == 0 ? 1 : -1;   /* longer than promised */
+}
+
+/* GET /api/tar/<folder>[?mtime=<unix s>] -- the folder ("" = everything) as
+ * a ustar archive, streamed (fs.c fs_tar_*). The board has no clock, so the
+ * browser passes the time to stamp the entries with. */
+static err_t http_start_tar(http_conn_t *c, struct tcp_pcb *tpcb, const char *path) {
+    char folder[FS_PATH_MAX + 1] = "";
+    const char *p = path + 8;                   /* after "/api/tar" */
+    while (*p == '/') { p++; }
+    size_t n = 0;
+    while (p[n] && p[n] != '?' && p[n] != '#' && n < FS_PATH_MAX) { folder[n] = p[n]; n++; }
+    folder[n] = 0;
+    while (n && folder[n - 1] == '/') { folder[--n] = 0; }
+    if (folder[0] && !fs_valid_path(folder)) {
+        return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad name\"}");
+    }
+    uint32_t mtime = 0;
+    const char *q = strstr(path, "mtime=");
+    if (q) { mtime = (uint32_t)strtoul(q + 6, NULL, 10); }
+    uint64_t len = 0;
+    int rc = fs_tar_begin(folder, mtime, &len);
+    if (rc == -2) {
+        return http_reply(tpcb, 503, "application/json", "{\"ok\":false,\"error\":\"an archive is already streaming\"}");
+    }
+    if (rc == -3) {
+        return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"no such folder\"}");
+    }
+    if (rc < 0) {
+        return http_reply(tpcb, 500, "application/json", "{\"ok\":false,\"error\":\"could not read the folder\"}");
+    }
+    const char *base = strrchr(folder, '/');
+    base = base ? base + 1 : (folder[0] ? folder : "btgw");
+    char hdr[480];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/x-tar\r\n"
+                      "Content-Length: %lu\r\n"
+                      "Content-Disposition: attachment; filename=\"%s.tar\"\r\n"
+                      "Cache-Control: no-store\r\n"
+                      "Access-Control-Allow-Origin: *\r\n"
+                      "Access-Control-Expose-Headers: Content-Length, Content-Disposition\r\n"
+                      "Connection: close\r\n\r\n",
+                      (unsigned long)len, base);   /* newlib-nano: no %llu; an archive is < 2 MB */
+    if (tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+        fs_tar_end();
+        return http_reply(tpcb, 503, "application/json", "{\"ok\":false,\"error\":\"busy\"}");
+    }
+    c->sending_tar = true;
+    c->tar_left = len;
+    c->retries = 0;
+    tar_buf_len = tar_buf_pos = 0;
+    return http_finish_file(c, tpcb, http_pump_tar(c, tpcb));
 }
 
 static err_t http_finish_file(http_conn_t *c, struct tcp_pcb *tpcb, int rc) {
@@ -911,6 +1015,10 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
         }
         return http_reply(tpcb, 200, "application/json", "{\"ok\":true}");
     }
+    if (strncmp(path, "/api/tar", 8) == 0 && (path[8] == 0 || path[8] == '/' || path[8] == '?')
+        && strcmp(method, "GET") == 0) {
+        return http_start_tar(c, tpcb, path);
+    }
     if (strncmp(path, "/api/fs", 7) == 0 && strcmp(method, "GET") == 0) {
         if (path_is(path, "/api/fs") || path_is(path, "/api/fs/")) {
             if (fs_list_json("", json_buf, sizeof(json_buf)) < 0) {
@@ -1021,6 +1129,7 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
             return http_reply(tpcb, 200, "text/plain",
                               "bluetooth_rp2_webapp\n"
                               "GET /api/fs  GET/PUT/DELETE /api/fs/<path>  POST /api/fs/rename\n"
+                              "GET /api/tar/<folder>  (a folder as tar)  PUT /api/fs/<folder>/  (mkdir)\n"
                               "WS " WS_PATH "  JSON API, e.g. {\"id\":1,\"op\":\"sys.info\"}\n");
         }
     }
@@ -1051,6 +1160,9 @@ static err_t http_sent(void *arg, struct tcp_pcb *tpcb, u16_t len) {
     }
     if (c->sending_file) {
         return http_finish_file(c, tpcb, http_pump_file(c, tpcb));
+    }
+    if (c->sending_tar) {
+        return http_finish_file(c, tpcb, http_pump_tar(c, tpcb));
     }
     return ERR_OK;
 }
@@ -1084,6 +1196,9 @@ static err_t http_poll(void *arg, struct tcp_pcb *tpcb) {
     }
     if (c->sending_file) {
         return http_finish_file(c, tpcb, http_pump_file(c, tpcb));
+    }
+    if (c->sending_tar) {
+        return http_finish_file(c, tpcb, http_pump_tar(c, tpcb));
     }
     /* Only a connection already closing gets another tcp_close() try here
      * (the first one answered ERR_MEM). This used to close every held
@@ -1194,6 +1309,17 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         bool want_post_body = c->content_len > 0 && !want_fs_put &&
                               (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 ||
                                strcmp(method, "DELETE") == 0);
+        /* PUT /api/fs/<path>/ (a trailing slash) makes a folder: what an
+         * archive restore needs for an empty one. */
+        size_t tok = strcspn(path, "?#");
+        if (want_fs_put && tok > 8 && path[tok - 1] == '/') {
+            pbuf_free(p);
+            conn_drop(tpcb);
+            if (!fs_api_name(path, c->fs_name, sizeof(c->fs_name)) || fs_mkdir(c->fs_name) < 0) {
+                return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"could not make the folder\"}");
+            }
+            return http_reply(tpcb, 200, "application/json", "{\"ok\":true,\"dir\":true}");
+        }
         if (want_fs_put) {
             if (!fs_api_name(path, c->fs_name, sizeof(c->fs_name)) || !fs_valid_path(c->fs_name)) {
                 pbuf_free(p);

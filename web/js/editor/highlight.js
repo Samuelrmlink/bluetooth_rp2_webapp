@@ -132,6 +132,7 @@ export function highlightJson(t) {
 }
 
 export function languageOf(path) {
+  path = String(path).replace(/\.gz$/i, '');      // a compressed file is its contents' language
   if (/\.lua$/i.test(path)) return 'lua';
   if (/\.json$/i.test(path)) return 'json';
   return 'text';

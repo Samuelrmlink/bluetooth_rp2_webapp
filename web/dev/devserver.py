@@ -73,6 +73,14 @@ def _chr(cid):
 # from the same device.
 REPO = os.path.join(WEB, "..")
 
+def _png(w, h):
+    """A small, valid RGB PNG (green), for the image preview."""
+    import zlib
+    def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    raw = b"".join(b"\0" + b"\x4f\xd0\x7f" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
 def _seed_fs():
     fs = {}
     for rel in ["lua/anker.lua", "lua/anker2.lua", "lua/pinecil.lua",
@@ -83,7 +91,20 @@ def _seed_fs():
             fs[rel] = open(path, "rb").read()
     fs["cfg/wifi.json"] = b'{"mode":"auto","networks":[{"ssid":"bench"}]}'
     fs["var/wg_epoch.bin"] = b"\x4e\x00\x00\x00"
+    # a web app's folder, stored as the device stores web files: compressed,
+    # plus pictures (fw 1.95 editor: .gz editing, .bak, image preview)
+    import gzip as _gz
+    fs["www/demo.js.gz"] = _gz.compress(b"// demo asset\nexport const answer = 42;\n", mtime=0)
+    fs["www/logo.svg.gz"] = _gz.compress(b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">'
+                                          b'<rect width="40" height="20" fill="#4fd07f"/></svg>\n', mtime=0)
+    fs["www/dot.png"] = _png(3, 2)
     return fs
+
+def _mime(path):
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return {"js": "text/javascript", "css": "text/css", "html": "text/html", "json": "application/json",
+            "svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+            "lua": "text/plain"}.get(ext, "application/octet-stream")
 
 def fnv1a(b):
     h = 2166136261
@@ -504,6 +525,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._ws()
         if self.path.startswith("/api/fs"):
             return self._fs("GET")
+        if self.path.startswith("/api/tar"):
+            return self._tar()
         return super().do_GET()
 
     def do_PUT(self): self._fs("PUT")
@@ -517,10 +540,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    def _reply(self, code, body, ctype="application/json"):
+    def _reply(self, code, body, ctype="application/json", extra=None):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in (extra or {}).items(): self.send_header(k, v)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
@@ -541,11 +565,17 @@ class Handler(SimpleHTTPRequestHandler):
             if src not in fs: return self._reply(404, {"ok": False, "error": "not found"})
             if dst in fs: return self._reply(409, {"ok": False, "error": "exists"})
             fs[dst] = fs.pop(src); return self._reply(200, {"ok": True})
+        dirs = STATE.setdefault("dirs", set())
+        if method == "PUT" and self.path.split("?")[0].endswith("/"):
+            # PUT /api/fs/<folder>/ makes the folder, parents too (fw 1.95)
+            if path in fs: return self._reply(409, {"ok": False, "error": "a file has that name"})
+            parts = path.split("/")
+            for i in range(1, len(parts) + 1): dirs.add("/".join(parts[:i]))
+            return self._reply(200, {"ok": True, "dir": True})
         if method == "PUT":
             n = int(self.headers.get("Content-Length", 0))
             if n > 128 * 1024: return self._reply(413, {"ok": False, "error": "too large"})
             fs[path] = self.rfile.read(n); return self._reply(200, {"ok": True, "name": path, "bytes": n})
-        dirs = STATE.setdefault("dirs", set())
         if method == "DELETE":
             if path in fs:
                 del fs[path]; return self._reply(200, {"ok": True})
@@ -555,7 +585,11 @@ class Handler(SimpleHTTPRequestHandler):
                 dirs.discard(path); return self._reply(200, {"ok": True})
             return self._reply(404, {"ok": False, "error": "not found"})
         if path in fs:
-            return self._reply(200, fs[path], "application/octet-stream")
+            if path.endswith(".gz"):
+                # as the device: any .gz goes out Content-Encoding: gzip, typed
+                # as what it holds, so a browser fetch gets the contents
+                return self._reply(200, fs[path], _mime(path[:-3]), {"Content-Encoding": "gzip"})
+            return self._reply(200, fs[path], _mime(path))
         pre = path + "/" if path else ""
         names = {}
         for k in list(fs) + [d + "/" for d in dirs]:
@@ -574,6 +608,41 @@ class Handler(SimpleHTTPRequestHandler):
         files = [{"name": n, "dir": True} if sz is None else {"name": n, "size": sz, "alloc": alloc(sz)}
                  for n, sz in sorted(names.items())]
         return self._reply(200, {"dir": path, "block": 4096, "files": files} if path else {"block": 4096, "files": files})
+
+    # GET /api/tar/<folder> (or /api/tar/ for everything), as fw 1.95 streams
+    # it: ustar, the folder's own entry first, names relative to its parent,
+    # file data exactly as stored, mtime from ?mtime=.
+    def _tar(self):
+        import io, tarfile
+        from urllib.parse import unquote, urlparse, parse_qs
+        u = urlparse(self.path)
+        folder = unquote(u.path[len("/api/tar"):]).strip("/")
+        mtime = int((parse_qs(u.query).get("mtime") or ["0"])[0] or 0)
+        fs, dirs = STATE["fs"], STATE.setdefault("dirs", set())
+        pre = folder + "/" if folder else ""
+        files = sorted(k for k in fs if k.startswith(pre))
+        alld = set(d for d in dirs if d == folder or d.startswith(pre))
+        for k in files:
+            parts = k.split("/")
+            for i in range(1, len(parts)): alld.add("/".join(parts[:i]))
+        alld = {d for d in alld if d == folder or d.startswith(pre)}
+        if folder and folder not in alld:
+            return self._reply(404, {"ok": False, "error": "no such folder"})
+        base = folder.rsplit("/", 1)[0] + "/" if "/" in folder else ""
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode="w", format=tarfile.USTAR_FORMAT) as t:
+            for name in sorted(alld | set(files)):
+                i = tarfile.TarInfo(name[len(base):])
+                i.mtime, i.uname, i.gname = mtime, "btgw", "btgw"
+                if name in fs:
+                    i.size, i.mode = len(fs[name]), 0o644
+                    t.addfile(i, io.BytesIO(fs[name]))
+                else:
+                    i.type, i.mode = tarfile.DIRTYPE, 0o755
+                    t.addfile(i)
+        name = (folder.rsplit("/", 1)[-1] if folder else "btgw") + ".tar"
+        return self._reply(200, b.getvalue(), "application/x-tar",
+                           {"Content-Disposition": f'attachment; filename="{name}"'})
 
     def _ws(self):
         key = self.headers.get("Sec-WebSocket-Key")

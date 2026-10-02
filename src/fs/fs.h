@@ -66,6 +66,16 @@ int fs_walk(const char *dir, fs_walk_fn cb, void *ctx);
 int fs_delete(const char *name);
 /* Bytes of flash a file occupies (0 when stored inline in its directory). */
 uint32_t fs_file_alloc(const char *name, uint32_t size);
+
+/* A folder ("" = everything) as a ustar archive, streamed (fs.c). begin:
+ * 0, or -2 when another archive is already streaming, -3 not a folder;
+ * *length is the archive's exact size. read: bytes produced, 0 at the end. */
+int fs_tar_begin(const char *folder, uint32_t mtime, uint64_t *length);
+int fs_tar_read(uint8_t *buf, size_t cap);
+void fs_tar_end(void);
+bool fs_tar_busy(void);
+/* Create a folder and its parents. */
+int fs_mkdir(const char *path);
 int fs_rename(const char *from, const char *to);
 bool fs_stat(const char *name, size_t *size);
 

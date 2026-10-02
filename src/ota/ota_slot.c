@@ -172,24 +172,30 @@ bool ota_buy_pending(void) {
 }
 bool ota_bought(void) { return bought; }
 
-static void do_buy(void *p) {
-    static uint8_t __attribute__((aligned(4))) workarea[4096];
-    *(int *)p = rom_explicit_buy(workarea, sizeof workarea);
+static inline uint32_t primask(void) {
+    uint32_t v;
+    __asm volatile ("mrs %0, primask" : "=r" (v));
+    return v;
 }
 
 int ota_buy(void) {
     if (!ota_buy_pending()) return 0;
-    int rc = -1;
+    static uint8_t __attribute__((aligned(4))) workarea[4096];
     watchdog_update();
-    /* Runs the ROM against flash with XIP off for the duration; the same
-     * guard fs.c uses for its writes. */
-    /* Time the interrupts-off blackout: it was never measured, and its length
-     * during the bring-up storm was the suspected radio-wedge trigger (now
-     * avoided by only buying on an operator confirm, when the radio is idle). */
+    /* NOT inside our own flash_safe_execute(): since SDK 2.3.0
+     * rom_explicit_buy() is a wrapper that runs the ROM call under
+     * flash_safe_execute() itself, and that helper keeps ONE saved interrupt
+     * state per core. Nested, the inner enter saves "disabled" over the
+     * outer's "enabled", and both exits restore "disabled": PRIMASK stays set
+     * for good. The main loop carries on (WiFi, WireGuard, HTTP are polled),
+     * but no interrupt is ever taken again -- USB's first of all, so USB-NCM
+     * dies with both bulk endpoints complete in hardware and unserviced
+     * (fw 1.95 confirm, 2026-10-02: ICSR showed thread mode with IRQ 14
+     * pending; root-caused through the probe). The same nesting is what
+     * "rom_flash_op() took the USB-NCM link down" was, below. */
     uint64_t t0 = time_us_64();
-    int fs = flash_safe_execute(do_buy, &rc, 2000);
+    int rc = rom_explicit_buy(workarea, sizeof workarea);
     uint32_t took_us = (uint32_t)(time_us_64() - t0);
-    if (fs != PICO_OK) rc = fs;
     if (rc == 0) {
         bought = true;
         rom_get_boot_info(&boot);
@@ -197,8 +203,9 @@ int ota_buy(void) {
          * on a version downgrade (RP2350 datasheet 5.1.17), so we do NOT do it
          * again here -- that was a redundant second flash blackout. */
     }
-    printf("ota: explicit_buy -> %d in %lu us (tbyb now %02x)\n",
-           rc, (unsigned long)took_us, boot.tbyb_and_update_info);
+    printf("ota: explicit_buy -> %d in %lu us (tbyb now %02x, interrupts %s)\n",
+           rc, (unsigned long)took_us, boot.tbyb_and_update_info,
+           primask() ? "STILL MASKED" : "on");
     return rc;
 }
 
@@ -244,8 +251,12 @@ void ota_slot_version_str(int which, char *dst, size_t cap) {
  * the same path fs.c has used for every LittleFS write, inside
  * flash_safe_execute. rom_flash_op() was tried first: the first sector
  * written through it took the USB-NCM link down every time (the host lost
- * the interface while the board kept running), and the ROM's own bookkeeping
- * is not needed -- the partition table's permissions only matter to the ROM.
+ * the interface while the board kept running) -- almost certainly the same
+ * nested flash_safe_execute as ota_buy's (SDK 2.3.0's rom_flash_op wraps
+ * itself too), which leaves interrupts masked for good. Either way the ROM's
+ * own bookkeeping is not needed -- the partition table's permissions only
+ * matter to the ROM. Never call a pico_bootrom rom_* helper from inside
+ * flash_safe_execute.
  * Timings are logged for the first operations so a regression is visible.
  */
 typedef struct { bool erase; uint32_t off; const uint8_t *page; } fop_t;

@@ -9,6 +9,7 @@
 #include "lua/lrt.h"
 #include "lua/lbind.h"
 #include "fs/fs.h"
+#include "util/inflate.h"
 #include "api/api.h"
 #include "net/ws.h"
 #include "autoconf.h"
@@ -275,15 +276,87 @@ static bool read_fs(const char *path, char *buf, size_t cap, size_t *out_len) {
  * something else, its own source is no longer needed. */
 static char src_buf[DRAFT_MAX + 1];
 
+/* --- sources, plain or compressed -------------------------------------------
+ * A source is <base>.lua, or <base>.lua.gz: compressed by the BROWSER when it
+ * saved or uploaded it (the board has no deflate), so a well-commented
+ * module costs a quarter of its size on flash. When both exist the plain one
+ * wins -- it is the one just saved, and the editor flags the other.
+ *
+ * Identity is the bytes AS STORED: a cache entry or a loaded unit records
+ * the hash of the file on flash, so asking "has this changed?" never
+ * inflates anything; only compiling does, straight into src_buf (which is
+ * also the inflater's window -- util/inflate.c). The text must still fit
+ * src_buf (32 KB) once inflated. */
+static bool source_file(const char *base, char *path, size_t cap, bool *gz) {
+    snprintf(path, cap, "%s.lua", base);
+    if (fs_stat(path, NULL)) { *gz = false; return true; }
+    snprintf(path, cap, "%s.lua.gz", base);
+    if (fs_stat(path, NULL)) { *gz = true; return true; }
+    return false;
+}
+
+/* FNV-1a of a file's stored bytes, read in pieces (never src_buf). */
+static bool stored_hash(const char *path, uint32_t *hash, size_t *len) {
+    size_t sz = 0;
+    int h = fs_begin_read(path, &sz);
+    if (h < 0) { return false; }
+    uint8_t piece[128];
+    uint32_t v = 2166136261u;
+    size_t total = 0;
+    int n;
+    while ((n = fs_read(h, piece, sizeof piece)) > 0) {
+        for (int i = 0; i < n; i++) { v ^= piece[i]; v *= 16777619u; }
+        total += (size_t)n;
+    }
+    fs_end_read(h);
+    if (n < 0) { return false; }
+    *hash = v;
+    *len = total;
+    return true;
+}
+
+static int fs_piece(void *ctx, uint8_t *buf, size_t cap) {
+    return fs_read(*(int *)ctx, buf, cap);
+}
+
+/* The text into src_buf: read a plain file, inflate a .gz one. */
+static bool load_source(const char *path, bool gz, size_t *len) {
+    if (!gz) { return read_fs(path, src_buf, sizeof(src_buf), len); }
+    int h = fs_begin_read(path, NULL);
+    if (h < 0) { return false; }
+    long n = gz_inflate(fs_piece, &h, (uint8_t *)src_buf, sizeof(src_buf) - 1);
+    fs_end_read(h);
+    if (n < 0) {
+        printf("lua: %s did not inflate (error %ld%s)\n", path, n,
+               n == INFLATE_ETOOBIG ? ": over 32 KB uncompressed" : "");
+        return false;
+    }
+    src_buf[n] = 0;
+    *len = (size_t)n;
+    return true;
+}
+
+/* A tier's source: path chosen, text in src_buf, identity of what is stored. */
+static bool read_source(const char *base, const char **src, size_t *len, uint32_t *hash) {
+    char path[112];
+    bool gz;
+    if (!source_file(base, path, sizeof path, &gz)) { return false; }
+    if (!load_source(path, gz, len)) { return false; }
+    *src = src_buf;
+    if (!gz) { *hash = fnv1a(src_buf, *len); return true; }
+    size_t stored = 0;
+    return stored_hash(path, hash, &stored);
+}
+
 /* Returns the tier the source came from, or NULL when there is none. */
 static const char *resolve_src(script_t *s, const char *name,
-                               const char **src, size_t *len) {
-    if (s && s->draft) { *src = s->draft; *len = s->draft_len; return "draft"; }
-    char path[80];
-    snprintf(path, sizeof(path), "staged/%s.lua", name);
-    if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return "staged"; }
-    snprintf(path, sizeof(path), "lua/%s.lua", name);
-    if (read_fs(path, src_buf, sizeof(src_buf), len)) { *src = src_buf; return "committed"; }
+                               const char **src, size_t *len, uint32_t *hash) {
+    if (s && s->draft) { *src = s->draft; *len = s->draft_len; *hash = fnv1a(s->draft, s->draft_len); return "draft"; }
+    char base[80];
+    snprintf(base, sizeof(base), "staged/%s", name);
+    if (read_source(base, src, len, hash)) { return "staged"; }
+    snprintf(base, sizeof(base), "lua/%s", name);
+    if (read_source(base, src, len, hash)) { return "committed"; }
     return NULL;
 }
 
@@ -405,19 +478,26 @@ static bool module_rel(const char *name, char *rel, size_t cap) {
 }
 
 static bool read_module_src(const char *name, const char **src, size_t *len,
-                            uint8_t *tier) {
+                            uint8_t *tier, uint32_t *hash) {
     char rel[64];
     if (!module_rel(name, rel, sizeof rel)) { return false; }
+    char base[96];
+    snprintf(base, sizeof base, "staged/%s", rel);
+    if (read_source(base, src, len, hash)) { *tier = SRC_TIER_STAGED; return true; }
+    snprintf(base, sizeof base, "lua/%s", rel);
+    if (read_source(base, src, len, hash)) { *tier = SRC_TIER_COMMITTED; return true; }
+    return false;
+}
 
-    char path[96];
-    snprintf(path, sizeof path, "staged/%s.lua", rel);
-    if (read_fs(path, src_buf, sizeof(src_buf), len)) {
-        *src = src_buf; *tier = SRC_TIER_STAGED; return true;
-    }
-    snprintf(path, sizeof path, "lua/%s.lua", rel);
-    if (read_fs(path, src_buf, sizeof(src_buf), len)) {
-        *src = src_buf; *tier = SRC_TIER_COMMITTED; return true;
-    }
+/* Tier and stored hash of a module's current file -- no inflating. */
+static bool module_identity(const char *name, uint8_t *tier, uint32_t *hash, size_t *stored) {
+    char rel[64], base[96], path[112];
+    bool gz;
+    if (!module_rel(name, rel, sizeof rel)) { return false; }
+    snprintf(base, sizeof base, "staged/%s", rel);
+    if (source_file(base, path, sizeof path, &gz)) { *tier = SRC_TIER_STAGED; return stored_hash(path, hash, stored); }
+    snprintf(base, sizeof base, "lua/%s", rel);
+    if (source_file(base, path, sizeof path, &gz)) { *tier = SRC_TIER_COMMITTED; return stored_hash(path, hash, stored); }
     return false;
 }
 
@@ -435,11 +515,11 @@ static bool module_is_current(const char *name) {
         }
     }
     if (!u || u->tier == SRC_TIER_NONE) { return false; }
-    const char *src = NULL;
-    size_t len = 0;
     uint8_t tier = SRC_TIER_NONE;
-    if (!read_module_src(name, &src, &len, &tier)) { return true; }
-    return tier == u->tier && fnv1a(src, len) == u->hash;
+    uint32_t hash = 0;
+    size_t stored = 0;
+    if (!module_identity(name, &tier, &hash, &stored)) { return true; }
+    return tier == u->tier && hash == u->hash;
 }
 
 /* --- the bytecode cache ----------------------------------------------------
@@ -471,7 +551,7 @@ static bool module_is_current(const char *name) {
  * until it is next cached. Top-level lua/*.lua are scripts, not modules,
  * and are not cached. */
 #define CACHE_HDR 16
-#define CACHE_VER 1
+#define CACHE_VER 2          /* 2: keyed on the source as STORED (.lua or .lua.gz) */
 
 static void cache_path(const char *rel, char *out, size_t cap) {
     snprintf(out, cap, "cache/%s.luac", rel);
@@ -548,24 +628,28 @@ static void cache_refresh(const char *name) {
     char rel[64], path[96];
     if (!module_rel(name, rel, sizeof rel)) { return; }
     cache_path(rel, path, sizeof path);
-    const char *src = NULL;
-    size_t len = 0;
     uint8_t tier = SRC_TIER_NONE;
-    if (!read_module_src(name, &src, &len, &tier)) {
+    uint32_t hash = 0;
+    size_t stored = 0;
+    if (!module_identity(name, &tier, &hash, &stored)) {
         if (fs_stat(path, NULL)) { fs_delete(path); }
         return;
     }
     if (tier != SRC_TIER_COMMITTED) { return; }
-    uint32_t hash = fnv1a(src, len);
-    if (cache_matches(path, hash, (uint32_t)len)) { return; }
+    if (cache_matches(path, hash, (uint32_t)stored)) { return; }    /* nothing inflated */
+    const char *src = NULL;
+    size_t len = 0;
+    uint32_t h2 = 0;
+    if (!read_module_src(name, &src, &len, &tier, &h2)) { return; }
     char chunk[80];
     snprintf(chunk, sizeof chunk, "@%s", name);
     int top = lua_gettop(L);
     if (luaL_loadbufferx(L, src, len, chunk, "t") == LUA_OK) {
-        if (cache_store(L, rel, hash, (uint32_t)len)) {
+        if (cache_store(L, rel, hash, (uint32_t)stored)) {
             size_t sz = 0;
             fs_stat(path, &sz);
-            printf("lua: cached %s (%u B source -> %u B)\n", name, (unsigned)len, (unsigned)sz);
+            printf("lua: cached %s (%u B source, %u B stored -> %u B)\n", name, (unsigned)len,
+                   (unsigned)stored, (unsigned)sz);
         } else {
             printf("lua: %s compiled but its cache could not be written\n", name);
         }
@@ -598,7 +682,8 @@ static bool module_of_path(const char *path, char *name, size_t cap) {
     if (strncmp(path, "lua/", 4) != 0) { return false; }
     const char *rel = path + 4;
     size_t n = strlen(rel);
-    if (n < 5 || strcmp(rel + n - 4, ".lua") != 0 || !memchr(rel, '/', n - 4)) { return false; }
+    if (n > 7 && strcmp(rel + n - 3, ".gz") == 0) { n -= 3; }     /* x.lua.gz */
+    if (n < 5 || strncmp(rel + n - 4, ".lua", 4) != 0 || !memchr(rel, '/', n - 4)) { return false; }
     if (n - 4 >= cap) { return false; }
     for (size_t i = 0; i < n - 4; i++) { name[i] = rel[i] == '/' ? '.' : rel[i]; }
     name[n - 4] = 0;
@@ -692,31 +777,33 @@ static int l_require(lua_State *Ls) {
     }
     lua_pop(Ls, 1);
 
-    const char *src = NULL;
-    size_t len = 0;
+    /* Which file, and its identity as stored -- read before anything else
+     * touches src_buf (the lua_call below can require further modules, each
+     * reading its own source into the same buffer). A fresh cache is then
+     * loaded without the source ever being read, let alone inflated. */
     uint8_t tier = SRC_TIER_NONE;
-    if (!read_module_src(name, &src, &len, &tier)) {
+    uint32_t hash = 0;
+    size_t stored = 0;
+    if (!module_identity(name, &tier, &hash, &stored)) {
         return luaL_error(Ls, "module '%s' not found in staged/ or lua/", name);
     }
-    /* Hashed NOW, not after it runs: src is the shared src_buf, and the
-     * lua_call below can require further modules, each of which reads its
-     * own source into the same buffer. */
-    uint32_t hash = fnv1a(src, len);
 
     char chunkname[80];
     snprintf(chunkname, sizeof chunkname, "@%s", name);
     char rel[64];
     bool cacheable = tier == SRC_TIER_COMMITTED && module_rel(name, rel, sizeof rel);
-    if (!(cacheable && cache_load(Ls, rel, chunkname, hash, (uint32_t)len))) {
-        /* Not cached (or stale): compile the source. cache_load may have
-         * used src_buf, so read it again. */
-        if (cacheable && !read_module_src(name, &src, &len, &tier)) {
-            return luaL_error(Ls, "module '%s' not found in staged/ or lua/", name);
+    if (!(cacheable && cache_load(Ls, rel, chunkname, hash, (uint32_t)stored))) {
+        /* Not cached (or stale): the source, inflated if it is .gz. */
+        const char *src = NULL;
+        size_t len = 0;
+        uint32_t h2 = 0;
+        if (!read_module_src(name, &src, &len, &tier, &h2)) {
+            return luaL_error(Ls, "module '%s' could not be read (a .gz that does not inflate, or over 32 KB)", name);
         }
         if (luaL_loadbufferx(Ls, src, len, chunkname, "t") != LUA_OK) {
             return luaL_error(Ls, "module '%s': %s", name, lua_tostring(Ls, -1));
         }
-        if (cacheable && cache_store(Ls, rel, hash, (uint32_t)len)) {
+        if (cacheable && cache_store(Ls, rel, hash, (uint32_t)stored)) {
             printf("lua: cached %s on first use\n", name);
         }
     }
@@ -873,8 +960,7 @@ size_t lrt_collect(void) {
 
 /* --- start / stop --------------------------------------------------------- */
 static bool load_tier(script_t *s, const char *src, size_t len, const char *tier,
-                      const char **err) {
-    uint32_t hash = fnv1a(src, len);
+                      uint32_t hash, const char **err) {
     char chunkname[48];
     snprintf(chunkname, sizeof(chunkname), "@%s(%s)", s->name, tier);
     if (luaL_loadbuffer(L, src, len, chunkname) != LUA_OK) {
@@ -918,10 +1004,11 @@ bool lrt_start(const char *name, const char **err) {
     if (s->running || s->co_ref != LUA_NOREF || s->env_ref != LUA_NOREF) { teardown(s); }
 
     const char *src = NULL; size_t len = 0;
-    const char *tier = resolve_src(s, name, &src, &len);
+    uint32_t hash = 0;
+    const char *tier = resolve_src(s, name, &src, &len, &hash);
     if (!tier) { *err = "no draft, staged or committed source for that name"; return false; }
 
-    if (load_tier(s, src, len, tier, err)) {
+    if (load_tier(s, src, len, tier, hash, err)) {
         printf("lua: %s started from %s (%u bytes)\n", name, tier, (unsigned)len);
         return true;
     }
@@ -938,8 +1025,9 @@ bool lrt_start(const char *name, const char **err) {
 
         free(s->draft); s->draft = NULL; s->draft_len = 0;
         const char *src2 = NULL; size_t len2 = 0;
-        const char *tier2 = resolve_src(s, name, &src2, &len2);
-        if (tier2 && load_tier(s, src2, len2, tier2, err)) {
+        uint32_t hash2 = 0;
+        const char *tier2 = resolve_src(s, name, &src2, &len2, &hash2);
+        if (tier2 && load_tier(s, src2, len2, tier2, hash2, err)) {
             printf("lua: %s draft failed to load; fell back to %s\n", name, tier2);
             return true;
         }
@@ -1134,7 +1222,8 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
     script_t *s = find(name);
     const char *src = NULL;
     size_t len = 0;
-    const char *t = resolve_src(s, name, &src, &len);
+    uint32_t hash = 0;
+    const char *t = resolve_src(s, name, &src, &len, &hash);
     if (!t) { return 0; }
 
     *tier = t;
@@ -1362,7 +1451,7 @@ static bool unit_path(const char *name, bool module, uint8_t tier, char *out, si
         out[n++] = (module && name[i] == '.') ? '/' : name[i];
     }
     out[n] = 0;
-    return snprintf(out + n, cap - n, ".lua") == 4;
+    return true;            /* the base: source_file adds .lua or .lua.gz */
 }
 
 /* One unit of script.loaded's reply. `now` is the hash of the file at the
@@ -1370,25 +1459,29 @@ static bool unit_path(const char *name, bool module, uint8_t tier, char *out, si
  * when there is no file (a draft, or a file since deleted). */
 static int unit_json(char *dst, size_t cap, bool first, const char *name, bool module,
                      uint8_t tier, uint32_t hash, uint32_t users) {
-    char path[112];
+    char base[112], path[112] = "";
     char now[16] = "null";
+    bool gz;
+    uint32_t h = 0;
     size_t len = 0;
-    if (unit_path(name, module, tier, path, sizeof path) &&
-        read_fs(path, src_buf, sizeof(src_buf), &len)) {
-        snprintf(now, sizeof now, "\"%08lx\"", (unsigned long)fnv1a(src_buf, len));
+    if (unit_path(name, module, tier, base, sizeof base) &&
+        source_file(base, path, sizeof path, &gz) && stored_hash(path, &h, &len)) {
+        snprintf(now, sizeof now, "\"%08lx\"", (unsigned long)h);
+    } else {
+        path[0] = 0;
     }
     if (module) {
         return snprintf(dst, cap,
-            "%s{\"name\":\"%s\",\"kind\":\"module\",\"tier\":\"%s\","
+            "%s{\"name\":\"%s\",\"kind\":\"module\",\"tier\":\"%s\",\"path\":\"%s\","
             "\"hash\":\"%08lx\",\"now\":%s,\"users\":%u}",
-            first ? "" : ",", name, tier_name(tier), (unsigned long)hash, now,
+            first ? "" : ",", name, tier_name(tier), path, (unsigned long)hash, now,
             (unsigned)__builtin_popcount(users & ~MODULE_PINNED) +
                 ((users & MODULE_PINNED) ? 1u : 0u));
     }
     return snprintf(dst, cap,
-        "%s{\"name\":\"%s\",\"kind\":\"script\",\"tier\":\"%s\","
+        "%s{\"name\":\"%s\",\"kind\":\"script\",\"tier\":\"%s\",\"path\":\"%s\","
         "\"hash\":\"%08lx\",\"now\":%s}",
-        first ? "" : ",", name, tier_name(tier), (unsigned long)hash, now);
+        first ? "" : ",", name, tier_name(tier), path, (unsigned long)hash, now);
 }
 
 /*

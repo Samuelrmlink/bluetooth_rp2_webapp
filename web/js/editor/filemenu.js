@@ -1,18 +1,24 @@
 // What a file or folder's menu offers in the editor sidebar. Pure: the
 // window turns each { id } into the action (editor.js _fileAct).
 //
-//   file     Open (if it is not the open one), Download, Rename / move…,
+//   file     Open (if it is not the open one), Download, Store compressed /
+//            uncompressed, Restore .bak (when there is one), Rename / move…,
 //            Delete…; a script (lua/x.lua or staged/x.lua) also Start, Stop,
 //            Commit to lua/, Revert to the next tier
-//   folder   New file here…, Upload here…, Calculate size, Refresh,
-//            Rename / move…, and Delete… once it is known to be empty
+//   folder   New file here…, Upload here…, Upload archive here…, Download
+//            as .tar, Calculate size, Refresh, Rename / move…, and Delete…
+//            once it is known to be empty
 //
 // The path itself is added by the menu as the last item, and copies.
-export function fileMenuItems(node, { isOpen = false, script = null, empty = false } = {}) {
+import { isGz, canCompress, imageKind } from '../gz.js';
+
+export function fileMenuItems(node, { isOpen = false, script = null, empty = false, hasBak = false } = {}) {
   if (node.dir) {
     const out = [
       { id: 'new', label: 'New file here…' },
       { id: 'upload', label: 'Upload here…' },
+      { id: 'untar', label: 'Upload archive here… (.tar)' },
+      { id: 'tar', label: 'Download as .tar' },
       // keep: it answers in the menu (the info line), so the menu stays open
       { id: 'size', label: 'Calculate size', keep: true },
       { id: 'refresh', label: 'Refresh' },
@@ -32,6 +38,9 @@ export function fileMenuItems(node, { isOpen = false, script = null, empty = fal
     out.push({ id: 'revert', label: 'Revert to the next tier' });
   }
   out.push({ id: 'download', label: 'Download' });
+  if (canCompress(node.path)) out.push({ id: 'compress', label: 'Store compressed (.gz)' });
+  else if (isGz(node.path) && imageKind(node.path) !== 'bitmap') out.push({ id: 'decompress', label: 'Store uncompressed' });
+  if (hasBak) out.push({ id: 'restore-bak', label: 'Restore .bak (the version before the last save)' });
   out.push({ id: 'rename', label: 'Rename / move…' });
   out.push({ id: 'delete', label: 'Delete…', danger: true });
   return out;
@@ -50,6 +59,7 @@ export function bytes(n) {
 // alloc 0); a larger one takes whole 4 KB blocks.
 export function fileInfo(node) {
   if (node.size == null) return '';
+  if (isGz(node.path || node.name || '')) return `compressed (gzip) · ${fileInfo({ ...node, path: '', name: '' })}`;
   if (node.alloc == null) return bytes(node.size);
   if (node.alloc === 0) return `${bytes(node.size)} · stored inline in its folder (no blocks of its own)`;
   return `${bytes(node.size)} · ${bytes(node.alloc)} on flash`;

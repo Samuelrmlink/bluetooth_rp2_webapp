@@ -55,6 +55,7 @@ add_executable(btgw
     src/net/http.c
     src/net/ws.c
     src/fs/fs.c
+    src/util/inflate.c
     src/fs/littlefs/lfs.c
     src/fs/littlefs/lfs_util.c
     src/config/config.c

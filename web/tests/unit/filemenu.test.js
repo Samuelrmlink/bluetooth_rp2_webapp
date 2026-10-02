@@ -5,7 +5,7 @@ import { fileMenuItems } from '../../js/editor/filemenu.js';
 const ids = (items) => items.map((i) => i.id);
 
 test('a folder: new file, upload, refresh, rename', () => {
-  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'upload', 'size', 'refresh', 'rename']);
+  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename']);
 });
 
 test('a plain file: open, download, rename, delete (last, marked)', () => {
@@ -16,7 +16,7 @@ test('a plain file: open, download, rename, delete (last, marked)', () => {
 
 test('a script gets start / stop / commit / revert; the open file no Open', () => {
   const m = fileMenuItems({ dir: false, path: 'lua/anker.lua' }, { isOpen: true, script: 'anker' });
-  assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'rename', 'delete']);
+  assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'compress', 'rename', 'delete']);
   assert.equal(m[0].label, 'Start anker');
 });
 
@@ -51,4 +51,23 @@ test('Calculate size walks every subfolder and counts their metadata', async () 
   const t = await folderSize(async (p) => ({ ok: true, block: 4096, files: tree[p] }), 'lua');
   assert.deepEqual([t.files, t.dirs, t.bytes, t.alloc], [3, 1, 5110, 8192 + 2 * 2 * 4096]);
   assert.equal(sizeInfo(t), "5.0 KB in 3 files and 1 subfolder · 24.0 KB on flash, counting each folder's 8.0 KB of metadata");
+});
+
+test('compressed files: Store uncompressed; plain ones Store compressed; never cfg/ or a bitmap', () => {
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'lua/run.lua.gz' })).includes('decompress'));
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'js/app.js.gz' })).includes('decompress'));
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'lua/run.lua' })).includes('compress'));
+  const cfg = ids(fileMenuItems({ dir: false, path: 'cfg/wifi.json' }));
+  assert.ok(!cfg.includes('compress') && !cfg.includes('decompress'));
+  const jpg = ids(fileMenuItems({ dir: false, path: 'ss/a.jpg' }));
+  assert.ok(!jpg.includes('compress') && !jpg.includes('decompress'));
+});
+
+test('Restore .bak only when there is one', () => {
+  assert.ok(!ids(fileMenuItems({ dir: false, path: 'js/app.js.gz' })).includes('restore-bak'));
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'js/app.js.gz' }, { hasBak: true })).includes('restore-bak'));
+});
+
+test('a compressed file says so on its info line', () => {
+  assert.match(fileInfo({ path: 'lua/x.lua.gz', size: 900, alloc: 4096 }), /^compressed \(gzip\) · 900 B · 4\.0 KB on flash$/);
 });

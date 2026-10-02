@@ -13,11 +13,13 @@
 // every running script and resident module the hash of what it compiled and
 // the hash of its file now (see src/lua/lrt.c).
 
-// The file a loaded unit came from -- the firmware's unit_path(), mirrored:
-// scripts are <dir>/<name>.lua, a module's dots are directories, and <dir> is
-// staged/ or lua/ by tier. A draft has no file; it is attributed to where the
-// script's committed file is, because that is the file you edit to change it.
+// The file a loaded unit came from. Firmware 1.95+ says (`path`: x.lua or
+// x.lua.gz, whichever it compiled); otherwise the firmware's unit_path(),
+// mirrored: scripts are <dir>/<name>.lua, a module's dots are directories,
+// and <dir> is staged/ or lua/ by tier. A draft has no file; it is attributed
+// to where the script's committed file is, because that is the file you edit.
 export function unitPath(u) {
+  if (u.path) return u.path;
   const rel = u.kind === 'module' ? u.name.replace(/\./g, '/') : u.name;
   return `${u.tier === 'staged' ? 'staged' : 'lua'}/${rel}.lua`;
 }
@@ -50,9 +52,10 @@ export function shownArena(mark, savedHash) {
 }
 
 // The top-level script a path runs as, or null: lua/x.lua and staged/x.lua
-// are the script "x"; anything deeper is a module and cannot be started.
+// are the script "x" (lua/x.lua.gz too: stored compressed, the same
+// script); anything deeper is a module and cannot be started.
 export function scriptNameOf(path) {
-  const m = /^(?:lua|staged)\/([A-Za-z0-9_-]+)\.lua$/.exec(path);
+  const m = /^(?:lua|staged)\/([A-Za-z0-9_-]+)\.lua(?:\.gz)?$/.exec(path);
   return m ? m[1] : null;
 }
 
