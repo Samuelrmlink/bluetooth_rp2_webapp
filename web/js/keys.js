@@ -138,6 +138,7 @@ export const BINDINGS = [
   { id: 'editor-stop', group: 'Editor', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
   { id: 'editor-sidebar', group: 'Editor', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
   { id: 'editor-files', group: 'Editor', keys: 'j / k, l, h', combos: [], when: 'editor', label: 'In the file list: move, open or expand, collapse' },
+  { id: 'editor-file-menu', group: 'Editor', keys: 'm  /  Shift+F10  /  Menu key', combos: [], when: 'editor-files', label: 'In the file list: the file\'s or folder\'s menu (Open, Start / Stop, Rename, Delete, Download, New file here…) — also right-click' },
   { id: 'editor-to-files', group: 'Editor', keys: 'Ctrl+H', combos: ['Ctrl+KeyH'], when: 'editor', label: 'Move to the file list (opens the sidebar if it is shut)' },
   { id: 'editor-to-text', group: 'Editor', keys: 'Ctrl+L', combos: ['Ctrl+KeyL'], when: 'editor', label: 'Move back into the text' },
   { id: 'editor-vim-toggle', group: 'Editor', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },
@@ -274,6 +275,10 @@ HINTS['gatt-panel'] = [
   { keys: 'Esc', label: 'back to the row' },
   { keys: 'Alt+HJKL', label: 'focus window' },
 ];
+HINTS['editor-files'] = [
+  { keys: 'j/k', label: 'move' }, { keys: 'l', label: 'open' }, { keys: 'h', label: 'collapse' },
+  { keys: 'm', label: 'menu' }, { keys: 'Ctrl+L', label: 'text' }, ...HINTS.workspace,
+];
 HINTS.scanner = [{ keys: '/', label: 'filter' }, { keys: 'c', label: 'columns' }, { keys: 'Space', label: 'table' }, ...HINTS.workspace];
 HINTS['scanner-table'] = [
   { keys: 'HJKL', label: 'cell' },
@@ -328,11 +333,15 @@ export function matches(e, combo) {
 // Contexts that are the workspace with something extra: every workspace
 // binding (Alt+hjkl and the rest) applies in them too, plus their own.
 // ('scanner-filter' is a box in a dialog, not the workspace: only its own keys.)
-const WORKSPACE_LIKE = new Set(['editor', 'scanner', 'scanner-table', 'scanner-head', 'gatt', 'gatt-panel', 'events', 'events-table', 'events-head']);
+const WORKSPACE_LIKE = new Set(['editor', 'editor-files', 'scanner', 'scanner-table', 'scanner-head', 'gatt', 'gatt-panel', 'events', 'events-table', 'events-head']);
+
+// A context that is another one plus more: everything bound there applies
+// here too (the editor's file list is still the editor -- Ctrl+S, Alt+B).
+const INHERITS = { 'editor-files': 'editor' };
 
 function applies(b, context) {
   const w = Array.isArray(b.when) ? b.when : [b.when];
-  return w.includes('always') || w.includes(context) ||
+  return w.includes('always') || w.includes(context) || (INHERITS[context] && w.includes(INHERITS[context])) ||
     (WORKSPACE_LIKE.has(context) && w.includes('workspace'));
 }
 

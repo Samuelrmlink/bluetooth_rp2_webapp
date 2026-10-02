@@ -26,6 +26,8 @@ import { languageOf } from '../editor/highlight.js';
 import { arenaMarks, shownArena, scriptNameOf, shadowedBy } from '../editor/status.js';
 import { initialState, handle as vimHandle, modeLabel, clampNormal, searchMatches } from '../editor/vim.js';
 import { copyText } from '../clipboard.js';
+import { openCellMenu } from '../controls/cellmenu.js';
+import { fileMenuItems } from '../editor/filemenu.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -141,6 +143,19 @@ export class EditorWindow {
       mark: (p) => this._mark(p),
       onError: (m) => this.app.log('!', m),
     });
+    // Right-click a file or folder: its menu (openFileMenu). The keyboard
+    // equivalent is m / Shift+F10 / the Menu key in the list (attachKeys).
+    this._fileMenu = document.createElement('div');
+    this._fileMenu.className = 's-menu ed-file-menu';
+    this._files.addEventListener('contextmenu', (e) => {
+      const row = e.target.closest('.ft-row');
+      if (!row) return;
+      e.preventDefault();
+      this.tree.sel = row.dataset.path;
+      this.tree.invalidate();
+      this.tree.render();
+      this.openFileMenu(row.dataset.path);
+    });
     this._files.addEventListener('click', (e) => {
       const row = e.target.closest('.ft-row');
       if (!row) return;
@@ -158,9 +173,9 @@ export class EditorWindow {
     q('.ed-b-run').addEventListener('click', () => this.run());
     q('.ed-b-stop').addEventListener('click', () => this.stop());
     q('.ed-b-new').addEventListener('click', () => this.newFile());
-    q('.ed-b-upload').addEventListener('click', () => this._upload.click());
+    q('.ed-b-upload').addEventListener('click', () => { this._uploadDir = undefined; this._upload.click(); });
     q('.ed-b-download').addEventListener('click', () => this.download());
-    this._upload.addEventListener('change', () => this.upload([...this._upload.files]));
+    this._upload.addEventListener('change', () => this.upload([...this._upload.files], this._uploadDir));
     this._moreBtn.addEventListener('click', () => this.app.popover.toggle(this._moreBtn, this._more, 'editor-more'));
     this._more.addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
@@ -182,7 +197,19 @@ export class EditorWindow {
 
   attachKeys(keys) {
     this.keys = keys;
-    keys.nav.registerList(this._files, this.tree.listController());
+    const files = this.tree.listController();
+    // First refusal on a key in the file list: the selected file's menu.
+    files.key = (e) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey) || (e.key === 'm' && !e.shiftKey)) {
+        if (!this.tree.sel) return false;
+        e.preventDefault();
+        this.openFileMenu(this.tree.sel);
+        return true;
+      }
+      return false;
+    };
+    keys.nav.registerList(this._files, files);
     // The Esc ladder: insert -> normal (vim takes it), then normal -> leave
     // the text (vim declines, the key layer blurs), then Alt+hjkl.
     keys.ownEscape(this.core.ta, (e) => this._vimEsc(e));
@@ -381,7 +408,12 @@ export class EditorWindow {
 
   // Active editor window -> the 'editor' context: the workspace bindings
   // plus the editor's own (Ctrl+S, F5, Alt+B).
-  context() { return 'editor'; }
+  // In the file list, its own keys (the hint bar shows them); everything the
+  // editor binds still applies there (keys.js: 'editor-files' inherits 'editor').
+  context() {
+    return this._files.hasAttribute('data-nav-active') && this._files.contains(document.activeElement)
+      ? 'editor-files' : 'editor';
+  }
 
   action(id) {
     if (id === 'editor-save') return this.save();
@@ -609,36 +641,97 @@ export class EditorWindow {
     this.open(this.path);
   }
 
-  async _act_rename() {
-    if (!this.path) return;
-    const to = prompt('Rename or move to:', this.path)?.trim();
-    if (!to || to === this.path) return;
-    const r = await fs.rename(this.path, to);
+  _act_rename() { return this.renameFile(this.path); }
+  _act_delete() { return this.deleteFile(this.path); }
+
+  // Any file, open or not (the file menu); the open one by default.
+  async renameFile(path) {
+    if (!path) return;
+    const to = prompt('Rename or move to:', path)?.trim();
+    if (!to || to === path) return;
+    const r = await fs.rename(path, to);
     if (!r.ok) { this._say(`Rename failed: ${r.error}`, 'err'); return; }
-    const b = this.buffers.get(this.path);
-    this.buffers.delete(this.path);
-    if (b) b.lang = languageOf(to);
-    if (b) this.buffers.set(to, b);
-    this.path = to;
+    const b = this.buffers.get(path);
+    this.buffers.delete(path);
+    if (b) { b.lang = languageOf(to); this.buffers.set(to, b); }
+    if (this.path === path) this.path = to;
+    this._say(`Renamed ${path} to ${to}`);
     await this.tree.refresh();
     this.tree.reveal(to);
     this._renderTitle();
   }
 
-  async _act_delete() {
-    if (!this.path || !confirm(`Delete ${this.path} from the device? This cannot be undone.`)) return;
-    const r = await fs.remove(this.path);
+  async deleteFile(path) {
+    if (!path || !confirm(`Delete ${path} from the device? This cannot be undone.`)) return;
+    const r = await fs.remove(path);
     if (!r.ok) { this._say(`Delete failed: ${r.error}`, 'err'); return; }
-    this.buffers.delete(this.path);
-    this._say(`Deleted ${this.path}`);
-    this.path = null;
-    this.core.setValue('', 'text');
+    this.buffers.delete(path);
+    this._say(`Deleted ${path}`);
+    if (this.path === path) {
+      this.path = null;
+      this.core.setValue('', 'text');
+    }
     this.tree.refresh();
     this._renderTitle();
   }
 
-  async newFile() {
-    const name = prompt('New file (path on the device):', `${this.tree.currentDir}/`)?.trim();
+  // A script's tier operations by name, for a file that need not be open.
+  async scriptOp(op, path, done) {
+    const name = scriptNameOf(path);
+    if (!name) return;
+    try {
+      await this.ws.call(op, { script: name });
+      this._say(done(name));
+    } catch (e) {
+      this._say(`${op}: ${e.message}`, 'err');
+    }
+    await this._poll();
+    this.tree.refresh();
+  }
+
+  // The menu for one file or folder: right-click, or m / Shift+F10 / the Menu
+  // key in the list. Items come from editor/filemenu.js (tested); the path
+  // itself is the last item and copies.
+  openFileMenu(path) {
+    const node = this.tree.find(path);
+    if (!node) return false;
+    const row = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`);
+    if (!row) return false;
+    const items = fileMenuItems(node, {
+      isOpen: this.path === path,
+      script: scriptNameOf(path),
+    }).map((it) => ({ label: it.label, cls: it.danger ? 'sm-danger' : '', fn: () => this._fileAct(it.id, node) }));
+    this.tree.menuPath = path;
+    this.tree.invalidate();
+    this.tree.render();
+    const anchor = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`) || row;
+    return openCellMenu(this.app, {
+      anchor, menuEl: this._fileMenu, title: node.dir ? `${path}/` : path, items, value: path,
+      wrap: this._files, paneId: 'editor-file-menu',
+      onClose: () => { this.tree.menuPath = null; this.tree.invalidate(); },
+    });
+  }
+
+  _fileAct(id, node) {
+    const p = node.path;
+    switch (id) {
+      case 'open': return this.open(p);
+      case 'start': return this.scriptOp('script.start', p, (n) => `Started ${n}`);
+      case 'stop': return this.scriptOp('script.stop', p, (n) => `Stopped ${n}`);
+      case 'commit': return this.scriptOp('script.commit', p, (n) => `Committed ${n} to lua/${n}.lua`);
+      case 'revert': return this.scriptOp('script.revert', p, (n) => `Reverted ${n}: the next tier down runs now`);
+      case 'download': return this.download(p);
+      case 'rename': return this.renameFile(p);
+      case 'delete': return this.deleteFile(p);
+      case 'new': return this.newFile(p);
+      case 'upload': this._uploadDir = p; return this._upload.click();
+      case 'refresh': return this.tree.refresh(node).then(() => this.tree.invalidate());
+      default: return undefined;
+    }
+  }
+
+  async newFile(dir = this.tree.currentDir) {
+    const name = prompt('New file (path on the device):', `${dir}/`)?.trim();
     if (!name || name.endsWith('/')) return;
     // Not written until saved -- a new file is an unsaved buffer, like any
     // editor's. Its base is a hash no text has, so it shows as modified.
@@ -655,8 +748,7 @@ export class EditorWindow {
     this.core.focus();
   }
 
-  async upload(files) {
-    const dir = this.tree.currentDir;
+  async upload(files, dir = this.tree.currentDir) {
     for (const f of files) {
       const dest = dir ? `${dir}/${f.name}` : f.name;
       const r = await fs.write(dest, f);
@@ -666,22 +758,23 @@ export class EditorWindow {
     this.tree.refresh();
   }
 
-  async download() {
-    if (!this.path) return;
-    const b = this.buffers.get(this.path);
+  async download(path = this.path) {
+    if (!path) return;
+    const b = this.buffers.get(path);
     // The buffer if it is text (what you see is what you get, saved or not);
     // the device's bytes if it is binary.
     let blob;
     if (b && !b.binary) {
-      blob = new Blob([this.core.value], { type: 'text/plain' });
+      // the open file's buffer is the text box; another's is its kept text
+      blob = new Blob([path === this.path ? this.core.value : b.text], { type: 'text/plain' });
     } else {
-      const r = await fs.readBlob(this.path);
+      const r = await fs.readBlob(path);
       if (!r.ok) { this._say(`Download failed: ${r.error}`, 'err'); return; }
       blob = r.blob;
     }
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = this.path.split('/').pop();
+    a.download = path.split('/').pop();
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }

@@ -593,3 +593,7 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 .pair-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .pair-body .pane-btn { border: 1px solid var(--border); border-radius: 4px; padding: 4px 12px; }
 .pair-body [hidden] { display: none; }   /* display:flex above would override the attribute */
+
+/* Editor file menu (editor.js openFileMenu): the row it is for, and Delete */
+.ft-row.is-menu-row { outline: 2px solid var(--orange); outline-offset: -2px; background: rgba(230, 168, 61, 0.12); }
+.s-menu .sm-danger { color: var(--red); }

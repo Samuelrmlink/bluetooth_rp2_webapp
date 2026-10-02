@@ -139,6 +139,7 @@ export class FileTree {
       row.dataset.path = node.path;
       row.style.paddingLeft = `${6 + depth * 12}px`;
       if (node.path === this.sel) row.setAttribute('aria-selected', 'true');
+      if (node.path === this.menuPath) row.classList.add('is-menu-row');   // its menu is open
       const tw = document.createElement('span');
       tw.className = 'ft-twisty';
       tw.textContent = node.dir ? (node.open ? '▾' : '▸') : '';
