@@ -153,8 +153,9 @@ static void op_arena(const char *params, api_reply_fn reply, void *ctx, long id)
 
 /* script.vm_restart: a fresh Lua state without rebooting the board. */
 static void op_vm_restart(const char *params, api_reply_fn reply, void *ctx, long id) {
-    (void)params;
-    lrt_vm_restart(buf, BUF_SZ);
+    bool resume = false;
+    (void)api_json_bool(params, "resume", &resume);
+    lrt_vm_restart(resume, false, buf, BUF_SZ);
     api_reply_ok(reply, ctx, id, buf);
 }
 
@@ -321,7 +322,7 @@ static const op_def_t lua_ops_tbl[] = {
     { NULL, NULL }
 };
 
-static const char *const lua_topics[] = { "script.error", "profile.*", NULL };
+static const char *const lua_topics[] = { "script.error", "script.vm_restarted", "profile.*", NULL };
 
 static bool lua_mod_init(void) { lrt_init(); return true; }
 

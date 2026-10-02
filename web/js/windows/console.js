@@ -8,6 +8,7 @@
 
 const MAX_LINES = 1000;
 
+import { restartText } from '../settings/system.js';
 import { copyWithToast } from '../controls/cellmenu.js';
 import { toast } from '../toast.js';
 export class ConsoleWindow {
@@ -68,6 +69,8 @@ export class ConsoleWindow {
     bus.on('log', (d) => this.add('info', d?.src || 'device', d?.message ?? JSON.stringify(d), d?.level));
     bus.on('script.error', (d) => this.add('lua', d?.script || 'lua', d?.error || 'error', 'error'));
     bus.on('script.wake', (d) => this.add('lua', d?.script || 'lua', `woke: ${d?.reason} after ${d?.waited_ms} ms`));
+    // A rebuilt Lua VM: by hand, or by itself after the last script stopped with the arena in pieces.
+    bus.on('script.vm_restarted', (d) => this.add('lua', 'lua', restartText(d || {})));
     for (const t of ['dev.connected', 'dev.disconnected', 'security.failed', 'security.bonded']) {
       bus.on(t, (d) => this.add('bt', t, d?.addr || JSON.stringify(d)));
     }

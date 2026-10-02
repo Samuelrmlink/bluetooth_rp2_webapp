@@ -87,7 +87,10 @@ void lrt_stats(lrt_stats_t *out);
 /* Diagnostics (script.heap / script.arena) and a Lua-only restart. */
 size_t lrt_heap_json(char *dst, size_t cap);
 size_t lrt_arena_json(long offset, long len, char *dst, size_t cap);
-size_t lrt_vm_restart(char *dst, size_t cap);
+/* A fresh Lua state. resume: start again the scripts that were running;
+ * keep_status: keep dead scripts' errors. Emits script.vm_restarted. Also
+ * done by itself when the last script stops and the arena is fragmented. */
+size_t lrt_vm_restart(bool resume, bool keep_status, char *dst, size_t cap);
 typedef struct { const char *name; uint32_t state, resumes, runtime_ms; } lrt_task_info_t;
 int lrt_task_info(int i, lrt_task_info_t *out);
 

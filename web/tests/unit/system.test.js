@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { heapRows, fetchArena } from '../../js/settings/system.js';
+import { heapRows, fetchArena, restartText } from '../../js/settings/system.js';
 
 const heap = {
   arena: { bytes: 163840, used: 18016, peak: 133768, free_bytes: 145824, largest_free: 55120,
@@ -27,4 +27,10 @@ test('the arena is fetched 1 KB at a time, in order', async () => {
   assert.deepEqual(calls, [0, 1024, 2048]);
   assert.equal(a.hex.length, 5000);
   assert.deepEqual([a.base, a.header, a.size], [7, 16, 2500]);
+});
+
+test('what a VM rebuild did, in words', () => {
+  assert.equal(restartText({ stopped: 0, resumed: 0, before: 17560, after: 15640, largest_free_before: 61640, largest_free: 144000 }),
+    'Lua VM rebuilt: 0 script(s) stopped; arena 17.1 KB → 15.3 KB, largest free block 60.2 KB → 140.6 KB.');
+  assert.match(restartText({ stopped: 2, resumed: 2, before: 1, after: 1 }), /2 script\(s\) stopped and started again/);
 });

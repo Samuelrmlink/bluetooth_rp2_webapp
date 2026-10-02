@@ -54,6 +54,7 @@ export class SystemSection extends PolledSection {
     acts.append(
       button('Reboot gateway', () => this.reboot()),
       button('Restart Lua VM', () => this.restartVm()),
+      button('Defragment Lua memory', () => this.restartVm(true)),
     );
     this._dumpBtn = button('Download heap dump', () => this.dump());
     d.querySelector('.sys-dump').append(this._dumpBtn);
@@ -67,12 +68,16 @@ export class SystemSection extends PolledSection {
     } catch (e) { this._note.textContent = e.message; }
   }
 
-  async restartVm() {
-    if (!window.confirm('Restart the Lua VM?\n\nEvery script stops and the Lua arena starts empty. The network and the board keep running.')) return;
+  // resume: Defragment -- rebuild the VM and start the running scripts again
+  // (Lua never moves objects, so rebuilding is how the arena is packed).
+  async restartVm(resume = false) {
+    const q = resume
+      ? 'Defragment Lua memory?\n\nThe Lua VM is rebuilt and the scripts that are running now start again -- device drivers reconnect, which takes a few seconds each.'
+      : 'Restart the Lua VM?\n\nEvery script stops and the Lua arena starts empty. The network and the board keep running.';
+    if (!window.confirm(q)) return;
     try {
-      const r = await this.ws.call('script.vm_restart');
-      this._note.textContent = `Lua restarted: ${r.stopped} script(s) stopped, arena ${kb(r.before)} → ${kb(r.after)}.`;
-      this.app.log('info', `Lua VM restarted (${r.stopped} script(s) stopped)`);
+      const r = await this.ws.call('script.vm_restart', { resume });
+      this._note.textContent = restartText(r);
     } catch (e) { this._note.textContent = e.message; }
     this.soon();
   }
@@ -102,4 +107,10 @@ export class SystemSection extends PolledSection {
     if (h) kvRows(this._heap, heapRows(h));
     else kvRows(this._heap, [['Lua', 'this firmware has no heap census (1.90 or later)']]);
   }
+}
+
+// What a VM restart did, in words (also used for the Console line). Pure; tested.
+export function restartText(r) {
+  const what = r.resumed ? `${r.stopped} script(s) stopped and started again` : `${r.stopped} script(s) stopped`;
+  return `Lua VM rebuilt: ${what}; arena ${kb(r.before)} → ${kb(r.after)}, largest free block ${kb(r.largest_free_before)} → ${kb(r.largest_free)}.`;
 }

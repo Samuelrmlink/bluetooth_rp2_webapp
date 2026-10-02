@@ -962,6 +962,30 @@ bool lrt_start(const char *name, const char **err) {
  * found 2026-09-30 by walking a dump of the arena: three threads in the
  * registry that no script slot referred to, one holding the dead driver.
  */
+/* --- defragmenting by rebuilding -------------------------------------------
+ * Lua never moves an object, so a few long-lived ones created mid-session (a
+ * module's shared state, the string table growing) stay wherever first-fit
+ * put them, and cut the free space into pieces: after five Anker driver
+ * sessions, 3.3 KB of such blocks left the largest free block at 62 KB of
+ * 146 KB free. Rebuilding the VM packs everything from the bottom again, so
+ * when the last script stops and the free space is in pieces, the next tick
+ * does that (lrt_vm_restart) -- unless something has started meanwhile. */
+static bool s_defrag_due;
+static bool s_restarting;
+
+static bool any_running(const script_t *except) {
+    for (int i = 0; i < MAX_SCRIPTS; i++) {
+        if (&scripts[i] != except && scripts[i].used && scripts[i].running) { return true; }
+    }
+    return false;
+}
+
+static void defrag_check(const script_t *going) {
+    if (s_restarting || any_running(going)) { return; }
+    size_t free_b = lheap_capacity() - lheap_used();
+    if (lheap_largest_free() * 4 < free_b * 3) { s_defrag_due = true; }
+}
+
 static void release_runtime(script_t *s) {
     if (s->co_ref != LUA_NOREF) {
         /* Close the thread rather than merely dropping the reference. A
@@ -986,6 +1010,7 @@ static void release_runtime(script_t *s) {
      * release_modules ran before this coroutine was let go, so it could not
      * reach any of it. */
     lrt_collect();
+    defrag_check(s);
 }
 
 /* Tears down the coroutine and environment but KEEPS the entry and its draft.
@@ -1125,6 +1150,14 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
 /* --- the scheduler -------------------------------------------------------- */
 void lrt_tick(void) {
     if (!s_ready) { return; }
+    if (s_defrag_due) {
+        s_defrag_due = false;
+        if (!any_running(NULL)) {
+            static char r[256];
+            lrt_vm_restart(false, true, r, sizeof r);   /* keep a dead script's error */
+            return;
+        }
+    }
     cache_tick();
     lbind_pairing_pump();
 
@@ -1617,16 +1650,19 @@ size_t lrt_arena_json(long offset, long len, char *dst, size_t cap) {
 /* script.vm_restart: stop every script, close the Lua state and start a new
  * one in a clean arena -- what a reboot does for Lua, without dropping WiFi,
  * WireGuard or Bluetooth. Drafts are kept (they live outside the arena). */
-size_t lrt_vm_restart(char *dst, size_t cap) {
+size_t lrt_vm_restart(bool resume, bool keep_status, char *dst, size_t cap) {
     if (!L) { return (size_t)snprintf(dst, cap, "{\"error\":\"no Lua state\"}"); }
-    size_t before = lheap_used();
+    s_restarting = true;
+    size_t before = lheap_used(), before_free = lheap_largest_free();
     int stopped = 0;
+    static char was[MAX_SCRIPTS][NAME_MAX_LEN + 1];
+    memset(was, 0, sizeof was);
     for (int i = 0; i < MAX_SCRIPTS; i++) {
         script_t *s = &scripts[i];
         if (!s->used) { continue; }
+        if (s->running) { snprintf(was[i], sizeof was[i], "%s", s->name); }
         if (s->running || s->co_ref != LUA_NOREF) { stopped += s->running ? 1 : 0; teardown(s); }
-        s->dead = false;
-        s->err[0] = 0;
+        if (!keep_status) { s->dead = false; s->err[0] = 0; }
     }
     lbind_reset();
     memset(s_mod_use, 0, sizeof s_mod_use);
@@ -1634,10 +1670,24 @@ size_t lrt_vm_restart(char *dst, size_t cap) {
     L = NULL;
     s_ready = false;
     lrt_init();
-    printf("lua: VM restarted (%d script(s) stopped), arena %u -> %u B\n",
-           stopped, (unsigned)before, (unsigned)lheap_used());
-    return (size_t)snprintf(dst, cap, "{\"restarted\":true,\"stopped\":%d,\"before\":%u,\"after\":%u}",
-                            stopped, (unsigned)before, (unsigned)lheap_used());
+    s_restarting = false;
+    s_defrag_due = false;
+    int resumed = 0;
+    for (int i = 0; resume && i < MAX_SCRIPTS; i++) {
+        const char *err = NULL;
+        if (was[i][0] && lrt_start(was[i], &err)) { resumed++; }
+        else if (was[i][0]) { printf("lua: could not resume %s: %s\n", was[i], err ? err : "?"); }
+    }
+    printf("lua: VM restarted (%d script(s) stopped, %d resumed), arena %u -> %u B, largest free %u -> %u B\n",
+           stopped, resumed, (unsigned)before, (unsigned)lheap_used(),
+           (unsigned)before_free, (unsigned)lheap_largest_free());
+    size_t n = (size_t)snprintf(dst, cap,
+        "{\"restarted\":true,\"stopped\":%d,\"resumed\":%d,\"before\":%u,\"after\":%u,"
+        "\"largest_free_before\":%u,\"largest_free\":%u}",
+        stopped, resumed, (unsigned)before, (unsigned)lheap_used(),
+        (unsigned)before_free, (unsigned)lheap_largest_free());
+    api_emit("script.vm_restarted", dst);
+    return n;
 }
 
 size_t lrt_stats_json(char *dst, size_t cap) {
@@ -1684,6 +1734,12 @@ void lrt_init(void) {
         printf("lua: could not create state in a %u KB arena\n", CONFIG_LUA_HEAP_KB);
         return;
     }
+    /* The string table at its working size from the start. It doubles when
+     * full and never shrinks while a quarter used, so growing mid-session
+     * from 256 to 512 slots left its 2 KB array as an island in the middle
+     * of the arena. Allocated now, it sits at the bottom with the rest of
+     * what lives as long as the VM. */
+    luaS_resize(L, 512);
     /* Only the libraries that cannot reach the host. io, os, package and debug
      * are not compiled in at all -- see third_party/lua/CMakeLists.txt. */
     luaL_requiref(L, LUA_GNAME, luaopen_base, 1);      lua_pop(L, 1);

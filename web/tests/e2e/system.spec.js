@@ -19,7 +19,20 @@ test('Restart Lua VM asks, then reports what it stopped', async ({ page }) => {
   await system(page);
   page.once('dialog', (d) => d.accept());
   await page.getByRole('button', { name: 'Restart Lua VM' }).click();
-  await expect(page.locator('.sys-note')).toContainText('Lua restarted: 1 script(s) stopped');
+  await expect(page.locator('.sys-note')).toContainText('Lua VM rebuilt: 1 script(s) stopped;');
+  await expect(page.locator('.sys-note')).toContainText('largest free block 60.2 KB → 140.6 KB');
+});
+
+test('Defragment rebuilds the VM and starts the running scripts again, and says so in the Console', async ({ page }) => {
+  await system(page);
+  page.once('dialog', (d) => { expect(d.message()).toContain('start again'); d.accept(); });
+  await page.getByRole('button', { name: 'Defragment Lua memory' }).click();
+  await expect(page.locator('.sys-note')).toContainText('1 script(s) stopped and started again');
+  const running = await page.evaluate(async () => (await window.__btgwApp.ws.call('script.list')).scripts.find((x) => x.name === 'anker')?.running);
+  expect(running).toBe(true);
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => window.__btgwApp.show('console'));
+  await expect(page.locator('.console-line').filter({ hasText: 'Lua VM rebuilt' }).first()).toBeVisible();
 });
 
 test('Reboot asks first; No sends nothing', async ({ page }) => {

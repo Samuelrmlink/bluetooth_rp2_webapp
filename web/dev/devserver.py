@@ -317,10 +317,16 @@ class MockGateway:
             chunk = bytes(raw[off:off + min(int(p.get("len", 1024)), 1024)])
             return {"base": base, "size": size, "header": 16, "offset": off, "len": len(chunk), "hex": chunk.hex()}
         if op == "script.vm_restart":
-            n = sum(1 for v in STATE["scripts"].values() if v.get("running"))
+            running = [k for k, v in STATE["scripts"].items() if v.get("running")]
             for v in STATE["scripts"].values():
                 v["running"] = False
-            return {"restarted": True, "stopped": n, "before": 85424, "after": 15640}
+            if p.get("resume"):
+                for k in running:
+                    STATE["scripts"][k]["running"] = True
+            r = {"restarted": True, "stopped": len(running), "resumed": len(running) if p.get("resume") else 0,
+                 "before": 85424, "after": 15640, "largest_free_before": 61640, "largest_free": 144000}
+            self.send({"evt": "script.vm_restarted", "data": r})
+            return r
         if op == "test.pairing":
             # e2e only: the firmware's question, as if a device had asked.
             topic = {"input": "security.passkey_request", "compare": "security.numeric_comparison",
