@@ -870,7 +870,10 @@ static GCObject **sweeptolive (lua_State *L, GCObject **p) {
 */
 static void checkSizes (lua_State *L, global_State *g) {
   if (!g->gcemergency) {
-    if (g->strt.nuse < g->strt.size / 4) {  /* string table too big? */
+    /* btgw: never below MINSTRTABSIZE (512, third_party/lua/CMakeLists.txt).
+     * Shrinking it when a script stops and growing it again in the next
+     * session left its array as an island in the middle of the arena. */
+    if (g->strt.nuse < g->strt.size / 4 && g->strt.size / 2 >= MINSTRTABSIZE) {  /* string table too big? */
       l_mem olddebt = g->GCdebt;
       luaS_resize(L, g->strt.size / 2);
       g->GCestimate += g->GCdebt - olddebt;  /* correct estimate */

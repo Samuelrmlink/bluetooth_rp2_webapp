@@ -17,4 +17,8 @@ add_library(lua STATIC
 target_include_directories(lua PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_compile_options(lua PRIVATE -include ${CMAKE_CURRENT_LIST_DIR}/lua_pico_conf.h -Wno-unused-function)
 target_compile_definitions(lua PUBLIC LUA_32BITS=1)
+# The string table starts at its working size and never shrinks below it
+# (patched checkSizes in lgc.c): growing it mid-session left a 2 KB array
+# stranded in the middle of the arena.
+target_compile_definitions(lua PUBLIC MINSTRTABSIZE=512)
 target_link_libraries(lua PUBLIC pico_stdlib)

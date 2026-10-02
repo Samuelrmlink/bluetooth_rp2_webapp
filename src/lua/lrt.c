@@ -1734,12 +1734,11 @@ void lrt_init(void) {
         printf("lua: could not create state in a %u KB arena\n", CONFIG_LUA_HEAP_KB);
         return;
     }
-    /* The string table at its working size from the start. It doubles when
-     * full and never shrinks while a quarter used, so growing mid-session
-     * from 256 to 512 slots left its 2 KB array as an island in the middle
-     * of the arena. Allocated now, it sits at the bottom with the rest of
-     * what lives as long as the VM. */
-    luaS_resize(L, 512);
+    /* The string table starts at 512 slots (MINSTRTABSIZE, set in
+     * third_party/lua/CMakeLists.txt) and lgc.c is patched never to shrink it
+     * below that: growing it from 256 mid-session left its 2 KB array as an
+     * island in the middle of the arena. A resize here was not enough --
+     * the first collection shrank it straight back. */
     /* Only the libraries that cannot reach the host. io, os, package and debug
      * are not compiled in at all -- see third_party/lua/CMakeLists.txt. */
     luaL_requiref(L, LUA_GNAME, luaopen_base, 1);      lua_pop(L, 1);
