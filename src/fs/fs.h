@@ -61,7 +61,11 @@ int fs_list_json(const char *dir, char *buf, size_t cap);
  * Returns the number of entries visited, or -1 if `dir` is not a directory. */
 typedef void (*fs_walk_fn)(const char *name, bool is_dir, size_t size, void *ctx);
 int fs_walk(const char *dir, fs_walk_fn cb, void *ctx);
+/* Removes a file or an empty directory; FS_ERR_NOTEMPTY for one that is not. */
+#define FS_ERR_NOTEMPTY (-39)
 int fs_delete(const char *name);
+/* Bytes of flash a file occupies (0 when stored inline in its directory). */
+uint32_t fs_file_alloc(const char *name, uint32_t size);
 int fs_rename(const char *from, const char *to);
 bool fs_stat(const char *name, size_t *size);
 

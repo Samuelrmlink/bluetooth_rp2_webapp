@@ -12,10 +12,11 @@ export async function copyWithToast(text, done = 'Copied') {
   toast((await copyText(text)) ? done : 'Could not copy');
 }
 
-// items: [{ label, fn, cls? }]. onClose runs however the menu closes (the
-// window un-highlights the cell it was for). Returns false when there was
-// nothing to show.
-export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '', wrap, paneId = 'cell-menu', onReturn, onClose }) {
+// items: [{ label, fn, cls?, keep? }] -- keep: the item answers inside the
+// menu, which stays open. info: a line under the title. onClose runs however
+// the menu closes (the window un-highlights the cell it was for). Returns
+// false when there was nothing to show, else { setInfo(text) }.
+export function openCellMenu(app, { anchor, menuEl, title, info = '', items = [], value = '', wrap, paneId = 'cell-menu', onReturn, onClose }) {
   if (!anchor) return false;
   const m = menuEl;
   m.replaceChildren();
@@ -23,16 +24,21 @@ export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '
   t.className = 'sm-title';
   t.textContent = title || '';
   m.appendChild(t);
-  const add = (label, fn, cls = '') => {
+  const infoEl = document.createElement('div');
+  infoEl.className = 'dim sm-info';
+  infoEl.textContent = info;
+  infoEl.hidden = !info;
+  m.appendChild(infoEl);
+  const add = (label, fn, cls = '', keep = false) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = `pane-btn sm-item ${cls}`;
     b.textContent = label;
-    b.addEventListener('click', () => { app.popover.close(); fn(); });
+    b.addEventListener('click', () => { if (!keep) app.popover.close(); fn(); });
     m.appendChild(b);
     return b;
   };
-  for (const it of items) add(it.label, it.fn, it.cls);
+  for (const it of items) add(it.label, it.fn, it.cls, it.keep);
   if (value) {
     add(value, () => copyWithToast(value), 'sm-value').title = 'Copy';
     const hint = document.createElement('div');
@@ -40,7 +46,7 @@ export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '
     hint.textContent = 'Tap the value to copy it';
     m.appendChild(hint);
   }
-  if (m.children.length <= 1) return false;
+  if (m.querySelectorAll('.sm-item').length === 0) return false;
   const fromTable = wrap?.hasAttribute('data-nav-active');
   app.popover.open(anchor, m, paneId, {
     onClose: () => {
@@ -53,5 +59,7 @@ export function openCellMenu(app, { anchor, menuEl, title, items = [], value = '
       onReturn?.();
     },
   });
-  return true;
+  return {
+    setInfo: (text) => { infoEl.textContent = text; infoEl.hidden = !text; app.popover.reposition(); },
+  };
 }

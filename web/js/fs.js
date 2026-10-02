@@ -56,7 +56,8 @@ async function send(method, url, body, as) {
   return { ok: true, ...data };
 }
 
-// One level, as the device lists it: [{name, dir:true} | {name, size}].
+// One level, as the device lists it: [{name, dir:true} | {name, size, alloc}],
+// alloc being the flash a file takes (fw 1.94+; 0 = inline in its folder).
 // Directories first, then files, each alphabetical -- the order a file tree
 // is read in.
 export async function list(dir = '') {
@@ -64,7 +65,7 @@ export async function list(dir = '') {
   if (!r.ok) return r;
   const files = (r.files || []).slice().sort((a, b) =>
     (b.dir ? 1 : 0) - (a.dir ? 1 : 0) || a.name.localeCompare(b.name));
-  return { ok: true, files };
+  return { ok: true, files, block: r.block };
 }
 
 export const readText = (path) => send('GET', fsPath(path), undefined, 'text');

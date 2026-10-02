@@ -256,6 +256,33 @@ int fs_walk(const char *dir, fs_walk_fn cb, void *ctx) {
     return n;
 }
 
+/* How much flash a file really takes, beyond its own size.
+ *
+ * LittleFS keeps a small file (up to cache_size, 256 B here) INLINE, inside
+ * its directory's metadata block: it owns no blocks at all. A larger file is
+ * a CTZ skip-list of whole blocks, and every block after the first spends
+ * 4 * (ctz(i) + 1) bytes on back-pointers -- so a 4096 B file fits one
+ * block (the first carries none) and a 4097 B one needs two.
+ * Mirrors lfs_ctz_index (static in lfs.c); checked against a brute-force
+ * model of the layout for every size to 70 KB. Returns bytes. */
+static uint32_t ctz_blocks(uint32_t size) {
+    if (size == 0) { return 0; }
+    uint32_t off = size - 1;
+    uint32_t b = FS_BLOCK - 2 * 4;
+    uint32_t i = off / b;
+    if (i == 0) { return 1; }
+    i = (off - 4 * ((uint32_t)__builtin_popcount(i - 1) + 2)) / b;
+    return i + 1;
+}
+
+uint32_t fs_file_alloc(const char *name, uint32_t size) {
+    lfs_file_t f;
+    if (lfs_file_open(&lfs, &f, name, LFS_O_RDONLY) < 0) { return 0; }
+    bool inl = (f.flags & LFS_F_INLINE) != 0;
+    lfs_file_close(&lfs, &f);
+    return inl ? 0 : ctz_blocks(size) * FS_BLOCK;
+}
+
 int fs_list_json(const char *dir, char *buf, size_t cap) {
     if (!mounted || !buf || cap < 16) {
         return -1;
@@ -270,10 +297,12 @@ int fs_list_json(const char *dir, char *buf, size_t cap) {
         shown = dir;
     }
     size_t n = 0;
+    /* block: the allocation unit; each file's alloc is what it occupies on
+     * flash (0 when it is stored inline in this directory's metadata). */
     if (shown[0]) {
-        n += (size_t)snprintf(buf + n, cap - n, "{\"dir\":\"%s\",\"files\":[", shown);
+        n += (size_t)snprintf(buf + n, cap - n, "{\"dir\":\"%s\",\"block\":%u,\"files\":[", shown, (unsigned)FS_BLOCK);
     } else {
-        n += (size_t)snprintf(buf + n, cap - n, "{\"files\":[");
+        n += (size_t)snprintf(buf + n, cap - n, "{\"block\":%u,\"files\":[", (unsigned)FS_BLOCK);
     }
     lfs_dir_t ldir;
     if (lfs_dir_open(&lfs, &ldir, open_path) < 0) {
@@ -297,8 +326,10 @@ int fs_list_json(const char *dir, char *buf, size_t cap) {
         if (info.type == LFS_TYPE_DIR) {
             n += (size_t)snprintf(buf + n, cap - n, "{\"name\":\"%s\",\"dir\":true}", info.name);
         } else {
-            n += (size_t)snprintf(buf + n, cap - n, "{\"name\":\"%s\",\"size\":%u}",
-                                  info.name, (unsigned)info.size);
+            char full[FS_PATH_MAX + 1];
+            snprintf(full, sizeof full, "%s%s%s", shown, shown[0] ? "/" : "", info.name);
+            n += (size_t)snprintf(buf + n, cap - n, "{\"name\":\"%s\",\"size\":%u,\"alloc\":%u}",
+                                  info.name, (unsigned)info.size, (unsigned)fs_file_alloc(full, info.size));
         }
         if (n + 32 >= cap) {
             break;
@@ -332,11 +363,14 @@ static void changed(const char *name) {
     if (change_hook) { change_hook(name); }
 }
 
+/* A file, or an EMPTY directory: LittleFS itself refuses a directory with
+ * anything in it (FS_ERR_NOTEMPTY), so nothing is ever removed recursively. */
 int fs_delete(const char *name) {
-    if (!mounted || !fs_valid_path(name) || fs_is_dir(name)) {
+    if (!mounted || !fs_valid_path(name)) {
         return -1;
     }
     int err = lfs_remove(&lfs, name);
+    if (err == LFS_ERR_NOTEMPTY) { return FS_ERR_NOTEMPTY; }
     if (err >= 0) { changed(name); }
     return err < 0 ? err : 0;
 }

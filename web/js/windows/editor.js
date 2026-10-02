@@ -27,7 +27,7 @@ import { arenaMarks, shownArena, scriptNameOf, shadowedBy } from '../editor/stat
 import { initialState, handle as vimHandle, modeLabel, clampNormal, searchMatches } from '../editor/vim.js';
 import { copyText } from '../clipboard.js';
 import { openCellMenu } from '../controls/cellmenu.js';
-import { fileMenuItems } from '../editor/filemenu.js';
+import { fileMenuItems, fileInfo, dirInfo, folderSize, sizeInfo } from '../editor/filemenu.js';
 import { LongPress } from '../editor/longpress.js';
 
 const ARENA_POLL_MS = 3000;
@@ -73,6 +73,7 @@ export class EditorWindow {
       <div class="ed-status">
         <span class="ed-s-mode"></span>
         <span class="ed-s-path dim"></span>
+        <span class="ed-s-size dim"></span>
         <span class="spacer"></span>
         <span class="ed-s-pos"></span>
         <span class="ed-s-lang dim"></span>
@@ -96,6 +97,7 @@ export class EditorWindow {
     this._files = q('.ed-files');
     this._sMode = q('.ed-s-mode');
     this._sPath = q('.ed-s-path');
+    this._sSize = q('.ed-s-size');
     this._sPos = q('.ed-s-pos');
     this._sLang = q('.ed-s-lang');
     this._sArena = q('.ed-s-arena');
@@ -695,6 +697,16 @@ export class EditorWindow {
     this._renderTitle();
   }
 
+  // An empty folder (the device refuses any other, so nothing is ever
+  // deleted recursively).
+  async deleteFolder(path) {
+    if (!path || !confirm(`Delete the empty folder ${path}/ from the device?`)) return;
+    const r = await fs.remove(path);
+    if (!r.ok) { this._say(`Delete failed: ${r.error}`, 'err'); return; }
+    this._say(`Deleted ${path}/`);
+    this.tree.refresh();
+  }
+
   // A script's tier operations by name, for a file that need not be open.
   async scriptOp(op, path, done) {
     const name = scriptNameOf(path);
@@ -722,24 +734,43 @@ export class EditorWindow {
   // button on a touch screen, or m / Shift+F10 / the Menu key in the list.
   // Items come from editor/filemenu.js (tested); the path itself is the last
   // item and copies.
-  openFileMenu(path) {
+  async openFileMenu(path) {
     const node = this.tree.find(path);
     if (!node) return false;
+    // A folder's menu says what is in it, and offers Delete only when empty:
+    // list it first if it has never been opened (one request).
+    if (node.dir && !node.children) await this.tree.load(node);
     const row = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`);
     if (!row) return false;
     const items = fileMenuItems(node, {
       isOpen: this.path === path,
       script: scriptNameOf(path),
-    }).map((it) => ({ label: it.label, cls: it.danger ? 'sm-danger' : '', fn: () => this._fileAct(it.id, node) }));
+      empty: node.dir && node.children?.length === 0,
+    }).map((it) => ({ label: it.label, keep: it.keep, cls: it.danger ? 'sm-danger' : '', fn: () => this._fileAct(it.id, node) }));
     this.tree.menuPath = path;
     this.tree.invalidate();
     this.tree.render();
     const anchor = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`) || row;
-    return openCellMenu(this.app, {
+    this._menu = openCellMenu(this.app, {
       anchor, menuEl: this._fileMenu, title: node.dir ? `${path}/` : path, items, value: path,
+      info: node.dir ? dirInfo(node.children) : fileInfo(node),
       wrap: this._files, paneId: 'editor-file-menu',
-      onClose: () => { this.tree.menuPath = null; this.tree.invalidate(); },
+      onClose: () => { this.tree.menuPath = null; this.tree.invalidate(); this._menu = null; },
     });
+    return this._menu;
+  }
+
+  // Calculate size: every file under the folder, listed one folder at a time,
+  // only when asked. Answers on the menu's info line.
+  async sizeFolder(node) {
+    const menu = this._menu;
+    menu?.setInfo('counting…');
+    try {
+      const t = await folderSize(fs.list, node.path, (p) => menu?.setInfo(`counting… ${p.files} files so far`));
+      menu?.setInfo(sizeInfo(t));
+    } catch (e) {
+      menu?.setInfo(`Could not count: ${e.message}`);
+    }
   }
 
   _fileAct(id, node) {
@@ -752,7 +783,8 @@ export class EditorWindow {
       case 'revert': return this.scriptOp('script.revert', p, (n) => `Reverted ${n}: the next tier down runs now`);
       case 'download': return this.download(p);
       case 'rename': return this.renameFile(p);
-      case 'delete': return this.deleteFile(p);
+      case 'delete': return node.dir ? this.deleteFolder(p) : this.deleteFile(p);
+      case 'size': return this.sizeFolder(node);
       case 'new': return this.newFile(p);
       case 'upload': this._uploadDir = p; return this._upload.click();
       case 'refresh': return this.tree.refresh(node).then(() => this.tree.invalidate());
@@ -839,6 +871,9 @@ export class EditorWindow {
     this._state.textContent = bits.length ? `  ${bits.join(' · ')}` : '';
     this._state.className = `ed-state${m.arena ? ' ed-' + m.arena : ''}${m.dirty ? ' is-dirty' : ''}`;
     this._sPath.textContent = this.path || '';
+    // the open file's size and what it takes on flash, as listed (saved state)
+    const n = this.path && this.tree.find(this.path);
+    this._sSize.textContent = n && !n.dir ? fileInfo(n) : '';
     this._sLang.textContent = b ? LANG_NAMES[b.lang] || '' : '';
     this._sArena.textContent = this.runtime
       ? `arena ${Math.round(this.runtime.used / 1024)}/${Math.round(this.runtime.arena_bytes / 1024)} KB` : '';

@@ -34,6 +34,7 @@ export class Popover {
     this._content = null;
     this._home = null;
     this._openedAt = 0;
+    this._scrollers = [];
 
     // Capture phase: the charts and the tiles stop propagation on their own
     // elements, and a click outside must close this wherever it landed.
@@ -66,9 +67,12 @@ export class Popover {
     // an iPad (a phone shows one window at a time, so it never happened there).
     window.addEventListener('scroll', (e) => {
       if (!this.isOpen || performance.now() - this._openedAt <= 200) return;
+      // Its containers as they were when it opened: a list that redraws its
+      // rows (the editor's file tree) replaces the anchor itself, and the
+      // list it was in still scrolls it away.
       const t = e.target;
       const moves = t === document || t === document.documentElement || t === document.body
-        || !this._anchor || (t.contains && t.contains(this._anchor));
+        || !this._anchor || this._scrollers.includes(t) || (t.contains && t.contains(this._anchor));
       if (moves) this.close();
     }, true);
   }
@@ -97,6 +101,8 @@ export class Popover {
     if (this.isOpen) this.close();
     this._onClose = opts.onClose || null;
     this._anchor = anchor;
+    this._scrollers = [];
+    for (let a = anchor?.parentElement; a; a = a.parentElement) this._scrollers.push(a);
     this._content = content;
     // Where to put it back: its own pane, which is where it lives.
     this._home = content.parentElement;

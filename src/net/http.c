@@ -948,10 +948,14 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
         if (!fs_api_name(path, name, sizeof(name)) || !fs_valid_path(name)) {
             return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad name\"}");
         }
-        if (!fs_stat(name, NULL)) {
+        if (!fs_stat(name, NULL) && !fs_is_dir(name)) {
             return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"not found\"}");
         }
-        if (fs_delete(name) < 0) {
+        int del = fs_delete(name);
+        if (del == FS_ERR_NOTEMPTY) {
+            return http_reply(tpcb, 409, "application/json", "{\"ok\":false,\"error\":\"folder is not empty\"}");
+        }
+        if (del < 0) {
             return http_reply(tpcb, 500, "application/json", "{\"ok\":false,\"error\":\"delete failed\"}");
         }
         return http_reply(tpcb, 200, "application/json", "{\"ok\":true}");

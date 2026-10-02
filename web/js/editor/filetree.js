@@ -35,8 +35,8 @@ export class FileTree {
       const path = node.path ? `${node.path}/${f.name}` : f.name;
       const prev = old.get(f.name);
       // Keep an expanded directory's state and contents across a refresh.
-      return prev && prev.dir === !!f.dir ? { ...prev, size: f.size }
-        : { path, name: f.name, dir: !!f.dir, size: f.size, open: false, children: null };
+      return prev && prev.dir === !!f.dir ? { ...prev, size: f.size, alloc: f.alloc }
+        : { path, name: f.name, dir: !!f.dir, size: f.size, alloc: f.alloc, open: false, children: null };
     });
     this._dirty = true;
   }

@@ -336,6 +336,9 @@ class MockGateway:
                 data["number"] = p["number"]
             self.send({"evt": topic, "data": data})
             return {"sent": topic}
+        if op == "test.mkdir":
+            STATE.setdefault("dirs", set()).add(str(p.get("path", "")).strip("/"))
+            return {"ok": True}
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \
@@ -524,8 +527,10 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     # /api/fs, in memory, with the device's shapes: a one-level listing
-    # {"dir", "files": [{name, dir:true} | {name, size}]}, raw file bodies,
-    # {"ok":false,"error"} on failure.
+    # {"dir", "block", "files": [{name, dir:true} | {name, size, alloc}]}, raw
+    # file bodies, {"ok":false,"error"} on failure. Folders are implicit,
+    # except empty ones (STATE["dirs"], made by test.mkdir); DELETE removes a
+    # file or an EMPTY folder, 409 for a folder with anything in it, as fw 1.94.
     def _fs(self, method):
         from urllib.parse import unquote
         fs = STATE["fs"]
@@ -540,21 +545,35 @@ class Handler(SimpleHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0))
             if n > 128 * 1024: return self._reply(413, {"ok": False, "error": "too large"})
             fs[path] = self.rfile.read(n); return self._reply(200, {"ok": True, "name": path, "bytes": n})
+        dirs = STATE.setdefault("dirs", set())
         if method == "DELETE":
-            if path not in fs: return self._reply(404, {"ok": False, "error": "not found"})
-            del fs[path]; return self._reply(200, {"ok": True})
+            if path in fs:
+                del fs[path]; return self._reply(200, {"ok": True})
+            if any(k.startswith(path + "/") for k in list(fs) + list(dirs)):
+                return self._reply(409, {"ok": False, "error": "folder is not empty"})
+            if path in dirs:
+                dirs.discard(path); return self._reply(200, {"ok": True})
+            return self._reply(404, {"ok": False, "error": "not found"})
         if path in fs:
             return self._reply(200, fs[path], "application/octet-stream")
         pre = path + "/" if path else ""
         names = {}
-        for k in fs:
+        for k in list(fs) + [d + "/" for d in dirs]:
             if k.startswith(pre):
                 rest = k[len(pre):]
+                if not rest: continue
                 if "/" in rest: names[rest.split("/")[0]] = None
                 else: names[rest] = len(fs[k])
-        if not names and path: return self._reply(404, {"ok": False, "error": "not found"})
-        files = [{"name": n, "dir": True} if sz is None else {"name": n, "size": sz} for n, sz in sorted(names.items())]
-        return self._reply(200, {"dir": path, "files": files} if path else {"files": files})
+        if not names and path and path not in dirs: return self._reply(404, {"ok": False, "error": "not found"})
+        def alloc(sz):     # as fs.c fs_file_alloc: inline up to 256 B, else CTZ blocks
+            if sz <= 256: return 0
+            off, b = sz - 1, 4096 - 8
+            i = off // b
+            if i: i = (off - 4 * (bin(i - 1).count("1") + 2)) // b
+            return (i + 1) * 4096
+        files = [{"name": n, "dir": True} if sz is None else {"name": n, "size": sz, "alloc": alloc(sz)}
+                 for n, sz in sorted(names.items())]
+        return self._reply(200, {"dir": path, "block": 4096, "files": files} if path else {"block": 4096, "files": files})
 
     def _ws(self):
         key = self.headers.get("Sec-WebSocket-Key")

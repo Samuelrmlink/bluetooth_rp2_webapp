@@ -613,3 +613,4 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
   .ft-more:active { background: #2a2e34; color: var(--fg); }
   .s-menu .sm-item { min-height: 40px; padding: 8px 10px; }
 }
+.s-menu .sm-info { font-size: 12px; margin: -2px 0 4px; max-width: 34ch; }

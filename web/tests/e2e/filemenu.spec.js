@@ -11,6 +11,15 @@ async function editor(page) {
   await ready(page);
   await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
   await expect(row(page, 'lua/anker.lua')).toBeVisible();
+  // Let the layout settle (as filemenu-touch.spec.js): the mock's devices
+  // register their panes about a second after load, and a layout change
+  // closes any popover -- a menu opened just before would vanish mid-test.
+  await page.waitForFunction(() => {
+    const v = window.__btgwApp._layout.version;
+    const s = window.__settle || (window.__settle = { v, t: performance.now() });
+    if (s.v !== v) { s.v = v; s.t = performance.now(); }
+    return performance.now() - s.t > 1500;
+  }, null, { polling: 100 });
 }
 
 test('right-click: the file\'s menu, its row marked, Esc closes only the menu', async ({ page }) => {
@@ -97,4 +106,33 @@ test('another window scrolling (the Console logging) leaves the menu open; the f
   // the list the row is in scrolls: the menu would be left floating -- it closes
   await page.evaluate(() => document.querySelector('.ed-files').dispatchEvent(new Event('scroll')));
   await expect(menu(page)).toBeHidden();
+});
+
+test('sizes: a file\'s menu and the status bar say its size and flash use', async ({ page }) => {
+  await editor(page);
+  await row(page, 'lua/anker.lua').click({ button: 'right' });
+  await expect(menu(page).locator('.sm-info')).toHaveText(/B · (.* on flash|stored inline)/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.ed-s-size')).toHaveText(/B · /);
+});
+
+test('a folder: what is in it, Calculate size on request, Delete only when empty', async ({ page }) => {
+  await editor(page);
+  await row(page, 'lua').click({ button: 'right' });
+  const info = menu(page).locator('.sm-info');
+  await expect(info).toHaveText(/\d+ files?/);
+  await expect(menu(page).getByRole('button', { name: 'Delete folder…' })).toHaveCount(0);   // not empty
+  await menu(page).getByRole('button', { name: 'Calculate size' }).click();
+  await expect(menu(page)).toBeVisible();                                                   // stays open
+  await expect(info).toHaveText(/ in \d+ files.* on flash/);
+  await page.keyboard.press('Escape');
+  // an empty one can go
+  await page.evaluate(() => window.__btgwApp.ws.call('test.mkdir', { path: 'lua/zz_empty' }));
+  await page.evaluate(() => window.__btgwApp.windows.get('editor').win.tree.refresh());
+  await expect(row(page, 'lua/zz_empty')).toBeVisible();
+  await row(page, 'lua/zz_empty').click({ button: 'right' });
+  await expect(menu(page).locator('.sm-info')).toHaveText('empty');
+  page.once('dialog', (d) => d.accept());
+  await menu(page).getByRole('button', { name: 'Delete folder…' }).click();
+  await expect(row(page, 'lua/zz_empty')).toHaveCount(0);
 });
