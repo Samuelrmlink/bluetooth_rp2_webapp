@@ -970,7 +970,15 @@ export class EditorWindow {
     this._renderTitle();
   }
 
+  // Paint vim's cursor / selection, then bring the cursor into view: a
+  // cursor set by code is not scrolled to as a typed one is, so without this
+  // G, 200j, n or :120 moved the cursor off-screen and the view stayed put.
   _vimPaint() {
+    this._vimPaintSel();
+    this.core.revealCaret(Math.max(0, Math.min(this.vcur, this.core.ta.value.length)));
+  }
+
+  _vimPaintSel() {
     const ta = this.core.ta;
     const t = ta.value;
     const c = Math.max(0, Math.min(this.vcur, t.length));

@@ -149,3 +149,36 @@ test('a mouse drag is visual mode; y copies; a paste in normal mode inserts', as
   expect((await ta(page).inputValue()).slice(0, 8)).toBe('-PASTED-');   // after the cursor's character, as p
   await expect(mode(page)).toHaveText('-- NORMAL --');
 });
+
+test('G jumps to the end and the view follows; gg back to the top; jumps far down and n are scrolled to', async ({ page }) => {
+  await ready(page);
+  await page.evaluate(() => window.__btgwApp.setPref('vim', true));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/profiles/anker/run.lua'));
+  const ta = page.locator('.ed-group.is-focus .ed-input');
+  await expect(ta).toHaveValue(/./);
+  await ta.focus();
+  // is the cursor's line inside the visible part of the scroll box?
+  const view = () => page.evaluate(() => {
+    const w = window.__btgwApp.windows.get('editor').win;
+    const sc = w.core.scroll, t = w.core.ta;
+    const line = t.value.slice(0, t.selectionStart).split('\n').length - 1;
+    const lh = parseFloat(getComputedStyle(t).lineHeight);
+    const y = t.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop + parseFloat(getComputedStyle(t).paddingTop) + line * lh;
+    return { atEnd: t.selectionStart >= t.value.length - 1, atStart: t.selectionStart === 0, visible: y >= sc.scrollTop && y + lh <= sc.scrollTop + sc.clientHeight, top: sc.scrollTop };
+  });
+  await page.keyboard.press('Shift+KeyG');
+  let v = await view();
+  expect(v.atEnd).toBe(true);
+  expect(v.visible).toBe(true);
+  expect(v.top).toBeGreaterThan(0);
+  await page.keyboard.type('gg');
+  v = await view();
+  expect(v.atStart).toBe(true);
+  expect(v.top).toBe(0);
+  await page.keyboard.type('300j');
+  expect((await view()).visible).toBe(true);
+  await page.keyboard.type('gg/screensaver\n');                   // a match far below
+  expect((await view()).visible).toBe(true);
+  await page.keyboard.type(':1\n');
+  expect((await view()).top).toBe(0);
+});

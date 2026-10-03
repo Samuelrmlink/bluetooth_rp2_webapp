@@ -135,6 +135,36 @@ export class EditorCore {
     this.scroll.scrollTop = top;
   }
 
+  // Scroll the outer .ed-scroll (the textarea never scrolls itself) so the
+  // character at `pos` is in view -- with a line of margin above and below,
+  // and clear of the sticky line-number gutter on the left.
+  revealCaret(pos = this.ta.selectionStart) {
+    const t = this.ta.value;
+    const before = t.slice(0, pos);
+    const line = before.split('\n').length - 1;
+    const col = pos - (before.lastIndexOf('\n') + 1);
+    const cs = getComputedStyle(this.ta);
+    const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4;
+    const sc = this.scroll;
+    const so = sc.getBoundingClientRect(), to = this.ta.getBoundingClientRect();
+    // the textarea's top-left in the scroll content's coordinates
+    const top0 = to.top - so.top + sc.scrollTop + (parseFloat(cs.paddingTop) || 0);
+    const left0 = to.left - so.left + sc.scrollLeft + (parseFloat(cs.paddingLeft) || 0);
+    const y = top0 + line * lh;
+    if (y - lh < sc.scrollTop) sc.scrollTop = Math.max(0, y - lh);
+    else if (y + 2 * lh > sc.scrollTop + sc.clientHeight) sc.scrollTop = y + 2 * lh - sc.clientHeight;
+    if (!this._cw || this._cwFont !== cs.font) {
+      const c = (this._measure ||= document.createElement('canvas')).getContext('2d');
+      c.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      this._cw = c.measureText('0').width || 8;
+      this._cwFont = cs.font;
+    }
+    const x = left0 + col * this._cw;
+    const gut = this.gutter.offsetWidth;
+    if (x - 2 * this._cw < sc.scrollLeft + gut) sc.scrollLeft = Math.max(0, x - 2 * this._cw - gut);
+    else if (x + 3 * this._cw > sc.scrollLeft + sc.clientWidth) sc.scrollLeft = x + 3 * this._cw - sc.clientWidth;
+  }
+
   set readOnly(v) { this.ta.readOnly = !!v; }
   get readOnly() { return this.ta.readOnly; }
 
