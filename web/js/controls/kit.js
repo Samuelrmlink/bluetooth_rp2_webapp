@@ -169,8 +169,13 @@ export function buildControl(c, onWrite) {
       break;
     }
     default: {                                   // readout
-      input = document.createElement('span');
+      // A button that looks like text: a keyboard stop (hjkl reach it), and
+      // Enter / Space / a click open its menu (the device window's: copy
+      // the value, as in All Data).
+      input = document.createElement('button');
+      input.type = 'button';
       input.className = 'ctl-readout';
+      input.title = 'Copy…';
       set = (v) => { input.textContent = fmt(c, v); };
     }
   }

@@ -397,7 +397,11 @@ table.s-table td:first-child { padding: 3px 4px; }
 .dev-controls .ctl { display: contents; }
 .ctl-label { color: var(--dim); align-self: center; }
 .ctl-value { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ctl-readout { font: 14px ui-monospace, monospace; }
+.ctl-readout { font: 14px ui-monospace, monospace; color: var(--fg); background: none; border: none; padding: 0 2px; margin: 0 -2px;
+  text-align: left; cursor: copy; border-radius: 3px; }
+.ctl-readout:hover { background: #1a1c20; }
+.ctl-readout.is-menu-cell { outline: 2px solid var(--orange); outline-offset: 1px; background: rgba(230, 168, 61, 0.12); }
+body[data-kbd] .ctl-readout:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
 .ctl-note { font-size: 11.5px; }
 .ctl.is-pending .ctl-value > :first-child { opacity: 0.5; }
 .ctl.is-pending .ctl-note::before { content: 'waiting for the device\2026  '; color: var(--orange); }

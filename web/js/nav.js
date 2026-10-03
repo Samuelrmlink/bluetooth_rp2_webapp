@@ -47,6 +47,11 @@ export function controlsIn(roots) {
     if (!root) continue;
     for (const el of root.querySelectorAll(CONTROL)) {
       if (el.disabled || el.closest('[hidden]') || inClosedDetails(el)) continue;
+      // tabindex="-1" says "not a stop": a table's header and row buttons
+      // (the table is the stop: its cell cursor reaches them), a tab's close
+      // button, a row's touch-only menu button. Natively focusable elements
+      // match CONTROL whatever their tabindex, so it is asked here.
+      if (el.getAttribute('tabindex') === '-1') continue;
       // A modal's title-bar close button is what Esc does; keep it out of
       // the walk so entering a panel lands on its first real control.
       if (el.closest('.modal-header')) continue;

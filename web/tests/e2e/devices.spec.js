@@ -290,3 +290,106 @@ test('the A2687\'s Unclassified window has the same cell menu', async ({ page })
   await page.locator('.dev-fields tbody tr').first().locator('td').nth(1).click();
   await expect(unMenu(page).locator('.sm-value')).toBeVisible();
 });
+
+// --- the device windows from the keyboard alone ---------------------------------
+const A2687 = 'anker-scp.controls@7CE913601FD8';
+async function focusWindow(page, id) {
+  await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
+  await page.evaluate((x) => window.__btgwApp.show(x), id);
+  await page.locator('#tiles .tile[data-active]').focus();       // as Alt+HJKL leaves it
+}
+const active = (page) => page.evaluate(() => {
+  const a = document.activeElement;
+  return { cls: a.className, text: (a.textContent || a.value || '').trim(), menu: !!document.querySelector('#pane-popover .s-menu:not([hidden])') && !document.getElementById('pane-popover').hidden };
+});
+
+test('Controls from the keyboard: j reaches the readouts; Enter opens the value menu; Esc returns; on to the switches', async ({ page }) => {
+  await ready(page);
+  await focusWindow(page, CONTROLS);
+  await page.keyboard.press('KeyJ');
+  let a = await active(page);
+  expect(a.cls).toContain('ctl-readout');                          // Battery, the first control
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#pane-popover .s-menu .sm-title')).toContainText('C1000 · Battery');
+  await expect(page.locator('#pane-popover .s-menu .sm-value')).toHaveText(/%/);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#pane-popover')).toBeHidden();
+  a = await active(page);
+  expect(a.cls).toContain('ctl-readout');                          // back where it was
+  for (let i = 0; i < 8; i++) await page.keyboard.press('KeyJ');   // down past the readouts
+  a = await active(page);
+  expect(a.cls).toContain('ctl-switch');                           // Car output
+});
+
+test('the A2687\'s Controls (all readouts) are keyboard stops too: j does not fall out into the title bar', async ({ page }) => {
+  await ready(page);
+  await focusWindow(page, A2687);
+  await page.keyboard.press('KeyJ');
+  expect((await active(page)).cls).toContain('ctl-readout');
+  await page.keyboard.press('KeyJ');
+  await page.keyboard.press('Space');                              // Space opens it too
+  await expect(page.locator('#pane-popover .s-menu .sm-title')).toContainText('A2687 · USB-C2');
+  await page.keyboard.press('Escape');
+});
+
+test('All Data from the keyboard: j lands on the table (not its header buttons); Space, j l, Enter: the cell menu', async ({ page }) => {
+  await ready(page);
+  await focusWindow(page, CONTROLS.replace('.controls@', '.unclassified@'));
+  const seen = [];
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press('KeyJ');
+    seen.push((await active(page)).cls);
+  }
+  expect(seen.some((c) => /col-sort/.test(c))).toBe(false);        // the header is not a stop
+  expect(seen).toContain('table-wrap');
+  await page.locator('.pane-device .table-wrap').filter({ has: page.locator('.dev-fields') }).focus();
+  await page.keyboard.press('Space');
+  await page.keyboard.press('KeyJ');
+  await page.keyboard.press('KeyL');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#pane-popover .s-menu .sm-value')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('#pane-popover')).toBeHidden();
+  // still in the table: the next j moves its cursor
+  await expect(page.locator('.pane-device .table-wrap[data-nav-active]')).toHaveCount(1);
+});
+
+test('the Screensaver window: j reaches its controls', async ({ page }) => {
+  await ready(page);
+  await focusWindow(page, A2687.replace('.controls@', '.screensaver@'));
+  await page.keyboard.press('KeyJ');
+  expect((await active(page)).cls).toContain('ss-choose');
+});
+
+test('All Data columns, as every table\'s: drag to reorder, drag the edge to resize, Columns hides one', async ({ page }) => {
+  await ready(page);
+  const id = CONTROLS.replace('.controls@', '.unclassified@');
+  await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
+  await page.evaluate((x) => window.__btgwApp.show(x), id);
+  const heads = () => page.locator('.dev-fields thead th').evaluateAll((ths) => ths.map((t) => t.textContent.trim()).filter(Boolean));
+  expect((await heads()).slice(0, 4)).toEqual(['Field', 'Value', 'Shown as', 'Changed']);
+  // resize: drag Value's right edge
+  const valueTh = page.locator('.dev-fields thead th', { hasText: 'Value' });
+  const w0 = (await valueTh.boundingBox()).width;
+  const edge = valueTh.locator('.col-resize');
+  const eb = await edge.boundingBox();
+  await page.mouse.move(eb.x + eb.width / 2, eb.y + eb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(eb.x + 80, eb.y + eb.height / 2, { steps: 5 });
+  await page.mouse.up();
+  expect((await valueTh.boundingBox()).width).toBeGreaterThan(w0 + 50);
+  // reorder: drag 'Changed' left onto 'Value'
+  const ch = await page.locator('.dev-fields thead th', { hasText: 'Changed' }).locator('.col-sort').boundingBox();
+  const vb = await valueTh.boundingBox();
+  await page.mouse.move(ch.x + ch.width / 2, ch.y + ch.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(vb.x + 10, vb.y + vb.height / 2, { steps: 8 });
+  await page.mouse.up();
+  expect((await heads()).indexOf('Changed')).toBeLessThan((await heads()).indexOf('Shown as'));
+  // hide one in the Columns dialog
+  await page.locator('.dev-cols').click();
+  const dlg = page.locator('[id^="alldata-columns-"]');
+  await expect(dlg).toBeVisible();
+  await dlg.getByLabel('Shown as').uncheck();
+  expect(await heads()).not.toContain('Shown as');
+});

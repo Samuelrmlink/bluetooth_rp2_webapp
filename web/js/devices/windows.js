@@ -11,6 +11,7 @@
 
 import { buildControl } from '../controls/kit.js';
 import { Grid } from '../controls/grid.js';
+import { columnsDialog } from '../controls/columnsdialog.js';
 import { copyWithToast, openCellMenu } from '../controls/cellmenu.js';
 import { toast } from '../toast.js';
 import { Pending, same, unclassified, displayValue, shownAs, allFields } from '../controls/state.js';
@@ -35,6 +36,7 @@ function ageText(dev) {
 export class ControlsWindow {
   constructor(el, ctx) {
     this.ctx = ctx;
+    this.app = ctx.app;
     this.dev = ctx.device;
     this.plugin = ctx.plugin;
     this.pending = new Pending();
@@ -59,6 +61,34 @@ export class ControlsWindow {
     if (!this.controls.length) {
       body.innerHTML = '<div class="dim pane-empty">This device\'s plugin declares no controls yet — see All Data.</div>';
     }
+    // A readout's menu: its whole value in the wrapping box that copies, as
+    // in All Data and GATT Events (a click, or Enter / Space on it).
+    this._menu = document.createElement('div');
+    this._menu.className = 'pane-settings s-menu';
+    this._menu.hidden = true;
+    el.appendChild(this._menu);
+    body.addEventListener('click', (e) => {
+      const b = e.target.closest('.ctl-readout');
+      if (!b) return;
+      const hit = this.controls.find((k) => k.ctl.el.contains(b));
+      if (hit) this._openMenu(hit.c, b);
+    });
+  }
+
+  _openMenu(c, anchor) {
+    if (!this.app) return;
+    const label = c.label || c.field;
+    const value = anchor.textContent.trim();
+    const raw = this.dev.sample?.[c.field];
+    const items = [{ label: `Copy "${label}: ${value}"`, fn: () => copyWithToast(`${label}: ${value}`, 'Copied') }];
+    if (raw != null && String(raw) !== value) items.push({ label: `Copy the raw value (${displayValue(raw)})`, fn: () => copyWithToast(String(raw), 'Copied') });
+    items.push({ label: `Copy the field name (${c.field})`, fn: () => copyWithToast(c.field, 'Field name copied') });
+    const opened = openCellMenu(this.app, {
+      anchor, menuEl: this._menu, paneId: 'controls-readout', title: `${this.dev.name} · ${label}`,
+      items, value,
+      onClose: () => anchor.classList.remove('is-menu-cell'),
+    });
+    if (opened) anchor.classList.add('is-menu-cell');
   }
 
   async _write(c, ctl, value) {
@@ -164,6 +194,18 @@ export class UnclassifiedWindow {
     this.grid = new Grid(wrap.querySelector('table'), {
       id: 'unclassified', columns: this._cols, onChange: () => { this._dirty = true; },
     });
+    // As every table: sort, resize and reorder from the header (mouse, finger
+    // or keyboard) and show / hide columns here -- remembered.
+    if (this.app) {
+      this.columnsDlg = columnsDialog(this.app, this.grid, { id: `alldata-columns-${this.dev.key || this.dev.addr || 'dev'}` });
+      const cb = document.createElement('button');
+      cb.type = 'button';
+      cb.className = 'pane-btn dev-cols';
+      cb.textContent = 'Columns';
+      cb.title = 'Show or hide columns (drag a header to move one, its edge to resize)';
+      cb.addEventListener('click', () => this.columnsDlg.toggle());
+      el.querySelector('.dev-head').insertBefore(cb, el.querySelector('.dev-copy'));
+    }
     this._dirty = true;
   }
 
