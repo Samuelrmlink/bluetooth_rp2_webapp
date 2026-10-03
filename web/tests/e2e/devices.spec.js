@@ -393,3 +393,24 @@ test('All Data columns, as every table\'s: drag to reorder, drag the edge to res
   await dlg.getByLabel('Shown as').uncheck();
   expect(await heads()).not.toContain('Shown as');
 });
+
+test('All Data: a cell is marked only while its menu is open, however many are opened', async ({ page }) => {
+  await ready(page);
+  await openUnclassified(page, CONTROLS);
+  const cells = page.locator('.dev-fields tbody tr td:nth-child(2)');
+  for (let i = 0; i < 4; i++) {
+    await cells.nth(i).click();
+    await expect(unMenu(page)).toBeVisible();
+    await expect(page.locator('.dev-fields td.is-menu-cell')).toHaveCount(1);
+    await page.keyboard.press('Escape');
+    await expect(unMenu(page)).toBeHidden();
+  }
+  await page.waitForTimeout(1500);                                   // telemetry redraws meanwhile
+  await expect(page.locator('.dev-fields td.is-menu-cell')).toHaveCount(0);
+  // closed by clicking another cell: the mark moves, it is not left behind
+  await cells.nth(0).click();
+  const fieldCell = page.locator('.dev-fields tbody tr td:nth-child(1)').nth(6);    // clear of the menu
+  await fieldCell.click();
+  await expect(page.locator('.dev-fields td.is-menu-cell')).toHaveCount(1);
+  await expect(fieldCell).toHaveClass(/is-menu-cell/);
+});

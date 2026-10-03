@@ -247,7 +247,9 @@ export class UnclassifiedWindow {
       title: `${this.dev.name} · ${f}`,
       items, value: value === '\u2014' ? '' : value,
       onReturn: () => { this._dirty = true; },
-      onClose: () => { this._menuCell = null; this._dirty = true; },
+      // the mark goes with the menu: cells are updated in place now, so
+      // nothing else would ever take it off (it stuck, cell after cell)
+      onClose: () => { this._menuCell = null; anchor.classList.remove('is-menu-cell'); this._dirty = true; },
     });
     if (opened) { this._menuCell = { field: f, key }; anchor.classList.add('is-menu-cell'); }
   }
@@ -306,6 +308,8 @@ export class UnclassifiedWindow {
       cols.forEach((c, i) => {
         const text = String((c.show ? c.show(f) : c.get(f)) ?? '');
         if (tr.cells[i].textContent !== text) tr.cells[i].textContent = text;
+        // marked only while its menu is open
+        tr.cells[i].classList.toggle('is-menu-cell', this._menuCell?.field === f && this._menuCell?.key === c.key);
       });
     };
     if (inPlace) {
