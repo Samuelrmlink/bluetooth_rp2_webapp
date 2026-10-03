@@ -33,9 +33,13 @@ import { RestoreDialog } from '../editor/restore.js';
 import { ImagePreview } from '../editor/preview.js';
 import { isGz, plainName, imageKind, imageType, isWebAsset, shadowInfo, gzipText } from '../gz.js';
 import { bytes } from '../editor/filemenu.js';
+import { TabState } from '../editor/tabs.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
+
+const TABS_KEY = 'btgw.editor.tabs';
+const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const icon = (id) => `<svg aria-hidden="true"><use href="#i-${id}" xlink:href="#i-${id}"/></svg>`;
 
@@ -44,8 +48,12 @@ export class EditorWindow {
     this.app = ctx.app;
     this.ws = ctx.ws;
     this.io = new ScriptIO(ctx.ws);
-    this.buffers = new Map();       // path -> { text, base, lang, binary }
-    this.path = null;
+    this.buffers = new Map();       // path -> { text, base, lang, binary }, shared by every tab and half
+    // Tabs and the split (editor/tabs.js); each half is a view with its own
+    // text surface, cursor, undo and vim state (_makeView). `this.path`,
+    // `this.core` and the vim state are always the FOCUSED half's.
+    this.tabs = new TabState();
+    this.views = new Map();         // group id -> view
     this.marks = new Map();         // path -> { state, tier, hash } (editor/status.js)
     this.runtime = null;            // script.list's runtime block
     this.notice = '';
@@ -65,6 +73,7 @@ export class EditorWindow {
         <button type="button" class="tool-btn ed-b-upload" title="Upload files from this computer" aria-label="Upload">${icon('upload')}</button>
         <button type="button" class="tool-btn ed-b-download" title="Download this file" aria-label="Download">${icon('download')}</button>
         <button type="button" class="tool-btn ed-b-svg" title="Show the SVG as a picture or as text" hidden>Text</button>
+        <button type="button" class="tool-btn ed-b-split" title="Split the editor: the file in a second half, side by side (Alt+\\) — again to unsplit" aria-label="Split editor" aria-pressed="false">${icon('split')}</button>
         <button type="button" class="tool-btn ed-b-more" title="More" aria-label="More actions">${icon('more')}</button>
         <input type="file" class="ed-upload-input" multiple hidden>
         <input type="file" class="ed-tar-input" accept=".tar,application/x-tar" hidden>
@@ -74,7 +83,7 @@ export class EditorWindow {
           <div class="ed-tabs" role="tablist"><button type="button" class="ed-tab" role="tab" aria-selected="true">Files</button></div>
           <div class="ed-files" role="tree" aria-label="Files on the device"></div>
         </aside>
-        <div class="ed-surface"></div>
+        <div class="ed-groups"></div>
       </div>
       <div class="ed-status">
         <span class="ed-s-mode"></span>
@@ -93,6 +102,10 @@ export class EditorWindow {
         <button type="button" class="pane-btn" data-act="rename">Rename / move…</button>
         <button type="button" class="pane-btn" data-act="delete">Delete…</button>
         <button type="button" class="pane-btn" data-act="reload">Reload from the device</button>
+        <hr>
+        <button type="button" class="pane-btn" data-act="split">Split / unsplit the editor (Alt+\\)</button>
+        <button type="button" class="pane-btn" data-act="flip">Side by side ↔ one above the other (Alt+Shift+\\)</button>
+        <button type="button" class="pane-btn" data-act="other">Move this tab to the other half (Alt+Shift+O)</button>
         <hr>
         <button type="button" class="pane-btn" data-act="tarall">Download everything (.tar)</button>
         <button type="button" class="pane-btn" data-act="restore">Restore archive… (.tar)</button>
@@ -116,19 +129,15 @@ export class EditorWindow {
     this._tarInput = q('.ed-tar-input');
     this._svgBtn = q('.ed-b-svg');
 
-    this.core = new EditorCore(q('.ed-surface'));
-    this.preview = new ImagePreview(q('.ed-surface'));
+    this._groups = q('.ed-groups');
+    this._splitBtn = q('.ed-b-split');
     this.restorer = new RestoreDialog(this.app, {
       onDone: async ({ target }) => { await this.tree.refresh(); if (target) this.tree.reveal(target); this._poll(); },
     });
-    // Vim: a pure reducer (editor/vim.js) driven from here. vcur is vim's
-    // logical cursor -- in normal mode the textarea shows it as a one-
-    // character selection, which is what makes it look like a block.
+    // Vim: a pure reducer (editor/vim.js) driven from here, one state per
+    // half. vcur is vim's logical cursor -- in normal mode the textarea shows
+    // it as a one-character selection, which is what makes it look like a block.
     this.vimOn = !!this.app.prefs.vim;
-    this.vst = initialState();
-    this.vcur = 0;
-    this._painted = null;           // the selection _vimPaint last set
-    this.core.ta.addEventListener('keydown', (e) => this._vimKey(e));
     // A selection made with the mouse or a finger, in normal mode, becomes
     // visual mode -- so y / d / c / p act on it. 'select' and selectionchange
     // also fire for the selection _vimPaint sets itself; _painted tells them apart.
@@ -136,25 +145,16 @@ export class EditorWindow {
     // resets the browser's drag anchor, so a drag could never select more
     // than one character. The release decides.
     this._pointerDown = false;
-    this.core.ta.addEventListener('pointerdown', () => { this._pointerDown = true; });
     window.addEventListener('pointerup', () => {
       if (!this._pointerDown) return;
       this._pointerDown = false;
       if (document.activeElement === this.core.ta) this._vimSync();
     }, true);
     window.addEventListener('pointercancel', () => { this._pointerDown = false; }, true);
-    for (const ev of ['select', 'focus']) {
-      this.core.ta.addEventListener(ev, () => { if (!this._pointerDown) this._vimSync(); });
-    }
     document.addEventListener('selectionchange', () => {
       if (!this._pointerDown && document.activeElement === this.core.ta) this._vimSync();
     });
-    // A paste in normal or visual mode (Ctrl+V, the phone's Paste) puts the
-    // clipboard in as p would -- the only way the system clipboard reaches
-    // the editor over http, where pages cannot read it on demand.
-    this.core.ta.addEventListener('paste', (e) => this._vimPaste(e));
-    this.core.onChange = (text) => this._edited(text);
-    this.core.onCursor = (l, c) => { this._sPos.textContent = `Ln ${l}, Col ${c}`; };
+    this._layout();
 
     this.tree = new FileTree(this._files, {
       onOpen: (p) => this.open(p),
@@ -219,6 +219,7 @@ export class EditorWindow {
       if (f) this.restorer.open(f, this._tarTarget || '');
     });
     this._svgBtn.addEventListener('click', () => this._toggleSvg());
+    this._splitBtn.addEventListener('click', () => this.toggleSplit());
     this._moreBtn.addEventListener('click', () => this.app.popover.toggle(this._moreBtn, this._more, 'editor-more'));
     this._more.addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
@@ -255,7 +256,306 @@ export class EditorWindow {
     keys.nav.registerList(this._files, files);
     // The Esc ladder: insert -> normal (vim takes it), then normal -> leave
     // the text (vim declines, the key layer blurs), then Alt+hjkl.
-    keys.ownEscape(this.core.ta, (e) => this._vimEsc(e));
+    for (const v of this.views.values()) keys.ownEscape(v.core.ta, (e) => this._vimEsc(e));
+  }
+
+  // --- tabs and the split ----------------------------------------------------------
+
+  // The focused half, and its state under the names the rest of this file
+  // has always used.
+  get v() { return this.views.get(this.tabs.group.id); }
+  get core() { return this.v.core; }
+  get preview() { return this.v.preview; }
+  get path() { return this.tabs.activePath(); }
+  get vst() { return this.v.vst; }
+  set vst(st) { this.v.vst = st; }
+  get vcur() { return this.v.vcur; }
+  set vcur(c) { this.v.vcur = c; }
+  get _painted() { return this.v.painted; }
+  set _painted(p) { this.v.painted = p; }
+  get _ins() { return this.v.ins; }
+  set _ins(i) { this.v.ins = i; }
+
+  // One half: a tab bar over a text surface (and the picture preview).
+  _makeView(id) {
+    const el = document.createElement('div');
+    el.className = 'ed-group';
+    el.innerHTML = '<div class="ed-tabbar" role="tablist" aria-label="Open files" hidden></div><div class="ed-surface"></div>';
+    const v = { id, el, bar: el.querySelector('.ed-tabbar'), shown: null, saved: new Map(),
+                vst: initialState(), vcur: 0, painted: null, ins: null, sig: '' };
+    v.core = new EditorCore(el.querySelector('.ed-surface'));
+    v.preview = new ImagePreview(el.querySelector('.ed-surface'));
+    v.core.readOnly = true;
+    const ta = v.core.ta;
+    // Whichever half is touched or focused is the one keys and toolbar act on.
+    el.addEventListener('pointerdown', () => this._focusGroup(id), true);
+    el.addEventListener('focusin', () => this._focusGroup(id));
+    ta.addEventListener('keydown', (e) => this._vimKey(e));
+    ta.addEventListener('pointerdown', () => { this._pointerDown = true; });
+    for (const ev of ['select', 'focus']) {
+      ta.addEventListener(ev, () => {
+        if (ev === 'focus') this._focusGroup(id);
+        if (!this._pointerDown && this.v === v) this._vimSync();
+      });
+    }
+    // A paste in normal or visual mode (Ctrl+V, the phone's Paste) puts the
+    // clipboard in as p would -- the only way the system clipboard reaches
+    // the editor over http, where pages cannot read it on demand.
+    ta.addEventListener('paste', (e) => this._vimPaste(e));
+    v.core.onChange = (text) => this._edited(text, v);
+    v.core.onCursor = (l, c) => { if (this.v === v) this._sPos.textContent = `Ln ${l}, Col ${c}`; };
+    v.bar.addEventListener('click', (e) => {
+      const t = e.target.closest('.ed-ftab');
+      if (!t) return;
+      const gi = this.tabs.groups.findIndex((g) => g.id === id);
+      if (e.target.closest('.ed-ftab-x')) { this.closeTab(t.dataset.path, gi); return; }
+      this.tabs.focus = gi;
+      this.open(t.dataset.path);
+    });
+    // middle-click closes, as in every browser and editor
+    v.bar.addEventListener('auxclick', (e) => {
+      const t = e.button === 1 && e.target.closest('.ed-ftab');
+      if (!t) return;
+      e.preventDefault();
+      this.closeTab(t.dataset.path, this.tabs.groups.findIndex((g) => g.id === id));
+    });
+    this.keys?.ownEscape(ta, (e) => this._vimEsc(e));
+    return v;
+  }
+
+  // Views follow the groups: made when a half appears, dropped when it goes,
+  // in the groups' order (moved only when out of order: moving a node takes
+  // the focus out of it).
+  _layout() {
+    const ids = this.tabs.groups.map((g) => g.id);
+    for (const [id, v] of this.views) {
+      if (ids.includes(id)) continue;
+      v.preview.hide();
+      v.el.remove();
+      this.views.delete(id);
+    }
+    ids.forEach((id, i) => {
+      if (!this.views.has(id)) this.views.set(id, this._makeView(id));
+      const el = this.views.get(id).el;
+      if (this._groups.children[i] !== el) this._groups.insertBefore(el, this._groups.children[i] || null);
+      el.classList.toggle('is-focus', i === this.tabs.focus);
+    });
+    this._groups.classList.toggle('is-split', this.tabs.split);
+    this._groups.classList.toggle('ed-stacked', this.tabs.orient === 'v');
+    this._splitBtn.setAttribute('aria-pressed', String(this.tabs.split));
+    this._splitBtn.classList.toggle('on', this.tabs.split);
+  }
+
+  _focusGroup(id) {
+    const gi = this.tabs.groups.findIndex((g) => g.id === id);
+    if (gi < 0 || gi === this.tabs.focus) return;
+    this.tabs.focus = gi;
+    this._layout();
+    this._updateFind();
+    this._renderTitle();
+    this._saveTabs();
+  }
+
+  // Put the half's showing tab into its text surface. force: the buffer was
+  // (re)loaded from the device, so the view kept for it no longer applies.
+  _show(gi, force = false) {
+    const g = this.tabs.groups[gi];
+    const v = g && this.views.get(g.id);
+    if (!v) return;
+    const p = this.tabs.activePath(gi);
+    if (v.shown === p && !force) return;
+    if (v.shown && v.shown !== p && g.tabs.includes(v.shown) && this.buffers.has(v.shown)) {
+      v.saved.set(v.shown, v.core.saveView());
+    }
+    v.shown = p;
+    // A fresh vim state, but the last search survives a change of file, as in vim.
+    const { search, word, sdir, hl } = v.vst;
+    v.vst = { ...initialState(), search, word, sdir, hl };
+    v.painted = null;
+    v.ins = null;
+    const b = p && this.buffers.get(p);
+    if (!b) {
+      v.core.setValue('', 'text');
+      v.core.readOnly = true;
+      v.core.setFind(null);
+      v.preview.hide();
+      v.vcur = 0;
+      return;
+    }
+    v.core.setValue(b.binary ? '' : b.text, b.lang);
+    v.core.readOnly = b.binary;
+    if (force) v.saved.delete(p);
+    else v.core.restoreView(v.saved.get(p));
+    v.vcur = clampNormal(v.core.value, v.core.ta.selectionStart);
+    this._applyPreview(v);
+  }
+
+  _showAll(force = false) {
+    this.tabs.groups.forEach((_, gi) => this._show(gi, force));
+  }
+
+  // The tab rows: the file name (with its folder when two share a name), a
+  // dot when modified, and a close button that is always there -- a touch
+  // screen has no hover to reveal it.
+  _renderTabs() {
+    this.tabs.groups.forEach((g) => {
+      const v = this.views.get(g.id);
+      if (!v) return;
+      const dirty = g.tabs.map((p) => this._mark(p).dirty);
+      const sig = JSON.stringify([g.tabs, g.active, dirty, this.tabs.split]);
+      if (sig === v.sig) return;
+      v.sig = sig;
+      v.bar.hidden = !g.tabs.length;
+      const base = (p) => p.split('/').pop();
+      v.bar.innerHTML = g.tabs.map((p, i) => {
+        const twin = g.tabs.some((o) => o !== p && base(o) === base(p));
+        const dir = p.split('/').slice(0, -1).join('/');
+        const on = i === g.active;
+        return `<div class="ed-ftab${on ? ' is-active' : ''}${dirty[i] ? ' is-dirty' : ''}" role="tab" aria-selected="${on}" data-path="${escHtml(p)}" title="${escHtml(p)}">`
+          + `<span class="ed-ftab-dot" aria-hidden="true">●</span><span class="ed-ftab-name">${escHtml(base(p))}</span>`
+          + (twin && dir ? `<span class="ed-ftab-dir">${escHtml(dir)}</span>` : '')
+          + `<button type="button" class="ed-ftab-x" tabindex="-1" aria-label="Close ${escHtml(p)}" title="Close (Alt+Q)">×</button></div>`;
+      }).join('');
+      v.bar.querySelector('.is-active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
+  }
+
+  _saveTabs() {
+    try { localStorage.setItem(TABS_KEY, JSON.stringify(this.tabs)); } catch { /* private mode: tabs just do not survive a reload */ }
+  }
+
+  // After a reload: the tabs and split as they were. Only the files showing
+  // are read now; the others when their tab is picked.
+  async _restoreTabs() {
+    if (this._restored) return;
+    this._restored = true;
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(TABS_KEY)); } catch { /* none */ }
+    const t = TabState.from(saved);
+    if (!t.openPaths().size || this.tabs.openPaths().size) return;
+    for (let gi = t.groups.length - 1; gi >= 0; gi--) {
+      for (let p = t.activePath(gi); p; p = t.activePath(gi)) {
+        if (this.buffers.has(p) || await this._load(p)) break;
+        t.close(p, gi);                               // gone from the device since
+        if (gi >= t.groups.length) break;
+      }
+    }
+    if (this.tabs.openPaths().size) return;           // something was opened meanwhile
+    this.tabs = t;
+    this._layout();
+    this._showAll();
+    this._renderTitle();
+    if (this.path) this.tree.reveal(this.path);
+  }
+
+  // Close one tab; force: the caller has already asked about unsaved work.
+  // A file still open in the other half keeps its buffer.
+  closeTab(path, gi = this.tabs.focus, { force = false } = {}) {
+    const g = this.tabs.groups[gi];
+    if (!g || !g.tabs.includes(path)) return false;
+    const b = this.buffers.get(path);
+    const elsewhere = this.tabs.groups.some((o, i) => i !== gi && o.tabs.includes(path));
+    if (!force && b && this._isDirty(b) && !elsewhere &&
+        !confirm(`${path} has unsaved changes. Close it and lose them?`)) return false;
+    this.views.get(g.id)?.saved.delete(path);
+    this.tabs.close(path, gi);
+    if (!this.tabs.isOpen(path)) this.buffers.delete(path);
+    this._layout();
+    this._showAll();
+    this._say(`Closed ${path}`);
+    this.tree.invalidate();
+    this._renderTitle();
+    this._saveTabs();
+    if (this.path) { this.tree.reveal(this.path); this.core.focus(); } else this.focusFiles();
+    return true;
+  }
+
+  _afterTabs() {
+    this._layout();
+    this._showAll();
+    this._updateFind();
+    this._renderTitle();
+    this._saveTabs();
+    if (this.path) { this.tree.reveal(this.path); this.core.focus(); } else this.focusFiles();
+  }
+
+  async stepTab(delta) { const p = this.tabs.step(delta); if (p) await this.open(p); }
+  async gotoTab(n) { const p = this.tabs.goto(n); if (p) await this.open(p); }
+
+  moveTab(delta) {
+    if (!this.tabs.move(delta)) return;
+    this._renderTitle();
+    this._saveTabs();
+  }
+
+  toggleSplit() {
+    if (!this.tabs.split && !this.path) { this._say('Open a file first: the split shows it twice.', 'warn'); return; }
+    // Too narrow for two columns of code (a phone): one above the other.
+    if (!this.tabs.split && this._groups.clientWidth && this._groups.clientWidth < 640) this.tabs.orient = 'v';
+    this.tabs.toggleSplit();
+    this._afterTabs();
+    this._say(this.tabs.split ? 'Split: Alt+O moves between the halves, Alt+\\ unsplits' : 'One half again — its tabs joined these');
+  }
+
+  flipSplit() {
+    this.tabs.flip();
+    this._layout();
+    this._saveTabs();
+    this.core.focus();
+  }
+
+  focusOther() {
+    if (!this.tabs.split) { this._say('Not split — Alt+\\ splits the editor', 'warn'); return; }
+    this.tabs.focusOther();
+    this._layout();
+    this._updateFind();
+    this._renderTitle();
+    this._saveTabs();
+    if (this.path) this.core.focus();
+  }
+
+  moveToOther() {
+    if (!this.tabs.moveToOther()) { this._say('Only one file is open: split instead (Alt+\\)', 'warn'); return; }
+    this._afterTabs();
+  }
+
+  // :sp / :vs [path]: a file (this one by default) in the other half.
+  async splitOpen(path, orient) {
+    if (!path) {
+      if (!this.path) return;
+      this.tabs.splitOpen(this.path, orient);
+      this._afterTabs();
+      return;
+    }
+    const before = this.tabs.split;
+    this.tabs.splitOpen(null, orient);
+    this._layout();
+    if (!(await this.open(path, { create: true })) && !before) {
+      this.tabs.unsplit();
+      this._afterTabs();
+    }
+  }
+
+  only() {
+    if (!this.tabs.split) return;
+    this.tabs.unsplit();
+    this._afterTabs();
+  }
+
+  // A file renamed (or stored compressed / uncompressed): its buffer, tabs
+  // and kept views follow it.
+  _renamed(from, to) {
+    const b = this.buffers.get(from);
+    this.buffers.delete(from);
+    if (b) { b.lang = languageOf(to); this.buffers.set(to, b); }
+    this.tabs.rename(from, to);
+    for (const v of this.views.values()) {
+      if (v.saved.has(from)) { v.saved.set(to, v.saved.get(from)); v.saved.delete(from); }
+      if (v.shown === from) { v.shown = to; v.core.lang = languageOf(to); v.core._dirty = true; }
+    }
+    this._layout();
+    this._showAll();
+    this._saveTabs();
   }
 
   // --- vim ---------------------------------------------------------------------
@@ -263,10 +563,12 @@ export class EditorWindow {
   onPrefs(prefs) {
     if (!!prefs.vim === this.vimOn) return;
     this.vimOn = !!prefs.vim;
-    this.vst = initialState();
-    const p = this.core.ta.selectionStart;
-    this.core.ta.setSelectionRange(p, p);
-    this._painted = null;
+    for (const v of this.views.values()) {
+      v.vst = initialState();
+      const p = v.core.ta.selectionStart;
+      v.core.ta.setSelectionRange(p, p);
+      v.painted = null;
+    }
     this._updateFind();
     this._renderTitle();
   }
@@ -397,6 +699,21 @@ export class EditorWindow {
         return this.open(this.path);
       case 'run': return this.run();
       case 'stop': return this.stop();
+      case 'tabnext': return /^\d+$/.test(arg) ? this.gotoTab(Number(arg)) : this.stepTab(1);
+      case 'tabprev': return this.stepTab(-(Number(arg) || 1));
+      case 'tabnew':
+        if (arg) return this.open(arg, { create: true });
+        return this.newFile();
+      case 'tabclose':
+        if (!this.path) return undefined;
+        if (dirty && !force && !this.tabs.groups.some((g, i) => i !== this.tabs.focus && g.tabs.includes(this.path))) {
+          this._say('E37: No write since last change (add ! to override)', 'warn');
+          return undefined;
+        }
+        return this.closeTab(this.path, this.tabs.focus, { force: true });
+      case 'split': return this.splitOpen(arg, 'v');
+      case 'vsplit': return this.splitOpen(arg, 'h');
+      case 'only': return this.only();
       default: return undefined;
     }
   }
@@ -465,6 +782,15 @@ export class EditorWindow {
     if (id === 'editor-sidebar') return this.toggleSidebar();
     if (id === 'editor-to-files') return this.focusFiles();
     if (id === 'editor-to-text') return this.focusText();
+    if (id === 'editor-tab-next') return this.stepTab(1);
+    if (id === 'editor-tab-prev') return this.stepTab(-1);
+    if (id === 'editor-tab-right') return this.moveTab(1);
+    if (id === 'editor-tab-left') return this.moveTab(-1);
+    if (id === 'editor-tab-close') return this.path ? this.closeTab(this.path) : undefined;
+    if (id === 'editor-split') return this.toggleSplit();
+    if (id === 'editor-split-flip') return this.flipSplit();
+    if (id === 'editor-other') return this.focusOther();
+    if (id === 'editor-to-other') return this.moveToOther();
     return undefined;
   }
 
@@ -487,6 +813,7 @@ export class EditorWindow {
 
   onShow() {
     if (!this.tree.root.children) this.tree.load();
+    this._restoreTabs();
     this._poll();
     clearInterval(this._pollTimer);
     this._pollTimer = setInterval(() => this._poll(), ARENA_POLL_MS);
@@ -522,40 +849,56 @@ export class EditorWindow {
     return { dirty: !!b && this._isDirty(b), arena: shownArena(this.marks.get(path), b?.base) };
   }
 
-  // { create: true } (from :e) opens a path that does not exist yet as a new,
-  // unsaved buffer -- as vim does -- rather than reporting it missing.
-  async open(path, { create = false } = {}) {
+  // A file into a buffer (once; every tab and half shares it). Returns the
+  // buffer, or null after saying why not. { create: true } (from :e, :tabnew,
+  // :sp) makes a missing file a new, unsaved buffer -- as vim does -- rather
+  // than reporting it missing.
+  async _load(path, { create = false } = {}) {
     let b = this.buffers.get(path);
-    if (!b) {
-      const img = imageKind(path);
-      if (img) {
-        // a picture: shown, not edited -- except an SVG, which is text too
-        const r = await fs.readBlob(path);
-        if (!r.ok) { this._say(`Could not open ${path}: ${r.error}`, 'err'); return false; }
-        const blob = new Blob([r.blob], { type: imageType(path) });
-        const text = img === 'svg' ? await blob.text() : '';
-        b = { text, base: fnv1a(text), lang: 'text', binary: img !== 'svg', image: img, blob, showText: false };
-      } else if (/\.(bin|luac|bak)$/i.test(path)) {
-        b = { text: '', base: fnv1a(''), lang: 'text', binary: true };
+    if (b) return b;
+    const img = imageKind(path);
+    if (img) {
+      // a picture: shown, not edited -- except an SVG, which is text too
+      const r = await fs.readBlob(path);
+      if (!r.ok) { this._say(`Could not open ${path}: ${r.error}`, 'err'); return null; }
+      const blob = new Blob([r.blob], { type: imageType(path) });
+      const text = img === 'svg' ? await blob.text() : '';
+      b = { text, base: fnv1a(text), lang: 'text', binary: img !== 'svg', image: img, blob, showText: false };
+    } else if (/\.(bin|luac|bak)$/i.test(path)) {
+      b = { text: '', base: fnv1a(''), lang: 'text', binary: true };
+    } else {
+      // a .gz arrives as its text: the device sends it Content-Encoding: gzip
+      const r = await fs.readText(path);
+      if (!r.ok && r.offline && isGz(path)) {
+        this._say(`Could not open ${path}: the browser could not unpack it — is it really gzip?`, 'err');
+        return null;
+      }
+      if (!r.ok && create && r.status === 404) {
+        b = { text: '', base: '', lang: languageOf(path), binary: false, isNew: true };
+      } else if (!r.ok) {
+        this._say(`Could not open ${path}: ${r.error}`, 'err');
+        return null;
       } else {
-        // a .gz arrives as its text: the device sends it Content-Encoding: gzip
-        const r = await fs.readText(path);
-        if (!r.ok && r.offline && isGz(path)) {
-          this._say(`Could not open ${path}: the browser could not unpack it — is it really gzip?`, 'err');
-          return false;
-        }
-        if (!r.ok && create && r.status === 404) {
-          this.buffers.set(path, { text: '', base: '', lang: languageOf(path), binary: false });
-          this._openBuffer(path);
-          this._say(`"${path}" [New] — :w writes it to the device`);
-          return true;
-        }
-        if (!r.ok) { this._say(`Could not open ${path}: ${r.error}`, 'err'); return false; }
         b = { text: r.text, base: fnv1a(r.text), lang: languageOf(path), binary: r.text.includes('\0') };
       }
-      this.buffers.set(path, b);
     }
-    this._openBuffer(path);
+    this.buffers.set(path, b);
+    b.fresh = true;
+    return b;
+  }
+
+  // Show a file in the focused half: its tab if it has one, else a new tab.
+  async open(path, { create = false } = {}) {
+    const b = await this._load(path, { create });
+    if (!b) return false;
+    const fresh = b.fresh;
+    b.fresh = false;
+    this._openBuffer(path, { force: fresh });
+    if (b.isNew) {
+      delete b.isNew;
+      this._say(`"${path}" [New] — :w writes it to the device`);
+      return true;
+    }
     this._say(b.image === 'bitmap' ? '' : b.binary ? 'Binary file — download it to inspect it.' : '');
     // plain wins: x.lua runs, not x.lua.gz, when both are there
     const sh = shadowInfo(path, this._siblings(path));
@@ -570,67 +913,52 @@ export class EditorWindow {
     return (parent?.children || []).map((c) => c.name);
   }
 
-  // An SVG: picture or text.
+  // An SVG: picture or text (for every half showing it).
   _toggleSvg() {
     const b = this.path && this.buffers.get(this.path);
     if (!b || b.image !== 'svg') return;
     b.text = this.core.value;
     b.showText = !b.showText;
-    this._showPreview(b);
+    for (const v of this.views.values()) if (v.shown === this.path) this._applyPreview(v);
+    this._renderTitle();
   }
 
-  _showPreview(b) {
-    const picture = b.image === 'bitmap' || (b.image === 'svg' && !b.showText);
-    this._svgBtn.hidden = b.image !== 'svg';
-    this._svgBtn.textContent = picture ? 'Text' : 'Preview';
-    if (!picture) { this.preview.hide(); return; }
-    const n = this.tree.find(this.path);
+  _applyPreview(v) {
+    const b = v.shown && this.buffers.get(v.shown);
+    const picture = !!b && (b.image === 'bitmap' || (b.image === 'svg' && !b.showText));
+    if (!picture) { v.preview.hide(); return; }
+    const n = this.tree.find(v.shown);
     const blob = b.image === 'svg' ? new Blob([b.text], { type: 'image/svg+xml' }) : b.blob;
-    this.preview.show(blob, { note: n && !n.dir ? fileInfo(n) : '' });
+    v.preview.show(blob, { note: n && !n.dir ? fileInfo(n) : '' });
   }
 
-  _openBuffer(path) {
-    const b = this.buffers.get(path);
-    this.path = path;
-    this.core.setValue(b.binary ? '' : b.text, b.lang);
-    this.core.readOnly = b.binary;
-    if (b.image) this._showPreview(b);
-    else { this.preview.hide(); this._svgBtn.hidden = true; }
-    // A fresh vim state, but the last search survives a change of file, as in vim.
-    const { search, word, sdir, hl } = this.vst;
-    this.vst = { ...initialState(), search, word, sdir, hl };
-    this.vcur = 0;
-    this._painted = null;
+  _openBuffer(path, { force = false } = {}) {
+    this.tabs.open(path);
+    this._layout();
+    this._show(this.tabs.focus, force);
+    // reloaded from the device: the other half showing it gets the new text too
+    if (force) this.tabs.groups.forEach((_, gi) => { if (gi !== this.tabs.focus && this.tabs.activePath(gi) === path) this._show(gi, true); });
     this.tree.reveal(path);
     this._updateFind();
     this._renderTitle();
+    this._saveTabs();
     this.core.focus();
   }
 
-  // :q -- close the file. Its buffer goes with it (unsaved changes too: the
-  // caller has already asked, or was told to with !). Focus moves to the file
+  // :q -- close the file's tab (unsaved changes too: the caller has already
+  // asked, or was told to with !). With no tab left, focus moves to the file
   // list, where the next file is picked.
   close() {
     if (!this.path) return;
-    const was = this.path;
-    this.buffers.delete(was);
-    this.path = null;
-    this.core.setValue('', 'text');
-    this.core.readOnly = true;
-    this.preview.hide();
-    this._svgBtn.hidden = true;
-    this.vst = { ...initialState(), search: this.vst.search, word: this.vst.word, sdir: this.vst.sdir, hl: this.vst.hl };
-    this.core.setFind(null);
-    this._say(`Closed ${was}`);
-    this.tree.invalidate();
-    this._renderTitle();
-    this.focusFiles();
+    this.closeTab(this.path, this.tabs.focus, { force: true });
   }
 
-  _edited(text) {
-    const b = this.buffers.get(this.path);
+  // An edit in one half; the other half, if it shows the same file, follows.
+  _edited(text, v = this.v) {
+    const b = v.shown && this.buffers.get(v.shown);
     if (!b) return;
     b.text = text;
+    for (const o of this.views.values()) if (o !== v && o.shown === v.shown) o.core.adopt(text);
     this.tree.invalidate();
     this._updateFind();
     this._renderTitle();
@@ -745,7 +1073,7 @@ export class EditorWindow {
     const b = this.buffers.get(this.path);
     if (b && this._isDirty(b) && !confirm(`Discard unsaved changes to ${this.path}?`)) return;
     this.buffers.delete(this.path);
-    this.open(this.path);
+    this.open(this.path);            // a fresh read: both halves showing it take the new text
   }
 
   _act_rename() { return this.renameFile(this.path); }
@@ -758,10 +1086,7 @@ export class EditorWindow {
     if (!to || to === path) return;
     const r = await fs.rename(path, to);
     if (!r.ok) { this._say(`Rename failed: ${r.error}`, 'err'); return; }
-    const b = this.buffers.get(path);
-    this.buffers.delete(path);
-    if (b) { b.lang = languageOf(to); this.buffers.set(to, b); }
-    if (this.path === path) this.path = to;
+    this._renamed(path, to);
     this._say(`Renamed ${path} to ${to}`);
     await this.tree.refresh();
     this.tree.reveal(to);
@@ -774,10 +1099,11 @@ export class EditorWindow {
     if (!r.ok) { this._say(`Delete failed: ${r.error}`, 'err'); return; }
     this.buffers.delete(path);
     this._say(`Deleted ${path}`);
-    if (this.path === path) {
-      this.path = null;
-      this.core.setValue('', 'text');
-    }
+    for (const v of this.views.values()) v.saved.delete(path);
+    this.tabs.closeEverywhere(path);
+    this._layout();
+    this._showAll();
+    this._saveTabs();
     this.tree.refresh();
     this._renderTitle();
   }
@@ -900,6 +1226,10 @@ export class EditorWindow {
     this._say(`Downloading ${folder ? `${folder}/` : 'the whole filesystem'} as a .tar`);
   }
 
+  _act_split() { return this.toggleSplit(); }
+  _act_flip() { return this.flipSplit(); }
+  _act_other() { return this.moveToOther(); }
+
   _act_tarall() { return this.downloadTar(''); }
   _act_restore() { this._tarTarget = ''; this._tarInput.click(); }
 
@@ -919,8 +1249,7 @@ export class EditorWindow {
     if (!d.ok) this._say(`Wrote ${to}, but could not remove ${path}: ${d.error}`, 'warn');
     else if (compress) this._say(`Stored compressed: ${to}, ${bytes(body.size)} (was ${bytes(r.blob.size)})`);
     else this._say(`Stored uncompressed: ${to}, ${bytes(body.size)}`);
-    if (b) { this.buffers.delete(path); this.buffers.set(to, b); }
-    if (this.path === path) this.path = to;
+    this._renamed(path, to);
     await this.tree.refresh();
     this.tree.reveal(to);
     this._renderTitle();
@@ -950,12 +1279,10 @@ export class EditorWindow {
     if (!name || name.endsWith('/')) return;
     // Not written until saved -- a new file is an unsaved buffer, like any
     // editor's. Its base is a hash no text has, so it shows as modified.
-    this.buffers.set(name, { text: '', base: '', lang: languageOf(name), binary: false });
-    this.path = name;
-    this.core.setValue('', languageOf(name));
-    this.core.readOnly = false;
+    if (!this.buffers.has(name)) this.buffers.set(name, { text: '', base: '', lang: languageOf(name), binary: false });
+    this._openBuffer(name, { force: true });
     // A new file starts in insert mode: there is nothing to move over yet.
-    this.vst = { ...initialState(), mode: 'insert' };
+    this.vst = { ...this.vst, mode: 'insert' };
     this.vcur = 0;
     this._say(`New file — Ctrl+S writes ${name} to the device`);
     this.tree.invalidate();
@@ -1032,12 +1359,15 @@ export class EditorWindow {
     this._sArena.textContent = this.runtime
       ? `arena ${Math.round(this.runtime.used / 1024)}/${Math.round(this.runtime.arena_bytes / 1024)} KB` : '';
     this._sMode.textContent = this.vimOn ? modeLabel(this.vst) : '';
+    this._svgBtn.hidden = b?.image !== 'svg';
+    this._svgBtn.textContent = b?.showText ? 'Preview' : 'Text';
+    this._renderTabs();
     this._keysBtn.setAttribute('aria-pressed', String(this.vimOn));
     this._keysBtn.classList.toggle('on', this.vimOn);
   }
 
   render() {
-    this.core.render();
+    for (const v of this.views.values()) v.core.render();
     this.tree.render();
   }
 }

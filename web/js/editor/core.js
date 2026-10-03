@@ -92,13 +92,47 @@ export class EditorCore {
   setValue(text, lang) {
     this.ta.value = text;
     this._prev = text;
-    this.history.reset();
+    // a NEW history, not a reset: the old one may be kept by a tab (saveView)
+    this.history = new History();
     this.lang = lang || this.lang;
     this._dirty = true;
     this.ta.setSelectionRange(0, 0);
     this.scroll.scrollTop = 0;
     this.scroll.scrollLeft = 0;
     this._cursor();
+  }
+
+  // A tab's view, kept while another file shows: undo history, cursor and
+  // scroll, so coming back to a tab is coming back to where you were.
+  saveView() {
+    return { history: this.history, sel: [this.ta.selectionStart, this.ta.selectionEnd],
+             top: this.scroll.scrollTop, left: this.scroll.scrollLeft };
+  }
+
+  restoreView(v) {
+    if (!v) return;
+    this.history = v.history;
+    const n = this.ta.value.length;
+    this.ta.setSelectionRange(Math.min(v.sel[0], n), Math.min(v.sel[1], n));
+    this.render();                    // the text's height first, or the scroll is clamped
+    this.scroll.scrollTop = v.top;
+    this.scroll.scrollLeft = v.left;
+    this._cursor();
+  }
+
+  // The same file edited in the other half of a split: take its text
+  // without making it an edit here. Undo history goes (it described the old
+  // text); the cursor stays where it was, as near as the new text allows.
+  adopt(text) {
+    if (text === this.ta.value) return;
+    const [a, b] = [this.ta.selectionStart, this.ta.selectionEnd];
+    const top = this.scroll.scrollTop;
+    this.ta.value = text;
+    this._prev = text;
+    this.history.reset();
+    this.ta.setSelectionRange(Math.min(a, text.length), Math.min(b, text.length));
+    this._dirty = true;
+    this.scroll.scrollTop = top;
   }
 
   set readOnly(v) { this.ta.readOnly = !!v; }

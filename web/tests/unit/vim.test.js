@@ -161,3 +161,18 @@ test('vim: the mode label', () => {
   assert.equal(modeLabel(run('|a', ':wq').st), ':wq');
   assert.equal(modeLabel(run('|a', '?ab').st), '?ab');
 });
+
+test('gt / gT / {n}gt and the tab and split : commands go to the editor', () => {
+  assert.deepEqual(run('a|b', 'gt').actions, ['ex:tabnext']);
+  assert.deepEqual(run('a|b', 'gT').actions, ['ex:tabprev']);
+  assert.deepEqual(run('a|b', '3gt').actions, ['ex:tabnext 3']);
+  assert.equal(run('a|b', 'gt').out, 'a|b');                  // no movement in the text
+  assert.deepEqual(run('a|b', ':tabnew lua/x.lua<Enter>').actions, ['ex:tabnew lua/x.lua']);
+  assert.deepEqual(run('a|b', ':tabe y<Enter>').actions, ['ex:tabnew y']);
+  assert.deepEqual(run('a|b', ':tabc!<Enter>').actions, ['ex:tabclose!']);
+  assert.deepEqual(run('a|b', ':vs p<Enter>').actions, ['ex:vsplit p']);
+  assert.deepEqual(run('a|b', ':sp<Enter>').actions, ['ex:split']);
+  assert.deepEqual(run('a|b', ':only<Enter>').actions, ['ex:only']);
+  assert.deepEqual(run('a|b', ':tabN<Enter>').actions, ['ex:tabprev']);
+  assert.deepEqual(run('a|b', 'gg').actions, []);            // gg is still a motion
+});

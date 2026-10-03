@@ -190,6 +190,12 @@ export function handle(state, key, text, cursor, ctrl = false) {
 
   if (st.g) {
     st.g = false;
+    // gt / gT: next / previous tab; {n}gt: tab n (the editor's tabs)
+    if (key === 't' || key === 'T') {
+      const n = st.count;
+      reset();
+      return out({ action: 'ex', ex: { cmd: key === 't' ? 'tabnext' : 'tabprev', arg: String(n || ''), force: false } });
+    }
     if (key !== 'g') { reset(); return out({}); }
     key = 'gg';
   } else if (key === 'g') { st.g = true; return out({}); }
@@ -438,13 +444,16 @@ function wordAt(text, i) {
 // --- : commands ----------------------------------------------------------------
 // Movement and :noh are handled here; everything that touches files is handed
 // to the editor as { action: 'ex', ex: { cmd, arg, force } }.
-const EX = { w: 'w', write: 'w', q: 'q', quit: 'q', wq: 'wq', x: 'x', xit: 'x', e: 'e', edit: 'e', run: 'run', stop: 'stop' };
+const EX = { w: 'w', write: 'w', q: 'q', quit: 'q', wq: 'wq', x: 'x', xit: 'x', e: 'e', edit: 'e', run: 'run', stop: 'stop',
+  tabnew: 'tabnew', tabe: 'tabnew', tabedit: 'tabnew', tabc: 'tabclose', tabclose: 'tabclose',
+  tabn: 'tabnext', tabnext: 'tabnext', tabp: 'tabprev', tabprevious: 'tabprev', tabN: 'tabprev', tabNext: 'tabprev',
+  sp: 'split', split: 'split', vs: 'vsplit', vsp: 'vsplit', vsplit: 'vsplit', on: 'only', only: 'only' };
 function ex(st, c, text, out) {
   if (c === '') return out({});
   if (/^\d+$/.test(c)) return out({ cursor: firstNonBlank(text, lineAt(text, Math.max(0, Number(c) - 1))) });
   if (c === '$') return out({ cursor: firstNonBlank(text, lineAt(text, lineCount(text) - 1)) });
   if (c === 'noh' || c === 'nohlsearch') { st.hl = false; return out({}); }
-  const m = /^([a-z]+)(!?)\s*(.*)$/.exec(c);
+  const m = /^([a-zA-Z]+)(!?)\s*(.*)$/.exec(c);
   const cmd = m && EX[m[1]];
   if (!cmd) return out({ action: 'unknown', message: `Not an editor command: ${c}` });
   return out({ action: 'ex', ex: { cmd, force: m[2] === '!', arg: m[3].trim() } });

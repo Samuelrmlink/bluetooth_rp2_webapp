@@ -638,3 +638,33 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
   background: repeating-conic-gradient(#2a2e34 0% 25%, #1e2126 0% 50%) 50% / 16px 16px; }
 .ed-pv-img img { max-width: 100%; max-height: 100%; image-rendering: auto; }
 .ed-pv-img img.is-small { image-rendering: pixelated; min-width: 64px; }
+
+/* Editor tabs and split (windows/editor.js, editor/tabs.js) */
+.ed-groups { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; }
+.ed-groups.ed-stacked { flex-direction: column; }
+.ed-group { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.ed-groups.is-split > .ed-group + .ed-group { border-left: 1px solid var(--border); }
+.ed-groups.is-split.ed-stacked > .ed-group + .ed-group { border-left: none; border-top: 1px solid var(--border); }
+.ed-tabbar { flex: 0 0 auto; display: flex; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+  border-bottom: 1px solid var(--border); background: #15161a; }
+.ed-tabbar[hidden] { display: none; }
+.ed-ftab { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; max-width: 220px; padding: 0 2px 0 10px;
+  font-size: 12px; color: var(--dim); border-right: 1px solid var(--border); border-top: 2px solid transparent;
+  cursor: pointer; white-space: nowrap; user-select: none; }
+.ed-ftab:hover { color: var(--fg); background: #1a1c20; }
+.ed-ftab.is-active { color: var(--fg); background: var(--bg); }
+/* the focused half's showing tab carries the accent; the other half's is plain */
+.ed-groups.is-split > .ed-group.is-focus .ed-ftab.is-active,
+.ed-groups:not(.is-split) .ed-ftab.is-active { border-top-color: var(--green); }
+.ed-ftab-name { overflow: hidden; text-overflow: ellipsis; }
+.ed-ftab-dir { color: var(--dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.ed-ftab-dot { display: none; font-size: 9px; color: var(--fg); }
+.ed-ftab.is-dirty .ed-ftab-dot { display: inline; }
+.ed-ftab-x { background: none; border: none; color: var(--dim); font: inherit; font-size: 14px; line-height: 1;
+  padding: 4px 6px; border-radius: 3px; cursor: pointer; }
+.ed-ftab-x:hover { color: var(--fg); background: #2a2e34; }
+.ed-titlebar .ed-b-split.on { color: var(--green); }
+@media (pointer: coarse) {
+  .ed-ftab { padding-left: 12px; min-height: 34px; }
+  .ed-ftab-x { padding: 8px 10px; font-size: 16px; }
+}

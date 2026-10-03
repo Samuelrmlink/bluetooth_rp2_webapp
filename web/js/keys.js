@@ -141,6 +141,19 @@ export const BINDINGS = [
   { id: 'editor-file-menu', group: 'Editor', keys: 'm  /  Shift+F10  /  Menu key', combos: [], when: 'editor-files', label: 'In the file list: the file\'s or folder\'s menu (Open, Start / Stop, Rename, Delete, Download, New file here…) — also right-click' },
   { id: 'editor-to-files', group: 'Editor', keys: 'Ctrl+H', combos: ['Ctrl+KeyH'], when: 'editor', label: 'Move to the file list (opens the sidebar if it is shut)' },
   { id: 'editor-to-text', group: 'Editor', keys: 'Ctrl+L', combos: ['Ctrl+KeyL'], when: 'editor', label: 'Move back into the text' },
+  // Tabs and the split. Alt+[ ] \\ O Q: keys nothing else binds, and none the
+  // browser keeps for itself (Ctrl+Tab, Ctrl+W, Ctrl+PageUp cannot be had).
+  { id: 'editor-tab-next', group: 'Editor', keys: 'Alt+]', combos: ['Mod+BracketRight'], when: 'editor', label: 'Next tab (in the focused half of a split)' },
+  { id: 'editor-tab-prev', group: 'Editor', keys: 'Alt+[', combos: ['Mod+BracketLeft'], when: 'editor', label: 'Previous tab' },
+  { id: 'editor-tab-right', group: 'Editor', keys: 'Alt+Shift+]', combos: ['Mod+Shift+BracketRight'], when: 'editor', label: 'Move the tab one place right' },
+  { id: 'editor-tab-left', group: 'Editor', keys: 'Alt+Shift+[', combos: ['Mod+Shift+BracketLeft'], when: 'editor', label: 'Move the tab one place left' },
+  { id: 'editor-tab-close', group: 'Editor', keys: 'Alt+Q', combos: ['Mod+KeyQ'], when: 'editor', label: 'Close the tab (asks first if it has unsaved changes) — also its ×, or a middle-click' },
+  { id: 'editor-split', group: 'Editor', keys: 'Alt+\\', combos: ['Mod+Backslash'], when: 'editor', label: 'Split the editor: the file in a second half (again: back to one, the tabs joined)' },
+  { id: 'editor-split-flip', group: 'Editor', keys: 'Alt+Shift+\\', combos: ['Mod+Shift+Backslash'], when: 'editor', label: 'Split side by side ↔ one above the other' },
+  { id: 'editor-other', group: 'Editor', keys: 'Alt+O', combos: ['Mod+KeyO'], when: 'editor', label: 'Move to the other half of the split' },
+  { id: 'editor-to-other', group: 'Editor', keys: 'Alt+Shift+O', combos: ['Mod+Shift+KeyO'], when: 'editor', label: 'Move the tab to the other half (splitting if need be)' },
+  { id: 'vim-tabs', group: 'Editor', keys: 'gt  gT  3gt', combos: [], when: 'editor', label: 'Vim: next / previous tab / tab 3' },
+  { id: 'vim-tab-ex', group: 'Editor', keys: ':tabnew path  :tabc  :sp path  :vs path  :only', combos: [], when: 'editor', label: 'Vim: open in a new tab / close the tab / split (stacked, side by side) / back to one half' },
   { id: 'editor-vim-toggle', group: 'Editor', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },
   // Vim, in normal mode (editor/vim.js). No combos: the editor's own key
   // handler takes these inside the text; listed so help can find them.
@@ -201,6 +214,8 @@ export const HINTS = {
     { keys: 'Ctrl+S', label: 'save' },
     { keys: 'F5', label: 'run' },
     { keys: 'Ctrl+H/L', label: 'files / text' },
+    { keys: 'Alt+[ ]', label: 'tabs' },
+    { keys: 'Alt+\\', label: 'split' },
     { keys: '/', label: 'search' },
     { keys: ':', label: 'command' },
     { keys: 'Esc', label: 'leave the text' },

@@ -76,7 +76,9 @@ test(':e opens a new file, :wq writes and closes it; :w path writes a copy and s
   await keys(page, 'i');
   await page.keyboard.type('-- hello');
   await keys(page, '<Esc>:wq<Enter>');
-  await expect(name(page)).toHaveText('No file open');
+  // :wq closes that file's tab; the tab it was opened from shows again
+  await expect(name(page)).toHaveText('lua/anker.lua');
+  await expect(page.locator('.ed-ftab[data-path="lua/zz_new.lua"]')).toHaveCount(0);
   expect(await fileText(page, 'lua/zz_new.lua')).toBe('-- hello');
 
   await open(page, 'lua/anker.lua');
