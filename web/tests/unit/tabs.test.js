@@ -120,3 +120,83 @@ test('toJSON / from: the tabs and split survive a reload, junk does not', () => 
   assert.deepEqual(rows(TabState.from(null)), ['']);
   assert.deepEqual(rows(TabState.from({ groups: [{ tabs: ['x', 'x', 3], active: 7 }] })), ['[x]']);
 });
+
+import { dropZone, tabIndexAt } from '../../js/editor/tabs.js';
+
+test('insert: a tab dragged within its row lands where dropped', () => {
+  const t = new TabState();
+  for (const p of ['a', 'b', 'c', 'd']) t.open(p);
+  t.insert('a', 0, 3);                         // after c: index 3 counts a's old place
+  assert.deepEqual(rows(t), ['b c [a] d']);
+  t.insert('d', 0, 0);
+  assert.deepEqual(rows(t), ['[d] b c a']);
+  t.insert('new', 0, 99);
+  assert.deepEqual(rows(t), ['d b c a [new]']);
+});
+
+test('moveTab: into the other half at a place; the emptied half closes', () => {
+  const t = new TabState();
+  t.open('a'); t.open('b');
+  t.splitOpen('c');
+  t.moveTab('a', 0, 1, 0);
+  assert.deepEqual(rows(t), ['[b]', '[a] c']);
+  assert.equal(t.focus, 1);
+  t.moveTab('b', 0, 1, 1);
+  assert.equal(t.split, false);
+  assert.deepEqual(rows(t), ['a [b] c']);
+  assert.equal(t.focus, 0);
+});
+
+test('splitTo: a side makes the split there; a lone tab shows twice, one of several moves', () => {
+  const t = new TabState();
+  t.open('a');
+  t.splitTo('left', 'a', 0);                   // the only tab: both halves show it
+  assert.equal(t.orient, 'h');
+  assert.deepEqual(rows(t), ['[a]', '[a]']);
+  assert.equal(t.focus, 0);
+  const u = new TabState();
+  u.open('a'); u.open('b');
+  u.splitTo('bottom', 'b', 0);                 // one of two: it moves down
+  assert.equal(u.orient, 'v');
+  assert.deepEqual(rows(u), ['[a]', '[b]']);
+  assert.equal(u.focus, 1);
+  u.splitTo('top', 'f.lua');                   // split already: a file opens in that half
+  assert.deepEqual(rows(u), ['a [f.lua]', '[b]']);
+  u.splitTo('right', 'a', 0);                  // a tab from the first half moves across
+  assert.deepEqual(rows(u), ['[f.lua]', 'b [a]']);
+});
+
+test('resize: the focused half grows; kept between 15% and 85%; saved', () => {
+  const t = new TabState();
+  t.open('a'); t.splitOpen('a');
+  assert.equal(t.focus, 1);
+  t.resize(0.1);
+  assert.equal(t.ratio, 0.4);
+  t.focusOther();
+  t.resize(0.2);
+  assert.equal(t.ratio, 0.6);
+  t.resize(1);
+  assert.equal(t.ratio, 0.85);
+  t.setRatio(-3);
+  assert.equal(t.ratio, 0.15);
+  assert.equal(TabState.from(JSON.parse(JSON.stringify(t))).ratio, 0.15);
+  assert.equal(TabState.from({ groups: [{ tabs: ['x'] }], ratio: 'big' }).ratio, 0.5);
+});
+
+test('dropZone: edges split, the middle opens; split already: always the middle', () => {
+  const r = { left: 0, top: 0, width: 400, height: 200 };
+  assert.equal(dropZone(r, 20, 100, false), 'left');
+  assert.equal(dropZone(r, 390, 100, false), 'right');
+  assert.equal(dropZone(r, 200, 10, false), 'top');
+  assert.equal(dropZone(r, 200, 190, false), 'bottom');
+  assert.equal(dropZone(r, 200, 100, false), 'center');
+  assert.equal(dropZone(r, 20, 100, true), 'center');
+});
+
+test('tabIndexAt: before the first tab whose middle is past the pointer', () => {
+  const boxes = [{ left: 0, width: 100 }, { left: 100, width: 100 }, { left: 200, width: 60 }];
+  assert.equal(tabIndexAt(boxes, 10), 0);
+  assert.equal(tabIndexAt(boxes, 60), 1);
+  assert.equal(tabIndexAt(boxes, 240), 3);
+  assert.equal(tabIndexAt([], 5), 0);
+});

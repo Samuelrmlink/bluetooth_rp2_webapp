@@ -160,6 +160,13 @@ export const BINDINGS = [
   { id: 'editor-split-flip', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+\\', combos: ['Mod+Shift+Backslash'], when: 'editor', label: 'Split side by side ↔ one above the other' },
   { id: 'editor-other', group: 'Editor', section: 'Tabs and split', keys: 'Alt+O', combos: ['Mod+KeyO'], when: 'editor', label: 'Move to the other half of the split (or click into it)' },
   { id: 'editor-to-other', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+O', combos: ['Mod+Shift+KeyO'], when: 'editor', label: 'Move the tab to the other half (splitting if need be)' },
+  { id: 'editor-split-grow', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+.  (Alt+>)', combos: ['Mod+Shift+Period'], when: 'editor', label: 'Make the focused half bigger (vim\'s Ctrl+W > — Ctrl+W itself is the browser\'s); works from inside the text, vim or not' },
+  { id: 'editor-split-shrink', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+,  (Alt+<)', combos: ['Mod+Shift+Comma'], when: 'editor', label: 'Make the focused half smaller' },
+  { id: 'editor-split-even', group: 'Editor', section: 'Tabs and split', keys: 'Alt+.', combos: ['Mod+Period'], when: 'editor', label: 'Even halves (also: double-click the line between them)' },
+  { id: 'editor-split-mouse', group: 'Editor', section: 'Tabs and split', keys: 'drag the line', combos: [], when: 'editor', label: 'Drag the line between the halves to resize them (a finger works too)' },
+  { id: 'editor-files-split', group: 'Editor', section: 'Files', keys: 's  /  i', combos: [], when: 'editor-files', label: 'In the file list: open the selected file in a split, side by side / stacked' },
+  { id: 'editor-dnd-tab', group: 'Editor', section: 'Drag and drop', keys: 'drag a tab', combos: [], when: 'editor', label: 'Along its row: rearranged. Onto the other half\'s tabs or text: moved there. Onto an edge of the text (left, right, top, bottom): splits the editor there' },
+  { id: 'editor-dnd-split', group: 'Editor', section: 'Drag and drop', keys: 'drag a file row', combos: [], when: 'editor', label: 'Onto the tabs: opened at that place. Onto the text: opened there, or at an edge, in a new split on that side' },
   { id: 'editor-dnd-in', group: 'Editor', section: 'Drag and drop', keys: 'drop files', combos: [], when: 'editor', label: 'Files or folders from the computer: onto a folder row, uploaded into it; onto a file row, beside it. Asks before replacing anything' },
   { id: 'editor-dnd-tar', group: 'Editor', section: 'Drag and drop', keys: 'drop a .tar', combos: [], when: 'editor', label: 'Extracted where it is dropped, after a preview of what is added and overwritten' },
   { id: 'editor-dnd-move', group: 'Editor', section: 'Drag and drop', keys: 'drag a row', combos: [], when: 'editor', label: 'Onto a folder row: moved there. Out of the browser: saved to the computer (a folder as .tar; Chrome / Edge). Mouse only — on a touch screen a long press is the menu' },
@@ -181,6 +188,7 @@ export const BINDINGS = [
   { id: 'vim-edit', group: 'Editor', section: 'Vim', keys: ':e path  :e!', combos: [], when: 'editor', label: 'Open a file in a tab (a new one if missing) / revert to what is on the device' },
   { id: 'vim-tabs', group: 'Editor', section: 'Vim', keys: 'gt  gT  3gt', combos: [], when: 'editor', label: 'Next / previous tab / tab 3' },
   { id: 'vim-tab-ex', group: 'Editor', section: 'Vim', keys: ':tabnew path  :tabc  :sp path  :vs path  :only', combos: [], when: 'editor', label: 'Open in a new tab / close the tab / split (stacked, side by side) / back to one half' },
+  { id: 'vim-resize', group: 'Editor', section: 'Vim', keys: ':resize ±N  :vertical resize ±N', combos: [], when: 'editor', label: 'The focused half\'s height in lines (stacked) / width in columns (side by side); +N / -N change it; no number: as big as allowed' },
   { id: 'vim-run', group: 'Editor', section: 'Vim', keys: ':run  :stop', combos: [], when: 'editor', label: 'Run the buffer as a draft / stop the script (F5 / Shift+F5)' },
   // The Scanner's: 'scanner' (the window), 'scanner-head' / 'scanner-table'
   // (the table's cursor on the header / a row), 'scanner-filter' (a text box

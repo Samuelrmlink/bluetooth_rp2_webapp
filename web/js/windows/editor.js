@@ -33,7 +33,7 @@ import { RestoreDialog } from '../editor/restore.js';
 import { ImagePreview } from '../editor/preview.js';
 import { isGz, plainName, imageKind, imageType, isWebAsset, shadowInfo, gzipText } from '../gz.js';
 import { bytes } from '../editor/filemenu.js';
-import { TabState } from '../editor/tabs.js';
+import { TabState, dropZone, tabIndexAt } from '../editor/tabs.js';
 import { ConfirmDelete } from '../editor/confirmdelete.js';
 import { EditorHelp } from '../editor/help.js';
 import { planDrop, dropDir, moveDest, treeOf, deleteTree, isVital, dropEntries, readDrop } from '../editor/dnd.js';
@@ -42,6 +42,9 @@ const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
 
 const TABS_KEY = 'btgw.editor.tabs';
+// What a drag carries: a row of the file list, or an editor tab ({ path, gid }).
+const ROW_TYPE = 'application/x-btgw-path';
+const TAB_TYPE = 'application/x-btgw-tab';
 const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 const icon = (id) => `<svg aria-hidden="true"><use href="#i-${id}" xlink:href="#i-${id}"/></svg>`;
@@ -134,6 +137,13 @@ export class EditorWindow {
     this._svgBtn = q('.ed-b-svg');
 
     this._groups = q('.ed-groups');
+    // Between the halves: drag it (or double-click: even halves); from the
+    // keyboard, Alt+> / Alt+< / Alt+. (editor-split-grow / -shrink / -even).
+    this._splitter = document.createElement('div');
+    this._splitter.className = 'ed-splitter';
+    this._splitter.setAttribute('role', 'separator');
+    this._splitter.title = 'Drag to resize · double-click: even halves · Alt+> / Alt+< / Alt+.';
+    this._setupSplitter();
     this.confirmDelete = new ConfirmDelete(this.app);
     this.help = new EditorHelp(this.app);
     this._splitBtn = q('.ed-b-split');
@@ -253,6 +263,14 @@ export class EditorWindow {
     // First refusal on a key in the file list: the selected file's menu.
     files.key = (e) => {
       if (e.ctrlKey || e.altKey || e.metaKey) return false;
+      // s / i: the selected file in a split, side by side / stacked (NERDTree's keys)
+      if ((e.key === 's' || e.key === 'i') && !e.shiftKey) {
+        const n = this.tree.sel && this.tree.find(this.tree.sel);
+        if (!n || n.dir) return false;
+        e.preventDefault();
+        this.openSplit(n.path, e.key === 's' ? 'right' : 'bottom');
+        return true;
+      }
       if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey) || (e.key === 'm' && !e.shiftKey)) {
         if (!this.tree.sel) return false;
         e.preventDefault();
@@ -288,7 +306,8 @@ export class EditorWindow {
   _makeView(id) {
     const el = document.createElement('div');
     el.className = 'ed-group';
-    el.innerHTML = '<div class="ed-tabbar" role="tablist" aria-label="Open files" hidden></div><div class="ed-surface"></div>';
+    el.innerHTML = '<div class="ed-tabbar" role="tablist" aria-label="Open files" hidden></div><div class="ed-surface"></div>'
+      + '<div class="ed-dropzone" hidden></div><div class="ed-tabmark" hidden></div>';
     const v = { id, el, bar: el.querySelector('.ed-tabbar'), shown: null, saved: new Map(),
                 vst: initialState(), vcur: 0, painted: null, ins: null, sig: '' };
     v.core = new EditorCore(el.querySelector('.ed-surface'));
@@ -328,6 +347,7 @@ export class EditorWindow {
       this.closeTab(t.dataset.path, this.tabs.groups.findIndex((g) => g.id === id));
     });
     this.keys?.ownEscape(ta, (e) => this._vimEsc(e));
+    this._setupViewDnd(v);
     return v;
   }
 
@@ -342,16 +362,210 @@ export class EditorWindow {
       v.el.remove();
       this.views.delete(id);
     }
-    ids.forEach((id, i) => {
-      if (!this.views.has(id)) this.views.set(id, this._makeView(id));
-      const el = this.views.get(id).el;
-      if (this._groups.children[i] !== el) this._groups.insertBefore(el, this._groups.children[i] || null);
-      el.classList.toggle('is-focus', i === this.tabs.focus);
-    });
+    for (const id of ids) if (!this.views.has(id)) this.views.set(id, this._makeView(id));
+    // [half, splitter, half] or [half]; nodes moved only when out of place
+    // (moving a node takes the focus out of it)
+    const want = ids.map((id) => this.views.get(id).el);
+    if (want.length > 1) want.splice(1, 0, this._splitter);
+    else this._splitter.remove();
+    want.forEach((el, i) => { if (this._groups.children[i] !== el) this._groups.insertBefore(el, this._groups.children[i] || null); });
+    ids.forEach((id, i) => this.views.get(id).el.classList.toggle('is-focus', i === this.tabs.focus));
+    this._applyRatio();
     this._groups.classList.toggle('is-split', this.tabs.split);
     this._groups.classList.toggle('ed-stacked', this.tabs.orient === 'v');
     this._splitBtn.setAttribute('aria-pressed', String(this.tabs.split));
     this._splitBtn.classList.toggle('on', this.tabs.split);
+  }
+
+  // The halves' shares of the room.
+  _applyRatio() {
+    const els = this.tabs.groups.map((g) => this.views.get(g.id)?.el).filter(Boolean);
+    const r = this.tabs.ratio;
+    els.forEach((el, i) => { el.style.flex = els.length > 1 ? `${i ? 1 - r : r} 1 0` : ''; });
+    this._splitter.setAttribute('aria-orientation', this.tabs.orient === 'h' ? 'vertical' : 'horizontal');
+    this._splitter.setAttribute('aria-valuenow', String(Math.round(r * 100)));
+  }
+
+  _setupSplitter() {
+    const sp = this._splitter;
+    let drag = null;
+    sp.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      sp.setPointerCapture(e.pointerId);
+      drag = { id: e.pointerId };
+      sp.classList.add('is-dragging');
+      this._groups.classList.add('is-resizing');
+    });
+    sp.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const r = this._groups.getBoundingClientRect();
+      this.tabs.setRatio(this.tabs.orient === 'h' ? (e.clientX - r.left) / r.width : (e.clientY - r.top) / r.height);
+      this._applyRatio();
+    });
+    const end = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      drag = null;
+      sp.classList.remove('is-dragging');
+      this._groups.classList.remove('is-resizing');
+      this._saveTabs();
+    };
+    sp.addEventListener('pointerup', end);
+    sp.addEventListener('pointercancel', end);
+    sp.addEventListener('dblclick', () => this.resizeSplit(null));
+  }
+
+  // From the keyboard: the focused half grows (+) or shrinks (-) by a step;
+  // null evens them out.
+  resizeSplit(delta) {
+    if (!this.tabs.split) { this._say('Not split — Alt+\\ splits the editor', 'warn'); return; }
+    if (delta == null) this.tabs.setRatio(0.5); else this.tabs.resize(delta);
+    this._applyRatio();
+    this._saveTabs();
+    const share = this.tabs.focus === 0 ? this.tabs.ratio : 1 - this.tabs.ratio;
+    this._say(`This half: ${Math.round(share * 100)}% of the editor`);
+  }
+
+  // vim's :resize / :vertical resize -- N lines (stacked) or columns (side
+  // by side) for the focused half; +N / -N relative; none: as big as allowed.
+  resizeEx(arg, axis) {
+    if (!this.tabs.split) { this._say('Not split — :sp or :vs first', 'warn'); return; }
+    if (this.tabs.orient !== axis) {
+      this._say(axis === 'v' ? 'The halves are side by side: :vertical resize sets the width' : 'The halves are stacked: :resize sets the height', 'warn');
+      return;
+    }
+    const ta = this.core.ta;
+    const cs = getComputedStyle(ta);
+    let unit;
+    if (axis === 'v') unit = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4;
+    else {
+      const c = (this._measure ||= document.createElement('canvas')).getContext('2d');
+      c.font = `${cs.fontSize} ${cs.fontFamily}`;
+      unit = c.measureText('0').width || 8;
+    }
+    const box = this._groups.getBoundingClientRect();
+    const total = axis === 'v' ? box.height : box.width;
+    const share = this.tabs.focus === 0 ? this.tabs.ratio : 1 - this.tabs.ratio;
+    const m = /^([+-]?)(\d+)$/.exec(arg.trim());
+    let want;
+    if (!arg.trim()) want = 1;
+    else if (!m) { this._say(`:resize takes a number, +N or -N`, 'warn'); return; }
+    else {
+      const n = Number(m[2]) * unit / total;
+      want = m[1] === '+' ? share + n : m[1] === '-' ? share - n : n;
+    }
+    this.tabs.setRatio(this.tabs.focus === 0 ? want : 1 - want);
+    this._applyRatio();
+    this._saveTabs();
+  }
+
+  // Open a file in a split on a side ('right' / 'bottom' from the file list's
+  // s / i), loading it first.
+  async openSplit(path, side) {
+    if (!(await this._load(path))) return false;
+    this.tabs.splitTo(side, path);
+    this._afterTabs();
+    return true;
+  }
+
+  // Drags onto a half: its tab bar (a place in the row) and its text (an
+  // edge splits there, the middle opens it in this half). What can be
+  // dragged: a tab (from this half or the other) or a file from the list.
+  _setupViewDnd(v) {
+    const kind = (e) => {
+      const t = [...(e.dataTransfer?.types || [])];
+      return t.includes(TAB_TYPE) ? 'tab' : t.includes(ROW_TYPE) ? 'row' : null;
+    };
+    const gi = () => this.tabs.groups.findIndex((g) => g.id === v.id);
+    const zoneEl = v.el.querySelector('.ed-dropzone');
+    const mark = v.el.querySelector('.ed-tabmark');
+    const clear = () => { zoneEl.hidden = true; mark.hidden = true; };
+    const barIndex = (e) => {
+      const tabs = [...v.bar.querySelectorAll('.ed-ftab')];
+      const i = tabIndexAt(tabs.map((t) => t.getBoundingClientRect()), e.clientX);
+      const br = v.bar.getBoundingClientRect();
+      const x = i < tabs.length ? tabs[i].getBoundingClientRect().left : (tabs.at(-1)?.getBoundingClientRect().right ?? br.left);
+      mark.style.left = `${x - br.left + v.bar.scrollLeft}px`;
+      return i;
+    };
+    v.el.addEventListener('dragover', (e) => {
+      const k = kind(e);
+      if (!k) return;
+      e.preventDefault();
+      e.stopPropagation();                         // not the editor's file-drop handling
+      e.dataTransfer.dropEffect = k === 'tab' ? 'move' : 'copy';
+      if (v.bar.contains(e.target) || v.el.querySelector('.ed-tabbar') === e.target) {
+        zoneEl.hidden = true;
+        mark.hidden = false;
+        barIndex(e);
+        return;
+      }
+      mark.hidden = true;
+      const surf = v.el.querySelector('.ed-surface').getBoundingClientRect();
+      zoneEl.dataset.zone = dropZone(surf, e.clientX, e.clientY, this.tabs.split);
+      zoneEl.style.setProperty('--bar', `${v.bar.hidden ? 0 : v.bar.offsetHeight}px`);
+      zoneEl.hidden = false;
+    });
+    v.el.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !v.el.contains(e.relatedTarget)) clear(); });
+    v.el.addEventListener('drop', async (e) => {
+      const k = kind(e);
+      if (!k) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const onBar = !mark.hidden;
+      const index = onBar ? barIndex(e) : -1;
+      const zone = zoneEl.dataset.zone || 'center';
+      clear();
+      this._tabDrag = false;                       // the dragged tab's own dragend may never come: it is re-drawn
+      this._groups.classList.remove('is-dnd');
+      let path, from = -1;
+      if (k === 'tab') {
+        try { ({ path, gid: from } = JSON.parse(e.dataTransfer.getData(TAB_TYPE))); } catch { return; }
+        from = this.tabs.groups.findIndex((g) => g.id === from);
+        if (from < 0 || !this.tabs.groups[from].tabs.includes(path)) return;
+      } else {
+        path = e.dataTransfer.getData(ROW_TYPE);
+        if (this.tree.find(path)?.dir) { this._say('Drop a file here, not a folder', 'warn'); return; }
+        if (!(await this._load(path))) return;
+      }
+      const to = gi();
+      if (to < 0) return;
+      if (onBar) {
+        if (from >= 0) this.tabs.moveTab(path, from, to, index);
+        else this.tabs.insert(path, to, index);
+      } else if (zone === 'center') {
+        if (from >= 0) this.tabs.moveTab(path, from, to);
+        else this.tabs.open(path, to);
+      } else {
+        this.tabs.splitTo(zone, path, from);
+      }
+      this._afterTabs();
+    });
+    // a tab starts a drag (any pointer: tabs have no long-press menu)
+    v.bar.addEventListener('dragstart', (e) => {
+      const t = e.target.closest?.('.ed-ftab');
+      if (!t) return;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData(TAB_TYPE, JSON.stringify({ path: t.dataset.path, gid: v.id }));
+      t.classList.add('is-dragging');
+      this._tabDrag = true;
+      this._groups.classList.add('is-dnd');
+    });
+    // (dragend is sent to the dragged element; if a re-draw replaced it, to
+    // nothing -- so the window's, as the backstop)
+    if (!this._dragendHooked) {
+      this._dragendHooked = true;
+      window.addEventListener('dragend', () => {
+        this._groups.classList.remove('is-dnd');
+        if (this._tabDrag) { this._tabDrag = false; this._renderTitle(); }
+      }, true);
+    }
+    v.bar.addEventListener('dragend', (e) => {
+      e.target.closest?.('.ed-ftab')?.classList.remove('is-dragging');
+      this._tabDrag = false;
+      for (const o of this.views.values()) { o.el.querySelector('.ed-dropzone').hidden = true; o.el.querySelector('.ed-tabmark').hidden = true; }
+      this._renderTitle();
+    });
   }
 
   _focusGroup(id) {
@@ -411,7 +625,7 @@ export class EditorWindow {
       if (!v) return;
       const dirty = g.tabs.map((p) => this._mark(p).dirty);
       const sig = JSON.stringify([g.tabs, g.active, dirty, this.tabs.split]);
-      if (sig === v.sig) return;
+      if (sig === v.sig || this._tabDrag) return;
       v.sig = sig;
       v.bar.hidden = !g.tabs.length;
       const base = (p) => p.split('/').pop();
@@ -419,7 +633,7 @@ export class EditorWindow {
         const twin = g.tabs.some((o) => o !== p && base(o) === base(p));
         const dir = p.split('/').slice(0, -1).join('/');
         const on = i === g.active;
-        return `<div class="ed-ftab${on ? ' is-active' : ''}${dirty[i] ? ' is-dirty' : ''}" role="tab" aria-selected="${on}" data-path="${escHtml(p)}" title="${escHtml(p)}">`
+        return `<div class="ed-ftab${on ? ' is-active' : ''}${dirty[i] ? ' is-dirty' : ''}" role="tab" draggable="true" aria-selected="${on}" data-path="${escHtml(p)}" title="${escHtml(p)} — drag to move it, or onto the text's edge to split">`
           + `<span class="ed-ftab-dot" aria-hidden="true">●</span><span class="ed-ftab-name">${escHtml(base(p))}</span>`
           + (twin && dir ? `<span class="ed-ftab-dir">${escHtml(dir)}</span>` : '')
           + `<button type="button" class="ed-ftab-x" tabindex="-1" aria-label="Close ${escHtml(p)}" title="Close (Alt+Q)">×</button></div>`;
@@ -722,6 +936,12 @@ export class EditorWindow {
       case 'split': return this.splitOpen(arg, 'v');
       case 'vsplit': return this.splitOpen(arg, 'h');
       case 'only': return this.only();
+      case 'resize': return this.resizeEx(arg, 'v');
+      case 'vertical': {
+        const m = /^res(?:ize)?\b\s*(.*)$/.exec(arg);
+        if (!m) { this._say(`Not an editor command: vertical ${arg}`, 'warn'); return undefined; }
+        return this.resizeEx(m[1], 'h');
+      }
       default: return undefined;
     }
   }
@@ -791,6 +1011,9 @@ export class EditorWindow {
     if (id === 'editor-to-files') return this.focusFiles();
     if (id === 'editor-to-text') return this.focusText();
     if (id === 'editor-help') return this.help.toggle();
+    if (id === 'editor-split-grow') return this.resizeSplit(0.05);
+    if (id === 'editor-split-shrink') return this.resizeSplit(-0.05);
+    if (id === 'editor-split-even') return this.resizeSplit(null);
     if (id === 'editor-tab-next') return this.stepTab(1);
     if (id === 'editor-tab-prev') return this.stepTab(-1);
     if (id === 'editor-tab-right') return this.moveTab(1);
@@ -1164,7 +1387,7 @@ export class EditorWindow {
   // Within: a row dropped on a folder row moves it there.
 
   _setupDnd(el) {
-    const ROW = 'application/x-btgw-path';
+    const ROW = ROW_TYPE;
     this.tree.canDrag = matchMedia('(pointer: fine)').matches;
     let over = null;                                  // the highlighted element
     const mark = (target) => {
@@ -1202,6 +1425,7 @@ export class EditorWindow {
       dt.setData('DownloadURL', `${node?.dir ? 'application/x-tar' : 'application/octet-stream'}:${name}:${url}`);
       dt.setData('text/uri-list', url);
       this.tree.holdRender = true;
+      this._groups.classList.add('is-dnd');
     });
     this._files.addEventListener('dragend', end);
     el.addEventListener('dragover', (e) => {

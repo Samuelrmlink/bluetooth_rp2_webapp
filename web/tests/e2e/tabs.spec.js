@@ -243,3 +243,145 @@ test('the editor\'s own key list: Alt+/ from the text, the ? button, a filter, a
   await expect(page.locator('#help-modal .keys tr:not([hidden])')).toHaveCount(1);
   await expect(page.locator('#help-modal .keys tr:not([hidden])')).toContainText('The editor has its own list');
 });
+
+// --- dragging tabs and files, resizing the split -------------------------------
+
+const surface = (page, half = 0) => page.locator('.ed-group').nth(half).locator('.ed-surface');
+async function edgePoint(loc, side) {
+  const b = await loc.boundingBox();
+  const at = { left: [8, b.height / 2], right: [b.width - 8, b.height / 2], top: [b.width / 2, 8], bottom: [b.width / 2, b.height - 8], center: [b.width / 2, b.height / 2] }[side];
+  return { x: at[0], y: at[1] };
+}
+const ratio = (page) => page.evaluate(() => window.__btgwApp.windows.get('editor').win.tabs.ratio);
+
+test('a tab dragged along its row is rearranged', async ({ page }) => {
+  await editor(page);
+  await openFile(page, 'lua/pinecil.lua');
+  await openFile(page, 'lua/anker2.lua');
+  await expect.poll(() => tabsOf(page)).toEqual(['lua/anker.lua', 'lua/pinecil.lua', '[lua/anker2.lua]']);
+  await tab(page, 'lua/anker2.lua').dragTo(tab(page, 'lua/anker.lua'), { targetPosition: { x: 3, y: 10 } });
+  await expect.poll(() => tabsOf(page)).toEqual(['[lua/anker2.lua]', 'lua/anker.lua', 'lua/pinecil.lua']);
+});
+
+test('a file from the sidebar onto the right edge tiles it right; onto the bottom, below', async ({ page }) => {
+  await editor(page);
+  await row(page, 'lua/pinecil.lua').dragTo(surface(page), { targetPosition: await edgePoint(surface(page), 'right') });
+  await expect(page.locator('.ed-group')).toHaveCount(2);
+  await expect(page.locator('.ed-groups')).not.toHaveClass(/ed-stacked/);
+  await expect.poll(() => tabsOf(page, 0)).toEqual(['[lua/anker.lua]']);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/pinecil.lua]']);
+  await expect(page.locator('.ed-name')).toHaveText('lua/pinecil.lua');
+  await page.keyboard.press('Alt+Backslash');                      // back to one
+  await row(page, 'lua/anker2.lua').dragTo(surface(page), { targetPosition: await edgePoint(surface(page), 'bottom') });
+  await expect(page.locator('.ed-groups')).toHaveClass(/ed-stacked/);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/anker2.lua]']);
+  // and onto the left edge: the new half is the first one
+  await page.keyboard.press('Alt+Backslash');
+  await row(page, 'lua/anker2.lua').dragTo(surface(page), { targetPosition: await edgePoint(surface(page), 'left') });
+  await expect.poll(() => tabsOf(page, 0)).toEqual(['[lua/anker2.lua]']);
+});
+
+test('a file from the sidebar onto the tab bar opens at that place', async ({ page }) => {
+  await editor(page);
+  await openFile(page, 'lua/pinecil.lua');
+  await row(page, 'lua/anker2.lua').dragTo(tab(page, 'lua/pinecil.lua'), { targetPosition: { x: 3, y: 10 } });
+  await expect.poll(() => tabsOf(page)).toEqual(['lua/anker.lua', '[lua/anker2.lua]', 'lua/pinecil.lua']);
+  await expect(page.locator('.ed-group')).toHaveCount(1);
+});
+
+test('tabs drag between the halves: onto the other row at a place, or onto its text', async ({ page }) => {
+  await editor(page);
+  await openFile(page, 'lua/pinecil.lua');
+  await openFile(page, 'lua/anker2.lua');
+  // a tab onto the right edge: split, the tab moves there
+  await tab(page, 'lua/anker2.lua').dragTo(surface(page), { targetPosition: await edgePoint(surface(page), 'right') });
+  await expect.poll(() => tabsOf(page, 0)).toEqual(['lua/anker.lua', '[lua/pinecil.lua]']);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/anker2.lua]']);
+  // left -> right row, before anker2
+  // (x 12: clear of the line's widened grip, which a pre-drag hit test sees)
+  await tab(page, 'lua/anker.lua').dragTo(tab(page, 'lua/anker2.lua'), { targetPosition: { x: 12, y: 10 } });
+  await expect.poll(() => tabsOf(page, 0)).toEqual(['[lua/pinecil.lua]']);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/anker.lua]', 'lua/anker2.lua']);
+  // right -> onto the left half's text: moved there
+  await tab(page, 'lua/anker2.lua').dragTo(surface(page, 0), { targetPosition: await edgePoint(surface(page, 0), 'center') });
+  await expect.poll(() => tabsOf(page, 0)).toEqual(['lua/pinecil.lua', '[lua/anker2.lua]']);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/anker.lua]']);
+  // the last tab of a half dragged out: that half closes
+  await tab(page, 'lua/anker.lua').dragTo(tab(page, 'lua/pinecil.lua'), { targetPosition: { x: 3, y: 10 } });
+  await expect(page.locator('.ed-group')).toHaveCount(1);
+  await expect.poll(() => tabsOf(page, 0)).toEqual(['[lua/anker.lua]', 'lua/pinecil.lua', 'lua/anker2.lua']);
+});
+
+test('the line between the halves drags to resize; a double-click evens them', async ({ page }) => {
+  await editor(page);
+  await page.locator('.ed-b-split').click();
+  const sp = page.locator('.ed-splitter');
+  await expect(sp).toBeVisible();
+  const g = await page.locator('.ed-groups').boundingBox();
+  const b = await sp.boundingBox();
+  const vertical = await page.locator('.ed-groups').evaluate((e) => !e.classList.contains('ed-stacked'));
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  if (vertical) await page.mouse.move(g.x + g.width * 0.3, b.y + b.height / 2, { steps: 4 });
+  else await page.mouse.move(b.x + b.width / 2, g.y + g.height * 0.3, { steps: 4 });
+  await page.mouse.up();
+  expect(Math.abs(await ratio(page) - 0.3)).toBeLessThan(0.03);
+  const w0 = await page.locator('.ed-group').nth(0).boundingBox();
+  expect((vertical ? w0.width / g.width : w0.height / g.height)).toBeLessThan(0.35);
+  await sp.dblclick();
+  expect(await ratio(page)).toBe(0.5);
+});
+
+for (const vim of [false, true]) {
+  test(`from the keyboard, ${vim ? 'in vim' : 'without vim'}: Alt+O switches halves, Alt+> / Alt+< resize, Alt+. evens`, async ({ page }) => {
+    await editor(page, vim);
+    await focusedTa(page).focus();
+    await page.keyboard.press('Alt+Backslash');
+    await focusedTa(page).focus();
+    const before = await focusedTa(page).inputValue();
+    expect(await ratio(page)).toBe(0.5);
+    await page.keyboard.press('Alt+Shift+Period');                // the focused (second) half grows
+    await expect.poll(() => ratio(page)).toBe(0.45);
+    await page.keyboard.press('Alt+Shift+Comma');
+    await page.keyboard.press('Alt+Shift+Comma');
+    await expect.poll(() => ratio(page)).toBe(0.55);
+    await page.keyboard.press('Alt+KeyO');
+    await expect(page.locator('.ed-group').nth(0)).toHaveClass(/is-focus/);
+    await page.keyboard.press('Alt+Shift+Period');                // now the first half grows
+    await expect.poll(() => ratio(page)).toBe(0.6);
+    await page.keyboard.press('Alt+Period');
+    await expect.poll(() => ratio(page)).toBe(0.5);
+    expect(await focusedTa(page).inputValue()).toBe(before);      // none of it typed anything
+    await expect(page.locator('.ed-notice')).toContainText('50%');
+  });
+}
+
+test('vim :resize and :vertical resize, and the file list\'s s / i', async ({ page }) => {
+  await editor(page, true);
+  // s: the selected file side by side
+  await page.keyboard.press('Control+KeyH');
+  await page.evaluate(() => { const w = window.__btgwApp.windows.get('editor').win; w.tree.sel = 'lua/pinecil.lua'; w.tree.invalidate(); });
+  await page.keyboard.press('KeyS');
+  await expect(page.locator('.ed-group')).toHaveCount(2);
+  await expect(page.locator('.ed-groups')).not.toHaveClass(/ed-stacked/);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/pinecil.lua]']);
+  await focusedTa(page).focus();
+  await page.keyboard.type(':resize 5\n');                       // stacked only: says so
+  await expect(page.locator('.ed-notice')).toContainText(':vertical resize');
+  await page.keyboard.type(':vertical resize 20\n');
+  const g = await page.locator('.ed-groups').boundingBox();
+  const w = (await page.locator('.ed-group').nth(1).boundingBox()).width;
+  expect(w).toBeLessThan(g.width * 0.45);                          // 20 columns, as near as allowed
+  await page.keyboard.type(':vertical resize\n');                  // no number: as big as allowed
+  await expect.poll(() => ratio(page)).toBe(0.15);
+  // i: stacked
+  await page.keyboard.type(':only\n');
+  await page.keyboard.press('Control+KeyH');
+  await page.evaluate(() => { const w = window.__btgwApp.windows.get('editor').win; w.tree.sel = 'lua/anker2.lua'; w.tree.invalidate(); });
+  await page.keyboard.press('KeyI');
+  await expect(page.locator('.ed-groups')).toHaveClass(/ed-stacked/);
+  await expect.poll(() => tabsOf(page, 1)).toEqual(['[lua/anker2.lua]']);
+  await focusedTa(page).focus();
+  await page.keyboard.type(':resize +3\n');
+  await expect.poll(() => ratio(page)).toBeLessThan(0.5);
+});

@@ -18,6 +18,7 @@ export class TabState {
     this.groups = [group()];     // each { id, tabs, active }; id follows a half wherever it moves
     this.focus = 0;
     this.orient = 'h';
+    this.ratio = 0.5;            // the first half's share of the room when split
   }
 
   get split() { return this.groups.length > 1; }
@@ -143,9 +144,75 @@ export class TabState {
 
   flip() { this.orient = this.orient === 'h' ? 'v' : 'h'; }
 
+  // Put `path` in half gi at `index` (moving it there if that half has it),
+  // showing it. A drag of a tab within its row, or onto another half's row.
+  insert(path, gi, index) {
+    const g = this.groups[gi];
+    const had = g.tabs.indexOf(path);
+    if (had >= 0) {
+      g.tabs.splice(had, 1);
+      if (had < index) index--;
+    }
+    index = Math.max(0, Math.min(index, g.tabs.length));
+    g.tabs.splice(index, 0, path);
+    g.active = index;
+    this.focus = gi;
+    return index;
+  }
+
+  // A tab dragged from one half to another (at `index`, default the end):
+  // it leaves its half, which closes if that was its last tab.
+  moveTab(path, from, to, index = Infinity) {
+    if (from === to) return this.insert(path, to, index);
+    const target = this.groups[to], source = this.groups[from];
+    if (!target || !source || !source.tabs.includes(path)) return -1;
+    this.insert(path, to, index);
+    this.close(path, this.groups.indexOf(source));
+    this.focus = this.groups.indexOf(target);
+    return this.focus;
+  }
+
+  // Split on a side -- 'left' 'right' 'top' 'bottom' -- by dropping `path`
+  // there: the new half takes that side and shows it. `from`: the half the
+  // dragged TAB came from (it moves, unless it was that half's only tab:
+  // then the file shows in both). Already split: the drop opens it in the
+  // half on that side.
+  splitTo(side, path, from = -1) {
+    const orient = side === 'left' || side === 'right' ? 'h' : 'v';
+    const first = side === 'left' || side === 'top';
+    if (this.split) {
+      const gi = first ? 0 : 1;
+      if (from >= 0 && from !== gi) return this.moveTab(path, from, gi);
+      this.open(path, gi);
+      return gi;
+    }
+    const keep = from >= 0 && this.groups[0].tabs.length > 1 ? false : true;
+    this.orient = orient;
+    const g = group();
+    if (first) this.groups.unshift(g); else this.groups.push(g);
+    const gi = this.groups.indexOf(g);
+    this.open(path, gi);
+    if (!keep) this.close(path, gi ^ 1);
+    this.focus = gi;
+    return gi;
+  }
+
+  // Resize: the focused half grows by `delta` of the room (negative
+  // shrinks); `set` puts the split at a share outright. Kept between 15% and
+  // 85% so neither half can vanish.
+  resize(delta) {
+    const grow = this.focus === 0 ? delta : -delta;
+    return this.setRatio(this.ratio + grow);
+  }
+
+  setRatio(r) {
+    this.ratio = Math.round(Math.min(0.85, Math.max(0.15, r)) * 1000) / 1000;
+    return this.ratio;
+  }
+
   // What a page reload can bring back (paths only; the files are re-read).
   toJSON() {
-    return { groups: this.groups.map((g) => ({ tabs: g.tabs, active: g.active })), focus: this.focus, orient: this.orient };
+    return { groups: this.groups.map((g) => ({ tabs: g.tabs, active: g.active })), focus: this.focus, orient: this.orient, ratio: this.ratio };
   }
 
   static from(o) {
@@ -158,6 +225,7 @@ export class TabState {
     });
     t.focus = Math.min(o.focus | 0, t.groups.length - 1);
     t.orient = o.orient === 'v' ? 'v' : 'h';
+    if (typeof o.ratio === 'number' && Number.isFinite(o.ratio)) t.setRatio(o.ratio);
     return t;
   }
 
@@ -184,4 +252,22 @@ export class TabState {
     this.focus = this.groups.length === 1 ? 0 : from ^ 1;
     return true;
   }
+}
+
+// Where a drop lands on a half's text area: an edge (the outer quarter on
+// that side) splits there; the middle opens the file in that half. Only the
+// middle when already split -- two halves are the most there are.
+export function dropZone(rect, x, y, split) {
+  if (split) return 'center';
+  const fx = (x - rect.left) / rect.width, fy = (y - rect.top) / rect.height;
+  const edges = [['left', fx], ['right', 1 - fx], ['top', fy], ['bottom', 1 - fy]];
+  const [side, d] = edges.reduce((a, b) => (b[1] < a[1] ? b : a));
+  return d < 0.25 ? side : 'center';
+}
+
+// Where in a row of tabs a drop at x goes: before the first tab whose middle
+// is right of x. lefts / widths: the tabs' boxes, in order.
+export function tabIndexAt(boxes, x) {
+  const i = boxes.findIndex((b) => x < b.left + b.width / 2);
+  return i < 0 ? boxes.length : i;
 }

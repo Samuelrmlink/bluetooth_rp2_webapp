@@ -447,7 +447,8 @@ function wordAt(text, i) {
 const EX = { w: 'w', write: 'w', q: 'q', quit: 'q', wq: 'wq', x: 'x', xit: 'x', e: 'e', edit: 'e', run: 'run', stop: 'stop',
   tabnew: 'tabnew', tabe: 'tabnew', tabedit: 'tabnew', tabc: 'tabclose', tabclose: 'tabclose',
   tabn: 'tabnext', tabnext: 'tabnext', tabp: 'tabprev', tabprevious: 'tabprev', tabN: 'tabprev', tabNext: 'tabprev',
-  sp: 'split', split: 'split', vs: 'vsplit', vsp: 'vsplit', vsplit: 'vsplit', on: 'only', only: 'only' };
+  sp: 'split', split: 'split', vs: 'vsplit', vsp: 'vsplit', vsplit: 'vsplit', on: 'only', only: 'only',
+  res: 'resize', resize: 'resize', vert: 'vertical', vertical: 'vertical' };
 function ex(st, c, text, out) {
   if (c === '') return out({});
   if (/^\d+$/.test(c)) return out({ cursor: firstNonBlank(text, lineAt(text, Math.max(0, Number(c) - 1))) });

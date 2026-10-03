@@ -700,3 +700,31 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 .eh-list h3:first-child { margin-top: 2px; }
 .eh-list table.keys td:first-child { white-space: normal; }
 .ed-titlebar .ed-b-help { font: 600 13px/1 ui-monospace, monospace; color: var(--dim); }
+
+/* Resizable split, tab and split drag (windows/editor.js) */
+.ed-group { position: relative; }
+.ed-groups.is-split > .ed-group + .ed-splitter + .ed-group { border: none; }
+.ed-splitter { flex: 0 0 5px; background: var(--border); cursor: col-resize; touch-action: none; position: relative; z-index: 4; }
+.ed-groups.ed-stacked > .ed-splitter { cursor: row-resize; }
+.ed-splitter::before { content: ''; position: absolute; inset: 0 -4px; }      /* a wider grip than it looks */
+.ed-groups.ed-stacked > .ed-splitter::before { inset: -4px 0; }
+.ed-splitter:hover, .ed-splitter.is-dragging { background: var(--green); }
+.ed-groups.is-resizing { user-select: none; }
+.ed-groups.is-resizing .ed-surface { pointer-events: none; }
+@media (pointer: coarse) {
+  .ed-splitter { flex-basis: 8px; }
+  .ed-splitter::before { inset: 0 -10px; }
+  .ed-groups.ed-stacked > .ed-splitter::before { inset: -10px 0; }
+}
+.ed-tabbar { position: relative; }
+.ed-ftab.is-dragging { opacity: 0.4; }
+.ed-tabmark { position: absolute; top: 0; height: 30px; width: 2px; background: var(--green); z-index: 6; pointer-events: none; }
+.ed-tabmark[hidden], .ed-dropzone[hidden] { display: none; }
+.ed-dropzone { position: absolute; z-index: 5; pointer-events: none; background: rgba(79, 208, 127, 0.14);
+  border: 2px solid var(--green); border-radius: 3px; top: var(--bar, 0px); left: 0; right: 0; bottom: 0; }
+.ed-dropzone[data-zone='left'] { right: 50%; }
+.ed-dropzone[data-zone='right'] { left: 50%; }
+.ed-dropzone[data-zone='bottom'] { top: calc(var(--bar, 0px) + (100% - var(--bar, 0px)) / 2); }
+.ed-dropzone[data-zone='top'] { bottom: calc((100% - var(--bar, 0px)) / 2); }
+/* while a tab or file is being dragged, the line between the halves is not a target */
+.ed-groups.is-dnd > .ed-splitter { pointer-events: none; }
