@@ -42,12 +42,16 @@ class LazyWindow {
     const Kind = plugin.windows?.[this.spec.kind] || BUILTIN_KINDS[this.spec.kind];
     this.el.replaceChildren();
     this.inst = new Kind(this.el, {
+      app: this.host.app,
       ws: this.host.app.ws,
       bus: this.scope,
       device: this.dev,
       plugin,
       log: (s, t) => this.host.app.log(s, t),
     });
+    // made after the app wired its keys: hand them over now (a table's
+    // cell cursor, Enter for its cell menu)
+    if (this.host.app.keys) this.inst.attachKeys?.(this.host.app.keys);
     this.host.cssAcquire(this.dev.plugin, plugin);
     this.dev.listeners.add(this._onSample);
     if (this.dev.seen) this.inst.update?.(this.dev.sample);
@@ -65,6 +69,7 @@ class LazyWindow {
   }
 
   render(t) { this.inst?.render?.(t); }
+  attachKeys(keys) { this.inst?.attachKeys?.(keys); }
   get mounted() { return !!this.inst; }
 }
 

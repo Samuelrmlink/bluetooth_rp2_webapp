@@ -217,3 +217,64 @@ test('A2687 Screensaver: a picture is cropped, sent in windows, and a resend is 
   await win.locator('.ss-send').click();
   await expect(win.locator('.ss-status')).toContainText('already had this picture', { timeout: 15000 });
 });
+
+// The cell menu, as in GATT Events: a click (or Enter on the cell cursor)
+// opens it with the whole value in a wrapping box that copies on a tap.
+async function openUnclassified(page, controlsId) {
+  const id = controlsId.replace('.controls@', '.unclassified@');
+  await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
+  await page.evaluate((x) => window.__btgwApp.show(x), id);
+  await expect(page.locator(`.pane-device .dev-fields tbody tr`).first()).toBeVisible();
+}
+const unMenu = (page) => page.locator('#pane-popover .s-menu');
+
+test('Unclassified: a click on a cell opens its menu; the value wraps and copies; the row copies', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await ready(page);
+  await openUnclassified(page, CONTROLS);
+  const row = page.locator('.dev-fields tbody tr').filter({ hasText: 'capability_block' });
+  await row.locator('td').nth(1).click();
+  await expect(unMenu(page)).toBeVisible();
+  await expect(unMenu(page).locator('.sm-title')).toContainText('capability_block');
+  const value = unMenu(page).locator('.sm-value');
+  await expect(value).toHaveText('02 01 01 01  (hex)');
+  expect(await value.evaluate((e) => getComputedStyle(e).whiteSpace)).toBe('pre-wrap');   // wraps
+  await expect(row.locator('td').nth(1)).toHaveClass(/is-menu-cell/);
+  // the cell stays put while open, though telemetry keeps arriving
+  await page.waitForTimeout(1500);
+  await expect(unMenu(page)).toBeVisible();
+  await value.click();
+  await expect(page.locator('.toast')).toContainText('Copied');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('02 01 01 01  (hex)');
+  // Copy row: field, value, changed -- tab-separated
+  await row.locator('td').first().click();
+  await unMenu(page).getByRole('button', { name: 'Copy row' }).click();
+  expect((await page.evaluate(() => navigator.clipboard.readText())).split('\t').slice(0, 2)).toEqual(['capability_block', '02 01 01 01  (hex)']);
+});
+
+test('Unclassified: from the keyboard -- Space into the table, l to the value, Enter opens the menu, Esc closes it', async ({ page }) => {
+  await ready(page);
+  await openUnclassified(page, CONTROLS);
+  const wrap = page.locator('.pane-device .table-wrap').filter({ has: page.locator('.dev-fields') });
+  await wrap.focus();
+  await page.keyboard.press('Space');
+  await page.keyboard.press('KeyJ');
+  await page.keyboard.press('KeyL');
+  await page.keyboard.press('Enter');
+  await expect(unMenu(page)).toBeVisible();
+  await expect(unMenu(page).locator('.sm-value')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(unMenu(page)).toBeHidden();
+});
+
+test('the A2687\'s Unclassified window has the same cell menu', async ({ page }) => {
+  await ready(page);
+  // (the mock registers the A2687 a moment after load)
+  const handle = await page.waitForFunction(() => [...window.__btgwApp.windows.entries()]
+    .find(([k, w]) => /unclassified@/.test(k) && /^A2687 · /.test(w.def.title || ''))?.[0]);
+  const id = await handle.jsonValue();
+  await page.evaluate((x) => window.__btgwApp.show(x), id);
+  await expect(page.locator('.dev-fields tbody tr').first()).toBeVisible();
+  await page.locator('.dev-fields tbody tr').first().locator('td').nth(1).click();
+  await expect(unMenu(page).locator('.sm-value')).toBeVisible();
+});

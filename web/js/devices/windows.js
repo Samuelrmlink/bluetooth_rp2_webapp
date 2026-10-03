@@ -10,7 +10,7 @@
 
 import { buildControl } from '../controls/kit.js';
 import { Grid } from '../controls/grid.js';
-import { copyWithToast } from '../controls/cellmenu.js';
+import { copyWithToast, openCellMenu } from '../controls/cellmenu.js';
 import { toast } from '../toast.js';
 import { Pending, same, unclassified, displayValue } from '../controls/state.js';
 
@@ -104,6 +104,7 @@ export class ControlsWindow {
 export class UnclassifiedWindow {
   constructor(el, ctx) {
     this.ctx = ctx;
+    this.app = ctx.app;
     this.dev = ctx.device;
     this.plugin = ctx.plugin;
     this.changed = new Map();       // field -> time it last changed
@@ -114,7 +115,18 @@ export class UnclassifiedWindow {
     wrap.className = 'table-wrap';
     wrap.innerHTML = '<table class="grid dev-fields"><thead></thead><tbody></tbody></table>';
     el.appendChild(wrap);
+    this._wrap = wrap;
     this._tbody = wrap.querySelector('tbody');
+    this._fields = [];
+    // A cell's menu, as in GATT Events and the Scanner: the whole value in a
+    // wrapping box that copies on a tap, and Copy row. A click opens it, and
+    // in the table (Space, then h j k l) Enter does.
+    this._menu = document.createElement('div');
+    this._menu.className = 'pane-settings s-menu';
+    this._menu.hidden = true;
+    el.appendChild(this._menu);
+    this._menuCell = null;
+    this._tbody.addEventListener('click', (e) => this._onClick(e));
     // Copy all: the table as it is shown (order, columns, sort), as tab-
     // separated text under a line naming the device -- pastes into a report
     // or a spreadsheet.
@@ -137,6 +149,49 @@ export class UnclassifiedWindow {
       id: 'unclassified', columns: this._cols, onChange: () => { this._dirty = true; },
     });
     this._dirty = true;
+  }
+
+  attachKeys(keys) {
+    keys.nav.registerList(this._wrap, this.grid.controller({
+      list: this._wrap,
+      count: () => this._fields.length,
+      activate: (i, key, td) => this._openMenu(this._fields[i], key, td),
+      onChange: () => { this._dirty = true; },
+    }));
+  }
+
+  _cellText(f, c) {
+    return String((c.show ? c.show(f) : c.get(f)) ?? '');
+  }
+
+  _onClick(e) {
+    const tr = e.target.closest('tr');
+    const td = e.target.closest('td');
+    if (!tr || !td) return;
+    const i = [...this._tbody.rows].indexOf(tr);
+    const col = [...tr.cells].indexOf(td);
+    if (i < 0 || col < 0 || col >= this.grid.visible.length) return;
+    this.grid.cursor = { row: i + 1, col };
+    this._openMenu(this._fields[i], this.grid.visible[col].key, td);
+  }
+
+  _openMenu(f, key, anchor) {
+    if (f == null || !anchor || !this.app) return;
+    const col = this._cols.find((c) => c.key === key);
+    // the value column: the field's whole value (the cell may be cut short)
+    const value = col ? this._cellText(f, col) : '';
+    const items = [
+      { label: 'Copy row', fn: () => copyWithToast(this.grid.visible.map((c) => this._cellText(f, c)).join('\t'), 'Row copied') },
+    ];
+    if (key !== 'field') items.push({ label: `Copy the field name (${f})`, fn: () => copyWithToast(f, 'Field name copied') });
+    const opened = openCellMenu(this.app, {
+      anchor, menuEl: this._menu, paneId: 'unclassified-cell', wrap: this._wrap,
+      title: `${this.dev.name} · ${f}`,
+      items, value: value === '\u2014' ? '' : value,
+      onReturn: () => { this._dirty = true; },
+      onClose: () => { this._menuCell = null; this._dirty = true; },
+    });
+    if (opened) { this._menuCell = { field: f, key }; anchor.classList.add('is-menu-cell'); }
   }
 
   copyAll() {
@@ -162,10 +217,15 @@ export class UnclassifiedWindow {
     this._age.textContent = ageText(this.dev);
     this._age.classList.toggle('is-gone', !!this.dev.gone);
     if (!this._dirty && !this._flashing) return;
+    // Not while a cell's menu is open: telemetry re-draws the rows several
+    // times a second, and the menu is anchored to its cell (the value shown
+    // in it is the one it was opened on).
+    if (this._menuCell) return;
     this._dirty = false;
     const now = Date.now();
     this._flashing = false;
     const fields = this.grid.sort(unclassified(this.dev.sample, this.plugin.controls));
+    this._fields = fields;
     this._tbody.replaceChildren(...fields.map((f) => {
       const tr = document.createElement('tr');
       const at = this.changed.get(f);
@@ -178,6 +238,7 @@ export class UnclassifiedWindow {
       this.grid.appendSpacer(tr);
       return tr;
     }));
+    this.grid.paintCursor();
   }
 }
 
