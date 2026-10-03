@@ -65,6 +65,19 @@ export function unclassified(sample, controls) {
   return Object.keys(sample || {}).filter((k) => !claimed.has(k) && !IDENTITY.has(k)).sort();
 }
 
+// Every field of a sample, for the All Data window, and what already shows
+// each one: a control's label, 'device identity', or '' (nothing yet -- the
+// fields the "Unclassified only" view keeps).
+export function shownAs(controls) {
+  const m = new Map();
+  for (const c of controls || []) if (c.field && !m.has(c.field)) m.set(c.field, c.label || c.field);
+  return (field) => m.get(field) || (IDENTITY.has(field) ? 'device identity' : '');
+}
+
+export function allFields(sample) {
+  return Object.keys(sample || {}).sort();
+}
+
 // How the Unclassified window shows a value. Some schema fields are raw
 // bytes decoded as a string (capability_block, memory_port_bits); printed
 // as text they are unreadable boxes, and this window is where unknown fields

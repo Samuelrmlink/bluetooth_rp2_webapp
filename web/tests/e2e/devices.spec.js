@@ -119,13 +119,25 @@ test('AC charge limit writes watts and follows the device', async ({ page }) => 
   await expect(c).not.toHaveClass(/is-pending/, { timeout: 6000 });
 });
 
-test('Unclassified lists every field no control claims, binary as hex', async ({ page }) => {
+test('All Data: every field and what shows it; "Unclassified only" keeps the rest; binary as hex', async ({ page }) => {
   await ready(page);
   const id = CONTROLS.replace('.controls@', '.unclassified@');
   await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
   await page.evaluate((x) => window.__btgwApp.show(x), id);
   const fields = page.locator('.dev-fields tbody tr td:first-child');
+  const rowOf = (f) => page.locator('.dev-fields tbody tr').filter({ has: page.locator('td:first-child', { hasText: new RegExp(`^${f}$`) }) });
   await expect(fields.filter({ hasText: 'unknown_b1' })).toHaveCount(1);
+  await expect(rowOf('battery_pct').locator('td').nth(2)).toHaveText('Battery');        // shown by a control
+  await expect(rowOf('serial').locator('td').nth(2)).toHaveText('device identity');
+  await expect(rowOf('unknown_b1')).toHaveClass(/is-unclassified/);
+  expect(await page.evaluate((x) => window.__btgwApp.windows.get(x).def.title, id)).toMatch(/· All Data$/);
+  await page.locator('.dev-only input').check();
+  await expect(fields.filter({ hasText: /^battery_pct$/ })).toHaveCount(0);
+  await expect(fields.filter({ hasText: 'unknown_b1' })).toHaveCount(1);
+  await page.reload();                                                                   // remembered
+  await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
+  await page.evaluate((x) => window.__btgwApp.show(x), id);
+  await expect(page.locator('.dev-only input')).toBeChecked();
   await expect(fields.filter({ hasText: /^battery_pct$/ })).toHaveCount(0);
   await expect(page.locator('.dev-fields tbody tr').filter({ hasText: 'capability_block' }).locator('td').nth(1)).toHaveText('02 01 01 01  (hex)');
 });
@@ -162,7 +174,7 @@ test('Unclassified: Copy all puts the table, as shown, on the clipboard', async 
   const text = await page.evaluate(() => navigator.clipboard.readText());
   const lines = text.split('\n');
   expect(lines[0]).toMatch(/^# C1000 · A1761 · /);
-  expect(lines[1]).toBe('Field\tValue\tChanged');
+  expect(lines[1]).toBe('Field\tValue\tShown as\tChanged');
   expect(lines.some((l) => l.startsWith('unknown_b1\t'))).toBe(true);
 });
 

@@ -50,3 +50,12 @@ test('displayValue: binary strings as hex, everything else as itself', () => {
   assert.equal(displayValue({ a: 1 }), '{"a":1}');
   assert.equal(displayValue(null), '\u2014');
 });
+
+import { shownAs, allFields } from '../../js/controls/state.js';
+test('All Data: every field, and what already shows each one', () => {
+  const s = shownAs([{ field: 'battery_pct', label: 'Battery' }, { field: 'ac', label: 'AC output' }, { kind: 'button', label: 'Beep' }]);
+  assert.equal(s('battery_pct'), 'Battery');
+  assert.equal(s('serial'), 'device identity');
+  assert.equal(s('unknown_b1'), '');
+  assert.deepEqual(allFields({ b: 1, a: 2, serial: 'x' }), ['a', 'b', 'serial']);
+});

@@ -25,7 +25,7 @@ export const PLUGINS = [
     module: './anker-scp/plugin.js',
     windows: [
       { kind: 'controls', title: 'Controls' },
-      { kind: 'unclassified', title: 'Unclassified' },
+      { kind: 'unclassified', title: 'All Data' },
       { kind: 'screensaver', title: 'Screensaver' },
     ],
   },
@@ -42,7 +42,7 @@ export const GENERIC = {
   match: () => true,
   name: (d, topic) => d.model_name || topic.replace(/^profile\.|\.telemetry$/g, ''),
   module: null,
-  windows: [{ kind: 'unclassified', title: 'Telemetry' }],
+  windows: [{ kind: 'unclassified', title: 'All Data' }],
 };
 
 export function pluginFor(topic, d) {
@@ -56,7 +56,10 @@ export function deviceKey(topic, d) {
   return topic.replace(/^profile\./, '').replace(/[^A-Za-z0-9]/g, '-');
 }
 
+// 'unclassified' is the All Data window's kind (and so part of its id in a
+// saved layout): it began as the fields no control claimed, and still
+// offers that view ("Unclassified only").
 export const DEFAULT_WINDOWS = [
   { kind: 'controls', title: 'Controls' },
-  { kind: 'unclassified', title: 'Unclassified' },
+  { kind: 'unclassified', title: 'All Data' },
 ];

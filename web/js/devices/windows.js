@@ -2,7 +2,8 @@
 //
 //   Controls      the plugin's control list -- switches, selects, numbers,
 //                 readouts -- built with the control kit
-//   Unclassified  every telemetry field no control claims yet: the working
+//   All Data      every telemetry field, and what shows it -- or (Unclassified
+//                 only) the fields no control claims yet: the working
 //                 surface for figuring out what an unknown tag means
 //
 // ctx: { ws, bus (this window's own scope), device, plugin, log }.
@@ -12,7 +13,9 @@ import { buildControl } from '../controls/kit.js';
 import { Grid } from '../controls/grid.js';
 import { copyWithToast, openCellMenu } from '../controls/cellmenu.js';
 import { toast } from '../toast.js';
-import { Pending, same, unclassified, displayValue } from '../controls/state.js';
+import { Pending, same, unclassified, displayValue, shownAs, allFields } from '../controls/state.js';
+
+const ONLY_KEY = 'btgw.alldata.unclassifiedOnly';
 
 function header(dev) {
   const h = document.createElement('div');
@@ -54,7 +57,7 @@ export class ControlsWindow {
       body.appendChild(ctl.el);
     }
     if (!this.controls.length) {
-      body.innerHTML = '<div class="dim pane-empty">This device\'s plugin declares no controls yet — see Unclassified.</div>';
+      body.innerHTML = '<div class="dim pane-empty">This device\'s plugin declares no controls yet — see All Data.</div>';
     }
   }
 
@@ -136,12 +139,25 @@ export class UnclassifiedWindow {
     copy.textContent = 'Copy all';
     copy.title = 'Copy every field shown to the clipboard';
     copy.addEventListener('click', () => this.copyAll());
-    el.querySelector('.dev-head').appendChild(copy);
+    // All Data shows every field; this narrows it to the ones nothing shows
+    // yet (where unknown fields get worked out). Remembered.
+    const only = document.createElement('label');
+    only.className = 'dev-only';
+    only.innerHTML = '<input type="checkbox"> Unclassified only';
+    this._onlyBox = only.querySelector('input');
+    try { this._onlyBox.checked = localStorage.getItem(ONLY_KEY) === '1'; } catch { /* default: all */ }
+    this._onlyBox.addEventListener('change', () => {
+      try { localStorage.setItem(ONLY_KEY, this._onlyBox.checked ? '1' : '0'); } catch { /* not remembered */ }
+      this._dirty = true;
+    });
+    this._shownAs = shownAs(this.plugin.controls);
+    el.querySelector('.dev-head').append(only, copy);
     // One remembered layout for every device's Unclassified table: the
     // columns mean the same whichever device fills them.
     this._cols = [
       { key: 'field', label: 'Field', width: 200, get: (f) => f },
       { key: 'value', label: 'Value', width: 200, get: (f) => displayValue(this.dev.sample[f]) },
+      { key: 'shown', label: 'Shown as', width: 130, get: (f) => this._shownAs(f) },
       { key: 'changed', label: 'Changed', width: 90, type: 'num', get: (f) => (this.changed.has(f) ? Date.now() - this.changed.get(f) : null),
         show: (f) => (this.changed.get(f) ? `${Math.round((Date.now() - this.changed.get(f)) / 1000)} s ago` : '') },
     ];
@@ -194,8 +210,13 @@ export class UnclassifiedWindow {
     if (opened) { this._menuCell = { field: f, key }; anchor.classList.add('is-menu-cell'); }
   }
 
+  // The rows: every field, or only those nothing shows yet.
+  _list() {
+    return this.grid.sort(this._onlyBox.checked ? unclassified(this.dev.sample, this.plugin.controls) : allFields(this.dev.sample));
+  }
+
   copyAll() {
-    const fields = this.grid.sort(unclassified(this.dev.sample, this.plugin.controls));
+    const fields = this._list();
     if (!fields.length) { toast('Nothing to copy'); return; }
     const cols = this.grid.visible;
     const id = [this.dev.name, this.dev.sample.product_code, this.dev.addr].filter(Boolean).join(' · ');
@@ -224,20 +245,38 @@ export class UnclassifiedWindow {
     this._dirty = false;
     const now = Date.now();
     this._flashing = false;
-    const fields = this.grid.sort(unclassified(this.dev.sample, this.plugin.controls));
+    const fields = this._list();
+    const cols = this.grid.visible;
+    // The same rows in the same order and columns: update the cells in
+    // place. Rebuilt every frame (something is always changing when every
+    // field is shown), a row could be replaced between a mouse press and
+    // its release, and the click was lost.
+    const shape = `${cols.map((c) => c.key).join(',')}|${fields.join(',')}`;
+    const inPlace = shape === this._shape && this._tbody.rows.length === fields.length;
+    this._shape = shape;
     this._fields = fields;
-    this._tbody.replaceChildren(...fields.map((f) => {
-      const tr = document.createElement('tr');
+    const fill = (tr, f) => {
+      tr.classList.toggle('is-unclassified', !this._shownAs(f));
       const at = this.changed.get(f);
-      if (at && now - at < 1500) { tr.classList.add('just-changed'); this._flashing = true; }
-      for (const c of this.grid.visible) {
-        const td = document.createElement('td');
-        td.textContent = c.show ? c.show(f) : c.get(f);
-        tr.appendChild(td);
-      }
-      this.grid.appendSpacer(tr);
-      return tr;
-    }));
+      const flash = !!at && now - at < 1500;
+      tr.classList.toggle('just-changed', flash);
+      if (flash) this._flashing = true;
+      cols.forEach((c, i) => {
+        const text = String((c.show ? c.show(f) : c.get(f)) ?? '');
+        if (tr.cells[i].textContent !== text) tr.cells[i].textContent = text;
+      });
+    };
+    if (inPlace) {
+      fields.forEach((f, i) => fill(this._tbody.rows[i], f));
+    } else {
+      this._tbody.replaceChildren(...fields.map((f) => {
+        const tr = document.createElement('tr');
+        for (let i = 0; i < cols.length; i++) tr.appendChild(document.createElement('td'));
+        this.grid.appendSpacer(tr);
+        fill(tr, f);
+        return tr;
+      }));
+    }
     this.grid.paintCursor();
   }
 }

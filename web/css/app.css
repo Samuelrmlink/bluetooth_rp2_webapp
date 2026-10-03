@@ -759,3 +759,7 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 .es-txt { overflow: hidden; text-overflow: ellipsis; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .es-txt mark { background: rgba(230, 168, 61, 0.35); color: var(--fg); border-radius: 2px; }
 @media (pointer: coarse) { .es-hit, .es-file { min-height: 32px; align-items: center; } }
+
+/* All Data (devices/windows.js) */
+.dev-only { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--dim); margin-right: 6px; white-space: nowrap; }
+.dev-fields tr.is-unclassified td:first-child { color: var(--orange); }
