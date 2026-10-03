@@ -29,7 +29,7 @@ test('Alt+hjkl moves between windows; ? lists every binding; Alt+S opens Setting
   await page.keyboard.press('?');
   await expect(page.locator('#editor-help-dlg')).toBeVisible();
   const counts = await page.evaluate(async () => {
-    const all = (await import('/js/keys.js')).BINDINGS.filter((b) => b.group);
+    const all = (await import('/js/keys.js')).BINDINGS.filter((b) => b.group && !b.hidden);
     return { editor: all.filter((b) => b.group === 'Editor').length, other: all.filter((b) => b.group !== 'Editor').length };
   });
   expect(await page.locator('#editor-help-dlg .keys tr').count()).toBe(counts.editor);

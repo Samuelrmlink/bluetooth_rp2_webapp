@@ -126,7 +126,7 @@ export class HelpModal {
       const rows = group === 'Editor'
         ? [{ keys: 'Alt+/ in the editor', label: 'The editor has its own list of keys: tabs and split, files, save and run, drag and drop, vim. Open it with the ? button in the editor\'s toolbar, or Alt+/ while the editor is the active window.',
              find: editorRows.map((b) => `${b.keys} ${b.label}`).join(' ') }]
-        : BINDINGS.filter((b) => b.group === group);
+        : BINDINGS.filter((b) => b.group === group && !b.hidden);
       if (!rows.length) continue;
       const h = document.createElement('h3');
       h.textContent = group;

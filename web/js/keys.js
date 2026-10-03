@@ -144,6 +144,11 @@ export const BINDINGS = [
   { id: 'editor-tab-key', group: 'Editor', section: 'Editing', keys: 'Tab', combos: [], when: 'editor', label: 'Insert two spaces (Tab is text inside the editor)' },
   { id: 'editor-esc', group: 'Editor', section: 'Editing', keys: 'Esc', combos: [], when: 'editor', label: 'Leave the text (vim: insert → normal first, then leave); after that Alt+H J K L move between windows' },
   { id: 'editor-vim-toggle', group: 'Editor', section: 'Editing', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },
+  { id: 'editor-search-files', group: 'Editor', section: 'Search in files', keys: 'Ctrl+Shift+F', combos: ['Ctrl+Shift+KeyF'], when: ['editor', 'editor-files'], label: 'Search every file (or one folder): the sidebar\'s Search tab, filled with the selected text. Match case, whole word and regex are its Aa / ab / .* buttons; .gz files are searched as the text they hold; cache/ ota/ var/ only when named' },
+  { id: 'editor-search-next', group: 'Editor', section: 'Search in files', keys: 'F4 / Shift+F4', combos: ['F4'], when: ['editor', 'editor-files'], label: 'The next / previous result: its file opened, the match selected' },
+  // (listed with the row above: F4 / Shift+F4)
+  { id: 'editor-search-prev', group: 'Editor', section: 'Search in files', hidden: true, keys: 'Shift+F4', combos: ['Shift+F4'], when: ['editor', 'editor-files'], label: 'The previous result' },
+  { id: 'editor-search-list', group: 'Editor', section: 'Search in files', keys: 'j / k, Enter', combos: [], when: 'editor', label: 'In the results: move, open the one under the cursor (or click it); a file\'s heading folds its matches' },
   { id: 'editor-sidebar', group: 'Editor', section: 'Files', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
   { id: 'editor-to-files', group: 'Editor', section: 'Files', keys: 'Ctrl+H', combos: ['Ctrl+KeyH'], when: 'editor', label: 'Move to the file list (opens the sidebar if it is shut)' },
   { id: 'editor-to-text', group: 'Editor', section: 'Files', keys: 'Ctrl+L', combos: ['Ctrl+KeyL'], when: 'editor', label: 'Move back into the text' },
@@ -189,6 +194,7 @@ export const BINDINGS = [
   { id: 'vim-tabs', group: 'Editor', section: 'Vim', keys: 'gt  gT  3gt', combos: [], when: 'editor', label: 'Next / previous tab / tab 3' },
   { id: 'vim-tab-ex', group: 'Editor', section: 'Vim', keys: ':tabnew path  :tabc  :sp path  :vs path  :only', combos: [], when: 'editor', label: 'Open in a new tab / close the tab / split (stacked, side by side) / back to one half' },
   { id: 'vim-resize', group: 'Editor', section: 'Vim', keys: ':resize ±N  :vertical resize ±N', combos: [], when: 'editor', label: 'The focused half\'s height in lines (stacked) / width in columns (side by side); +N / -N change it; no number: as big as allowed' },
+  { id: 'vim-grep', group: 'Editor', section: 'Vim', keys: ':grep text [folder]  :grep /regex/  :cn  :cp', combos: [], when: 'editor', label: 'Search in files (the Search tab shows them all) and go to the first match / the next / the previous' },
   { id: 'vim-run', group: 'Editor', section: 'Vim', keys: ':run  :stop', combos: [], when: 'editor', label: 'Run the buffer as a draft / stop the script (F5 / Shift+F5)' },
   // The Scanner's: 'scanner' (the window), 'scanner-head' / 'scanner-table'
   // (the table's cursor on the header / a row), 'scanner-filter' (a text box
@@ -226,7 +232,7 @@ export const BINDINGS = [
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
-export const EDITOR_SECTIONS = ['Help', 'Save and run', 'Editing', 'Files', 'Tabs and split', 'Drag and drop', 'Vim'];
+export const EDITOR_SECTIONS = ['Help', 'Save and run', 'Editing', 'Files', 'Search in files', 'Tabs and split', 'Drag and drop', 'Vim'];
 export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'GATT', 'GATT Events', 'Everywhere'];
 
 // The banner's contents per context: short, and only what applies now.

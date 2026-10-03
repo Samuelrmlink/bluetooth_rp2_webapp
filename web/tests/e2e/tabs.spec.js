@@ -224,8 +224,8 @@ test('the editor\'s own key list: Alt+/ from the text, the ? button, a filter, a
   const dlg = page.locator('#editor-help-dlg');
   await expect(dlg).toBeVisible();
   await expect(page.locator('#help-modal')).toBeHidden();
-  for (const h of ['Save and run', 'Tabs and split', 'Files', 'Drag and drop', 'Vim']) {
-    await expect(dlg.locator('h3', { hasText: h })).toBeVisible();
+  for (const h of ['Save and run', 'Tabs and split', 'Files', 'Search in files', 'Drag and drop', 'Vim']) {
+    await expect(dlg.locator('h3').filter({ hasText: new RegExp(`^${h}$`) })).toBeVisible();
   }
   await expect(dlg.locator('.eh-filter')).toBeFocused();
   await page.keyboard.type('split');

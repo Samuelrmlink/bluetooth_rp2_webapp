@@ -36,6 +36,7 @@ import { bytes } from '../editor/filemenu.js';
 import { TabState, dropZone, tabIndexAt } from '../editor/tabs.js';
 import { ConfirmDelete } from '../editor/confirmdelete.js';
 import { EditorHelp } from '../editor/help.js';
+import { SearchPanel } from '../editor/searchpanel.js';
 import { planDrop, dropDir, moveDest, treeOf, deleteTree, isVital, dropEntries, readDrop } from '../editor/dnd.js';
 
 const ARENA_POLL_MS = 3000;
@@ -87,8 +88,12 @@ export class EditorWindow {
       </div>
       <div class="ed-main">
         <aside class="ed-sidebar">
-          <div class="ed-tabs" role="tablist"><button type="button" class="ed-tab" role="tab" aria-selected="true">Files</button></div>
+          <div class="ed-tabs" role="tablist">
+            <button type="button" class="ed-tab" role="tab" data-tab="files" aria-selected="true">Files</button>
+            <button type="button" class="ed-tab" role="tab" data-tab="search" aria-selected="false" title="Search in files (Ctrl+Shift+F)">Search</button>
+          </div>
           <div class="ed-files" role="tree" aria-label="Files on the device"></div>
+          <div class="ed-search" hidden></div>
         </aside>
         <div class="ed-groups"></div>
       </div>
@@ -146,6 +151,15 @@ export class EditorWindow {
     this._setupSplitter();
     this.confirmDelete = new ConfirmDelete(this.app);
     this.help = new EditorHelp(this.app);
+    this._searchEl = q('.ed-search');
+    this.search = new SearchPanel(this._searchEl, {
+      list: fs.list,
+      readText: fs.readText,
+      buffer: (p) => (this.buffers.has(p) && !this.buffers.get(p).binary
+        ? (this.path === p ? this.core.value : this.buffers.get(p).text) : null),
+      onOpen: (p, m) => this.openAt(p, m),
+    });
+    for (const t of el.querySelectorAll('.ed-tab')) t.addEventListener('click', () => this.sidebarTab(t.dataset.tab));
     this._splitBtn = q('.ed-b-split');
     this.restorer = new RestoreDialog(this.app, {
       onDone: async ({ target }) => { await this.tree.refresh(); if (target) this.tree.reveal(target); this._poll(); },
@@ -280,9 +294,69 @@ export class EditorWindow {
       return false;
     };
     keys.nav.registerList(this._files, files);
+    keys.nav.registerList(this.search.results, this.search.listController());
     // The Esc ladder: insert -> normal (vim takes it), then normal -> leave
     // the text (vim declines, the key layer blurs), then Alt+hjkl.
     for (const v of this.views.values()) keys.ownEscape(v.core.ta, (e) => this._vimEsc(e));
+  }
+
+  // --- search in files ----------------------------------------------------------
+
+  // The sidebar's tab: 'files' or 'search'.
+  sidebarTab(which) {
+    const search = which === 'search';
+    if (this._sidebar.hidden) { this._applySidebar(true); this.app.setPref('sidebar', true); }
+    this._files.hidden = search;
+    this._searchEl.hidden = !search;
+    for (const t of this.el.querySelectorAll('.ed-tab')) t.setAttribute('aria-selected', String(t.dataset.tab === which));
+    if (search) this.search.focus();
+  }
+
+  // Ctrl+Shift+F: the Search tab, its box filled with the selected text
+  // (one line of it) when there is some.
+  openSearch() {
+    const ta = this.core.ta;
+    const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    this.sidebarTab('search');
+    // vim's block cursor is a one-character selection: not a query
+    const vimCursor = this.vimOn && this.vst.mode === 'normal';
+    if (sel && !sel.includes('\n') && !vimCursor) this.search.focus(sel);
+  }
+
+  // A search result: the file, the match selected and scrolled to.
+  async openAt(path, m) {
+    if (!(await this.open(path))) return;
+    const n = this.core.value.length;
+    const at = Math.min(m.at, n);
+    if (this.vimOn) {
+      this.vst = { ...this.vst, mode: 'normal' };
+      this.vcur = at;
+      this._vimPaint();
+    } else {
+      this.core.ta.setSelectionRange(at, Math.min(at + m.len, n));
+      this.core.revealCaret(at);
+    }
+    this._say(`${path}:${m.line}:${m.col + 1}`);
+    this._renderTitle();
+  }
+
+  // vim's :grep / :vimgrep -- `:grep needle`, `:grep /re.?gex/ lua/profiles`,
+  // `:grep "two words" js`: the Search tab runs it.
+  grepEx(arg) {
+    const a = arg.trim();
+    let q, rest, regex = false;
+    let m;
+    if ((m = /^\/((?:\\.|[^/])+)\/\s*(.*)$/.exec(a))) { q = m[1]; rest = m[2]; regex = true; }
+    else if ((m = /^"([^"]+)"\s*(.*)$/.exec(a))) { q = m[1]; rest = m[2]; }
+    else { [q, rest = ''] = a.split(/\s+(.*)/s); }
+    if (!q) { this.sidebarTab('search'); return undefined; }
+    this.search.option('regex', regex);
+    this.sidebarTab('search');
+    this.focusText();
+    return this.search.run({ q, dir: rest.trim() }).then((r) => {
+      if (r?.matches) this.search.step(1);
+      else this._say(r ? `No matches for ${q}` : 'Not searched', 'warn');
+    });
   }
 
   // --- tabs and the split ----------------------------------------------------------
@@ -767,6 +841,7 @@ export class EditorWindow {
   // A file renamed (or stored compressed / uncompressed): its buffer, tabs
   // and kept views follow it.
   _renamed(from, to) {
+    this.search.invalidate();
     const b = this.buffers.get(from);
     this.buffers.delete(from);
     if (b) { b.lang = languageOf(to); this.buffers.set(to, b); }
@@ -937,6 +1012,9 @@ export class EditorWindow {
       case 'vsplit': return this.splitOpen(arg, 'h');
       case 'only': return this.only();
       case 'resize': return this.resizeEx(arg, 'v');
+      case 'grep': return this.grepEx(arg);
+      case 'cnext': return this.search.step(1) || this._say('No search results — :grep pattern [folder]', 'warn');
+      case 'cprev': return this.search.step(-1) || this._say('No search results — :grep pattern [folder]', 'warn');
       case 'vertical': {
         const m = /^res(?:ize)?\b\s*(.*)$/.exec(arg);
         if (!m) { this._say(`Not an editor command: vertical ${arg}`, 'warn'); return undefined; }
@@ -1019,6 +1097,9 @@ export class EditorWindow {
     if (id === 'editor-to-files') return this.focusFiles();
     if (id === 'editor-to-text') return this.focusText();
     if (id === 'editor-help') return this.help.toggle();
+    if (id === 'editor-search-files') return this.openSearch();
+    if (id === 'editor-search-next') return this.search.step(1) || this._say('No search results — Ctrl+Shift+F searches', 'warn');
+    if (id === 'editor-search-prev') return this.search.step(-1) || this._say('No search results — Ctrl+Shift+F searches', 'warn');
     if (id === 'editor-split-grow') return this.resizeSplit(0.05);
     if (id === 'editor-split-shrink') return this.resizeSplit(-0.05);
     if (id === 'editor-split-even') return this.resizeSplit(null);
@@ -1232,6 +1313,7 @@ export class EditorWindow {
     }
     b.text = text;
     b.base = fnv1a(text);
+    this.search.invalidate(path);
     const packed = typeof body === 'string' ? '' : ` (stored compressed: ${bytes(body.size)} for ${bytes(new TextEncoder().encode(text).length)} of text)`;
     this._say(`Saved ${path}${packed}${bak ? ` — the previous version is ${bak.split('/').pop()}` : ''}`);
     await this._poll();
@@ -1338,6 +1420,7 @@ export class EditorWindow {
     const r = await fs.remove(path);
     if (!r.ok) { this._say(`Delete failed: ${r.error}`, 'err'); return; }
     this.buffers.delete(path);
+    this.search.invalidate(path);
     this._say(`Deleted ${path}`);
     for (const v of this.views.values()) v.saved.delete(path);
     this.tabs.closeEverywhere(path);
@@ -1464,6 +1547,7 @@ export class EditorWindow {
 
   // Files and folders from the computer into `dir`.
   async dropFiles(entries, dir) {
+    this.search.invalidate();
     let items;
     try { items = await readDrop(entries); } catch (e) { this._say(`Could not read the drop: ${e.message}`, 'err'); return; }
     if (!items.length) return;

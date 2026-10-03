@@ -448,7 +448,8 @@ const EX = { w: 'w', write: 'w', q: 'q', quit: 'q', wq: 'wq', x: 'x', xit: 'x', 
   tabnew: 'tabnew', tabe: 'tabnew', tabedit: 'tabnew', tabc: 'tabclose', tabclose: 'tabclose',
   tabn: 'tabnext', tabnext: 'tabnext', tabp: 'tabprev', tabprevious: 'tabprev', tabN: 'tabprev', tabNext: 'tabprev',
   sp: 'split', split: 'split', vs: 'vsplit', vsp: 'vsplit', vsplit: 'vsplit', on: 'only', only: 'only',
-  res: 'resize', resize: 'resize', vert: 'vertical', vertical: 'vertical' };
+  res: 'resize', resize: 'resize', vert: 'vertical', vertical: 'vertical',
+  grep: 'grep', vimgrep: 'grep', vim: 'grep', cn: 'cnext', cnext: 'cnext', cp: 'cprev', cprev: 'cprev', cN: 'cprev', cNext: 'cprev' };
 function ex(st, c, text, out) {
   if (c === '') return out({});
   if (/^\d+$/.test(c)) return out({ cursor: firstNonBlank(text, lineAt(text, Math.max(0, Number(c) - 1))) });

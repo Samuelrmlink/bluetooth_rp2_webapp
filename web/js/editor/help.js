@@ -58,7 +58,7 @@ export class EditorHelp {
     const frag = document.createDocumentFragment();
     this._rows = [];
     this._sections = [];
-    const editor = BINDINGS.filter((b) => b.group === 'Editor');
+    const editor = BINDINGS.filter((b) => b.group === 'Editor' && !b.hidden);
     const sections = [...EDITOR_SECTIONS, ...new Set(editor.map((b) => b.section).filter((s) => !EDITOR_SECTIONS.includes(s)))];
     for (const section of sections) {
       const rows = editor.filter((b) => (b.section || 'Other') === section);
