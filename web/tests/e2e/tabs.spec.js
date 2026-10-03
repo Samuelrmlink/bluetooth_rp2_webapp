@@ -385,3 +385,20 @@ test('vim :resize and :vertical resize, and the file list\'s s / i', async ({ pa
   await page.keyboard.type(':resize +3\n');
   await expect.poll(() => ratio(page)).toBeLessThan(0.5);
 });
+
+test('the status line and the toolbar keep their full height with a long file, in tiles and tabbed view', async ({ page }) => {
+  await editor(page);
+  await openFile(page, 'lua/profiles/anker/run.lua');              // a long file
+  const fits = () => page.evaluate(() => ['.ed-status', '.ed-titlebar'].map((s) => {
+    const el = document.querySelector(s);
+    return el.clientHeight >= el.scrollHeight && el.getBoundingClientRect().height >= 20;
+  }));
+  expect(await fits()).toEqual([true, true]);
+  await page.keyboard.press('Alt+Shift+KeyT');                     // tabbed view, as in the report
+  await expect(page.locator('#tabbar')).toBeVisible();
+  await page.evaluate(() => window.__btgwApp.show('editor'));
+  expect(await fits()).toEqual([true, true]);
+  const status = await page.locator('.ed-status').boundingBox();
+  const editorBox = await page.locator('.ed-status').evaluate((e) => e.parentElement.getBoundingClientRect().bottom);
+  expect(status.y + status.height).toBeLessThanOrEqual(editorBox + 1);   // not pushed out of the window either
+});
