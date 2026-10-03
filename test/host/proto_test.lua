@@ -302,6 +302,81 @@ do
   check('charge limit refuses 0', setter.check(cp, 0) == nil)
 end
 
+print('\n== A2687 setters ==')
+do
+  -- Every vector is the Anker app's own payload, from its plaintext log
+  -- (anker_c1000_protocol a2687-re/captures/20261003-181234, fw 1.6.0.6),
+  -- rebuilt here with the same epoch it carried.
+  local setter = mod('anker/setter')
+  local m = mod('anker/models/A2687')
+  local S = m.setters
+  local function ep(h) -- the 4 epoch bytes after fe 04 / fe 05 03, LE
+    return tonumber(h:sub(7, 8) .. h:sub(5, 6) .. h:sub(3, 4) .. h:sub(1, 2), 16)
+  end
+  local function v(name, field, value, want, stamp)
+    local s = S[field]
+    local val = assert(setter.check(s, value), field .. ' refused ' .. tostring(value))
+    eq(name, hex(setter.payload(s, val, stamp and ep(stamp) or 0)), want)
+  end
+  v('C3 off (0x0207)', 'c3_on', 0, 'a10121a2020102a3020100fe04378cc16a', '378cc16a')
+  v('C3 on', 'c3_on', 1, 'a10121a2020102a3020101fe04498cc16a', '498cc16a')
+  v('C3 timer 300 s (0x0209, a3 as type-04 bytes)', 'c3_timer_s', 300,
+    'a10121a2020102a305042c010000fe04858cc16a', '858cc16a')
+  v('C3 timer off', 'c3_timer_s', 0, 'a10121a2020102a3050400000000fe04918cc16a', '918cc16a')
+  v('Standard mode (0x0206)', 'charging_protocol', 'standard', 'a10121a2020101fe04ad8cc16a', 'ad8cc16a')
+  v('AI mode', 'charging_protocol', 0, 'a10121a2020100fe041a8dc16a', '1a8dc16a')
+  v('Custom mode EPRplus: mode 1, auto-exit, 140/20/0 W', 'custom_mode',
+    { mode = 1, auto_exit = 1, c1_w = 140, c2_w = 20, c3_w = 0 },
+    'a10121a2020102a3060401018c1400fe04048dc16a', '048dc16a')
+  v('dual-laptop (0x0205)', 'fixed_allocation', 'laptop_mode', 'a10121a2020101fe04c28cc16a', 'c28cc16a')
+  v('C1 priority', 'fixed_allocation', 0, 'a10121a2020100fe04ce8cc16a', 'ce8cc16a')
+  v('brightness 65 % (0x0204)', 'backlight_pct', 65, 'a10121a2020141fe04458dc16a', '458dc16a')
+  v('screen off after 30 min (0x0203)', 'screen_off', '30min', 'a10121a2020103fe04708dc16a', '708dc16a')
+  v('rotation left (0x020B)', 'direction', 'left', 'a10121a2020101fe04a68dc16a', 'a68dc16a')
+  v('language German (0x0202)', 'language', 'de', 'a10121a2020103fe04d18dc16a', 'd18dc16a')
+  v('screensaver off (0x021F: typed stamp)', 'screensaver_enabled', 0,
+    'a10121a2020100fe05035d8ec16a', '5d8ec16a')
+  v('protocols, C3 without UFCS (0x021D: all ports, no stamp)', 'protocols', { 0, 59, 58 },
+    'a10121a2070400003b003a00')
+  v('protocols by name', 'protocols', { c1 = 59, c2 = 59, c3 = 59 }, 'a10121a207043b003b003b00')
+  eq('auto-rotate is 0x020D', S.gyroscope.opcode, 0x020D)
+  eq('setters go out on FT 0x0F', m.setter_ft, 0x0F)
+  check('a port takes 0 or 1', setter.check(S.c1_on, 2) == nil)
+  check('a timer refuses a negative', setter.check(S.c2_timer_s, -1) == nil)
+  check('brightness refuses 10 (the app: 25..100)', setter.check(S.backlight_pct, 10) == nil)
+  check('an unknown name is refused', setter.check(S.screen_off, '2h') == nil)
+  check('custom: a port between 0 and 15 W is refused',
+        setter.check(S.custom_mode, { 1, 1, 10, 0, 0 }) == nil)
+  check('custom: more than 160 W in all is refused',
+        setter.check(S.custom_mode, { 1, 1, 140, 40, 0 }) == nil)
+  check('protocols: four PD bits on one port are refused',
+        setter.check(S.protocols, { 0x3c, 0, 0 }) == nil)
+  check('protocols: a mask over 63 is refused', setter.check(S.protocols, { 64, 0, 0 }) == nil)
+  -- a structured value reaches Lua only as the request's raw JSON
+  local vj = setter.value_from_json('{"device":"7C:E9","field":"protocols","value":{"c1":59,"c2":59,"c3":58}}')
+  eq('value_from_json: an object', setter.show(vj), '{c1=59 c2=59 c3=58}')
+  local va = setter.value_from_json('{"field":"custom_mode","value":[1, true, 140, 20, 0],"device":"x"}')
+  eq('value_from_json: an array, booleans as 1/0', table.concat(va, ','), '1,1,140,20,0')
+  check('value_from_json: a scalar value is not its business', setter.value_from_json('{"value":3}') == nil)
+  -- derived fields, from a report the charger sent during the capture
+  local t = { c3_control = { on = true, countdown_active = true, countdown_s = 3600, countdown_remain_s = 3594 },
+              c2_control = { on = true, countdown_active = false, countdown_s = 300, countdown_remain_s = 289 },
+              c2_power = { watts = 3.9 }, screensaver = { enabled = false } }
+  m.derive(t)
+  eq('c3_on from c3_control', t.c3_on, 1)
+  eq('c3_timer_s while it runs', t.c3_timer_s, 3600)
+  eq('c2_timer_s is 0 once cancelled (the old value stays in the struct)', t.c2_timer_s, 0)
+  eq('c2_w from c2_power', t.c2_w, 3.9)
+  eq('screensaver_enabled from e1', t.screensaver_enabled, 0)
+  -- e1 as the charger sent it (type 04 + 10 bytes), on and then switched off
+  local e1 = m.fields.e1[2]
+  local on = e1{ raw = bytes.unhex('048003857a0b0000000000') }
+  local off = e1{ raw = bytes.unhex('040003857a0b0000000000') }
+  check('e1: Screensaver Display on is bit 7', on.enabled == true and off.enabled == false)
+  eq('e1: screensaver id (the app: 752261)', on.id, 752261)
+  eq('e1: type 3, a custom image', on.type, 3)
+end
+
 print('\n== screensaver ==')
 do
   local ss = mod('anker/screensaver')

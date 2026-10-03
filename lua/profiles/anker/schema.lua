@@ -105,6 +105,8 @@ function S.decode(model, body, want_unknown)
 
   if want_unknown and next(unknown) then out.unknown = unknown end
   out.tlv_count = n
+  -- a model's flat fields derived from the structured ones (A2687: c1_on ...)
+  if model.derive then pcall(model.derive, out) end
   return out
 end
 

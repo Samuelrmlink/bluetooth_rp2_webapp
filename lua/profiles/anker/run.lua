@@ -90,8 +90,24 @@ local function norm(a) return (tostring(a or ''):upper():gsub('[^0-9A-F]', '')) 
 -- device refused writes to the other one. Ops outlive the script that
 -- registered them, so this must not hold anything of a session -- it reads
 -- the shared table on every call.
+-- anker.setters {device}: the writable fields and their rules.
+local function dispatch_setters(p)
+  p = p or {}
+  local want = norm(p.device)
+  for a, d in pairs(control.devices) do
+    if norm(a) == want and d.setters_info then return { device = a, setters = d.setters_info() } end
+  end
+  return { error = 'not_this_device', message = 'no Anker launcher holds ' .. tostring(p.device) }
+end
+
 local function dispatch_set(p)
   p = p or {}
+  -- The op's params are decoded flat (src/lua/lbind.c): a value that is an
+  -- object or array (custom_mode, protocols) arrives only in params._json.
+  if type(p.value) ~= 'table' and p._json then
+    local v = setter.value_from_json(p._json)
+    if v ~= nil then p.value = v end
+  end
   local want = norm(p.device)
   for a, d in pairs(control.devices) do
     if norm(a) == want and d.set then return d.set(p.field, p.value) end
@@ -336,6 +352,9 @@ function R.run(target_override, who)
   -- 6. Stream
   -- ---------------------------------------------------------------------------
   local first = true
+  -- settings the charger does not report (the A2687's protocol masks): what
+  -- this gateway last set, published beside the telemetry as such
+  local readback = {}
   local function publish(dec)
     local t
     if model then
@@ -357,6 +376,7 @@ function R.run(target_override, who)
     -- since this is the field that first pushed an event past 1536 bytes.
     if first then t.body_hex = bytes.hex(dec.body) end
     first = false
+    for k, v in pairs(readback) do t[k] = v end
     t.addr = addr
     t.product_type = a.product_type
     t.product_code = product_code
@@ -425,9 +445,20 @@ function R.run(target_override, who)
     return { queued = true, field = p.field, value = v }
   end
   ops.register('anker.set', dispatch_set)
+  ops.register('anker.setters', dispatch_setters)
   control.devices[addr] = {
     who = who,
     set = function(field, value) return request_set{ field = field, value = value } end,
+    -- what can be written, for clients (anker.setters) and scripts
+    setters_info = function()
+      local out = {}
+      for name, s in pairs(setters) do
+        out[name] = { opcode = s.opcode, values = s.values, min = s.min, max = s.max,
+                      names = s.names, kind = s.kind, verified = s.verified ~= false,
+                      readback = not s.no_readback }
+      end
+      return out
+    end,
   }
 
   -- Screensaver upload, driven step by step from the browser (screensaver.lua).
@@ -447,13 +478,28 @@ function R.run(target_override, who)
   end
   local function ss_emit(ev) bus.emit('anker.screensaver', ev) end
 
+  -- A setter's FT: the model's (the chargers: 0x0F), else the poll's.
+  local set_ft = model and (model.setter_ft or (model.poll and model.poll.ft))
   local function send_setters()
     while #queue > 0 do
       local q = table.remove(queue, 1)
-      local _, err = link:secure(model.poll.ft, q.opcode,
-        setter.payload(q.s, q.value, link_m.now_epoch()), q.opcode | 0x0800, 4000)
-      if err then log.warn(('anker: set %s=%d: %s'):format(q.field, q.value, err))
-      else log.info(('anker: set %s=%d: accepted'):format(q.field, q.value)) end
+      local want = q.s.reply or (q.opcode | 0x0800)
+      local _, err = link:secure(set_ft, q.opcode,
+        setter.payload(q.s, q.value, link_m.now_epoch()), want, 4000)
+      -- The A2687's custom mode answers twice: status 4 first, then 0 --
+      -- and applies it. The second answer is the one that counts.
+      if err and q.s.busy_ok and err:find('status 4') then
+        local f, dec = link:await(want, 3000)
+        err = not f and ('no second reply (' .. tostring(dec) .. ')')
+              or (dec.status and dec.status ~= 0 and ('status ' .. dec.status)) or nil
+      end
+      local shown = setter.show(q.value)
+      if err then log.warn(('anker: set %s=%s: %s'):format(q.field, shown, err))
+      else
+        log.info(('anker: set %s=%s: accepted'):format(q.field, shown))
+        -- a setting the charger never reports back: the gateway's word for it
+        if q.s.no_readback then readback[q.field] = q.value end
+      end
     end
   end
 
@@ -492,6 +538,10 @@ function R.run(target_override, who)
     while true do
       if ss_q[1] then
         ss.run(link, addr, table.remove(ss_q, 1), ss_emit)
+        goto continue
+      end
+      if queue[1] then
+        send_setters()
         goto continue
       end
       local f, dec = link:await(nil, 250)

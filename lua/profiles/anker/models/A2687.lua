@@ -151,21 +151,94 @@ local FIELDS = {
            end
            return out
          end },
-  -- 11 B. Only the leading fields are pinned by the notes; the tail is
-  -- carried as hex rather than guessed at.
+  -- 10 B, matched against the app's own decoded screensaverInfo (2026-10-03):
+  -- [flags][type][id u32][holiday id u32]. Bit 7 of flags is the "Screensaver
+  -- Display" switch (0x80 on, 0x00 off, toggled in the app); the app also names
+  -- displayTime / timeFormat / holiday / clock-type flags, all 0 here, whose
+  -- bits are not pinned yet -- carried as `flags`. type 3 = a custom image.
   e1 = { 'screensaver', function(it)
            local v = raw(it)
-           if #v < 11 then return bytes.hex(v) end
+           if #v < 10 then return bytes.hex(v) end
            return {
-             enabled = v:byte(1) ~= 0,
-             theme = v:byte(2),
-             time_format = v:byte(3),
-             start_min = u16(v, 4),
-             end_min = u16(v, 6),
-             rest = bytes.hex(v:sub(8)),
+             enabled = (v:byte(1) & 0x80) ~= 0,
+             flags = v:byte(1) & 0x7f,
+             type = v:byte(2),
+             id = u32(v, 3),
+             holiday_id = u32(v, 7),
            }
          end },
 }
+
+-- Names by value, inverted for the setters (which take a name or its index).
+local function names(t)
+  local out = {}
+  for k, v in pairs(t) do out[v] = k end
+  return out
+end
+
+--[[
+Setters, every one captured byte-exact from the Anker app on 2026-10-03
+(anker_c1000_protocol a2687-re/captures/20261003-181234, firmware 1.6.0.6):
+FT 0x0F, the reply is opcode | 0x0800, the body  a1 01 21 · items · fe 04 <epoch>
+unless `fe` says otherwise. A port's setters carry the port (0..2) in a2 and the
+value in a3. The field names are the telemetry fields that confirm them.
+]]
+local function port(i)
+  return {
+    on = { opcode = 0x0207, fe = 'bare', values = { 0, 1 }, verified = true,
+           items = { { tag = 0xa2, const = i }, { tag = 0xa3, enc = 'u8' } } },
+    -- seconds, a u32 sent as type-04 bytes; 0 cancels the timer
+    timer = { opcode = 0x0209, fe = 'bare', min = 0, max = 86400, verified = true,
+              items = { { tag = 0xa2, const = i }, { tag = 0xa3, enc = 'u32b' } } },
+  }
+end
+local P1, P2, P3 = port(0), port(1), port(2)
+local function one(opcode, t)
+  t.opcode = opcode
+  t.fe = t.fe or 'bare'
+  t.items = { { tag = 0xa2, enc = 'u8' } }
+  t.verified = true
+  return t
+end
+
+local SETTERS = {
+  c1_on = P1.on, c2_on = P2.on, c3_on = P3.on,
+  c1_timer_s = P1.timer, c2_timer_s = P2.timer, c3_timer_s = P3.timer,
+  -- 0 AI, 1 Standard. Custom (2) carries its own block: custom_mode below.
+  charging_protocol = one(0x0206, { values = { 0, 1 }, names = { ai = 0, standard = 1 } }),
+  -- {mode, auto_exit, c1_w, c2_w, c3_w}: switches to Custom with those watts.
+  -- The charger answers it twice -- status 4, then 0 -- and applies it.
+  custom_mode = { opcode = 0x0206, fe = 'bare', kind = 'custom', busy_ok = true, verified = true },
+  -- Standard mode's option: 0 C1 port priority, 1 dual-laptop
+  fixed_allocation = one(0x0205, { values = { 0, 1 }, names = { c1_priority = 0, laptop_mode = 1 } }),
+  backlight_pct = one(0x0204, { min = 25, max = 100 }),           -- the app's slider: 25..100
+  screen_off = one(0x0203, { values = { 0, 1, 2, 3, 4 }, names = names(SCREEN_OFF) }),
+  -- this firmware replies 0x0A0B (the app waits for an echo and times out)
+  direction = one(0x020B, { values = { 0, 1, 2, 3 }, names = names(DIRECTION) }),
+  gyroscope = one(0x020D, { values = { 0, 1 } }),                  -- auto-rotate
+  language = one(0x0202, { values = { 0, 1, 2, 3 }, names = names(LANGUAGE) }),
+  screensaver_enabled = one(0x021F, { values = { 0, 1 }, fe = 'typed' }),
+  -- {c1, c2, c3} bit masks; all three ports in one command, no stamp. The
+  -- charger reports no read-back: the gateway publishes what it last set.
+  protocols = { opcode = 0x021D, fe = 'none', kind = 'protocols', verified = true, no_readback = true },
+}
+
+-- Flat fields beside the structured ones, so a write can be confirmed against
+-- a plain value (and a script can read c2_on rather than c2_control.on).
+local function derive(t)
+  for i = 1, 3 do
+    local c, p = t['c' .. i .. '_control'], t['c' .. i .. '_power']
+    if type(c) == 'table' then
+      t['c' .. i .. '_on'] = c.on and 1 or 0
+      -- the timer as set, only while one runs: after a cancel the charger
+      -- keeps the old countdown and remaining values with the task flag off
+      t['c' .. i .. '_timer_s'] = c.countdown_active and c.countdown_s or 0
+      t['c' .. i .. '_timer_remain_s'] = c.countdown_active and c.countdown_remain_s or 0
+    end
+    if type(p) == 'table' then t['c' .. i .. '_w'] = p.watts end
+  end
+  if type(t.screensaver) == 'table' then t.screensaver_enabled = t.screensaver.enabled and 1 or 0 end
+end
 
 return {
   product_code = 'A2687',
@@ -190,4 +263,8 @@ return {
   ignore = { a1 = true, fe = true },
 
   fields = FIELDS,
+  derive = derive,
+
+  setters = SETTERS,
+  setter_ft = 0x0F,
 }
