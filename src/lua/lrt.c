@@ -551,6 +551,10 @@ static bool module_is_current(const char *name) {
  * until it is next cached. Top-level lua/*.lua are scripts, not modules,
  * and are not cached. */
 #define CACHE_HDR 16
+/* A timeout of a wait shorter than this is a script polling, not news
+ * (see the wake loop in lrt_tick). */
+#define WAKE_QUIET_MS 1000u
+
 #define CACHE_VER 2          /* 2: keyed on the source as STORED (.lua or .lua.gz) */
 
 static void cache_path(const char *rel, char *out, size_t cap) {
@@ -1273,10 +1277,15 @@ void lrt_tick(void) {
             lwait_take((uint8_t)i, &r);
             s->wake_reason = r;
 
-            if (r != LWAIT_DELIVERED) {
-                /* EVERY non-delivered wake is logged, with what was waited
-                 * for, how long, and which link. This is the diagnostic that
-                 * was missing when GATT discovery stalled silently: the
+            /* A short wait timing out is a script polling in slices (the
+             * Anker loop waits 250 ms at a time for telemetry, and most
+             * slices pass with nothing): routine, and reported 4x a second it
+             * buried the Console. Not logged; the script has its answer. */
+            bool routine = r == LWAIT_TIMEOUT && waited < WAKE_QUIET_MS;
+            if (r != LWAIT_DELIVERED && !routine) {
+                /* Every other non-delivered wake is logged, with what was
+                 * waited for, how long, and which link. This is the diagnostic
+                 * that was missing when GATT discovery stalled silently: the
                  * script gave up, and nothing anywhere said why. */
                 printf("lua: %s woke %s after %lu ms (token %08lx, link %u)\n",
                        s->name, lwait_reason_name(r), (unsigned long)waited,

@@ -120,3 +120,15 @@ test('Console on a phone: the keyboard shrinks the app instead of hiding it; Sen
   await box.press('Enter');
   await expect(page.locator('.console-line', { hasText: /> 2\+2$/ })).toHaveCount(1);   // the input line: Enter ran it
 });
+
+test('Console: a script polling in short waits is not news; a long wait giving up, or a lost link, is', async ({ page }) => {
+  await ready(page);
+  const emit = (data) => page.evaluate((d) => window.__btgwApp.ws.call('test.emit', { evt: 'script.wake', data: d }), data);
+  for (let i = 0; i < 5; i++) await emit({ script: 'anker2', reason: 'timeout', waited_ms: 250, link: 0 });
+  await emit({ script: 'disc', reason: 'timeout', waited_ms: 5000, link: 1 });
+  await emit({ script: 'anker2', reason: 'link_lost', waited_ms: 120, link: 1 });
+  const lines = page.locator('.console-line', { hasText: 'woke:' });
+  await expect(lines).toHaveCount(2);
+  await expect(lines.nth(0)).toContainText('disc woke: timeout after 5000 ms');
+  await expect(lines.nth(1)).toContainText('anker2 woke: link_lost after 120 ms');
+});

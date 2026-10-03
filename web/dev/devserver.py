@@ -357,6 +357,9 @@ class MockGateway:
                 data["number"] = p["number"]
             self.send({"evt": topic, "data": data})
             return {"sent": topic}
+        if op == "test.emit":                       # mock only: any event, as the firmware would send it
+            self.send({"evt": p.get("evt"), "data": p.get("data")})
+            return {"ok": True}
         if op == "test.mkdir":
             STATE.setdefault("dirs", set()).add(str(p.get("path", "")).strip("/"))
             return {"ok": True}

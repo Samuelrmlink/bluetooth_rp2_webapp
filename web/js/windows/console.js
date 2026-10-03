@@ -68,7 +68,13 @@ export class ConsoleWindow {
     const bus = ctx.bus;
     bus.on('log', (d) => this.add('info', d?.src || 'device', d?.message ?? JSON.stringify(d), d?.level));
     bus.on('script.error', (d) => this.add('lua', d?.script || 'lua', d?.error || 'error', 'error'));
-    bus.on('script.wake', (d) => this.add('lua', d?.script || 'lua', `woke: ${d?.reason} after ${d?.waited_ms} ms`));
+    // A short wait timing out is a script polling in slices (the Anker
+    // loop's 250 ms waits): routine, not news -- firmware 1.97+ no longer
+    // sends those; this keeps an older one from filling the Console 4x a second.
+    bus.on('script.wake', (d) => {
+      if (d?.reason === 'timeout' && Number(d.waited_ms) < 1000) return;
+      this.add('lua', d?.script || 'lua', `woke: ${d?.reason} after ${d?.waited_ms} ms`);
+    });
     // A rebuilt Lua VM: by hand, or by itself after the last script stopped with the arena in pieces.
     bus.on('script.vm_restarted', (d) => this.add('lua', 'lua', restartText(d || {})));
     for (const t of ['dev.connected', 'dev.disconnected', 'security.failed', 'security.bonded']) {
