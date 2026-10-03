@@ -562,9 +562,17 @@ class Handler(SimpleHTTPRequestHandler):
         if method == "POST" and path == "rename":
             req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             src, dst = req.get("from"), req.get("to")
-            if src not in fs: return self._reply(404, {"ok": False, "error": "not found"})
-            if dst in fs: return self._reply(409, {"ok": False, "error": "exists"})
-            fs[dst] = fs.pop(src); return self._reply(200, {"ok": True})
+            dirs = STATE.setdefault("dirs", set())
+            if dst in fs or dst in dirs or any(k.startswith(dst + "/") for k in fs):
+                return self._reply(409, {"ok": False, "error": "exists"})
+            if src in fs:
+                fs[dst] = fs.pop(src); return self._reply(200, {"ok": True})
+            inside = [k for k in list(fs) if k.startswith(src + "/")]
+            sub = [d for d in list(dirs) if d == src or d.startswith(src + "/")]
+            if not inside and not sub: return self._reply(404, {"ok": False, "error": "not found"})
+            for k in inside: fs[dst + k[len(src):]] = fs.pop(k)          # a folder moves whole, as lfs_rename
+            for d in sub: dirs.discard(d); dirs.add(dst + d[len(src):])
+            return self._reply(200, {"ok": True})
         dirs = STATE.setdefault("dirs", set())
         if method == "PUT" and self.path.split("?")[0].endswith("/"):
             # PUT /api/fs/<folder>/ makes the folder, parents too (fw 1.95)

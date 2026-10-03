@@ -68,6 +68,9 @@ export async function list(dir = '') {
   return { ok: true, files, block: r.block };
 }
 
+// A file's URL (for a link or a drag out of the page).
+export const fileUrl = (path) => apiUrl(fsPath(path));
+
 export const readText = (path) => send('GET', fsPath(path), undefined, 'text');
 export const readBlob = (path) => send('GET', fsPath(path), undefined, 'blob');
 

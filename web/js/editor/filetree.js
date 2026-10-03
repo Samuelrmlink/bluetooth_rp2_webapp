@@ -130,13 +130,18 @@ export class FileTree {
   invalidate() { this._dirty = true; }
 
   render() {
-    if (!this._dirty) return;
+    // Not while a drag is over the list: replacing the rows would drop the
+    // drag's source and the drop highlight with them.
+    if (!this._dirty || this.holdRender) return;
     this._dirty = false;
     const frag = document.createDocumentFragment();
     for (const { node, depth } of this.visible()) {
       const row = document.createElement('div');
       row.className = `ft-row${node.dir ? ' ft-dir' : ''}`;
       row.dataset.path = node.path;
+      // Draggable with a mouse only: on a touch screen a long press is the
+      // row's menu, and a draggable row would turn it into a drag.
+      if (this.canDrag) row.draggable = true;
       row.style.paddingLeft = `${6 + depth * 12}px`;
       if (node.path === this.sel) row.setAttribute('aria-selected', 'true');
       if (node.path === this.menuPath) row.classList.add('is-menu-row');   // its menu is open

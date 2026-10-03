@@ -152,6 +152,7 @@ export const BINDINGS = [
   { id: 'editor-split-flip', group: 'Editor', keys: 'Alt+Shift+\\', combos: ['Mod+Shift+Backslash'], when: 'editor', label: 'Split side by side ↔ one above the other' },
   { id: 'editor-other', group: 'Editor', keys: 'Alt+O', combos: ['Mod+KeyO'], when: 'editor', label: 'Move to the other half of the split' },
   { id: 'editor-to-other', group: 'Editor', keys: 'Alt+Shift+O', combos: ['Mod+Shift+KeyO'], when: 'editor', label: 'Move the tab to the other half (splitting if need be)' },
+  { id: 'editor-dnd', group: 'Editor', keys: 'drag and drop', combos: [], when: 'editor', label: 'Files or folders from the computer onto a folder: uploaded there (a .tar is extracted, after a preview). A row onto a folder: moved. A row out of the browser: downloaded (a folder as .tar; Chrome / Edge)' },
   { id: 'vim-tabs', group: 'Editor', keys: 'gt  gT  3gt', combos: [], when: 'editor', label: 'Vim: next / previous tab / tab 3' },
   { id: 'vim-tab-ex', group: 'Editor', keys: ':tabnew path  :tabc  :sp path  :vs path  :only', combos: [], when: 'editor', label: 'Vim: open in a new tab / close the tab / split (stacked, side by side) / back to one half' },
   { id: 'editor-vim-toggle', group: 'Editor', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },

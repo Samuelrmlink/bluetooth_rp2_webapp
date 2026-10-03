@@ -668,3 +668,7 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
   .ed-ftab { padding-left: 12px; min-height: 34px; }
   .ed-ftab-x { padding: 8px 10px; font-size: 16px; }
 }
+
+/* Drag and drop (editor/dnd.js) */
+.ft-row.is-drop { background: #1f3326; box-shadow: inset 0 0 0 1px var(--green); color: var(--fg); }
+.ed-files.is-drop, .ed-groups.is-drop { box-shadow: inset 0 0 0 2px var(--green); }

@@ -24,9 +24,11 @@ export function fileMenuItems(node, { isOpen = false, script = null, empty = fal
       { id: 'refresh', label: 'Refresh' },
       { id: 'rename', label: 'Rename / move…' },
     ];
-    // only an empty folder: the device refuses any other (nothing is ever
-    // deleted recursively)
-    if (empty) out.push({ id: 'delete', label: 'Delete folder…', danger: true });
+    // an empty folder goes in one step; any other with everything in it,
+    // after saying how much that is (and, for the gateway's own folders,
+    // asking for the name to be typed)
+    out.push(empty ? { id: 'delete', label: 'Delete folder…', danger: true }
+      : { id: 'delete', label: 'Delete folder and everything in it…', danger: true });
     return out;
   }
   const out = [];

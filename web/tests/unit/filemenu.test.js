@@ -5,7 +5,7 @@ import { fileMenuItems } from '../../js/editor/filemenu.js';
 const ids = (items) => items.map((i) => i.id);
 
 test('a folder: new file, upload, refresh, rename', () => {
-  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename']);
+  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename', 'delete']);
 });
 
 test('a plain file: open, download, rename, delete (last, marked)', () => {
@@ -22,8 +22,8 @@ test('a script gets start / stop / commit / revert; the open file no Open', () =
 
 import { bytes, fileInfo, dirInfo, folderSize, sizeInfo } from '../../js/editor/filemenu.js';
 
-test('a folder offers Delete only when known empty, and Calculate size keeps the menu open', () => {
-  assert.ok(!ids(fileMenuItems({ dir: true }, { empty: false })).includes('delete'));
+test('a folder: Delete when empty, Delete with everything in it otherwise; Calculate size keeps the menu open', () => {
+  assert.equal(fileMenuItems({ dir: true }, { empty: false }).at(-1).label, 'Delete folder and everything in it…');
   const m = fileMenuItems({ dir: true }, { empty: true });
   assert.equal(m.at(-1).id, 'delete');
   assert.equal(m.find((i) => i.id === 'size').keep, true);

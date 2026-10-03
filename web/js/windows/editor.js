@@ -34,6 +34,7 @@ import { ImagePreview } from '../editor/preview.js';
 import { isGz, plainName, imageKind, imageType, isWebAsset, shadowInfo, gzipText } from '../gz.js';
 import { bytes } from '../editor/filemenu.js';
 import { TabState } from '../editor/tabs.js';
+import { planDrop, dropDir, moveDest, treeOf, deleteTree, isVital, dropEntries, readDrop } from '../editor/dnd.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -192,6 +193,7 @@ export class EditorWindow {
       if (this._press.active || e.pointerType === 'touch' || e.pointerType === 'pen') { this._press.fire(); return; }
       this._rowMenu(row.dataset.path);
     });
+    this._setupDnd(el);
     this._files.addEventListener('click', (e) => {
       const row = e.target.closest('.ft-row');
       if (!row) return;
@@ -1108,14 +1110,208 @@ export class EditorWindow {
     this._renderTitle();
   }
 
-  // An empty folder (the device refuses any other, so nothing is ever
-  // deleted recursively).
+  // A folder: an empty one in one step; any other with everything in it,
+  // after saying how much that is. The gateway's own folders (cfg/, lua/,
+  // js/ ...) ask for their name to be typed rather than a click.
   async deleteFolder(path) {
-    if (!path || !confirm(`Delete the empty folder ${path}/ from the device?`)) return;
-    const r = await fs.remove(path);
-    if (!r.ok) { this._say(`Delete failed: ${r.error}`, 'err'); return; }
-    this._say(`Deleted ${path}/`);
-    this.tree.refresh();
+    if (!path) return false;
+    let t;
+    try { t = await treeOf(fs.list, path); } catch (e) { this._say(`Could not list ${path}/: ${e.message}`, 'err'); return false; }
+    const empty = !t.files.length && t.dirs.length === 1;
+    if (empty) {
+      if (!confirm(`Delete the empty folder ${path}/ from the device?`)) return false;
+    } else {
+      const sub = t.dirs.length - 1;
+      const size = t.files.reduce((n, f) => n + f.size, 0);
+      const what = `${t.files.length} file${t.files.length === 1 ? '' : 's'}${sub ? ` in ${sub + 1} folders` : ''}, ${bytes(size)}`;
+      const msg = `Delete ${path}/ and everything in it — ${what}? This cannot be undone.\n\n`
+        + `To keep a copy you can restore, cancel and use the folder's "Download as .tar" first.`;
+      if (isVital(path)) {
+        const typed = prompt(`${msg}\n\n${path}/ is one of the gateway's own folders. Type ${path} to delete it:`);
+        if (typed?.trim() !== path) { if (typed != null) this._say('Not deleted: the name did not match.', 'warn'); return false; }
+      } else if (!confirm(msg)) return false;
+    }
+    let failed = null;
+    const gone = new Set();
+    try {
+      await deleteTree(fs.list, fs.remove, path, (d, n, p) => { gone.add(p); this._say(`Deleting ${path}/ … ${d} of ${n}`); });
+    } catch (e) { failed = e.message; }
+    // the tabs of what went (all of it, or as far as it got)
+    for (const p of this.tabs.openPaths()) {
+      if (!gone.has(p)) continue;
+      this.tabs.closeEverywhere(p);
+      this.buffers.delete(p);
+      for (const v of this.views.values()) v.saved.delete(p);
+    }
+    this._layout();
+    this._showAll();
+    this._saveTabs();
+    if (failed) this._say(`Delete stopped at ${failed}`, 'err');
+    else this._say(empty ? `Deleted ${path}/` : `Deleted ${path}/ and everything in it`);
+    await this.tree.refresh();
+    this._renderTitle();
+    return !failed;
+  }
+
+  // --- drag and drop ------------------------------------------------------------
+  //
+  // In: files and folders from the computer, dropped on a folder row (into
+  // it), a file row (beside it), the list's empty space (the root) or
+  // anywhere else in the editor (the folder the list has selected). A .tar
+  // dropped by itself is extracted there, through Restore's preview.
+  // Out: a row dragged out of the browser saves the file -- a folder as a
+  // .tar (Chrome and Edge; elsewhere use the menu's Download).
+  // Within: a row dropped on a folder row moves it there.
+
+  _setupDnd(el) {
+    const ROW = 'application/x-btgw-path';
+    this.tree.canDrag = matchMedia('(pointer: fine)').matches;
+    let over = null;                                  // the highlighted element
+    const mark = (target) => {
+      if (over === target) return;
+      over?.classList.remove('is-drop');
+      over = target;
+      over?.classList.add('is-drop');
+    };
+    const end = () => { mark(null); this.tree.holdRender = false; this.tree.invalidate(); };
+    // Where a drop at this event lands, and the element that shows it.
+    const where = (e) => {
+      const row = this._files.contains(e.target) && e.target.closest('.ft-row');
+      if (row) {
+        const node = this.tree.find(row.dataset.path);
+        const dir = dropDir(node);
+        const dirRow = dir ? this._files.querySelector(`.ft-row[data-path="${CSS.escape(dir)}"]`) : null;
+        return { dir, show: dirRow || this._files };
+      }
+      if (this._files.contains(e.target)) return { dir: '', show: this._files };
+      return { dir: this.tree.currentDir, show: this._groups };
+    };
+    this._files.addEventListener('dragstart', (e) => {
+      const row = e.target.closest?.('.ft-row');
+      if (!row) return;
+      const path = row.dataset.path;
+      const node = this.tree.find(path);
+      const dt = e.dataTransfer;
+      dt.effectAllowed = 'copyMove';
+      dt.setData(ROW, path);
+      dt.setData('text/plain', path);
+      // out of the browser: the file (a .gz arrives unpacked, so it is named
+      // for what it holds), a folder as the device's .tar of it
+      const url = new URL(node?.dir ? fs.tarUrl(path) : fs.fileUrl(path), location.href).href;
+      const name = node?.dir ? `${node.name}.tar` : plainName(node?.name || path.split('/').pop());
+      dt.setData('DownloadURL', `${node?.dir ? 'application/x-tar' : 'application/octet-stream'}:${name}:${url}`);
+      dt.setData('text/uri-list', url);
+      this.tree.holdRender = true;
+    });
+    this._files.addEventListener('dragend', end);
+    el.addEventListener('dragover', (e) => {
+      const types = [...(e.dataTransfer?.types || [])];
+      const internal = types.includes(ROW);
+      if (!internal && !types.includes('Files')) return;
+      if (internal && !this._files.contains(e.target)) { mark(null); return; }
+      e.preventDefault();
+      e.dataTransfer.dropEffect = internal ? 'move' : 'copy';
+      this.tree.holdRender = true;
+      mark(where(e).show);
+    });
+    el.addEventListener('dragleave', (e) => {
+      if (!e.relatedTarget || !el.contains(e.relatedTarget)) end();
+    });
+    el.addEventListener('drop', (e) => {
+      const types = [...(e.dataTransfer?.types || [])];
+      if (!types.includes(ROW) && !types.includes('Files')) return;
+      e.preventDefault();
+      const { dir } = where(e);
+      const src = e.dataTransfer.getData(ROW);
+      const entries = src ? null : dropEntries(e.dataTransfer);   // now, while the event lasts
+      end();
+      if (src) this.moveTo(src, dir);
+      else this.dropFiles(entries, dir);
+    });
+  }
+
+  // Files and folders from the computer into `dir`.
+  async dropFiles(entries, dir) {
+    let items;
+    try { items = await readDrop(entries); } catch (e) { this._say(`Could not read the drop: ${e.message}`, 'err'); return; }
+    if (!items.length) return;
+    // what is there already, for the "replace?" question
+    const join = (p) => (dir ? `${dir}/${p}` : p);
+    const parents = new Set(items.filter((i) => !i.dir).map((i) => join(i.path).split('/').slice(0, -1).join('/')));
+    const existing = new Set();
+    for (const d of parents) {
+      const r = await fs.list(d);
+      if (r.offline) { this._say('The device is unreachable.', 'err'); return; }
+      for (const f of r.ok ? r.files : []) if (!f.dir) existing.add(d ? `${d}/${f.name}` : f.name);
+    }
+    const plan = planDrop(items, dir, existing);
+    let uploads = plan.uploads;
+    if (plan.overwrites.length) {
+      const list = plan.overwrites.slice(0, 12).join('\n') + (plan.overwrites.length > 12 ? `\n… and ${plan.overwrites.length - 12} more` : '');
+      if (!confirm(`${plan.overwrites.length} of these are on the device already:\n\n${list}\n\nOK replaces them; Cancel keeps them (the rest are still uploaded).`)) {
+        uploads = uploads.filter((u) => !existing.has(u.dest));
+      }
+    }
+    let done = 0, failed = null;
+    for (const d of plan.dirs) {
+      const r = await fs.mkdir(d);
+      if (!r.ok) { failed = `${d}/: ${r.error}`; break; }
+    }
+    for (const u of failed ? [] : uploads) {
+      this._say(`Uploading ${done + 1} of ${uploads.length}: ${u.dest}`);
+      const r = await fs.write(u.dest, u.file);
+      if (!r.ok) { failed = `${u.dest}: ${r.error}`; break; }
+      done++;
+    }
+    await this.tree.refresh();
+    if (dir) this.tree.reveal(dir);
+    // a file open in a tab, just replaced: show what is on the device now
+    for (const u of uploads.slice(0, done)) {
+      const b = this.buffers.get(u.dest);
+      if (b && !this._isDirty(b)) { this.buffers.delete(u.dest); if (this.tabs.showing(u.dest)) await this._reloadShown(u.dest); }
+    }
+    const where = dir ? `${dir}/` : 'the root';
+    const parts = [];
+    if (uploads.length || plan.dirs.length) parts.push(`Uploaded ${done} of ${uploads.length} file${uploads.length === 1 ? '' : 's'} to ${where}`);
+    if (plan.skipped.length) parts.push(`skipped ${plan.skipped.length} (${plan.skipped.slice(0, 3).map((x) => `${x.path}: ${x.why}`).join('; ')})`);
+    if (failed) this._say(`${parts.join(', ')} — stopped at ${failed}`, 'err');
+    else if (parts.length) this._say(parts.join(', '), plan.skipped.length ? 'warn' : '');
+    // a .tar dropped by itself: extracted here, after the preview
+    if (plan.tars.length) {
+      if (plan.tars.length > 1) this._say(`Extracting ${plan.tars[0].name} — drop the other archives one at a time`, 'warn');
+      this.restorer.open(plan.tars[0], dir);
+    }
+  }
+
+  // The tab showing `path` takes the device's copy again (after an upload
+  // replaced it).
+  async _reloadShown(path) {
+    const b = await this._load(path);
+    if (!b) return;
+    b.fresh = false;
+    this.tabs.groups.forEach((_, gi) => { if (this.tabs.activePath(gi) === path) this._show(gi, true); });
+    this._renderTitle();
+  }
+
+  // A row dropped on a folder: moved there (a folder with everything in it).
+  async moveTo(src, folder) {
+    const dest = moveDest(src, folder);
+    if (!dest) return;
+    const r = await fs.rename(src, dest);
+    if (!r.ok) {
+      this._say(r.status === 409 || /exist/i.test(r.error || '') ? `Not moved: ${dest} already exists` : `Move failed: ${r.error}`, 'err');
+      return;
+    }
+    // open tabs follow, the folder's contents too
+    for (const p of [...this.tabs.openPaths()]) {
+      if (p === src) this._renamed(p, dest);
+      else if (p.startsWith(src + '/')) this._renamed(p, dest + p.slice(src.length));
+    }
+    this._say(`Moved ${src} to ${dest}`);
+    await this.tree.refresh();
+    this.tree.reveal(dest);
+    this._renderTitle();
+    this._poll();
   }
 
   // A script's tier operations by name, for a file that need not be open.

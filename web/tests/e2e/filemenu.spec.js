@@ -116,12 +116,13 @@ test('sizes: a file\'s menu and the status bar say its size and flash use', asyn
   await expect(page.locator('.ed-s-size')).toHaveText(/B · /);
 });
 
-test('a folder: what is in it, Calculate size on request, Delete only when empty', async ({ page }) => {
+test('a folder: what is in it, Calculate size on request, Delete (with contents when not empty)', async ({ page }) => {
   await editor(page);
   await row(page, 'lua').click({ button: 'right' });
   const info = menu(page).locator('.sm-info');
   await expect(info).toHaveText(/\d+ files?/);
-  await expect(menu(page).getByRole('button', { name: 'Delete folder…' })).toHaveCount(0);   // not empty
+  await expect(menu(page).getByRole('button', { name: 'Delete folder…', exact: true })).toHaveCount(0);   // not empty
+  await expect(menu(page).getByRole('button', { name: 'Delete folder and everything in it…' })).toBeVisible();
   await menu(page).getByRole('button', { name: 'Calculate size' }).click();
   await expect(menu(page)).toBeVisible();                                                   // stays open
   await expect(info).toHaveText(/ in \d+ files.* on flash/);
