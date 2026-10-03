@@ -22,12 +22,25 @@ test('Alt+hjkl moves between windows; ? lists every binding; Alt+S opens Setting
   await page.keyboard.press('Alt+KeyH');
   expect(await active()).toBe('editor');
 
+  // help is for where you are: with the editor active, ? is the editor's
+  // own list; from another window, the main one -- and between them every
+  // binding is listed (the main list has one row pointing at the editor's)
   await page.keyboard.press('Escape');
   await page.keyboard.press('?');
-  const rows = await page.locator('#help-modal .keys tr').count();
-  const bindings = await page.evaluate(async () => (await import('/js/keys.js')).BINDINGS.filter((b) => b.group).length);
-  expect(rows).toBe(bindings);
+  await expect(page.locator('#editor-help-dlg')).toBeVisible();
+  const counts = await page.evaluate(async () => {
+    const all = (await import('/js/keys.js')).BINDINGS.filter((b) => b.group);
+    return { editor: all.filter((b) => b.group === 'Editor').length, other: all.filter((b) => b.group !== 'Editor').length };
+  });
+  expect(await page.locator('#editor-help-dlg .keys tr').count()).toBe(counts.editor);
   await page.keyboard.press('Escape');
+  await expect(page.locator('#editor-help-dlg')).toBeHidden();
+  await page.keyboard.press('Alt+KeyL');                           // the Scanner
+  await page.keyboard.press('Shift+Slash');                         // a real ?, Shift held (the Scanner's / is unshifted)
+  await expect(page.locator('#help-modal')).toBeVisible();
+  expect(await page.locator('#help-modal .keys tr').count()).toBe(counts.other + 1);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Alt+KeyH');
 
   await page.keyboard.press('Alt+KeyS');
   await expect(page.locator('#settings-modal')).toBeVisible();

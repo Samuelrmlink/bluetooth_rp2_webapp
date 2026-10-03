@@ -616,7 +616,7 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 .s-menu .sm-info { font-size: 12px; margin: -2px 0 4px; max-width: 34ch; }
 
 /* Restore archive (editor/restore.js) */
-.rs-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; min-width: min(520px, 90vw); }
+.rs-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; min-width: 0; }
 .rs-body p { margin: 0; }
 .rs-body [hidden] { display: none; }
 .rs-lists { max-height: 45vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
@@ -672,3 +672,31 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 /* Drag and drop (editor/dnd.js) */
 .ft-row.is-drop { background: #1f3326; box-shadow: inset 0 0 0 1px var(--green); color: var(--fg); }
 .ed-files.is-drop, .ed-groups.is-drop { box-shadow: inset 0 0 0 2px var(--green); }
+
+/* Delete folder confirmation (editor/confirmdelete.js) */
+.cd-body { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; min-width: 0; }
+#confirm-delete-dlg .modal, #restore-dlg .modal { width: min(600px, 94vw); }
+.cd-list li, .rs-list li { overflow-wrap: anywhere; }
+.cd-body p { margin: 0; }
+.cd-body [hidden] { display: none; }
+.cd-warn { color: var(--red); }
+.cd-list { max-height: 40vh; overflow: auto; border: 1px solid var(--border); border-radius: 4px; }
+.cd-list:empty { display: none; }
+.cd-list ul { margin: 0; padding: 6px 8px 6px 24px; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.cd-type { display: flex; flex-direction: column; gap: 6px; }
+.cd-name { font: 13px ui-monospace, monospace; padding: 4px 6px; }
+.cd-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.cd-body .pane-btn { border: 1px solid var(--border); border-radius: 4px; padding: 4px 12px; }
+.cd-body .cd-delete { color: #fff; background: #8c2a24; border-color: #b13a32; }
+.cd-body .cd-delete:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* The editor's own key list (editor/help.js) */
+#editor-help-dlg .modal { width: min(720px, 94vw); }
+.eh-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.eh-top { display: flex; gap: 8px; align-items: center; }
+.eh-filter { flex: 1 1 auto; min-width: 0; }
+.eh-top .pane-btn { border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; white-space: nowrap; }
+.eh-list h3 { margin: 12px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); }
+.eh-list h3:first-child { margin-top: 2px; }
+.eh-list table.keys td:first-child { white-space: normal; }
+.ed-titlebar .ed-b-help { font: 600 13px/1 ui-monospace, monospace; color: var(--dim); }

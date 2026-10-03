@@ -138,9 +138,40 @@ normal, insert, visual, visual line; `hjkl w b e 0 ^ $ gg G` with counts;
 Visual (`v`, `V`, or drag with the mouse or a finger): `y d x c`, and `p`/`P` paste over the selection.
 Search: `/text` `?text` (every match highlighted as you type), `n N`, `*` `#` (word under the cursor), `:noh`.
 Commands: `:w`, `:w path` (a copy; stays on this file), `:q` (refused with unsaved changes), `:q!`,
-`:wq`, `:x`/`ZZ`, `ZQ`, `:e path` (a new buffer if it does not exist), `:e!` (revert), `:12`, `:$`,
+`:wq`, `:x`/`ZZ`, `ZQ` (these close the tab), `:e path` (a new tab; a new file if it does not exist), `:e!` (revert), `:12`, `:$`,
 `:run`, `:stop`. Ctrl+H moves to the file list, Ctrl+L back to the text. Esc: insert → normal →
 leave the text → Alt+hjkl between windows.
+
+### Editor keys
+
+The editor has its **own key list** — the `?` button in its title bar, or Alt+/
+(and `?` outside the text) while the editor is the active window; from any
+other window those keys open the main list, which has one row pointing here.
+Both are generated from `js/keys.js` (`group: 'Editor'`, by `section`), so they
+cannot drift from what the keys do. In short:
+
+| Keys | What |
+|---|---|
+| Ctrl+S · F5 · Shift+F5 | save · run the buffer as a draft · stop |
+| Alt+] · Alt+[ | next · previous tab (in the focused half) |
+| Alt+Shift+] · Alt+Shift+[ | move the tab right · left |
+| Alt+Q | close the tab (asks if unsaved; also its ×, or middle-click) |
+| Alt+\ · Alt+Shift+\ | split / unsplit · side by side ↔ stacked |
+| Alt+O · Alt+Shift+O | the other half · move the tab there |
+| Alt+B · Ctrl+H · Ctrl+L | sidebar · into the file list · back to the text |
+| m / Shift+F10 / Menu (file list) | the row's menu (also right-click, long press, ⋯) |
+| vim `gt` `gT` `3gt` | next · previous tab · tab 3 |
+| vim `:tabnew p` `:tabc` `:sp p` `:vs p` `:only` | new tab · close it · split stacked · side by side · one half |
+
+All Alt combinations nothing else binds — Ctrl+Tab, Ctrl+W and Ctrl+PageUp/Down
+are the browser's and a page cannot have them. Tabs keep their own cursor,
+scroll and undo; tabs and the split survive a reload.
+
+Drag and drop: files or folders from the computer onto a folder row upload
+into it (onto a file row: beside it; asks before replacing anything); a `.tar`
+dropped by itself is extracted there after a preview; a row dropped on a folder
+row moves there; a row dragged out of the browser saves it (a folder as
+`.tar`; Chrome / Edge). Mouse only — on a touch screen a long press is the menu.
 
 Clipboard: a yank also copies to the system clipboard; text copied elsewhere comes in with a normal
 paste (Ctrl+V, the phone's Paste), which in normal mode inserts like `p`. The page cannot read the

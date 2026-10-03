@@ -133,7 +133,8 @@ test('a folder: what is in it, Calculate size on request, Delete (with contents 
   await expect(row(page, 'lua/zz_empty')).toBeVisible();
   await row(page, 'lua/zz_empty').click({ button: 'right' });
   await expect(menu(page).locator('.sm-info')).toHaveText('empty');
-  page.once('dialog', (d) => d.accept());
   await menu(page).getByRole('button', { name: 'Delete folder…' }).click();
+  await expect(page.locator('#confirm-delete-dlg .cd-summary')).toHaveText('Delete the empty folder lua/zz_empty/ from the device?');
+  await page.locator('#confirm-delete-dlg').getByRole('button', { name: 'Delete folder' }).click();
   await expect(row(page, 'lua/zz_empty')).toHaveCount(0);
 });

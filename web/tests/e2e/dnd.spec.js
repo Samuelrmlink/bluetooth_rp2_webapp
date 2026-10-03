@@ -115,30 +115,55 @@ test('dragging a row out carries a download: the file, or a folder as .tar', asy
   await expect(row(page, 'lua/anker.lua')).toHaveAttribute('draggable', 'true');
 });
 
-test('Delete folder and everything in it: says how much, removes it all, closes its tabs', async ({ page }) => {
+const confirmDlg = (page) => page.locator('#confirm-delete-dlg');
+
+test('Delete folder and everything in it: always confirmed in a dialog that lists what goes', async ({ page }) => {
   await editor(page);
   await page.evaluate(() => window.__btgwApp.openFile('www/demo.js.gz'));
-  await row(page, 'www').click({ button: 'right' });
-  let asked = '';
-  page.once('dialog', (d) => { asked = d.message(); d.accept(); });
-  await menu(page).getByRole('button', { name: 'Delete folder and everything in it…' }).click();
+  const ask = async () => {
+    await row(page, 'www').click({ button: 'right' });
+    await menu(page).getByRole('button', { name: 'Delete folder and everything in it…' }).click();
+    await expect(confirmDlg(page)).toBeVisible();
+  };
+  await ask();
+  await expect(confirmDlg(page).locator('.cd-summary')).toContainText('Delete www/ and everything in it: 3 files');
+  await expect(confirmDlg(page).locator('.cd-summary')).toContainText('This cannot be undone.');
+  await expect(confirmDlg(page).locator('.cd-list')).toContainText('www/dot.png');
+  await expect(confirmDlg(page).locator('.cd-list')).toContainText('www/logo.svg.gz');
+  // Cancel is the default: Enter on it, Esc, and the Cancel button all keep everything
+  await expect(confirmDlg(page).locator('.cd-cancel')).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(confirmDlg(page)).toBeHidden();
+  await expect(notice(page)).toHaveText('Not deleted: www/');
+  await ask();
+  await page.keyboard.press('Escape');
+  await expect(confirmDlg(page)).toBeHidden();
+  await ask();
+  await confirmDlg(page).locator('.cd-cancel').click();
+  expect(await status(page, 'www/dot.png')).toBe(200);
+  // and only the Delete button deletes
+  await ask();
+  await confirmDlg(page).getByRole('button', { name: 'Delete 3 files' }).click();
   await expect(notice(page)).toHaveText('Deleted www/ and everything in it');
-  expect(asked).toMatch(/Delete www\/ and everything in it — 3 files, .* This cannot be undone/);
   await expect(row(page, 'www')).toHaveCount(0);
   expect(await status(page, 'www/dot.png')).toBe(404);
   await expect(page.locator('.ed-ftab[data-path="www/demo.js.gz"]')).toHaveCount(0);
 });
 
-test('one of the gateway\'s own folders asks for its name typed', async ({ page }) => {
+test('one of the gateway\'s own folders: Delete stays disabled until its name is typed', async ({ page }) => {
   await editor(page);
   await row(page, 'cfg').click({ button: 'right' });
-  page.once('dialog', (d) => { expect(d.type()).toBe('prompt'); d.accept('nope'); });
   await menu(page).getByRole('button', { name: 'Delete folder and everything in it…' }).click();
-  await expect(notice(page)).toHaveText('Not deleted: the name did not match.');
+  const del = confirmDlg(page).locator('.cd-delete');
+  await expect(confirmDlg(page).locator('.cd-name')).toBeFocused();
+  await expect(del).toBeDisabled();
+  await page.keyboard.type('nope');
+  await page.keyboard.press('Enter');                               // the wrong name: nothing happens
+  await expect(del).toBeDisabled();
   expect(await status(page, 'cfg/wifi.json')).toBe(200);
-  await row(page, 'cfg').click({ button: 'right' });
-  page.once('dialog', (d) => d.accept('cfg'));
-  await menu(page).getByRole('button', { name: 'Delete folder and everything in it…' }).click();
+  await confirmDlg(page).locator('.cd-name').fill('cfg');
+  await expect(del).toBeEnabled();
+  await del.click();
   await expect(notice(page)).toHaveText('Deleted cfg/ and everything in it');
   expect(await status(page, 'cfg/wifi.json')).toBe(404);
 });

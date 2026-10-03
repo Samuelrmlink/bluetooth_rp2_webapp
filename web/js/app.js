@@ -317,7 +317,7 @@ class App {
     // whichever window is active, so a binding only does something where it
     // means something.
     for (const id of ['editor-save', 'editor-run', 'editor-stop', 'editor-sidebar', 'editor-to-files', 'editor-to-text',
-      'editor-tab-next', 'editor-tab-prev', 'editor-tab-right', 'editor-tab-left', 'editor-tab-close',
+      'editor-help', 'editor-tab-next', 'editor-tab-prev', 'editor-tab-right', 'editor-tab-left', 'editor-tab-close',
       'editor-split', 'editor-split-flip', 'editor-other', 'editor-to-other',
       'scanner-filter', 'scanner-filter-next', 'scanner-filter-prev', 'scanner-columns', 'scanner-clear',
       'events-search', 'events-next', 'events-prev', 'events-columns']) {

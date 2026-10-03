@@ -183,7 +183,15 @@ test('the keys are listed in the help, and none clashes with another binding', a
     }
     // the editor's new combos against every workspace one (the editor inherits them)
     const ws = new Set(BINDINGS.filter((b) => [b.when].flat().some((w) => ['workspace', 'always'].includes(w))).flatMap((b) => b.combos));
-    for (const b of BINDINGS.filter((x) => x.id.startsWith('editor-'))) for (const c of b.combos) if (ws.has(c)) out.push(`${c}: ${b.id} vs workspace`);
+    // (an override must say so, and be of the binding it names)
+    const help = BINDINGS.find((x) => x.id === 'help');
+    for (const b of BINDINGS.filter((x) => x.id.startsWith('editor-'))) {
+      for (const c of b.combos) {
+        if (!ws.has(c)) continue;
+        if (b.overrides === 'help' && help.combos.includes(c)) continue;
+        out.push(`${c}: ${b.id} vs workspace`);
+      }
+    }
     return out;
   });
   expect(clashes).toEqual([]);
@@ -207,4 +215,31 @@ test.describe('touch', () => {
     await page.locator('.ed-b-split').tap();
     await expect(page.locator('.ed-group')).toHaveCount(1);
   });
+});
+
+test('the editor\'s own key list: Alt+/ from the text, the ? button, a filter, and the way to the main list', async ({ page }) => {
+  await editor(page);
+  await focusedTa(page).focus();
+  await page.keyboard.press('Alt+Slash');
+  const dlg = page.locator('#editor-help-dlg');
+  await expect(dlg).toBeVisible();
+  await expect(page.locator('#help-modal')).toBeHidden();
+  for (const h of ['Save and run', 'Tabs and split', 'Files', 'Drag and drop', 'Vim']) {
+    await expect(dlg.locator('h3', { hasText: h })).toBeVisible();
+  }
+  await expect(dlg.locator('.eh-filter')).toBeFocused();
+  await page.keyboard.type('split');
+  await expect(dlg.locator('tr[data-id="editor-split"]')).toBeVisible();
+  await expect(dlg.locator('tr[data-id="editor-save"]')).toBeHidden();
+  await page.keyboard.press('?');                                   // ? closes it, as it does the main list
+  await expect(dlg).toBeHidden();
+  await page.locator('.ed-b-help').click();
+  await expect(dlg).toBeVisible();
+  await dlg.getByRole('button', { name: 'All shortcuts…' }).click();
+  await expect(dlg).toBeHidden();
+  await expect(page.locator('#help-modal')).toBeVisible();
+  // the main list points at the editor's, and a search for an editor key lands there
+  await page.keyboard.type('alt+q');
+  await expect(page.locator('#help-modal .keys tr:not([hidden])')).toHaveCount(1);
+  await expect(page.locator('#help-modal .keys tr:not([hidden])')).toContainText('The editor has its own list');
 });

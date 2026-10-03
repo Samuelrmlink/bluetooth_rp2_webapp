@@ -132,44 +132,56 @@ export const BINDINGS = [
   { id: 'settings', group: 'Everywhere', keys: 'Alt+S', combos: ['Mod+KeyS'], when: 'always', label: 'Open / close Settings' },
   // The editor's own. Context 'editor' is the workspace with the Editor
   // window active (see WORKSPACE_LIKE below), so these act only there: F5
-  // still reloads the page from any other window.
-  { id: 'editor-save', group: 'Editor', keys: 'Ctrl+S', combos: ['Ctrl+KeyS'], when: 'editor', label: 'Save the file to the device' },
-  { id: 'editor-run', group: 'Editor', keys: 'F5', combos: ['F5'], when: 'editor', label: 'Run the script from the buffer (a draft: nothing is written to flash)' },
-  { id: 'editor-stop', group: 'Editor', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
-  { id: 'editor-sidebar', group: 'Editor', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
-  { id: 'editor-files', group: 'Editor', keys: 'j / k, l, h', combos: [], when: 'editor', label: 'In the file list: move, open or expand, collapse' },
-  { id: 'editor-file-menu', group: 'Editor', keys: 'm  /  Shift+F10  /  Menu key', combos: [], when: 'editor-files', label: 'In the file list: the file\'s or folder\'s menu (Open, Start / Stop, Rename, Delete, Download, New file here…) — also right-click' },
-  { id: 'editor-to-files', group: 'Editor', keys: 'Ctrl+H', combos: ['Ctrl+KeyH'], when: 'editor', label: 'Move to the file list (opens the sidebar if it is shut)' },
-  { id: 'editor-to-text', group: 'Editor', keys: 'Ctrl+L', combos: ['Ctrl+KeyL'], when: 'editor', label: 'Move back into the text' },
+  // still reloads the page from any other window. They are listed in the
+  // EDITOR's help (editor/help.js), under `section`, not in the main list,
+  // which carries one row pointing there.
+  // Deliberately the main list's keys: help is for where you are.
+  { id: 'editor-help', group: 'Editor', section: 'Help', overrides: 'help', keys: 'Alt+/ / ?', combos: ['Mod+Slash', '?'], when: ['editor', 'editor-files'], label: 'This list: the editor\'s own keys (also the ? button in its toolbar). From any other window, Alt+/ is the main list' },
+  { id: 'editor-save', group: 'Editor', section: 'Save and run', keys: 'Ctrl+S', combos: ['Ctrl+KeyS'], when: 'editor', label: 'Save the file to the device (a .gz file is saved compressed; a web file keeps the old one as .bak)' },
+  { id: 'editor-run', group: 'Editor', section: 'Save and run', keys: 'F5', combos: ['F5'], when: 'editor', label: 'Run the script from the buffer (a draft: nothing is written to flash)' },
+  { id: 'editor-stop', group: 'Editor', section: 'Save and run', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
+  { id: 'editor-undo', group: 'Editor', section: 'Editing', keys: 'Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y', combos: [], when: 'editor', label: 'Undo / redo (each tab keeps its own history)' },
+  { id: 'editor-tab-key', group: 'Editor', section: 'Editing', keys: 'Tab', combos: [], when: 'editor', label: 'Insert two spaces (Tab is text inside the editor)' },
+  { id: 'editor-esc', group: 'Editor', section: 'Editing', keys: 'Esc', combos: [], when: 'editor', label: 'Leave the text (vim: insert → normal first, then leave); after that Alt+H J K L move between windows' },
+  { id: 'editor-vim-toggle', group: 'Editor', section: 'Editing', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },
+  { id: 'editor-sidebar', group: 'Editor', section: 'Files', keys: 'Alt+B', combos: ['Mod+KeyB'], when: 'editor', label: 'Show / hide the file sidebar' },
+  { id: 'editor-to-files', group: 'Editor', section: 'Files', keys: 'Ctrl+H', combos: ['Ctrl+KeyH'], when: 'editor', label: 'Move to the file list (opens the sidebar if it is shut)' },
+  { id: 'editor-to-text', group: 'Editor', section: 'Files', keys: 'Ctrl+L', combos: ['Ctrl+KeyL'], when: 'editor', label: 'Move back into the text' },
+  { id: 'editor-files', group: 'Editor', section: 'Files', keys: 'j / k, l, h', combos: [], when: 'editor', label: 'In the file list: move, open or expand, collapse' },
+  { id: 'editor-file-menu', group: 'Editor', section: 'Files', keys: 'm  /  Shift+F10  /  Menu key', combos: [], when: 'editor-files', label: 'In the file list: the file\'s or folder\'s menu (Open, Start / Stop, Rename, Delete, Download, Download as .tar, Store compressed…) — also right-click, a long press, or ⋯ on a touch screen' },
   // Tabs and the split. Alt+[ ] \\ O Q: keys nothing else binds, and none the
   // browser keeps for itself (Ctrl+Tab, Ctrl+W, Ctrl+PageUp cannot be had).
-  { id: 'editor-tab-next', group: 'Editor', keys: 'Alt+]', combos: ['Mod+BracketRight'], when: 'editor', label: 'Next tab (in the focused half of a split)' },
-  { id: 'editor-tab-prev', group: 'Editor', keys: 'Alt+[', combos: ['Mod+BracketLeft'], when: 'editor', label: 'Previous tab' },
-  { id: 'editor-tab-right', group: 'Editor', keys: 'Alt+Shift+]', combos: ['Mod+Shift+BracketRight'], when: 'editor', label: 'Move the tab one place right' },
-  { id: 'editor-tab-left', group: 'Editor', keys: 'Alt+Shift+[', combos: ['Mod+Shift+BracketLeft'], when: 'editor', label: 'Move the tab one place left' },
-  { id: 'editor-tab-close', group: 'Editor', keys: 'Alt+Q', combos: ['Mod+KeyQ'], when: 'editor', label: 'Close the tab (asks first if it has unsaved changes) — also its ×, or a middle-click' },
-  { id: 'editor-split', group: 'Editor', keys: 'Alt+\\', combos: ['Mod+Backslash'], when: 'editor', label: 'Split the editor: the file in a second half (again: back to one, the tabs joined)' },
-  { id: 'editor-split-flip', group: 'Editor', keys: 'Alt+Shift+\\', combos: ['Mod+Shift+Backslash'], when: 'editor', label: 'Split side by side ↔ one above the other' },
-  { id: 'editor-other', group: 'Editor', keys: 'Alt+O', combos: ['Mod+KeyO'], when: 'editor', label: 'Move to the other half of the split' },
-  { id: 'editor-to-other', group: 'Editor', keys: 'Alt+Shift+O', combos: ['Mod+Shift+KeyO'], when: 'editor', label: 'Move the tab to the other half (splitting if need be)' },
-  { id: 'editor-dnd', group: 'Editor', keys: 'drag and drop', combos: [], when: 'editor', label: 'Files or folders from the computer onto a folder: uploaded there (a .tar is extracted, after a preview). A row onto a folder: moved. A row out of the browser: downloaded (a folder as .tar; Chrome / Edge)' },
-  { id: 'vim-tabs', group: 'Editor', keys: 'gt  gT  3gt', combos: [], when: 'editor', label: 'Vim: next / previous tab / tab 3' },
-  { id: 'vim-tab-ex', group: 'Editor', keys: ':tabnew path  :tabc  :sp path  :vs path  :only', combos: [], when: 'editor', label: 'Vim: open in a new tab / close the tab / split (stacked, side by side) / back to one half' },
-  { id: 'editor-vim-toggle', group: 'Editor', keys: 'VIM button', combos: [], when: 'editor', label: 'Vim keys on / off (off: the text behaves like any text box; also Settings → UI)' },
+  { id: 'editor-tab-next', group: 'Editor', section: 'Tabs and split', keys: 'Alt+]', combos: ['Mod+BracketRight'], when: 'editor', label: 'Next tab (in the focused half of a split)' },
+  { id: 'editor-tab-prev', group: 'Editor', section: 'Tabs and split', keys: 'Alt+[', combos: ['Mod+BracketLeft'], when: 'editor', label: 'Previous tab' },
+  { id: 'editor-tab-right', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+]', combos: ['Mod+Shift+BracketRight'], when: 'editor', label: 'Move the tab one place right' },
+  { id: 'editor-tab-left', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+[', combos: ['Mod+Shift+BracketLeft'], when: 'editor', label: 'Move the tab one place left' },
+  { id: 'editor-tab-close', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Q', combos: ['Mod+KeyQ'], when: 'editor', label: 'Close the tab (asks first if it has unsaved changes) — also its ×, or a middle-click' },
+  { id: 'editor-split', group: 'Editor', section: 'Tabs and split', keys: 'Alt+\\', combos: ['Mod+Backslash'], when: 'editor', label: 'Split the editor: the file in a second half (again: back to one, the tabs joined) — also the split button' },
+  { id: 'editor-split-flip', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+\\', combos: ['Mod+Shift+Backslash'], when: 'editor', label: 'Split side by side ↔ one above the other' },
+  { id: 'editor-other', group: 'Editor', section: 'Tabs and split', keys: 'Alt+O', combos: ['Mod+KeyO'], when: 'editor', label: 'Move to the other half of the split (or click into it)' },
+  { id: 'editor-to-other', group: 'Editor', section: 'Tabs and split', keys: 'Alt+Shift+O', combos: ['Mod+Shift+KeyO'], when: 'editor', label: 'Move the tab to the other half (splitting if need be)' },
+  { id: 'editor-dnd-in', group: 'Editor', section: 'Drag and drop', keys: 'drop files', combos: [], when: 'editor', label: 'Files or folders from the computer: onto a folder row, uploaded into it; onto a file row, beside it. Asks before replacing anything' },
+  { id: 'editor-dnd-tar', group: 'Editor', section: 'Drag and drop', keys: 'drop a .tar', combos: [], when: 'editor', label: 'Extracted where it is dropped, after a preview of what is added and overwritten' },
+  { id: 'editor-dnd-move', group: 'Editor', section: 'Drag and drop', keys: 'drag a row', combos: [], when: 'editor', label: 'Onto a folder row: moved there. Out of the browser: saved to the computer (a folder as .tar; Chrome / Edge). Mouse only — on a touch screen a long press is the menu' },
   // Vim, in normal mode (editor/vim.js). No combos: the editor's own key
   // handler takes these inside the text; listed so help can find them.
-  { id: 'vim-search', group: 'Editor', keys: '/text  ?text', combos: [], when: 'editor', label: 'Vim: search forward / backward — every match highlighted' },
-  { id: 'vim-search-next', group: 'Editor', keys: 'n  N', combos: [], when: 'editor', label: 'Vim: next / previous match (wraps)' },
-  { id: 'vim-search-word', group: 'Editor', keys: '*  #', combos: [], when: 'editor', label: 'Vim: search for the word under the cursor, forward / backward' },
-  { id: 'vim-noh', group: 'Editor', keys: ':noh', combos: [], when: 'editor', label: 'Vim: clear the search highlight' },
-  { id: 'vim-write', group: 'Editor', keys: ':w  :w path', combos: [], when: 'editor', label: 'Vim: save / write a copy to another file (and stay on this one)' },
-  { id: 'vim-quit', group: 'Editor', keys: ':q  :q!  ZQ', combos: [], when: 'editor', label: 'Vim: close the file (refused with unsaved changes) / close, discarding them' },
-  { id: 'vim-wq', group: 'Editor', keys: ':wq  :x  ZZ', combos: [], when: 'editor', label: 'Vim: save and close (:x and ZZ only write if modified)' },
-  { id: 'vim-edit', group: 'Editor', keys: ':e path  :e!', combos: [], when: 'editor', label: 'Vim: open a file (a new one if missing) / revert to what is on the device' },
-  { id: 'vim-line', group: 'Editor', keys: ':12  :$', combos: [], when: 'editor', label: 'Vim: go to line 12 / the last line' },
-  { id: 'vim-run', group: 'Editor', keys: ':run  :stop', combos: [], when: 'editor', label: 'Vim: run the buffer as a draft / stop the script (F5 / Shift+F5)' },
-  { id: 'vim-visual', group: 'Editor', keys: 'v  V, then y d c p P', combos: [], when: 'editor', label: 'Vim: select characters / lines (or drag with the mouse or a finger), then yank, delete, change, or paste over' },
-  { id: 'vim-clipboard', group: 'Editor', keys: 'y  /  Ctrl+V', combos: [], when: 'editor', label: 'Vim: a yank also copies to the system clipboard; paste (Ctrl+V or the phone\'s Paste) in normal mode inserts like p' },
+  { id: 'vim-modes', group: 'Editor', section: 'Vim', keys: 'i a I A o O  /  v V  /  Esc', combos: [], when: 'editor', label: 'Insert (before, after, line start, line end, new line below / above) / visual, visual line / back to normal' },
+  { id: 'vim-motions', group: 'Editor', section: 'Vim', keys: 'h j k l  w b e  0 ^ $  gg G', combos: [], when: 'editor', label: 'Move (with counts: 3j, 2w); :12 and :$ go to a line' },
+  { id: 'vim-operators', group: 'Editor', section: 'Vim', keys: 'd c y + motion,  dd cc yy  D C Y  x X  J', combos: [], when: 'editor', label: 'Delete / change / yank; whole lines; to the end of the line; a character; join lines' },
+  { id: 'vim-paste-undo', group: 'Editor', section: 'Vim', keys: 'p P  u  Ctrl+R', combos: [], when: 'editor', label: 'Paste after / before; undo; redo' },
+  { id: 'vim-visual', group: 'Editor', section: 'Vim', keys: 'v  V, then y d c p P', combos: [], when: 'editor', label: 'Select characters / lines (or drag with the mouse or a finger), then yank, delete, change, or paste over' },
+  { id: 'vim-clipboard', group: 'Editor', section: 'Vim', keys: 'y  /  Ctrl+V', combos: [], when: 'editor', label: 'A yank also copies to the system clipboard; paste (Ctrl+V or the phone\'s Paste) in normal mode inserts like p' },
+  { id: 'vim-search', group: 'Editor', section: 'Vim', keys: '/text  ?text', combos: [], when: 'editor', label: 'Search forward / backward — every match highlighted' },
+  { id: 'vim-search-next', group: 'Editor', section: 'Vim', keys: 'n  N', combos: [], when: 'editor', label: 'Next / previous match (wraps)' },
+  { id: 'vim-search-word', group: 'Editor', section: 'Vim', keys: '*  #', combos: [], when: 'editor', label: 'Search for the word under the cursor, forward / backward' },
+  { id: 'vim-noh', group: 'Editor', section: 'Vim', keys: ':noh', combos: [], when: 'editor', label: 'Clear the search highlight' },
+  { id: 'vim-write', group: 'Editor', section: 'Vim', keys: ':w  :w path', combos: [], when: 'editor', label: 'Save / write a copy to another file (and stay on this one)' },
+  { id: 'vim-quit', group: 'Editor', section: 'Vim', keys: ':q  :q!  ZQ', combos: [], when: 'editor', label: 'Close the tab (refused with unsaved changes) / close it, discarding them' },
+  { id: 'vim-wq', group: 'Editor', section: 'Vim', keys: ':wq  :x  ZZ', combos: [], when: 'editor', label: 'Save and close the tab (:x and ZZ only write if modified)' },
+  { id: 'vim-edit', group: 'Editor', section: 'Vim', keys: ':e path  :e!', combos: [], when: 'editor', label: 'Open a file in a tab (a new one if missing) / revert to what is on the device' },
+  { id: 'vim-tabs', group: 'Editor', section: 'Vim', keys: 'gt  gT  3gt', combos: [], when: 'editor', label: 'Next / previous tab / tab 3' },
+  { id: 'vim-tab-ex', group: 'Editor', section: 'Vim', keys: ':tabnew path  :tabc  :sp path  :vs path  :only', combos: [], when: 'editor', label: 'Open in a new tab / close the tab / split (stacked, side by side) / back to one half' },
+  { id: 'vim-run', group: 'Editor', section: 'Vim', keys: ':run  :stop', combos: [], when: 'editor', label: 'Run the buffer as a draft / stop the script (F5 / Shift+F5)' },
   // The Scanner's: 'scanner' (the window), 'scanner-head' / 'scanner-table'
   // (the table's cursor on the header / a row), 'scanner-filter' (a text box
   // in the Filter dialog).
@@ -206,6 +218,7 @@ export const BINDINGS = [
   { id: 'escape', group: 'Everywhere', keys: 'Esc', combos: ['Escape'], when: ['settings', 'help', 'drag', 'popover'], label: "Close Settings, a pane's settings or this list; cancel a drag" },
 ];
 
+export const EDITOR_SECTIONS = ['Help', 'Save and run', 'Editing', 'Files', 'Tabs and split', 'Drag and drop', 'Vim'];
 export const GROUPS = ['Windows', 'Arrange', 'Inside a window', 'Editor', 'Scanner', 'GATT', 'GATT Events', 'Everywhere'];
 
 // The banner's contents per context: short, and only what applies now.
@@ -217,6 +230,7 @@ export const HINTS = {
     { keys: 'Ctrl+H/L', label: 'files / text' },
     { keys: 'Alt+[ ]', label: 'tabs' },
     { keys: 'Alt+\\', label: 'split' },
+    { keys: 'Alt+/', label: 'editor keys' },
     { keys: '/', label: 'search' },
     { keys: ':', label: 'command' },
     { keys: 'Esc', label: 'leave the text' },

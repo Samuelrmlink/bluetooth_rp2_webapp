@@ -120,7 +120,13 @@ export class HelpModal {
       return el;
     };
     for (const group of GROUPS) {
-      const rows = BINDINGS.filter((b) => b.group === group);
+      // The editor has its own list (editor/help.js); here, one row that
+      // says where -- and that a search for an editor key still lands on.
+      const editorRows = BINDINGS.filter((b) => b.group === 'Editor');
+      const rows = group === 'Editor'
+        ? [{ keys: 'Alt+/ in the editor', label: 'The editor has its own list of keys: tabs and split, files, save and run, drag and drop, vim. Open it with the ? button in the editor\'s toolbar, or Alt+/ while the editor is the active window.',
+             find: editorRows.map((b) => `${b.keys} ${b.label}`).join(' ') }]
+        : BINDINGS.filter((b) => b.group === group);
       if (!rows.length) continue;
       const h = document.createElement('h3');
       h.textContent = group;
@@ -134,7 +140,7 @@ export class HelpModal {
         const td2 = document.createElement('td');
         td2.textContent = b.label;
         tr.append(td1, td2);
-        table.appendChild(searchable(tr, `${group} ${b.keys} ${b.label}`));
+        table.appendChild(searchable(tr, `${group} ${b.keys} ${b.label} ${b.find || ''}`));
       }
       frag.appendChild(table);
       this._sections.push({ head: h, table });
@@ -183,7 +189,7 @@ export class HelpModal {
 }
 
 // 'Alt+H / Alt+←' -> <kbd>Alt</kbd>+<kbd>H</kbd> / <kbd>Alt</kbd>+<kbd>←</kbd>
-function keyNodes(display) {
+export function keyNodes(display) {
   const out = [];
   display.split(' / ').forEach((alt, i) => {
     if (i) out.push(document.createTextNode(' / '));

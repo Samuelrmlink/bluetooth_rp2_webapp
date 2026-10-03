@@ -34,6 +34,8 @@ import { ImagePreview } from '../editor/preview.js';
 import { isGz, plainName, imageKind, imageType, isWebAsset, shadowInfo, gzipText } from '../gz.js';
 import { bytes } from '../editor/filemenu.js';
 import { TabState } from '../editor/tabs.js';
+import { ConfirmDelete } from '../editor/confirmdelete.js';
+import { EditorHelp } from '../editor/help.js';
 import { planDrop, dropDir, moveDest, treeOf, deleteTree, isVital, dropEntries, readDrop } from '../editor/dnd.js';
 
 const ARENA_POLL_MS = 3000;
@@ -75,6 +77,7 @@ export class EditorWindow {
         <button type="button" class="tool-btn ed-b-download" title="Download this file" aria-label="Download">${icon('download')}</button>
         <button type="button" class="tool-btn ed-b-svg" title="Show the SVG as a picture or as text" hidden>Text</button>
         <button type="button" class="tool-btn ed-b-split" title="Split the editor: the file in a second half, side by side (Alt+\\) — again to unsplit" aria-label="Split editor" aria-pressed="false">${icon('split')}</button>
+        <button type="button" class="tool-btn ed-b-help" title="The editor's keys (Alt+/)" aria-label="Editor keys">?</button>
         <button type="button" class="tool-btn ed-b-more" title="More" aria-label="More actions">${icon('more')}</button>
         <input type="file" class="ed-upload-input" multiple hidden>
         <input type="file" class="ed-tar-input" accept=".tar,application/x-tar" hidden>
@@ -131,6 +134,8 @@ export class EditorWindow {
     this._svgBtn = q('.ed-b-svg');
 
     this._groups = q('.ed-groups');
+    this.confirmDelete = new ConfirmDelete(this.app);
+    this.help = new EditorHelp(this.app);
     this._splitBtn = q('.ed-b-split');
     this.restorer = new RestoreDialog(this.app, {
       onDone: async ({ target }) => { await this.tree.refresh(); if (target) this.tree.reveal(target); this._poll(); },
@@ -222,6 +227,7 @@ export class EditorWindow {
     });
     this._svgBtn.addEventListener('click', () => this._toggleSvg());
     this._splitBtn.addEventListener('click', () => this.toggleSplit());
+    q('.ed-b-help').addEventListener('click', () => this.help.toggle());
     this._moreBtn.addEventListener('click', () => this.app.popover.toggle(this._moreBtn, this._more, 'editor-more'));
     this._more.addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
@@ -784,6 +790,7 @@ export class EditorWindow {
     if (id === 'editor-sidebar') return this.toggleSidebar();
     if (id === 'editor-to-files') return this.focusFiles();
     if (id === 'editor-to-text') return this.focusText();
+    if (id === 'editor-help') return this.help.toggle();
     if (id === 'editor-tab-next') return this.stepTab(1);
     if (id === 'editor-tab-prev') return this.stepTab(-1);
     if (id === 'editor-tab-right') return this.moveTab(1);
@@ -1118,18 +1125,11 @@ export class EditorWindow {
     let t;
     try { t = await treeOf(fs.list, path); } catch (e) { this._say(`Could not list ${path}/: ${e.message}`, 'err'); return false; }
     const empty = !t.files.length && t.dirs.length === 1;
-    if (empty) {
-      if (!confirm(`Delete the empty folder ${path}/ from the device?`)) return false;
-    } else {
-      const sub = t.dirs.length - 1;
-      const size = t.files.reduce((n, f) => n + f.size, 0);
-      const what = `${t.files.length} file${t.files.length === 1 ? '' : 's'}${sub ? ` in ${sub + 1} folders` : ''}, ${bytes(size)}`;
-      const msg = `Delete ${path}/ and everything in it — ${what}? This cannot be undone.\n\n`
-        + `To keep a copy you can restore, cancel and use the folder's "Download as .tar" first.`;
-      if (isVital(path)) {
-        const typed = prompt(`${msg}\n\n${path}/ is one of the gateway's own folders. Type ${path} to delete it:`);
-        if (typed?.trim() !== path) { if (typed != null) this._say('Not deleted: the name did not match.', 'warn'); return false; }
-      } else if (!confirm(msg)) return false;
+    // Always asked, in the app's own dialog: what goes, file by file, and
+    // Cancel the default (editor/confirmdelete.js).
+    if (!(await this.confirmDelete.ask({ path, files: t.files, dirs: t.dirs, vital: !empty && isVital(path) }))) {
+      this._say(`Not deleted: ${path}/`);
+      return false;
     }
     let failed = null;
     const gone = new Set();
