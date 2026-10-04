@@ -67,31 +67,171 @@ test('auto-off: the presets set the time (not add to it), it counts down, Off ca
   expect((await writes(page)).at(-1)).toEqual({ field: 'c1_timer_s', value: 1500 });
 });
 
-test('charging mode: Standard and its option; Custom applies the stored profile', async ({ page }) => {
+// --- the Power section: shown per the mode the charger REPORTS ------------------
+
+const power = (page) => page.locator('.scp-power');
+const modeSel = (page) => row(power(page), 'Charging mode').locator('select');
+const stdRow = (page) => row(power(page), 'Standard mode');
+const editor = (page) => page.locator('.scp-custom');
+const dlg = (page) => page.locator('#confirm-dlg');
+const mock = (page, p) => page.evaluate((x) => window.__btgwApp.ws.call('test.a2687', x), p);
+const CUSTOM_PROFILE = { mode: 1, auto_exit: true, c1_w: 90, c2_w: 70, c3_w: 0, c1_proto: 11, c2_proto: 11, c3_proto: 11 };
+const inCustom = (page) => mock(page, { set: { charging_protocol: 2, custom_mode_number: 1, custom_power: CUSTOM_PROFILE } });
+
+test('AI Mode: neither Standard\'s option nor the custom editor is shown', async ({ page }) => {
   await open(page);
-  const mode = page.locator('.scp-power select').first();
-  await mode.selectOption('1');
-  await expect.poll(async () => (await state(page)).charging_protocol).toBe(1);
-  await page.locator('.scp-power select').nth(1).selectOption('laptop_mode');
-  await expect.poll(async () => (await state(page)).fixed_allocation).toBe('laptop_mode');
-  await mode.selectOption('2');
-  await expect.poll(async () => (await state(page)).charging_protocol).toBe(2);
-  expect((await writes(page)).at(-1)).toEqual({ field: 'custom_mode', value: { mode: 1, auto_exit: 1, c1_w: 140, c2_w: 20, c3_w: 0 } });
+  await expect(modeSel(page)).toHaveValue('0');
+  await expect(stdRow(page)).toBeHidden();
+  await expect(editor(page)).toBeHidden();
+  await expect(power(page).locator('.scp-mode-note')).toHaveText(/shares its 160 W/);
 });
 
-test('custom mode editor: the 160 W budget is enforced; Apply sends it and says when it is applied', async ({ page }) => {
+test('Standard: the switch asks first, Cancel sends nothing; the option shows only once the charger confirms', async ({ page }) => {
   await open(page);
-  const ed = page.locator('.scp-custom');
-  await ed.locator('.scp-wn[data-port="2"]').fill('40');
-  await expect(ed.locator('.scp-total')).toContainText('180 W in all');
-  await expect(ed.locator('.scp-apply-custom')).toBeDisabled();
+  await mock(page, { lag: 2 });                                     // the charger takes 2 s to report it
+  await modeSel(page).selectOption('1');
+  await expect(dlg(page).locator('.cf-text')).toContainText('from AI Mode 2.0 to Standard');
+  await page.keyboard.press('Escape');                              // Cancel (the default)
+  await expect(dlg(page)).toBeHidden();
+  await expect(modeSel(page)).toHaveValue('0');                     // back to what the charger reports
+  await page.waitForTimeout(500);
+  expect(await writes(page)).toEqual([]);
+  await modeSel(page).selectOption('1');
+  await dlg(page).locator('.cf-ok').click();
+  expect(await writes(page)).toEqual([{ field: 'charging_protocol', value: 1 }]);
+  // sent, not yet reported: still hidden
+  await page.waitForTimeout(800);
+  await expect(stdRow(page)).toBeHidden();
+  await expect.poll(async () => (await state(page)).charging_protocol, { timeout: 5000 }).toBe(1);
+  await expect(stdRow(page)).toBeVisible();
+  await expect(editor(page)).toBeHidden();
+  await mock(page, { lag: 0.3 });
+  await stdRow(page).locator('select').selectOption('laptop_mode'); // no question for the option
+  await expect.poll(async () => (await state(page)).fixed_allocation).toBe('laptop_mode');
+  expect((await writes(page)).at(-1)).toEqual({ field: 'fixed_allocation', value: 'laptop_mode' });
+});
+
+test('Custom: the question names the stored profile and its risks; the editor shows only once confirmed', async ({ page }) => {
+  await open(page);
+  await mock(page, { lag: 2, set: { custom_power: CUSTOM_PROFILE } });
+  await page.waitForFunction((id) => window.__btgwApp.windows.get(id)?.win?.dev?.sample?.custom_power?.c1_w === 90, PORTS);
+  await modeSel(page).selectOption('2');
+  const text = dlg(page).locator('.cf-text');
+  await expect(text).toContainText('C1 90 W · C2 70 W · C3 0 W');
+  await expect(text).toContainText('Automatic deactivation is on');
+  await dlg(page).locator('.cf-ok').click();
+  expect((await writes(page)).at(-1)).toEqual({ field: 'custom_mode', value: { mode: 1, auto_exit: 1, c1_w: 90, c2_w: 70, c3_w: 0 } });
+  await page.waitForTimeout(800);
+  await expect(editor(page)).toBeHidden();                          // not confirmed yet
+  await expect.poll(async () => (await state(page)).charging_protocol, { timeout: 5000 }).toBe(2);
+  await expect(editor(page)).toBeVisible();
+  await expect(stdRow(page)).toBeHidden();
+  await expect(power(page).locator('.scp-mode-note')).toContainText('returns the charger to AI Mode');
+  await expect(editor(page).locator('.scp-wn[data-port="1"]')).toHaveValue('90');
+});
+
+test('the custom editor: the 160 W budget is enforced; Apply edits the profile in use and says when it is applied', async ({ page }) => {
+  await open(page);
+  await inCustom(page);
+  const ed = editor(page);
+  await expect(ed).toBeVisible();
   await ed.locator('.scp-wn[data-port="1"]').fill('100');
+  await expect(ed.locator('.scp-total')).toContainText('170 W in all');
+  await expect(ed.locator('.scp-apply-custom')).toBeDisabled();
+  await ed.locator('.scp-wn[data-port="2"]').fill('40');
   await ed.locator('.scp-wn[data-port="3"]').fill('15');
   await expect(ed.locator('.scp-total')).toHaveText('Total 155 W / 160 W');
   await ed.locator('.scp-apply-custom').click();
   await expect(ed.locator('.scp-status')).toHaveText('applied');
   const s = await state(page);
   expect([s.charging_protocol, s.custom_power.c1_w, s.custom_power.c2_w, s.custom_power.c3_w]).toEqual([2, 100, 40, 15]);
+  expect((await writes(page)).at(-1)).toEqual({ field: 'custom_mode', value: { mode: 1, auto_exit: 1, c1_w: 100, c2_w: 40, c3_w: 15 } });
+});
+
+test('leaving Custom (here, or the charger by itself) hides the editor; nothing is sent on its behalf', async ({ page }) => {
+  await open(page);
+  await inCustom(page);
+  await expect(editor(page)).toBeVisible();
+  await editor(page).locator('.scp-wn[data-port="1"]').fill('60');     // an edit in progress ...
+  // ... and the charger leaves Custom by itself (Automatic deactivation, the phone app)
+  await mock(page, { set: { charging_protocol: 0 } });
+  await expect(editor(page)).toBeHidden();
+  await expect(stdRow(page)).toBeHidden();
+  await expect(modeSel(page)).toHaveValue('0');
+  // back in Custom: the editor shows the charger's profile, not the abandoned edit
+  await inCustom(page);
+  await expect(editor(page)).toBeVisible();
+  await expect(editor(page).locator('.scp-wn[data-port="1"]')).toHaveValue('90');
+  // and from here: AI Mode, asked and confirmed
+  await modeSel(page).selectOption('0');
+  await dlg(page).locator('.cf-ok').click();
+  await expect(editor(page)).toBeHidden();
+  expect(await writes(page)).toEqual([{ field: 'charging_protocol', value: 0 }]);
+});
+
+test('a stray Tab on the mode select asks instead of switching the charger', async ({ page }) => {
+  await open(page);
+  await inCustom(page);
+  await expect(modeSel(page)).toHaveValue('2');
+  await modeSel(page).focus();
+  await page.keyboard.press('Tab');                                  // keys.js: Tab steps a <select>'s value
+  await expect(dlg(page)).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(modeSel(page)).toHaveValue('2');
+  await page.waitForTimeout(500);
+  expect(await writes(page)).toEqual([]);
+  expect((await state(page)).charging_protocol).toBe(2);
+});
+
+test('reloading the page in Custom leaves the charger in Custom and sends nothing', async ({ page }) => {
+  await open(page);
+  await inCustom(page);
+  await expect(editor(page)).toBeVisible();
+  for (let i = 0; i < 2; i++) {
+    await page.reload();                                             // not open(): that resets the mock
+    await page.waitForFunction(() => document.getElementById('conn-status')?.textContent === 'Connected');
+    await page.waitForFunction((x) => window.__btgwApp.windows.has(x), PORTS);
+    await page.evaluate((x) => window.__btgwApp.show(x), PORTS);
+    await expect(modeSel(page)).toHaveValue('2');
+    await expect(editor(page)).toBeVisible();
+  }
+  await page.waitForTimeout(1000);
+  expect(await writes(page)).toEqual([]);
+  expect((await state(page)).charging_protocol).toBe(2);
+});
+
+// Every control j reaches from the pane's first control (Esc out of a text field,
+// which takes letters as text).
+async function walk(page, steps = 30) {
+  await page.locator('.scp-card[data-port="1"] .ctl-readout').first().focus();   // from the top each time
+  const seen = new Set();
+  for (let i = 0; i < steps; i++) {
+    if (await page.evaluate(() => document.activeElement?.matches('input[type=text], input:not([type])'))) await page.keyboard.press('Escape');
+    await page.keyboard.press('KeyJ');
+    seen.add(await page.evaluate(() => {
+      const a = document.activeElement;
+      return a?.closest('.scp-custom') ? 'custom' : a?.closest('.ctl')?.querySelector('.ctl-label')?.textContent || a?.className || '';
+    }));
+  }
+  return seen;
+}
+
+test('hidden settings are out of the keyboard\'s reach; shown, they are in it', async ({ page }) => {
+  await open(page);                                                  // AI Mode: both hidden
+  let seen = await walk(page);
+  expect(seen.has('Charging mode')).toBe(true);                      // the walk got past it
+  expect(seen.has('custom')).toBe(false);
+  expect(seen.has('Standard mode')).toBe(false);
+  await inCustom(page);
+  await expect(editor(page)).toBeVisible();
+  seen = await walk(page);
+  expect(seen.has('custom')).toBe(true);
+  expect(seen.has('Standard mode')).toBe(false);
+  await mock(page, { set: { charging_protocol: 1 } });
+  await expect(stdRow(page)).toBeVisible();
+  seen = await walk(page);
+  expect(seen.has('Standard mode')).toBe(true);
+  expect(seen.has('custom')).toBe(false);
 });
 
 test('protocols: the default shown as unknown, the PD limit enforced, Save sends all three ports', async ({ page }) => {

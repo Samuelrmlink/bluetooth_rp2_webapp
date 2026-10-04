@@ -77,7 +77,10 @@ export function buildControl(c, onWrite) {
         input.appendChild(o);
       }
       input.addEventListener('change', () => onWrite(Number.isNaN(Number(input.value)) ? input.value : Number(input.value)));
-      set = (v) => {
+      // force: put the device's value back even with the select focused (a
+      // cancelled or refused write -- otherwise it kept showing the choice
+      // that was never made)
+      set = (v, force) => {
         if (v == null) return;
         if (![...input.options].some((o) => o.value === String(v))) {
           // The device reported a value the plugin did not list: show it
@@ -87,7 +90,7 @@ export function buildControl(c, onWrite) {
           o.textContent = `${v} (reported)`;
           input.appendChild(o);
         }
-        if (document.activeElement !== input) input.value = String(v);
+        if (force || document.activeElement !== input) input.value = String(v);
       };
       break;
     }
@@ -198,7 +201,7 @@ export function buildControl(c, onWrite) {
     setPending(target) {
       r.classList.toggle('is-pending', target != null);
       if (target != null) set(target);
-      else set(current);
+      else set(current, true);
     },
     setEnabled(ok, reason = '') {
       if (c.kind === 'readout') return;

@@ -195,4 +195,32 @@ function S.show(v)
   return '{' .. table.concat(parts, ' ') .. '}'
 end
 
+--[[
+One queued write, sent and answered: nil when the device took it, else why
+not. Never raises -- a refusal, a timeout, a send that threw, an allocation
+that failed in a full arena all come back as the reason -- so a bad write
+fails that write, never the driver (an error here used to end the launcher:
+"not enough memory", anker2 dead until restarted by hand).
+
+q = { opcode, value, s = the setter spec }. A spec with `busy_ok` (the
+A2687's custom mode) answers twice: busy (status 4) at once, then the result
+-- and only the second answer says whether it was applied. link.lua words
+status 4 as "busy"; both spellings are accepted.
+]]
+function S.transact(link, ft, q, epoch)
+  local ok, why = pcall(function()
+    local want = q.s.reply or (q.opcode | 0x0800)
+    local _, err = link:secure(ft, q.opcode, S.payload(q.s, q.value, epoch), want, 4000)
+    if err and q.s.busy_ok and (err:find('busy', 1, true) or err:find('status 4', 1, true)) then
+      local f, dec = link:await(want, 3000)
+      if not f then return 'no second reply (' .. tostring(dec) .. ')' end
+      if dec.status and dec.status ~= 0 then return 'status ' .. dec.status end
+      return nil
+    end
+    return err
+  end)
+  if not ok then return 'failed: ' .. tostring(why) end
+  return why
+end
+
 return S

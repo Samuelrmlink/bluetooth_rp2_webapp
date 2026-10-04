@@ -496,9 +496,10 @@ function R.run(target_override, who)
 
   -- History (the A2687's 0x020C). Queued like everything else that waits
   -- for replies: the op handler only raises the flag.
-  local hist = model and model.history and require 'profiles.anker.history'
+  -- The module is loaded for a read and released after it: a few hundred
+  -- bytes of arena most of the time is worth a load from the bytecode cache.
   local hist_req = nil
-  if hist then
+  if model and model.history then
     control.devices[addr].history = function()
       if hist_req then return { error = 'busy', message = 'a history read is under way' } end
       hist_req = (hist_req or 0) + 1
@@ -508,6 +509,7 @@ function R.run(target_override, who)
   end
   local hist_seq = 0
   local function read_history()
+    local hist = require 'profiles.anker.history'
     hist_seq = hist_seq + 1
     local id, packets, records = hist_seq, 0, 0
     local function emit(ev) ev.addr = addr; ev.id = id; bus.emit('anker.history', ev) end
@@ -542,16 +544,7 @@ function R.run(target_override, who)
   local function send_setters()
     while #queue > 0 do
       local q = table.remove(queue, 1)
-      local want = q.s.reply or (q.opcode | 0x0800)
-      local _, err = link:secure(set_ft, q.opcode,
-        setter.payload(q.s, q.value, link_m.now_epoch()), want, 4000)
-      -- The A2687's custom mode answers twice: status 4 first, then 0 --
-      -- and applies it. The second answer is the one that counts.
-      if err and q.s.busy_ok and err:find('status 4') then
-        local f, dec = link:await(want, 3000)
-        err = not f and ('no second reply (' .. tostring(dec) .. ')')
-              or (dec.status and dec.status ~= 0 and ('status ' .. dec.status)) or nil
-      end
+      local err = setter.transact(link, set_ft, q, link_m.now_epoch())
       local shown = setter.show(q.value)
       if err then log.warn(('anker: set %s=%s: %s'):format(q.field, shown, err))
       else
@@ -607,6 +600,7 @@ function R.run(target_override, who)
         hist_req = nil
         local ok, err = pcall(read_history)
         if not ok then bus.emit('anker.history', { addr = addr, error = tostring(err), done = true }) end
+        drop('profiles.anker.history')
         goto continue
       end
       local f, dec = link:await(nil, 250)
@@ -630,9 +624,29 @@ end
 -- dropped, the device went away, a handshake failed -- starts over after a
 -- pause, looking again for any device no other launcher holds. Only a
 -- configuration error stops for good.
+--
+-- An ERROR ends the session the same way, logged, rather than the launcher:
+-- unguarded, one failed allocation anywhere in a session (the arena is
+-- shared, and full of telemetry garbage between collections) killed it for
+-- good -- "not enough memory", the charger silent until restarted by hand.
+-- The session's to-be-closed guard has released its claim and link by the
+-- time pcall returns.
+--
+-- The collector's pace, VM-wide: a cycle starts when the heap has grown by
+-- `pause` percent of what the last one left. Lua's default, 200, never comes
+-- round here -- twice a ~105 KB live heap is past the 160 KB arena, and Lua
+-- does not see lheap's 16-byte block headers (~29 KB of ~1800 blocks) at
+-- all -- so every cycle began as a failed allocation and an emergency full
+-- collection with the arena packed to the edge, ~40 a minute with one
+-- charger streaming, and one that found no block big enough was fatal.
+-- At 100 a cycle follows the last: measured 2026-10-03, no failed
+-- allocations in a minute and twice the largest free block.
 return function(target, who)
+  collectgarbage('incremental', 100, 400)
   while true do
-    if R.run(target, who) == 'fatal' then return end
+    local ok, res = pcall(R.run, target, who)
+    if ok and res == 'fatal' then return end
+    if not ok then log.error(('%s: session failed: %s'):format(who or 'anker', tostring(res))) end
     sys.collect()
     sys.sleep(5000)
   end

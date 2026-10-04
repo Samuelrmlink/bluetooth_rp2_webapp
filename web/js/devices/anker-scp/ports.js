@@ -4,6 +4,11 @@
 // the cards the charger's power settings: charging mode, Standard's option,
 // the custom mode's per-port watts, and the fast-charge protocols per port.
 //
+// Standard's option and the custom editor show only in the mode the CHARGER
+// reports -- never on the strength of a write still waiting for it -- and a
+// mode change asks first: a <select> changes on Tab and on a typed letter,
+// and a stray one switched the charger out of Custom.
+//
 // Writes go through the driver's anker.set (docs/a2687-protocol.md). The
 // cards' controls are the shared control kit, so a write shows as pending
 // until the charger's own telemetry confirms it (devices/windows.js); the two
@@ -40,6 +45,58 @@ export function customProblem({ c1_w, c2_w, c3_w }) {
   const total = ws.reduce((a, b) => a + b, 0);
   if (total > 160) return `${total} W in all — the charger has 160`;
   return null;
+}
+
+// What the Power section shows, from the mode the charger reports: Standard's
+// option only in Standard, the custom profile only in Custom. A mode not yet
+// reported (or a switch still waiting for the charger) shows neither.
+export function powerSections(mode, switching = false) {
+  const m = mode == null || mode === '' || switching ? NaN : Number(mode);
+  return { standard: m === 1, custom: m === 2 };
+}
+
+export const MODE_NAMES = { 0: 'AI Mode 2.0', 1: 'Standard', 2: 'Custom' };
+
+const profileText = (cp) => [1, 2, 3].map((n) => `C${n} ${Number(cp?.[`c${n}_w`]) || 0} W`).join(' · ');
+
+// Ports a 0 W custom profile leaves without power that have something on them.
+function starved(cp, s) {
+  return [1, 2, 3].filter((n) => !(Number(cp?.[`c${n}_w`]) > 0) && Number(s?.[`c${n}_w`]) > 0.05);
+}
+
+// The question before a mode change (null: no change, nothing to ask).
+export function modeQuestion(v, s = {}) {
+  const to = Number(v);
+  if (s.charging_protocol != null && Number(s.charging_protocol) === to) return null;
+  const from = MODE_NAMES[s.charging_protocol] || 'its current mode';
+  const lines = [`Switch the charger from ${from} to ${MODE_NAMES[to] || to}?`];
+  if (to === 0) lines.push('It shares its 160 W among the ports as it sees fit.');
+  if (to === 1) lines.push('C1 priority or dual-laptop is chosen once it is in Standard.');
+  if (to === 2) {
+    const cp = s.custom_power || {};
+    lines.push(`It applies the stored custom profile: ${profileText(cp)}.`);
+    const cut = starved(cp, s);
+    if (cut.length) lines.push(`${cut.map((n) => `C${n}`).join(' and ')} ${cut.length > 1 ? 'are' : 'is'} in use and would get no power.`);
+    if (cp.auto_exit && [1, 2, 3].some((n) => !(Number(cp[`c${n}_w`]) > 0))) {
+      lines.push('Automatic deactivation is on: a 0 W port that gets used switches the charger back to AI Mode.');
+    }
+  }
+  return lines.join('\n');
+}
+
+// One line under the mode, for what the charger is doing now.
+export function modeNote(s = {}) {
+  const m = Number(s.charging_protocol);
+  if (s.charging_protocol == null) return '';
+  if (m === 0) return 'The charger shares its 160 W among the ports itself.';
+  if (m === 1) return 'Standard: the option below decides how the ports share.';
+  if (m === 2) {
+    const cp = s.custom_power || {};
+    const auto = cp.auto_exit && [1, 2, 3].some((n) => !(Number(cp[`c${n}_w`]) > 0))
+      ? ' Automatic deactivation is on: using a 0 W port returns the charger to AI Mode.' : '';
+    return `Custom: ${profileText(cp)}.${auto}`;
+  }
+  return '';
 }
 
 // What a port is doing, in a word: the card's status chip.
@@ -86,8 +143,9 @@ function portControls(n) {
 
 const CHARGER = [
   { kind: 'select', field: 'charging_protocol', label: 'Charging mode', verified: true,
-    options: [[0, 'AI Mode 2.0'], [1, 'Standard'], [2, 'Custom (the profile below)']] },
-  { kind: 'select', field: 'fixed_allocation', label: 'Standard mode', verified: true,
+    options: [[0, MODE_NAMES[0]], [1, MODE_NAMES[1]], [2, MODE_NAMES[2]]],
+    confirm: modeQuestion, confirmOk: 'Switch' },
+  { kind: 'select', field: 'fixed_allocation', label: 'Standard mode', verified: true, part: 'standard',
     options: [['c1_priority', 'C1 port priority'], ['laptop_mode', 'Dual-laptop']] },
 ];
 
@@ -107,11 +165,16 @@ export class PortsWindow extends ControlsWindow {
       this._cards.className = 'scp-cards';
       this._settings = document.createElement('section');
       this._settings.className = 'scp-section scp-power';
-      this._settings.innerHTML = '<h3>Power</h3>';
+      this._settings.innerHTML = '<h3>Power</h3><p class="dim scp-mode-note"></p>';
       body.append(this._cards, this._settings);
       this._card = {};
     }
-    if (!c.port) { this._settings.appendChild(ctl.el); return; }
+    if (!c.port) {
+      // Standard's option: hidden until the charger says it is in Standard
+      if (c.part === 'standard') { ctl.el.hidden = true; this._standardRow = ctl.el; }
+      this._settings.insertBefore(ctl.el, this._settings.querySelector('.scp-mode-note'));
+      return;
+    }
     let card = this._card[c.port];
     if (!card) {
       card = document.createElement('section');
@@ -134,9 +197,21 @@ export class PortsWindow extends ControlsWindow {
       card.dataset.state = st;
       card.querySelector('.scp-state').textContent = st;
     }
+    this._showSections(sample);
     this._fillCustom(sample);
     this._fillProtocols(sample);
     this._watchApplied(sample);
+  }
+
+  _showSections(sample) {
+    const show = powerSections(sample.charging_protocol, !!this.pending.get('charging_protocol'));
+    if (this._standardRow) this._standardRow.hidden = !show.standard;
+    // a profile edited and then hidden (the mode changed under it) is not kept
+    if (!show.custom && !this._custom.hidden) { this._customDirty = false; this._status(this._custom.querySelector('.scp-status'), ''); }
+    this._custom.hidden = !show.custom;
+    const note = this._settings.querySelector('.scp-mode-note');
+    note.textContent = modeNote(sample);
+    note.hidden = !note.textContent;
   }
 
   // Several values at once: the editor's own status line says whether the
@@ -169,9 +244,10 @@ export class PortsWindow extends ControlsWindow {
   _buildCustom() {
     const s = document.createElement('section');
     s.className = 'scp-section scp-custom';
+    s.hidden = true;                    // until the charger says it is in Custom
     s.innerHTML = `
       <h3>Custom mode</h3>
-      <p class="dim">Each port 0 W (off in this mode) or 15–140 W; 160 W in all. Applying it switches the charger to Custom.</p>
+      <p class="dim">The profile in use. Each port 0 W (no power in this mode) or 15–140 W; 160 W in all.</p>
       ${[1, 2, 3].map((n) => `
         <label class="scp-w"><span>C${n}</span>
           <input type="range" min="0" max="140" step="5" data-port="${n}" aria-label="C${n} watts">
@@ -179,8 +255,8 @@ export class PortsWindow extends ControlsWindow {
           <span class="dim">W</span></label>`).join('')}
       <div class="scp-row"><span class="scp-total"></span>
         <label class="scp-check"><input type="checkbox" class="scp-auto"> Automatic deactivation</label></div>
-      <p class="dim scp-hint">Automatic deactivation: a port set to 0 W that gets used ends Custom mode.</p>
-      <div class="scp-row"><button type="button" class="pane-btn scp-apply-custom">Apply custom mode</button>
+      <p class="dim scp-hint">Automatic deactivation: a port set to 0 W that gets used switches the charger to AI Mode.</p>
+      <div class="scp-row"><button type="button" class="pane-btn scp-apply-custom">Apply</button>
         <span class="scp-status"></span></div>`;
     this.body.appendChild(s);
     this._custom = s;
@@ -234,7 +310,9 @@ export class PortsWindow extends ControlsWindow {
 
   _applyCustom() {
     const v = this._customValue();
-    if (customProblem(v)) return;
+    // only ever an edit of the profile in use: hidden outside Custom, and
+    // checked again here in case the charger left Custom a moment ago
+    if (customProblem(v) || this._custom.hidden || Number(this.dev.sample?.charging_protocol) !== 2) return;
     this._customDirty = false;
     this._send('custom_mode', v, this._custom.querySelector('.scp-status'), (s) =>
       s.charging_protocol === 2 && s.custom_power?.c1_w === v.c1_w && s.custom_power?.c2_w === v.c2_w

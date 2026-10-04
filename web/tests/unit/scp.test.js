@@ -44,6 +44,47 @@ test('a port card: its state word and its lines', () => {
   assert.equal(device({ c1: { brand: 3, model: 17 } }, 1), 'brand 3 · model 17');
 });
 
+import { powerSections, modeQuestion, modeNote } from '../../js/devices/anker-scp/ports.js';
+
+test('power section: Standard\'s option only in Standard, the custom editor only in Custom', () => {
+  assert.deepEqual(powerSections(0), { standard: false, custom: false });
+  assert.deepEqual(powerSections(1), { standard: true, custom: false });
+  assert.deepEqual(powerSections(2), { standard: false, custom: true });
+  assert.deepEqual(powerSections('2'), { standard: false, custom: true });
+  // not reported yet: neither (null is not mode 0's Number(null) === 0)
+  assert.deepEqual(powerSections(undefined), { standard: false, custom: false });
+  assert.deepEqual(powerSections(null), { standard: false, custom: false });
+  assert.deepEqual(powerSections(''), { standard: false, custom: false });
+  // a switch the charger has not confirmed yet: neither, whatever it was in
+  assert.deepEqual(powerSections(2, true), { standard: false, custom: false });
+  assert.deepEqual(powerSections(1, true), { standard: false, custom: false });
+  assert.deepEqual(powerSections(7), { standard: false, custom: false });
+});
+
+test('a mode change asks first; the question says what the change does', () => {
+  const s = { charging_protocol: 2, c3_w: 11.2, custom_power: { c1_w: 90, c2_w: 70, c3_w: 0, auto_exit: true } };
+  assert.equal(modeQuestion(2, s), null);                               // no change: nothing to ask
+  assert.match(modeQuestion(0, s), /from Custom to AI Mode 2\.0/);
+  assert.match(modeQuestion(1, { charging_protocol: 0 }), /from AI Mode 2\.0 to Standard/);
+  const q = modeQuestion(2, { ...s, charging_protocol: 0 });
+  assert.match(q, /C1 90 W · C2 70 W · C3 0 W/);
+  assert.match(q, /C3 is in use and would get no power/);
+  assert.match(q, /Automatic deactivation is on/);
+  const quiet = modeQuestion(2, { charging_protocol: 1, c3_w: 0, custom_power: { c1_w: 100, c2_w: 30, c3_w: 30, auto_exit: true } });
+  assert.doesNotMatch(quiet, /no power|deactivation/);                  // every port powered: nothing to warn of
+  assert.match(modeQuestion(1, {}), /from its current mode to Standard/);
+});
+
+test('the mode note says what the charger is doing, and why Custom may end by itself', () => {
+  assert.equal(modeNote({}), '');
+  assert.match(modeNote({ charging_protocol: 0 }), /shares its 160 W/);
+  assert.match(modeNote({ charging_protocol: 1 }), /option below/);
+  assert.equal(modeNote({ charging_protocol: 2, custom_power: { c1_w: 100, c2_w: 30, c3_w: 30, auto_exit: true } }),
+    'Custom: C1 100 W · C2 30 W · C3 30 W.');
+  assert.match(modeNote({ charging_protocol: 2, custom_power: { c1_w: 90, c2_w: 70, c3_w: 0, auto_exit: true } }),
+    /returns the charger to AI Mode/);
+});
+
 import { recordsFromHex, seriesOf, axis, timeOf } from '../../js/devices/anker-scp/history.js';
 
 test('history: records from a packet, the charger\'s own last packet of 2026-10-03', () => {

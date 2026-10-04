@@ -176,7 +176,8 @@ def a2687_set(st, f, v):
         if any(w != 0 and not 15 <= w <= 140 for w in ws): return ("bad_value", "a port takes 0 or 15..140")
         if sum(ws) > 160: return ("bad_value", f"the ports add up to {sum(ws)} W; the charger has 160")
         cp = st["custom_power"]
-        cp.update(mode=1, auto_exit=bool(v.get("auto_exit", 1)), c1_w=ws[0], c2_w=ws[1], c3_w=ws[2])
+        # as the charger reports it: custom_power.mode is the profile in use, 0 outside Custom
+        cp.update(mode=int(v.get("mode", 1)), auto_exit=bool(v.get("auto_exit", 1)), c1_w=ws[0], c2_w=ws[1], c3_w=ws[2])
         st["custom_mode_number"] = int(v.get("mode", 1)); st["charging_protocol"] = 2
         return None
     if f == "protocols":
@@ -196,8 +197,11 @@ def a2687_set(st, f, v):
         else: c["countdown_active"] = False
     elif f == "screensaver_enabled":
         st["screensaver"]["enabled"] = bool(v)
+    elif f == "charging_protocol":
+        st[f] = v
+        st["custom_power"]["mode"] = 0               # leaving Custom, as the charger reports it
     elif f in A2687_NAMES:
-        st[f] = v if f == "charging_protocol" else {n: k for k, n in A2687_NAMES[f].items()}[v]
+        st[f] = {n: k for k, n in A2687_NAMES[f].items()}[v]
     else:
         st[f] = v
     return None
@@ -437,6 +441,11 @@ class MockGateway:
             STATE.setdefault("dirs", set()).add(str(p.get("path", "")).strip("/"))
             return {"ok": True}
         if op == "test.a2687":                      # mock only: the A2687 state and the writes it got
+            # set: change the charger behind the page's back (the phone app,
+            # Automatic deactivation); lag: seconds before a write shows up
+            # in telemetry (default 0.3), to see what the page does meanwhile
+            if isinstance(p.get("set"), dict): STATE["a2687"].update(p["set"])
+            if "lag" in p: STATE["a2687_lag"] = float(p["lag"])
             return {"state": STATE["a2687"], "writes": STATE.get("a2687_writes", [])}
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
@@ -582,7 +591,7 @@ class MockGateway:
             err = a2687_set(json.loads(json.dumps(STATE["a2687"])), f, v)   # validate on a copy
             if err: return {"error": err[0], "message": err[1]}
             STATE.setdefault("a2687_writes", []).append({"field": f, "value": v})
-            threading.Timer(0.3, lambda: a2687_set(STATE["a2687"], f, v)).start()
+            threading.Timer(STATE.get("a2687_lag", 0.3), lambda: a2687_set(STATE["a2687"], f, v)).start()
             return {"queued": True, "field": f, "value": v}
         if op == "anker.set":
             # As the driver: only captured setters, only their listed values;

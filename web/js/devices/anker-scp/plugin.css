@@ -21,7 +21,10 @@
 .scp-ports-pane .dev-controls { padding: 10px 12px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
 /* a card and the Power section: the same label | value grid as Controls */
 .scp-card, .scp-section.scp-power { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; align-content: start; }
-.scp-card > header, .scp-power > h3 { grid-column: 1 / -1; }
+.scp-card > header, .scp-power > h3, .scp-power > .scp-mode-note { grid-column: 1 / -1; }
+/* shown per the charger's mode (ports.js powerSections): display rules here
+   would otherwise beat the UA [hidden] */
+.scp-ports-pane .ctl[hidden], .scp-ports-pane .scp-section[hidden], .scp-mode-note[hidden] { display: none; }
 .scp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
 .scp-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .scp-card header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }

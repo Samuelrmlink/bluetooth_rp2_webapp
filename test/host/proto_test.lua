@@ -377,6 +377,93 @@ do
   eq('e1: type 3, a custom image', on.type, 3)
 end
 
+print('\n== A2687 setter transactions ==')
+do
+  -- setter.transact against a scripted link: what the charger answered, in
+  -- order. Each entry is one secure() or await() result: 'ok', a status
+  -- number (worded as link.lua words it), 'timeout', or 'raise' (the send
+  -- itself throws -- what a failed allocation in a full arena does).
+  local setter = mod('anker/setter')
+  local S = mod('anker/models/A2687').setters
+  local function fake(script)
+    local l = { sent = {}, awaited = {} }
+    local function answer(opcode)
+      local a = table.remove(script, 1)
+      if a == nil or a == 'timeout' then return nil, 'timeout' end
+      if a == 'raise' then error('not enough memory') end
+      if a == 'ok' or a == 0 then return { opcode = opcode, status = 0 }, { status = 0, body = '' } end
+      return nil, ('0x%04x: %s'):format(opcode & 0x07ff, L.STATUS[a] or ('status ' .. a)), a
+    end
+    function l:secure(ft, opcode, payload, want, timeout)
+      self.sent[#self.sent + 1] = { ft = ft, opcode = opcode, payload = payload, want = want }
+      local f, err = answer(opcode)
+      if not f then return nil, err end
+      return err
+    end
+    function l:await(want, timeout)
+      self.awaited[#self.awaited + 1] = want
+      local a = script[1]
+      if a == nil or a == 'timeout' then table.remove(script, 1); return nil, 'timeout' end
+      table.remove(script, 1)
+      return { opcode = want }, { status = a == 'ok' and 0 or a, body = '' }
+    end
+    return l
+  end
+  local function q(field, value)
+    local s = S[field]
+    return { field = field, opcode = s.opcode, value = assert(setter.check(s, value)), s = s }
+  end
+  local custom = { mode = 1, auto_exit = 1, c1_w = 90, c2_w = 70, c3_w = 0 }
+
+  local l = fake{ 'ok' }
+  eq('accepted: no reason', setter.transact(l, 0x0F, q('fixed_allocation', 'laptop_mode'), 0), nil)
+  eq('... on FT 0x0F', l.sent[1].ft, 0x0F)
+  eq('... waiting for opcode | 0x0800', l.sent[1].want, 0x0A05)
+
+  l = fake{ 2 }
+  check('refused: the reason, worded as link.lua words it',
+        tostring(setter.transact(l, 0x0F, q('fixed_allocation', 'c1_priority'), 0)):find('0x0205', 1, true) ~= nil)
+
+  -- custom mode: busy (4) at once, then the result -- as captured, and as the
+  -- gateway logged it ("0x0206: busy") while the mode was in fact applied
+  check('link.lua words status 4 "busy"', L.STATUS[4] == 'busy')
+  l = fake{ 4, 'ok' }
+  eq('custom: busy then 0 is applied', setter.transact(l, 0x0F, q('custom_mode', custom), 0), nil)
+  eq('... the second answer was waited for, on 0x0A06', l.awaited[1], 0x0A06)
+  l = fake{ 4, 4 }
+  eq('custom: busy twice is a failure', setter.transact(l, 0x0F, q('custom_mode', custom), 0), 'status 4')
+  l = fake{ 4, 'timeout' }
+  eq('custom: busy and then nothing', setter.transact(l, 0x0F, q('custom_mode', custom), 0), 'no second reply (timeout)')
+  l = fake{ 4 }
+  check('busy for a setter that is not busy_ok is its answer (no second wait)',
+        setter.transact(l, 0x0F, q('charging_protocol', 1), 0) ~= nil and #l.awaited == 0)
+
+  -- a write never takes the driver down with it
+  l = fake{ 'raise' }
+  local ok, why = pcall(setter.transact, l, 0x0F, q('custom_mode', custom), 0)
+  check('a send that raises does not raise out of transact', ok)
+  check('... it is the reason instead', type(why) == 'string' and why:find('not enough memory', 1, true) ~= nil)
+  l = fake{ 4, 'ok' }
+  l.await = function() error('not enough memory') end
+  ok, why = pcall(setter.transact, l, 0x0F, q('custom_mode', custom), 0)
+  check('an await that raises does not raise either', ok and tostring(why):find('not enough memory', 1, true) ~= nil)
+
+  -- every A2687 setter, in every mode the charger can be in: the payload builds
+  -- and the transaction answers (the "set it while not in Custom" case is the
+  -- charger's to accept or refuse -- 2026-10-03 it accepted Standard's option in
+  -- AI and Custom alike -- and the driver's only job is not to fall over)
+  for _, field in ipairs{ 'charging_protocol', 'fixed_allocation', 'custom_mode' } do
+    for _, answer in ipairs{ 'ok', 1, 2, 4, 'timeout', 'raise' } do
+      local v = field == 'custom_mode' and custom or 1
+      local okc = pcall(setter.transact, fake{ answer, 'ok' }, 0x0F, q(field, v), 0)
+      check(('%s, charger answers %s: handled'):format(field, tostring(answer)), okc)
+    end
+  end
+  eq('direction waits for the reply fw 1.6.0.6 really sends',
+     (function() local f = fake{ 'ok' }; setter.transact(f, 0x0F, q('direction', 'up'), 0); return f.sent[1].want end)(),
+     S.direction.reply or 0x0A0B)
+end
+
 print('\n== A2687 history ==')
 do
   package.loaded['profiles.anker.setter'] = package.loaded['profiles.anker.setter'] or mod('anker/setter')

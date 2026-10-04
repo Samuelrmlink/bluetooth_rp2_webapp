@@ -47,8 +47,8 @@ fields: `cN_on`, `cN_timer_s` (0 unless a timer runs), `cN_timer_remain_s`, `cN_
 | `c1_on` `c2_on` `c3_on` | 0x0207 | A2 u8 port 0..2 · A3 u8 | 0 / 1 (the app asks before turning a port off) |
 | `c1_timer_s` … `c3_timer_s` | 0x0209 | A2 u8 port · A3 type-04 u32 LE | seconds, 0 cancels (app: 1/2/3 h or a custom h + 5-min wheel) |
 | `charging_protocol` | 0x0206 | A2 u8 | 0 / `ai`, 1 / `standard` |
-| `custom_mode` | 0x0206 | A2 u8 = 2 · A3 type-04 [mode][auto_exit][c1 W][c2 W][c3 W] | `{mode, auto_exit, c1_w, c2_w, c3_w}`: each 0 or 15..140 W, ≤ 160 W total. Replies status 4 then 0 (applied). |
-| `fixed_allocation` | 0x0205 | A2 u8 | 0 / `c1_priority`, 1 / `laptop_mode` |
+| `custom_mode` | 0x0206 | A2 u8 = 2 · A3 type-04 [mode][auto_exit][c1 W][c2 W][c3 W] | `{mode, auto_exit, c1_w, c2_w, c3_w}`: each 0 or 15..140 W, ≤ 160 W total. Replies status 4 ("busy") then 0 (applied); accepted from any mode, and switches to Custom. |
+| `fixed_allocation` | 0x0205 | A2 u8 | 0 / `c1_priority`, 1 / `laptop_mode`. Accepted in every mode (checked 2026-10-03 in AI and Custom); it only takes effect in Standard. |
 | `backlight_pct` | 0x0204 | A2 u8 | 25..100 |
 | `screen_off` | 0x0203 | A2 u8 | 0..4 or `30s` `1min` `5min` `30min` `12h` |
 | `direction` | 0x020B | A2 u8 | 0..3 or `up` `left` `down` `right` (fw 1.6.0.6 replies 0x0A0B; the app expects an echo and logs a false error) |
@@ -56,6 +56,11 @@ fields: `cN_on`, `cN_timer_s` (0 unless a timer runs), `cN_timer_remain_s`, `cN_
 | `language` | 0x0202 | A2 u8 | 0..3 or `en` `zh` `ja` `de` (reads back in ~4 s) |
 | `screensaver_enabled` | 0x021F | A2 u8, stamp `FE 05 03` | 0 / 1 |
 | `protocols` | 0x021D | A2 type-04 3× u16 LE, no stamp | `{c1, c2, c3}` masks: bit0 UFCS, 1 SCP, 2 PD 12V, 3 PPS 5-11V, 4 PPS 5-16V, 5 PPS 4.5-21V; at most 3 of bits 2..5. Default 59 (0x3B). |
+
+**Custom mode, as the charger reports it:** `custom_power.mode` is the profile number while Custom is
+in use and **0 otherwise**; `custom_mode_number` keeps the last one used. A port at 0 W gets no power
+in Custom. With `auto_exit` set ("Automatic deactivation" in the app), a 0 W port that gets used
+switches the charger **to AI Mode by itself** — a mode change no client sent.
 
 The app re-sends its stored protocol masks every time it connects (`0x021D [0,59,59]` on
 2026-10-03), so a mask set from the app sticks until changed there.
@@ -77,6 +82,13 @@ The app re-sends its stored protocol masks every time it connects (`0x021D [0,59
 - `anker.set {device, field, value}` → `{queued, field, value}` or `{error, message}`
   (`unknown_field`, `bad_value`, `not_this_device`). Objects/arrays (`custom_mode`, `protocols`)
   are read from the request's raw JSON. The change shows in `profile.anker.telemetry` ~1 s later.
+  The charger's answer is logged (`anker: set <field>=<value>: accepted` or the reason); a write
+  that fails — refused, timed out, or out of memory — fails alone (`setter.transact` never raises),
+  and an error anywhere in a session ends that session, logged, and the driver reconnects
+  (`run.lua`), rather than leaving the launcher dead.
+- The gateway's own reconnect does not change the mode (checked: Custom survives it). Its bind
+  burst does send `0x021D` with 59/59/59, so protocol masks set from here or the app are reset to
+  the default on every gateway connect.
 - `anker.history {device}` → `{queued}`; then `profile.anker.history` events, one per packet:
   `{addr, id, seq, n, last, span_min, interval_s, hex}` (the packet's n×12 record bytes), and a
   final `{addr, id, done, packets, records}` or `{done, error}`. The web's History window draws it.
