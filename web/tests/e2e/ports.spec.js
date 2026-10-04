@@ -141,3 +141,39 @@ test('from the keyboard alone: j reaches a port\'s switch; Space asks; Esc keeps
   await expect(page.locator('#confirm-dlg')).toBeHidden();
   expect((await writes(page)).length).toBe(0);
 });
+
+const HISTORY = 'anker-scp.history@7CE913601FD8';
+
+test('History: read on open; Total and per-port views; hover tooltip; keyboard; table', async ({ page }) => {
+  await ready(page);
+  await page.waitForFunction((x) => window.__btgwApp.windows.has(x), HISTORY);
+  await page.evaluate((x) => window.__btgwApp.show(x), HISTORY);
+  await expect(page.locator('.hs-status')).toContainText('73 points, 5 min apart');
+  await expect(page.locator('.hs-line')).toHaveCount(1);                       // Total: one series
+  await expect(page.locator('.hs-legend .hs-key')).toHaveCount(0);            // ... needs no legend
+  await page.locator('.hs-metric[data-metric="w"]').click();
+  await expect(page.locator('.hs-line')).toHaveCount(3);
+  await expect(page.locator('.hs-legend .hs-key')).toHaveText(['C1', 'C2', 'C3']);
+  // end labels do not overprint
+  const ys = await page.locator('.hs-end').evaluateAll((ts) => ts.map((t) => Number(t.getAttribute('y'))).sort((a, b) => a - b));
+  for (let i = 1; i < ys.length; i++) expect(ys[i] - ys[i - 1]).toBeGreaterThanOrEqual(12.9);
+  // hover: every port's value at that time, a gap shown as —
+  const box = await page.locator('.hs-svg').boundingBox();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2);
+  await expect(page.locator('.hs-tip')).toBeVisible();
+  await expect(page.locator('.hs-tip')).toContainText('C3 —');
+  // the keyboard: into the chart, l / h move by 5 min, Enter opens the copy menu
+  await page.mouse.move(0, 0);
+  await page.locator('.hs-plot').focus();
+  await page.keyboard.press('Space');
+  const t0 = await page.locator('.hs-tip b').textContent();
+  await page.keyboard.press('KeyH');
+  const t1 = await page.locator('.hs-tip b').textContent();
+  expect(t0).not.toBe(t1);
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#pane-popover .s-menu .sm-value')).toContainText(t1);
+  await page.keyboard.press('Escape');
+  // the table: every point, newest first
+  await page.locator('.hs-table-wrap summary').click();
+  await expect(page.locator('.hs-table tbody tr')).toHaveCount(73);
+});

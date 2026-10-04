@@ -441,7 +441,7 @@ class MockGateway:
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \
-                or op in ("anker.set", "anker.screensaver", "test.reset"):
+                or op in ("anker.set", "anker.setters", "anker.history", "anker.screensaver", "test.reset"):
             return self._script_op(op, p)
         raise ApiError("unknown_op", op)
 
@@ -549,6 +549,31 @@ class MockGateway:
                 return {"error": "bad_request", "message": "step is select, begin or data"}
             threading.Timer(0.05, lambda: self.send({"evt": "profile.anker.screensaver", "data": ev})).start()
             return {"queued": True, "step": step}
+        if op == "anker.history":
+            # as the driver: 73 records 5 min apart, oldest first, in packets of
+            # 10 (anker.history events), the last packet flagged; a gap on C3
+            if str(p.get("device", "")).upper() != A2687_BASE["addr"]: return {"error": "not_this_device"}
+            import math
+            st = STATE["a2687"]
+            def rec(i):
+                c2ma = int(400 + 300 * math.sin(i / 7)) if i < 72 else st["c2_power"]["ma"]
+                c1ma = 1500 if 24 <= i <= 30 else 0
+                c3 = (0xffff, 0xffff) if 20 <= i <= 60 else (5048, 0)
+                vals = [(5080 if not c1ma else 15000, c1ma), (5096, c2ma), c3]
+                return b"".join(mv.to_bytes(2, "little") + ma.to_bytes(2, "little") for mv, ma in vals)
+            recs = [rec(i) for i in range(73)]
+            STATE["history_id"] = STATE.get("history_id", 0) + 1
+            hid = STATE["history_id"]
+            def stream():
+                for k in range(0, 73, 10):
+                    chunk = recs[k:k + 10]
+                    self.send({"evt": "profile.anker.history", "data": {
+                        "addr": A2687_BASE["addr"], "id": hid, "seq": k // 10 + 1, "n": len(chunk),
+                        "last": k + 10 >= 73, "span_min": 360, "interval_s": 300, "hex": b"".join(chunk).hex()}})
+                    time.sleep(0.05)
+                self.send({"evt": "profile.anker.history", "data": {"addr": A2687_BASE["addr"], "id": hid, "done": True, "packets": 8, "records": 73}})
+            threading.Timer(0.1, stream).start()
+            return {"queued": True}
         if op == "anker.setters":
             if str(p.get("device", "")).upper() != A2687_BASE["addr"]: return {"error": "not_this_device"}
             return {"device": A2687_BASE["addr"], "setters": {f: {"verified": True} for f in A2687_SETTERS}}

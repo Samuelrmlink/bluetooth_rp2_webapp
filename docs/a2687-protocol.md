@@ -61,9 +61,12 @@ The app re-sends its stored protocol masks every time it connects (`0x021D [0,59
 2026-10-03), so a mask set from the app sticks until changed there.
 
 ## Other commands seen
-- **0x020C history** (Detailed Data screen): request `A2 u8` page; reply `A2 page · A3 u8 records
-  (10, last page fewer) · A4 u16 total (360 = 6 h) · A5 bytes`: records of 12 bytes = 3 ports ×
-  (mV u16, mA u16). Paging details not yet pinned — not exposed yet.
+- **0x020C history** (Detailed Data screen): request `A2 u8` = 0 start / 1 more (the app sends
+  "more" when the stream pauses). Replies 0x0A0C, pushed: `A2 u8` last-packet flag · `A3 u8`
+  records in this packet (10, the last fewer) · `A4 u16` span in minutes (360) · `A5` 120 bytes of
+  record slots. A record is 12 bytes = 3 ports × (mV u16, mA u16), `ffff ffff` = no reading;
+  records are **5 minutes apart, oldest first, the last one now** — 73 for 6 h (checked against
+  the app's chart: its 8 W peak at 17:00 is record 55). A full read takes ~3 s.
 - **0x0200 with `F0 05 03 01000000`**: a full-report request the app sends when opening a page.
 - **Cloud-only (no BLE):** "Charging Device Identification" (Test Features) =
   `POST mini_power/v1/app/setting/set_charging_device_identity_status`; custom profile names.
@@ -74,6 +77,9 @@ The app re-sends its stored protocol masks every time it connects (`0x021D [0,59
 - `anker.set {device, field, value}` → `{queued, field, value}` or `{error, message}`
   (`unknown_field`, `bad_value`, `not_this_device`). Objects/arrays (`custom_mode`, `protocols`)
   are read from the request's raw JSON. The change shows in `profile.anker.telemetry` ~1 s later.
+- `anker.history {device}` → `{queued}`; then `profile.anker.history` events, one per packet:
+  `{addr, id, seq, n, last, span_min, interval_s, hex}` (the packet's n×12 record bytes), and a
+  final `{addr, id, done, packets, records}` or `{done, error}`. The web's History window draws it.
 - `anker.setters {device}` → `{device, setters: {field: {opcode, values, min, max, names, kind,
   verified, readback}}}` — what a UI can offer.
 

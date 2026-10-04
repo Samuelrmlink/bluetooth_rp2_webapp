@@ -43,3 +43,30 @@ test('a port card: its state word and its lines', () => {
   assert.equal(device({ c2: 'none' }, 2), 'not identified');
   assert.equal(device({ c1: { brand: 3, model: 17 } }, 1), 'brand 3 · model 17');
 });
+
+import { recordsFromHex, seriesOf, axis, timeOf } from '../../js/devices/anker-scp/history.js';
+
+test('history: records from a packet, the charger\'s own last packet of 2026-10-03', () => {
+  const r = recordsFromHex('d8130000f8130303ffffffffd813000010141f03ffffffffd8130000d813be01c0130000', 3);
+  assert.deepEqual(r[0], { c1: { mv: 5080, ma: 0 }, c2: { mv: 5112, ma: 771 }, c3: null });
+  assert.deepEqual(r[2].c2, { mv: 5080, ma: 446 });
+  assert.deepEqual(r[2].c3, { mv: 5056, ma: 0 });
+});
+
+test('history: series per metric; Total sums the ports there are; a missing port is null', () => {
+  const r = recordsFromHex('d8130000f8130303ffffffff', 1);
+  const w = seriesOf(r, 'w');
+  assert.deepEqual(w.map((s) => s.name), ['C1', 'C2', 'C3']);
+  assert.equal(w[2].values[0], null);
+  assert.equal(seriesOf(r, 'total')[0].values[0].toFixed(2), '3.94');
+  assert.equal(seriesOf(r, 'v')[1].values[0], 5.112);
+  assert.equal(seriesOf(r, 'a')[1].values[0], 0.771);
+});
+
+test('history: a clean axis, and the time of each record (the last is now)', () => {
+  assert.deepEqual(axis(8.28), { top: 10, ticks: [0, 2.5, 5, 7.5, 10] });
+  assert.deepEqual(axis(0.77).ticks, [0, 0.2, 0.4, 0.6, 0.8]);
+  assert.equal(axis(0).top, 1);
+  assert.equal(timeOf(72, 73, 1_000_000_000, 300), 1_000_000_000);
+  assert.equal(timeOf(0, 73, 1_000_000_000, 300), 1_000_000_000 - 72 * 300_000);
+});

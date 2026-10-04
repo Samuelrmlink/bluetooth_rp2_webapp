@@ -377,6 +377,27 @@ do
   eq('e1: type 3, a custom image', on.type, 3)
 end
 
+print('\n== A2687 history ==')
+do
+  package.loaded['profiles.anker.setter'] = package.loaded['profiles.anker.setter'] or mod('anker/setter')
+  local h = mod('anker/history')
+  -- the app's own requests (2026-10-03 18:25:07): start, then "more"
+  eq('history start = the captured 0x020C', hex(h.request(false, 0x6AC18ED3)), 'a10121a2020100fe04d38ec16a')
+  eq('history more', hex(h.request(true, 0x6AC18ED3)), 'a10121a2020101fe04d38ec16a')
+  -- the final packet of that read (status byte off): last, 3 records
+  local body = bytes.unhex('a10131a2020101a3020103a4030268' .. '01a57904'
+    .. 'd8130000f8130303ffffffffd813000010141f03ffffffffd8130000d813be01c0130000'
+    .. string.rep('00', 84))
+  local pk = h.parse(body)
+  check('a history packet parses', pk ~= nil)
+  eq('last flag', pk.last, true)
+  eq('records in it', pk.n, 3)
+  eq('span: 6 h in minutes', pk.span_min, 360)
+  eq('only the records, not the padding', #pk.records, 36)
+  eq('the last record: c2 5080 mV 446 mA', hex(pk.records:sub(25, 36)), 'd8130000d813be01c0130000')
+  check('not a history packet', h.parse(bytes.unhex('a10131a2020100')) == nil)
+end
+
 print('\n== screensaver ==')
 do
   local ss = mod('anker/screensaver')

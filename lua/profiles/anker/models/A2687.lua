@@ -267,4 +267,7 @@ return {
 
   setters = SETTERS,
   setter_ft = 0x0F,
+  -- 0x020C, the Detailed Data screen's 6 h of per-port volts and amps
+  -- (profiles/anker/history.lua)
+  history = true,
 }

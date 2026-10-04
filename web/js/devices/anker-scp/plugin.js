@@ -6,6 +6,7 @@
 import { upload, crc32, defaultId, packetLength, SIDE, MAX_PACKET } from './screensaver.js';
 import { encodeJpeg } from './jpeg.js';
 import { PortsWindow } from './ports.js';
+import { HistoryWindow } from './history.js';
 
 // Every write: the driver's anker.set. A refusal comes back as a result
 // with `error` and is thrown, so the control shows why.
@@ -225,4 +226,4 @@ export class ScreensaverWindow {
   }
 }
 
-export const windows = { screensaver: ScreensaverWindow, ports: PortsWindow };
+export const windows = { screensaver: ScreensaverWindow, ports: PortsWindow, history: HistoryWindow };

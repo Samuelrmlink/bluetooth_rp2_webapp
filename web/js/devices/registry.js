@@ -25,6 +25,7 @@ export const PLUGINS = [
     module: './anker-scp/plugin.js',
     windows: [
       { kind: 'ports', title: 'Ports' },
+      { kind: 'history', title: 'History' },
       { kind: 'controls', title: 'Controls' },
       { kind: 'unclassified', title: 'All Data' },
       { kind: 'screensaver', title: 'Screensaver' },

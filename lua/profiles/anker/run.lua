@@ -90,6 +90,17 @@ local function norm(a) return (tostring(a or ''):upper():gsub('[^0-9A-F]', '')) 
 -- device refused writes to the other one. Ops outlive the script that
 -- registered them, so this must not hold anything of a session -- it reads
 -- the shared table on every call.
+-- anker.history {device}: read the charger's output history; it arrives as
+-- anker.history events, one per packet (profiles/anker/history.lua).
+local function dispatch_history(p)
+  p = p or {}
+  local want = norm(p.device)
+  for a, d in pairs(control.devices) do
+    if norm(a) == want and d.history then return d.history() end
+  end
+  return { error = 'not_this_device', message = 'no Anker launcher with history holds ' .. tostring(p.device) }
+end
+
 -- anker.setters {device}: the writable fields and their rules.
 local function dispatch_setters(p)
   p = p or {}
@@ -478,8 +489,56 @@ function R.run(target_override, who)
   end
   local function ss_emit(ev) bus.emit('anker.screensaver', ev) end
 
-  -- A setter's FT: the model's (the chargers: 0x0F), else the poll's.
+  -- A setter's FT: the model's (the chargers: 0x0F), else the poll's. (Up
+  -- here: read_history below uses it too, and a local declared after a
+  -- function that names it is, to that function, a nil global.)
   local set_ft = model and (model.setter_ft or (model.poll and model.poll.ft))
+
+  -- History (the A2687's 0x020C). Queued like everything else that waits
+  -- for replies: the op handler only raises the flag.
+  local hist = model and model.history and require 'profiles.anker.history'
+  local hist_req = nil
+  if hist then
+    control.devices[addr].history = function()
+      if hist_req then return { error = 'busy', message = 'a history read is under way' } end
+      hist_req = (hist_req or 0) + 1
+      return { queued = true }
+    end
+    ops.register('anker.history', dispatch_history)
+  end
+  local hist_seq = 0
+  local function read_history()
+    hist_seq = hist_seq + 1
+    local id, packets, records = hist_seq, 0, 0
+    local function emit(ev) ev.addr = addr; ev.id = id; bus.emit('anker.history', ev) end
+    if not link:secure_send(set_ft, hist.OPCODE, hist.request(false, link_m.now_epoch())) then
+      emit{ error = 'write refused', done = true }
+      return
+    end
+    local nudges = 0
+    while packets < 40 do
+      local f, dec = link:await(hist.REPLY, 400)        -- the charger answers "more" in ~250 ms
+      if not f then
+        if dec ~= 'timeout' then emit{ error = tostring(dec), done = true }; return end
+        -- the stream paused: ask for more, as the app does
+        nudges = nudges + 1
+        if nudges > 4 then emit{ error = 'no more packets', done = true, packets = packets, records = records }; return end
+        link:secure_send(set_ft, hist.OPCODE, hist.request(true, link_m.now_epoch()))
+      else
+        local pk = hist.parse(dec.body)
+        if pk then
+          packets = packets + 1
+          records = records + pk.n
+          nudges = 0
+          emit{ seq = packets, n = pk.n, last = pk.last, span_min = pk.span_min,
+                interval_s = hist.INTERVAL_S, hex = bytes.hex(pk.records) }
+          if pk.last then emit{ done = true, packets = packets, records = records }; return end
+        end
+      end
+    end
+    emit{ error = 'too many packets', done = true }
+  end
+
   local function send_setters()
     while #queue > 0 do
       local q = table.remove(queue, 1)
@@ -542,6 +601,12 @@ function R.run(target_override, who)
       end
       if queue[1] then
         send_setters()
+        goto continue
+      end
+      if hist_req then
+        hist_req = nil
+        local ok, err = pcall(read_history)
+        if not ok then bus.emit('anker.history', { addr = addr, error = tostring(err), done = true }) end
         goto continue
       end
       local f, dec = link:await(nil, 250)
