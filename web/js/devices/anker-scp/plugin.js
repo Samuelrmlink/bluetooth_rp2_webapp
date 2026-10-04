@@ -1,9 +1,28 @@
 // Anker small chargers (the A2687 family). Field names from
-// lua/profiles/anker/models/A2687.lua. Controls are readouts; the one write
-// path so far is the Screensaver window (custom picture upload).
+// lua/profiles/anker/models/A2687.lua; the protocol in docs/a2687-protocol.md.
+// Windows: Ports (./ports.js: the ports and the power settings), Controls
+// (the screen and display settings), All Data, Screensaver (picture upload).
 
 import { upload, crc32, defaultId, packetLength, SIDE, MAX_PACKET } from './screensaver.js';
 import { encodeJpeg } from './jpeg.js';
+import { PortsWindow } from './ports.js';
+
+// Every write: the driver's anker.set. A refusal comes back as a result
+// with `error` and is thrown, so the control shows why.
+export async function write(ctx, control, value) {
+  let field = control.field;
+  // Custom from the mode select: the charger's stored custom profile, applied
+  if (field === 'charging_protocol' && Number(value) === 2) {
+    const cp = ctx.device.sample?.custom_power || {};
+    const mode = Number(ctx.device.sample?.custom_mode_number);
+    field = 'custom_mode';
+    value = { mode: mode >= 1 && mode <= 254 ? mode : 1, auto_exit: cp.auto_exit ? 1 : 0,
+              c1_w: cp.c1_w ?? 0, c2_w: cp.c2_w ?? 0, c3_w: cp.c3_w ?? 0 };
+  }
+  const r = await ctx.ws.call('anker.set', { device: ctx.device.addr, field, value });
+  if (r && r.error) throw new Error(r.message || r.error);
+  return r;
+}
 
 export const css = 'plugin.css';
 
@@ -23,6 +42,8 @@ export function portControl(v) {
   return parts.join(' \u00b7 ');
 }
 
+// The Controls window: a summary of the ports (their controls are in Ports)
+// and the screen settings, every one verified on the bench (2026-10-03).
 export const controls = [
   { kind: 'readout', field: 'c1_power', label: 'USB-C1', format: portPower },
   { kind: 'readout', field: 'c2_power', label: 'USB-C2', format: portPower },
@@ -30,9 +51,15 @@ export const controls = [
   { kind: 'readout', field: 'c1_control', label: 'USB-C1 port', format: portControl },
   { kind: 'readout', field: 'c2_control', label: 'USB-C2 port', format: portControl },
   { kind: 'readout', field: 'c3_control', label: 'USB-C3 port', format: portControl },
-  { kind: 'readout', field: 'fixed_allocation', label: 'Allocation' },
-  { kind: 'readout', field: 'backlight_pct', label: 'Backlight', unit: '%' },
-  { kind: 'readout', field: 'screen_off', label: 'Screen off after' },
+  { kind: 'slider', field: 'backlight_pct', label: 'Brightness', min: 25, max: 100, step: 5, unit: '%', verified: true },
+  { kind: 'select', field: 'screen_off', label: 'Screen off after', verified: true,
+    options: [['30s', '30 s'], ['1min', '1 min'], ['5min', '5 min'], ['30min', '30 min'], ['12h', '12 h']] },
+  { kind: 'select', field: 'direction', label: 'Screen rotation', verified: true,
+    options: [['up', 'Up'], ['left', 'Left'], ['down', 'Down'], ['right', 'Right']] },
+  { kind: 'switch', field: 'gyroscope', label: 'Auto-rotate', verified: true },
+  { kind: 'select', field: 'language', label: 'Language', verified: true,
+    options: [['en', 'English'], ['zh', 'Chinese'], ['ja', 'Japanese'], ['de', 'German']] },
+  { kind: 'switch', field: 'screensaver_enabled', label: 'Screensaver', verified: true },
   { kind: 'readout', field: 'error_code', label: 'Error code' },
 ];
 
@@ -198,4 +225,4 @@ export class ScreensaverWindow {
   }
 }
 
-export const windows = { screensaver: ScreensaverWindow };
+export const windows = { screensaver: ScreensaverWindow, ports: PortsWindow };

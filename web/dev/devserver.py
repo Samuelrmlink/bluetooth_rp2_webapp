@@ -135,7 +135,72 @@ A2687_BASE = {
     "c3_control": {"on": False, "countdown_s": 300, "countdown_remain_s": 300, "vid": 0, "cable": "none", "countdown_active": False},
     "fixed_allocation": "c1_priority", "backlight_pct": 25, "screen_off": "12h", "error_code": 0,
     "charging_protocol": 0, "package_version": 1606, "language": "en", "direction": "up",
+    "gyroscope": 1, "custom_mode_number": 1,
+    "custom_power": {"mode": 0, "auto_exit": True, "c1_w": 140, "c2_w": 20, "c3_w": 0,
+                     "c1_proto": 11, "c2_proto": 11, "c3_proto": 11},
+    "connected_device": {"c1": {"brand": 3, "model": 17}, "c2": "none", "c3": "none"},
+    "screensaver": {"enabled": True, "flags": 0, "type": 3, "id": 752261, "holiday_id": 0},
 }
+
+# The A2687's setters, as lua/profiles/anker/models/A2687.lua takes them (a
+# value or its name), and what each writes into the state.
+A2687_NAMES = {
+    "charging_protocol": {"ai": 0, "standard": 1}, "fixed_allocation": {"c1_priority": 0, "laptop_mode": 1},
+    "screen_off": {"30s": 0, "1min": 1, "5min": 2, "30min": 3, "12h": 4},
+    "direction": {"up": 0, "left": 1, "down": 2, "right": 3}, "language": {"en": 0, "zh": 1, "ja": 2, "de": 3},
+}
+A2687_SETTERS = {
+    **{f"c{i}_on": (0, 1) for i in (1, 2, 3)}, **{f"c{i}_timer_s": range(0, 86401) for i in (1, 2, 3)},
+    "charging_protocol": (0, 1), "fixed_allocation": (0, 1), "backlight_pct": range(25, 101),
+    "screen_off": range(0, 5), "direction": range(0, 4), "gyroscope": (0, 1), "language": range(0, 4),
+    "screensaver_enabled": (0, 1), "custom_mode": None, "protocols": None,
+}
+
+def a2687_derive(t):
+    # as A2687.lua derive(): the flat fields a write confirms against
+    for i in (1, 2, 3):
+        c, pw = t[f"c{i}_control"], t[f"c{i}_power"]
+        t[f"c{i}_on"] = 1 if c["on"] else 0
+        t[f"c{i}_timer_s"] = c["countdown_s"] if c["countdown_active"] else 0
+        t[f"c{i}_timer_remain_s"] = c["countdown_remain_s"] if c["countdown_active"] else 0
+        t[f"c{i}_w"] = pw["watts"]
+    t["screensaver_enabled"] = 1 if t["screensaver"]["enabled"] else 0
+    return t
+
+def a2687_set(st, f, v):
+    # validate like setter.lua; apply like the charger. Returns None or (error, message).
+    if f not in A2687_SETTERS: return ("unknown_field", f"{f} has no captured setter")
+    if f == "custom_mode":
+        if not isinstance(v, dict): return ("bad_value", "custom_mode takes {mode, auto_exit, c1_w, c2_w, c3_w}")
+        ws = [int(v.get(k, -1)) for k in ("c1_w", "c2_w", "c3_w")]
+        if any(w != 0 and not 15 <= w <= 140 for w in ws): return ("bad_value", "a port takes 0 or 15..140")
+        if sum(ws) > 160: return ("bad_value", f"the ports add up to {sum(ws)} W; the charger has 160")
+        cp = st["custom_power"]
+        cp.update(mode=1, auto_exit=bool(v.get("auto_exit", 1)), c1_w=ws[0], c2_w=ws[1], c3_w=ws[2])
+        st["custom_mode_number"] = int(v.get("mode", 1)); st["charging_protocol"] = 2
+        return None
+    if f == "protocols":
+        vals = [v.get(f"c{i}") for i in (1, 2, 3)] if isinstance(v, dict) else v
+        if not isinstance(vals, list) or len(vals) != 3 or any(not isinstance(m, int) or not 0 <= m <= 63 for m in vals):
+            return ("bad_value", "protocols takes {c1, c2, c3} bit masks (0..63)")
+        if any(bin(m & 0x3c).count("1") > 3 for m in vals): return ("bad_value", "at most three of PD 12V and the PPS ranges")
+        st["protocols"] = {"c1": vals[0], "c2": vals[1], "c3": vals[2]}
+        return None
+    if isinstance(v, str) and v in A2687_NAMES.get(f, {}): v = A2687_NAMES[f][v]
+    if v not in A2687_SETTERS[f]: return ("bad_value", f"{f} takes {list(A2687_SETTERS[f])[:6]}")
+    if f.endswith("_on"):
+        st[f"c{f[1]}_control"]["on"] = bool(v)
+    elif f.endswith("_timer_s"):
+        c = st[f"c{f[1]}_control"]
+        if v: c.update(countdown_active=True, countdown_s=v, countdown_remain_s=v)
+        else: c["countdown_active"] = False
+    elif f == "screensaver_enabled":
+        st["screensaver"]["enabled"] = bool(v)
+    elif f in A2687_NAMES:
+        st[f] = v if f == "charging_protocol" else {n: k for k, n in A2687_NAMES[f].items()}[v]
+    else:
+        st[f] = v
+    return None
 
 C1000_SETTERS = {"ac_output_enabled": (0, 1), "car_output_enabled": (0, 1),
                  "ambient_light": (0, 1, 3), "screen_enabled": (0, 1),
@@ -156,6 +221,7 @@ def reset_state():
                         for m in ["profiles.anker.run", "profiles.anker.link", "profiles.anker.models.A1761"]
                         if f"lua/{m.replace('.', '/')}.lua" in STATE["fs"]}
     STATE["c1000"] = dict(C1000_BASE)
+    STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
@@ -190,7 +256,14 @@ class MockGateway:
                                 c[out] = 0
                     c["ac_output_power_w"] = c["total_output_power_w"] = (22 + int(time.time()) % 5) if c["ac_output_enabled"] else 0
                     self.send({"evt": "profile.anker.telemetry", "data": dict(c)})
-                    self.send({"evt": "profile.anker.telemetry", "data": dict(A2687_BASE)})
+                    a = STATE["a2687"]
+                    for i in (1, 2, 3):                     # timers count down; at 0 the port goes off
+                        cc = a[f"c{i}_control"]
+                        if cc["countdown_active"]:
+                            cc["countdown_remain_s"] = max(0, cc["countdown_remain_s"] - 1)
+                            if cc["countdown_remain_s"] == 0: cc.update(countdown_active=False, on=False)
+                        if not cc["on"]: a[f"c{i}_power"].update(mv=0, ma=0, watts=0.0, charging=False)
+                    self.send({"evt": "profile.anker.telemetry", "data": a2687_derive(json.loads(json.dumps(a)))})
                 if self.scanning:
                     for d in self.devices.values():
                         d["rssi"] = max(-95, min(-40, d["rssi"] + (hash(time.time()) % 5) - 2))
@@ -363,6 +436,8 @@ class MockGateway:
         if op == "test.mkdir":
             STATE.setdefault("dirs", set()).add(str(p.get("path", "")).strip("/"))
             return {"ok": True}
+        if op == "test.a2687":                      # mock only: the A2687 state and the writes it got
+            return {"state": STATE["a2687"], "writes": STATE.get("a2687_writes", [])}
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \
@@ -474,6 +549,16 @@ class MockGateway:
                 return {"error": "bad_request", "message": "step is select, begin or data"}
             threading.Timer(0.05, lambda: self.send({"evt": "profile.anker.screensaver", "data": ev})).start()
             return {"queued": True, "step": step}
+        if op == "anker.setters":
+            if str(p.get("device", "")).upper() != A2687_BASE["addr"]: return {"error": "not_this_device"}
+            return {"device": A2687_BASE["addr"], "setters": {f: {"verified": True} for f in A2687_SETTERS}}
+        if op == "anker.set" and str(p.get("device", "")).upper() == A2687_BASE["addr"]:
+            f, v = p.get("field"), p.get("value")
+            err = a2687_set(json.loads(json.dumps(STATE["a2687"])), f, v)   # validate on a copy
+            if err: return {"error": err[0], "message": err[1]}
+            STATE.setdefault("a2687_writes", []).append({"field": f, "value": v})
+            threading.Timer(0.3, lambda: a2687_set(STATE["a2687"], f, v)).start()
+            return {"queued": True, "field": f, "value": v}
         if op == "anker.set":
             # As the driver: only captured setters, only their listed values;
             # a refusal is a result carrying `error`, not a failed call.

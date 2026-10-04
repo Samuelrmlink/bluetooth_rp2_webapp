@@ -16,3 +16,35 @@
 .ss-status.is-error { color: var(--red, #e66); }
 .ss-status.is-ok { color: var(--green); }
 .ss-note { font-size: 12px; }
+
+/* A2687 Ports window (ports.js) */
+.scp-ports-pane .dev-controls { padding: 10px 12px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+/* a card and the Power section: the same label | value grid as Controls */
+.scp-card, .scp-section.scp-power { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; align-content: start; }
+.scp-card > header, .scp-power > h3 { grid-column: 1 / -1; }
+.scp-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.scp-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.scp-card header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.scp-port { font: 600 12px ui-monospace, monospace; padding: 1px 7px; border-radius: 4px; background: #2a2d33; color: var(--dim); }
+.scp-card[data-state='charging'] .scp-port, .scp-card[data-state='idle'] .scp-port { background: #1b6f9a; color: #fff; }
+.scp-card[data-state='off'] { opacity: 0.75; }
+.scp-state { font-size: 12px; }
+.scp-card[data-state='charging'] .scp-state { color: var(--green); }
+.scp-card .scp-watts .ctl-readout { font-size: 26px; font-weight: 600; color: var(--fg); }
+.scp-card .ctl-steps { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.scp-card .ctl-value { flex-wrap: wrap; }
+.scp-section { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.scp-section h3 { margin: 0 0 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dim); }
+.scp-section p { margin: 0; font-size: 12px; }
+.scp-w { display: grid; grid-template-columns: 2.5em 1fr 4.5em auto; gap: 8px; align-items: center; max-width: 520px; }
+.scp-wn { width: 4.5em; }
+.scp-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.scp-total.is-error, .scp-status.is-error { color: var(--red); }
+.scp-status.is-ok { color: var(--green); }
+.scp-status { font-size: 12px; }
+.scp-check { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; }
+.scp-proto { border-collapse: collapse; font-size: 13px; max-width: 420px; }
+.scp-proto th, .scp-proto td { padding: 3px 10px; text-align: center; border-bottom: 1px solid var(--border); }
+.scp-proto tbody th { text-align: left; font-weight: normal; }
+.scp-section .pane-btn { border: 1px solid var(--border); border-radius: 4px; padding: 3px 12px; }
+@media (pointer: coarse) { .scp-proto input[type=checkbox] { width: 22px; height: 22px; } }

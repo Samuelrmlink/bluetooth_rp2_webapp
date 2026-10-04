@@ -767,3 +767,11 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 /* All Data (devices/windows.js) */
 .dev-only { display: inline-flex; gap: 5px; align-items: center; font-size: 12px; color: var(--dim); margin-right: 6px; white-space: nowrap; }
 .dev-fields tr.is-unclassified td:first-child { color: var(--orange); }
+
+/* Confirmation (controls/confirm.js) */
+.cf-body { display: flex; flex-direction: column; gap: 12px; padding: 4px 2px; min-width: 0; }
+.cf-body p { margin: 0; white-space: pre-wrap; }
+.cf-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.cf-body .pane-btn { border: 1px solid var(--border); border-radius: 4px; padding: 4px 14px; }
+.cf-body .cf-ok.cf-danger { color: #fff; background: #8c2a24; border-color: #b13a32; }
+#confirm-dlg .modal { width: min(460px, 94vw); }

@@ -24,6 +24,7 @@ export const PLUGINS = [
     name: (d) => d.product_code || 'Anker charger',
     module: './anker-scp/plugin.js',
     windows: [
+      { kind: 'ports', title: 'Ports' },
       { kind: 'controls', title: 'Controls' },
       { kind: 'unclassified', title: 'All Data' },
       { kind: 'screensaver', title: 'Screensaver' },

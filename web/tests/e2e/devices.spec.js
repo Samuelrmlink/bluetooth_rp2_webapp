@@ -148,15 +148,18 @@ test('AC output asks before switching off, and a No sends nothing', async ({ pag
   await page.evaluate((id) => window.__btgwApp.show(id), CONTROLS);
   const ac = control(page, 'AC output').locator('.ctl-switch');
   await expect(ac).toHaveText('On');
-  const asked = [];
-  page.once('dialog', (d) => { asked.push(d.message()); d.dismiss(); });
+  // asked in the app's own dialog (not the browser's, which can be suppressed)
+  const dlg = page.locator('#confirm-dlg');
   await ac.click();
-  await expect.poll(() => asked.length).toBe(1);
-  expect(asked[0]).toContain('AC outlet OFF');
+  await expect(dlg).toBeVisible();
+  await expect(dlg.locator('.cf-text')).toContainText('AC outlet OFF');
+  await expect(dlg.locator('.cf-cancel')).toBeFocused();            // Cancel is the default
+  await page.keyboard.press('Enter');
+  await expect(dlg).toBeHidden();
   await page.waitForTimeout(1500);
   await expect(ac).toHaveText('On');
-  page.once('dialog', (d) => d.accept());
   await ac.click();
+  await dlg.locator('.cf-ok').click();
   await expect(ac).toHaveText('Off');
   await ac.click();                      // on: no question
   await expect(ac).toHaveText('On');

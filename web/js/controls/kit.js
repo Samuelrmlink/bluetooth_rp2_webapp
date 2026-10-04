@@ -156,7 +156,9 @@ export function buildControl(c, onWrite) {
         b.className = 'pane-btn ctl-step';
         b.textContent = label;
         b.dataset.step = String(d);
-        b.addEventListener('click', () => send(d === 0 ? 0 : (now() || 0) + d));
+        // c.absolute: the steps are presets (the A2687 app's Off / 1 / 2 / 3 h),
+        // not amounts to add to the time left
+        b.addEventListener('click', () => send(d === 0 ? 0 : c.absolute ? d : (now() || 0) + d));
         extraEls.push(b);
       }
       set = (v) => {

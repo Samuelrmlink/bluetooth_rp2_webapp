@@ -14,6 +14,7 @@ import { Grid } from '../controls/grid.js';
 import { columnsDialog } from '../controls/columnsdialog.js';
 import { copyWithToast, openCellMenu } from '../controls/cellmenu.js';
 import { toast } from '../toast.js';
+import { askConfirm } from '../controls/confirm.js';
 import { Pending, same, unclassified, displayValue, shownAs, allFields } from '../controls/state.js';
 
 const ONLY_KEY = 'btgw.alldata.unclassifiedOnly';
@@ -47,8 +48,9 @@ export class ControlsWindow {
     body.className = 'dev-controls';
     el.appendChild(body);
 
+    this.body = body;
     const writable = typeof this.plugin.write === 'function';
-    for (const c of this.plugin.controls || []) {
+    for (const c of this.controlList()) {
       const ctl = buildControl(c, (v) => this._write(c, ctl, v));
       if (c.kind !== 'readout') {
         if (!writable) ctl.setEnabled(false, 'no write path yet');
@@ -56,7 +58,7 @@ export class ControlsWindow {
         else if (c.verified === false) ctl.setEnabled(false, c.why || 'not yet verified on hardware');
       }
       this.controls.push({ c, ctl });
-      body.appendChild(ctl.el);
+      this.place(c, ctl, body);
     }
     if (!this.controls.length) {
       body.innerHTML = '<div class="dim pane-empty">This device\'s plugin declares no controls yet — see All Data.</div>';
@@ -74,6 +76,12 @@ export class ControlsWindow {
       if (hit) this._openMenu(hit.c, b);
     });
   }
+
+  // What this window shows (a subclass shows another list -- the A2687's Ports).
+  controlList() { return this.plugin.controls || []; }
+
+  // Where a control goes (a subclass groups them -- one card per port).
+  place(c, ctl, body) { body.appendChild(ctl.el); }
 
   _openMenu(c, anchor) {
     if (!this.app) return;
@@ -96,8 +104,12 @@ export class ControlsWindow {
     // A control may ask before a value that is hard to undo from here
     // (`confirm: { [value]: 'question' }`): AC off can cut the gateway's
     // own network, and then nothing here can switch it back on.
-    const ask = c.confirm?.[value];
-    if (ask && !window.confirm(ask)) { ctl.setPending(null); return; }
+    // (a string per value, or a function of the value and the latest sample)
+    const ask = typeof c.confirm === 'function' ? c.confirm(value, this.dev.sample || {}) : c.confirm?.[value];
+    if (ask && !(await askConfirm(this.app, { title: c.label || c.field, message: ask, ok: c.confirmOk || 'Yes' }))) {
+      ctl.setPending(null);
+      return;
+    }
     this.pending.begin(c.field, value, Date.now(), c.tolerance);
     ctl.setPending(value);
     try {
@@ -113,16 +125,19 @@ export class ControlsWindow {
   update(sample) {
     const { confirmed, expired } = this.pending.observe(sample);
     for (const { c, ctl } of this.controls) {
-      if (!(c.field in sample)) continue;
+      // `display`: the field shown, when it is not the one a write confirms
+      // against (a timer shows the time left, and confirms the time set)
+      const shown = c.display || c.field;
+      if (!(shown in sample)) continue;
       if (this.pending.get(c.field)) continue;       // still waiting: keep showing the target
-      ctl.set(sample[c.field]);
+      ctl.set(sample[shown]);
       if (confirmed.includes(c.field)) ctl.setPending(null);
     }
     for (const x of expired) {
       const hit = this.controls.find((k) => k.c.field === x.field);
       if (!hit) continue;
       hit.ctl.setPending(null);
-      hit.ctl.set(x.actual);
+      hit.ctl.set(hit.c.display ? this.dev.sample?.[hit.c.display] : x.actual);
       if (!same(x.actual, x.target)) hit.ctl.flash(`device kept ${x.actual ?? 'its value'}`);
     }
   }
