@@ -176,7 +176,7 @@ export function buildControl(c, onWrite) {
     default: {                                   // readout
       // A button that looks like text: a keyboard stop (hjkl reach it), and
       // Enter / Space / a click open its menu (the device window's: copy
-      // the value, as in All Data).
+      // the value, as in Telemetry).
       input = document.createElement('button');
       input.type = 'button';
       input.className = 'ctl-readout';

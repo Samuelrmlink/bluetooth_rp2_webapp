@@ -52,7 +52,7 @@ test('displayValue: binary strings as hex, everything else as itself', () => {
 });
 
 import { shownAs, allFields } from '../../js/controls/state.js';
-test('All Data: every field, and what already shows each one', () => {
+test('Telemetry: every field, and what already shows each one', () => {
   const s = shownAs([{ field: 'battery_pct', label: 'Battery' }, { field: 'ac', label: 'AC output' }, { kind: 'button', label: 'Beep' }]);
   assert.equal(s('battery_pct'), 'Battery');
   assert.equal(s('serial'), 'device identity');

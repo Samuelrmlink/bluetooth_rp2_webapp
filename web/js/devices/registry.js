@@ -27,7 +27,7 @@ export const PLUGINS = [
       { kind: 'ports', title: 'Ports' },
       { kind: 'history', title: 'History' },
       { kind: 'controls', title: 'Controls' },
-      { kind: 'unclassified', title: 'All Data' },
+      { kind: 'unclassified', title: 'Telemetry' },
       { kind: 'screensaver', title: 'Screensaver' },
     ],
   },
@@ -44,7 +44,7 @@ export const GENERIC = {
   match: () => true,
   name: (d, topic) => d.model_name || topic.replace(/^profile\.|\.telemetry$/g, ''),
   module: null,
-  windows: [{ kind: 'unclassified', title: 'All Data' }],
+  windows: [{ kind: 'unclassified', title: 'Telemetry' }],
 };
 
 export function pluginFor(topic, d) {
@@ -58,10 +58,10 @@ export function deviceKey(topic, d) {
   return topic.replace(/^profile\./, '').replace(/[^A-Za-z0-9]/g, '-');
 }
 
-// 'unclassified' is the All Data window's kind (and so part of its id in a
+// 'unclassified' is the Telemetry window's kind (and so part of its id in a
 // saved layout): it began as the fields no control claimed, and still
 // offers that view ("Unclassified only").
 export const DEFAULT_WINDOWS = [
   { kind: 'controls', title: 'Controls' },
-  { kind: 'unclassified', title: 'All Data' },
+  { kind: 'unclassified', title: 'Telemetry' },
 ];

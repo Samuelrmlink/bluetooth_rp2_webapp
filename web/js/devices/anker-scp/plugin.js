@@ -1,7 +1,7 @@
 // Anker small chargers (the A2687 family). Field names from
 // lua/profiles/anker/models/A2687.lua; the protocol in docs/a2687-protocol.md.
 // Windows: Ports (./ports.js: the ports and the power settings), Controls
-// (the screen and display settings), All Data, Screensaver (picture upload).
+// (the screen and display settings), Telemetry, Screensaver (picture upload).
 
 import { upload, crc32, defaultId, packetLength, SIDE, MAX_PACKET } from './screensaver.js';
 import { encodeJpeg } from './jpeg.js';

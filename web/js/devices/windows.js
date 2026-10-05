@@ -2,7 +2,7 @@
 //
 //   Controls      the plugin's control list -- switches, selects, numbers,
 //                 readouts -- built with the control kit
-//   All Data      every telemetry field, and what shows it -- or (Unclassified
+//   Telemetry      every telemetry field, and what shows it -- or (Unclassified
 //                 only) the fields no control claims yet: the working
 //                 surface for figuring out what an unknown tag means
 //
@@ -61,10 +61,10 @@ export class ControlsWindow {
       this.place(c, ctl, body);
     }
     if (!this.controls.length) {
-      body.innerHTML = '<div class="dim pane-empty">This device\'s plugin declares no controls yet — see All Data.</div>';
+      body.innerHTML = '<div class="dim pane-empty">This device\'s plugin declares no controls yet — see Telemetry.</div>';
     }
     // A readout's menu: its whole value in the wrapping box that copies, as
-    // in All Data and GATT Events (a click, or Enter / Space on it).
+    // in Telemetry and GATT Events (a click, or Enter / Space on it).
     this._menu = document.createElement('div');
     this._menu.className = 'pane-settings s-menu';
     this._menu.hidden = true;
@@ -184,7 +184,7 @@ export class UnclassifiedWindow {
     copy.textContent = 'Copy all';
     copy.title = 'Copy every field shown to the clipboard';
     copy.addEventListener('click', () => this.copyAll());
-    // All Data shows every field; this narrows it to the ones nothing shows
+    // Telemetry shows every field; this narrows it to the ones nothing shows
     // yet (where unknown fields get worked out). Remembered.
     const only = document.createElement('label');
     only.className = 'dev-only';

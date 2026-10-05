@@ -65,7 +65,7 @@ export function unclassified(sample, controls) {
   return Object.keys(sample || {}).filter((k) => !claimed.has(k) && !IDENTITY.has(k)).sort();
 }
 
-// Every field of a sample, for the All Data window, and what already shows
+// Every field of a sample, for the Telemetry window, and what already shows
 // each one: a control's label, 'device identity', or '' (nothing yet -- the
 // fields the "Unclassified only" view keeps).
 export function shownAs(controls) {

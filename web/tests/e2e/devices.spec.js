@@ -119,7 +119,7 @@ test('AC charge limit writes watts and follows the device', async ({ page }) => 
   await expect(c).not.toHaveClass(/is-pending/, { timeout: 6000 });
 });
 
-test('All Data: every field and what shows it; "Unclassified only" keeps the rest; binary as hex', async ({ page }) => {
+test('Telemetry: every field and what shows it; "Unclassified only" keeps the rest; binary as hex', async ({ page }) => {
   await ready(page);
   const id = CONTROLS.replace('.controls@', '.unclassified@');
   await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
@@ -130,7 +130,7 @@ test('All Data: every field and what shows it; "Unclassified only" keeps the res
   await expect(rowOf('battery_pct').locator('td').nth(2)).toHaveText('Battery');        // shown by a control
   await expect(rowOf('serial').locator('td').nth(2)).toHaveText('device identity');
   await expect(rowOf('unknown_b1')).toHaveClass(/is-unclassified/);
-  expect(await page.evaluate((x) => window.__btgwApp.windows.get(x).def.title, id)).toMatch(/· All Data$/);
+  expect(await page.evaluate((x) => window.__btgwApp.windows.get(x).def.title, id)).toMatch(/· Telemetry$/);
   await page.locator('.dev-only input').check();
   await expect(fields.filter({ hasText: /^battery_pct$/ })).toHaveCount(0);
   await expect(fields.filter({ hasText: 'unknown_b1' })).toHaveCount(1);
@@ -335,7 +335,7 @@ test('the A2687\'s Controls (all readouts) are keyboard stops too: j does not fa
   await page.keyboard.press('Escape');
 });
 
-test('All Data from the keyboard: j lands on the table (not its header buttons); Space, j l, Enter: the cell menu', async ({ page }) => {
+test('Telemetry from the keyboard: j lands on the table (not its header buttons); Space, j l, Enter: the cell menu', async ({ page }) => {
   await ready(page);
   await focusWindow(page, CONTROLS.replace('.controls@', '.unclassified@'));
   const seen = [];
@@ -364,7 +364,7 @@ test('the Screensaver window: j reaches its controls', async ({ page }) => {
   expect((await active(page)).cls).toContain('ss-choose');
 });
 
-test('All Data columns, as every table\'s: drag to reorder, drag the edge to resize, Columns hides one', async ({ page }) => {
+test('Telemetry columns, as every table\'s: drag to reorder, drag the edge to resize, Columns hides one', async ({ page }) => {
   await ready(page);
   const id = CONTROLS.replace('.controls@', '.unclassified@');
   await page.waitForFunction((x) => window.__btgwApp.windows.has(x), id);
@@ -397,7 +397,7 @@ test('All Data columns, as every table\'s: drag to reorder, drag the edge to res
   expect(await heads()).not.toContain('Shown as');
 });
 
-test('All Data: a cell is marked only while its menu is open, however many are opened', async ({ page }) => {
+test('Telemetry: a cell is marked only while its menu is open, however many are opened', async ({ page }) => {
   await ready(page);
   await openUnclassified(page, CONTROLS);
   const cells = page.locator('.dev-fields tbody tr td:nth-child(2)');
