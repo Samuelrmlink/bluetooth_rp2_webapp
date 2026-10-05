@@ -649,6 +649,14 @@ class Handler(SimpleHTTPRequestHandler):
             return self._fs("GET")
         if self.path.startswith("/api/tar"):
             return self._tar()
+        if self.path.startswith("/js/ext/"):
+            # as the device: static files come from the same filesystem
+            # /api/fs writes, so an uploaded extension is servable at once
+            from urllib.parse import unquote
+            body = STATE["fs"].get(unquote(self.path.split("?")[0]).lstrip("/"))
+            if body is None: return self._reply(404, {"ok": False, "error": "not found"})
+            ctype = "text/javascript" if self.path.split("?")[0].endswith(".js") else "text/css"
+            return self._reply(200, body if isinstance(body, bytes) else body.encode(), ctype)
         return super().do_GET()
 
     def do_PUT(self): self._fs("PUT")

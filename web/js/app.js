@@ -28,6 +28,7 @@ import { SettingsModal } from './modals/settings.js';
 import { HelpModal } from './modals/help.js';
 import { readLayoutStore, writeLayoutStore, readPrefs, writePrefs } from './prefs.js';
 import { BUILTIN_WINDOWS, DEFAULT_TREE } from './windows/index.js';
+import { loadExtensions } from './extensions.js';
 import { SETTINGS_SECTIONS } from './settings/index.js';
 import { GattLog } from './gattlog.js';
 import { DeviceStore } from './gattdb.js';
@@ -81,6 +82,9 @@ class App {
     // After the layout exists: devices register windows into it as they
     // appear, and a saved arrangement may already have a place for them.
     this.deviceHost = new DeviceHost(this);
+    // Windows from other projects, uploaded to js/ext/ on the gateway
+    // (extensions.js). The same promise for anyone who waits on them.
+    this.extensions = loadExtensions(this);
     this._wireToolbar();
     this._wireConnection();
 
