@@ -227,6 +227,15 @@ bool api_reboot_due(void) {
     return s_reboot_at_ms && (int32_t)(now_ms() - s_reboot_at_ms) >= 0;
 }
 
+/* What stopped the previous boot (src/util/crumb.h): the main-loop stage,
+ * the last few deep breadcrumbs, and a HardFault's frame and status. */
+static void op_sys_fault(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    char r[900];
+    crumb_report_json(r, sizeof r);
+    api_reply_ok(reply, ctx, id, r);
+}
+
 static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     char mods[512];
@@ -331,6 +340,7 @@ static void op_sys_secret_put(const char *params, api_reply_fn reply, void *ctx,
 
 static const op_def_t sys_ops[] = {
     { "sys.info", op_sys_info },
+    { "sys.fault", op_sys_fault },
     { "sys.reboot", op_sys_reboot },
     { "sys.secret_put", op_sys_secret_put },
     { NULL, NULL }

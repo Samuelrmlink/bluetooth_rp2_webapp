@@ -49,6 +49,7 @@ static service_t svc[MDNS_SERVICES_MAX];
  * table index, which is stable for the life of the entry. */
 static void srv_txt(struct mdns_service *service, void *txt_userdata) {
     size_t i = (size_t)(uintptr_t)txt_userdata;
+    crumb_d(CRUMB_MDNS_TXT, (uint32_t)i);
     if (i >= MDNS_SERVICES_MAX || !svc[i].used) { return; }
     for (int t = 0; t < svc[i].n_txt; t++) {
         const char *item = svc[i].txt[t];
@@ -83,6 +84,7 @@ static void bind_service(int si, int ni) {
 
 static void unbind_service(int si, int ni) {
     if (svc[si].slot[ni] >= 0 && bound[ni]) {
+        crumb_d(CRUMB_MDNS_SVC_DEL, (uint32_t)(si << 8 | ni));
         mdns_resp_del_service(bound[ni], (u8_t)svc[si].slot[ni]);
     }
     svc[si].slot[ni] = -1;
@@ -169,11 +171,11 @@ bool mdns_service_add_owned(int owner, const char *instance, const char *type, b
         snprintf(svc[si].txt[svc[si].n_txt], MDNS_TXT_LEN + 1, "%s", txt[t]);
         svc[si].n_txt++;
     }
-    crumb(CRUMB_MDNS_SVC_ADD);
+    crumb_d(CRUMB_MDNS_SVC_ADD, (uint32_t)si);
     for (int n = 0; n < MDNS_NETIFS; n++) { bind_service(si, n); }
-    crumb(CRUMB_MDNS_SVC_BOUND);
+    crumb_d(CRUMB_MDNS_SVC_BOUND, (uint32_t)si);
     mdns_announce_all();
-    crumb(CRUMB_MDNS_SVC_DONE);
+    crumb_d(CRUMB_MDNS_SVC_DONE, (uint32_t)si);
     return true;
 }
 
@@ -300,7 +302,7 @@ static void send_all(const uint8_t *data, size_t len) {
 void btgw_mdns_query_hook(struct netif *netif, struct pbuf *p, const ip_addr_t *addr,
                           u16_t port, int recv_unicast) {
     if (!mrec_group_count() || find_netif(netif) < 0) { return; }
-    crumb(CRUMB_MDNS_HOOK);
+    crumb_d(CRUMB_MDNS_HOOK, (uint32_t)p->tot_len);
     u16_t n = pbuf_copy_partial(p, rec_in, sizeof rec_in, 0);
     bool legacy = port != 5353, unicast = false;
     size_t len = mrec_build_answer(rec_in, n, legacy, rec_out, sizeof rec_out, &unicast);
@@ -314,7 +316,7 @@ void btgw_mdns_query_hook(struct netif *netif, struct pbuf *p, const ip_addr_t *
 }
 
 static void announce_again(void *arg) {
-    crumb(CRUMB_MDNS_ANNOUNCE);
+    crumb_d(CRUMB_MDNS_ANNOUNCE, (uint32_t)(intptr_t)arg);
     int id = (int)(intptr_t)arg;
     size_t len = mrec_build_announce(id, MREC_TTL_DEFAULT, rec_out, sizeof rec_out);
     if (len) { send_all(rec_out, len); }
