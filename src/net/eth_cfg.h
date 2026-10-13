@@ -35,6 +35,10 @@ typedef struct {
 
 /* How long DHCP gets alone before link-local is added beside it. */
 #define ETH_LL_AFTER_MS 8000
+/* While on link-local, restart DHCP this often. lwIP's own discover backoff
+ * grows to one attempt a minute; restarting keeps "a DHCP server appeared"
+ * to within about half a minute. A few broadcasts per period, on e0 only. */
+#define ETH_DHCP_KICK_MS 30000
 
 void eth_cfg_default(eth_cfg_t *c);                       /* DHCP client */
 /* Strict: an explicit config (eth.config, or the file). False + *why, and
@@ -50,5 +54,9 @@ const char *eth_mode_name(eth_mode_t m);
  * was lost (`since_ms`). */
 bool eth_ll_due(eth_mode_t mode, bool link, bool have_lease, bool ll_active,
                 uint32_t since_ms, uint32_t now_ms);
+
+/* While link-local without a lease: time to restart DHCP? */
+bool eth_dhcp_kick_due(eth_mode_t mode, bool ll_active, bool have_lease,
+                       uint32_t last_kick_ms, uint32_t now_ms);
 
 #endif

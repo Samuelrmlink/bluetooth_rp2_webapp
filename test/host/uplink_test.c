@@ -139,6 +139,21 @@ int main(void) {
     a = upl_choose(UPL_BEST, -1, c, 2, a, now, &why);
     CHECK(a == 1 && strcmp(why, "active lost its gateway") == 0, "gateway gone: switch at once");
 
+    /* --- a failed uplink is not traded for an unmeasured one ---------------------- */
+    fresh();
+    c[1].has_gw = false;
+    a = rounds(5, 40, 0, UPL_BEST, -1, 0, &why);
+    CHECK(a == 0, "w0 alone, steady");
+    c[1].has_gw = true; upl_reset(&c[1]);           /* e0 just got a gateway */
+    upl_sample(&c[0], -1); upl_sample(&c[0], -1); upl_sample(&c[0], -1);
+    a = upl_choose(UPL_BEST, -1, c, 2, a, now, &why);
+    CHECK(a == 0, "w0 failed but e0 has never answered: stay (do not strand the tunnel on an unknown link)");
+    a = rounds(3, -1, 30, UPL_BEST, -1, a, &why);
+    CHECK(a == 1 && strcmp(why, "active failed") == 0, "once e0 has answered, fail over to it");
+    fresh();
+    a = upl_choose(UPL_BEST, -1, c, 2, -1, now, &why);
+    CHECK(a == 0, "the very first pick may still go by priority");
+
     printf("%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }

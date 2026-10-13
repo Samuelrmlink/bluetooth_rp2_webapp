@@ -150,3 +150,9 @@ bool eth_ll_due(eth_mode_t mode, bool link, bool have_lease, bool ll_active,
     return mode == ETH_MODE_DHCP && link && !have_lease && !ll_active &&
            (uint32_t)(now_ms - since_ms) >= ETH_LL_AFTER_MS;
 }
+
+bool eth_dhcp_kick_due(eth_mode_t mode, bool ll_active, bool have_lease,
+                       uint32_t last_kick_ms, uint32_t now_ms) {
+    return mode == ETH_MODE_DHCP && ll_active && !have_lease &&
+           (uint32_t)(now_ms - last_kick_ms) >= ETH_DHCP_KICK_MS;
+}

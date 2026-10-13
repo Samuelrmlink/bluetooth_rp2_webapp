@@ -66,6 +66,7 @@ static bool had_addr;
 static uint32_t ll_since;     /* link up, or lease lost: when DHCP was left alone */
 static bool ll_active;        /* AutoIP started */
 static bool had_lease;
+static uint32_t last_kick;
 static uint32_t ll_starts, leases;
 static dhcp_server_t dsrv;
 static bool srv_on;
@@ -325,6 +326,11 @@ void eth_poll(void) {
             printf("eth: no DHCP lease after %u s -- adding link-local (DHCP keeps trying)\n",
                    ETH_LL_AFTER_MS / 1000);
             autoip_start(&eth_if);
+            last_kick = now;
+        }
+        if (eth_dhcp_kick_due(cfg.mode, ll_active, lease, last_kick, now)) {
+            last_kick = now;
+            dhcp_start(&eth_if);    /* back to a fast discover; the link-local address stays */
         }
     }
 

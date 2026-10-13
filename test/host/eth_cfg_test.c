@@ -88,6 +88,12 @@ int main(void) {
     CHECK(!eth_ll_due(ETH_MODE_SERVER, true, false, false, 0, 100000), "never in server mode");
     CHECK(eth_ll_due(ETH_MODE_DHCP, true, false, false, 0xFFFFF000u, 0xFFFFF000u + ETH_LL_AFTER_MS), "across the 32-bit wrap");
 
+    CHECK(!eth_dhcp_kick_due(ETH_MODE_DHCP, true, false, 1000, 1000 + ETH_DHCP_KICK_MS - 1), "no DHCP restart early");
+    CHECK(eth_dhcp_kick_due(ETH_MODE_DHCP, true, false, 1000, 1000 + ETH_DHCP_KICK_MS), "DHCP restarted while link-local");
+    CHECK(!eth_dhcp_kick_due(ETH_MODE_DHCP, false, false, 0, 100000), "not before link-local (lwIP's own retries)");
+    CHECK(!eth_dhcp_kick_due(ETH_MODE_DHCP, true, true, 0, 100000), "not with a lease");
+    CHECK(!eth_dhcp_kick_due(ETH_MODE_SERVER, true, false, 0, 100000), "never in server mode");
+
     printf("%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;
 }

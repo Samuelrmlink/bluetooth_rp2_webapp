@@ -74,6 +74,16 @@ static int best_of(const upl_cand_t *c, int n) {
     return best;
 }
 
+/* The best eligible candidate that has proven itself (answered probes). */
+static int best_known(const upl_cand_t *c, int n) {
+    int best = -1;
+    for (int i = 0; i < n; i++) {
+        if (!upl_eligible(&c[i]) || !upl_known(&c[i])) { continue; }
+        if (best < 0 || upl_metric(&c[i]) < upl_metric(&c[best])) { best = i; }
+    }
+    return best;
+}
+
 int upl_choose(upl_policy_t pol, int fixed, upl_cand_t *c, int n, int active,
                uint32_t now, const char **why) {
     static const char *const none = "";
@@ -88,7 +98,14 @@ int upl_choose(upl_policy_t pol, int fixed, upl_cand_t *c, int n, int active,
     bool active_ok = active >= 0 && active < n && upl_eligible(&c[active]);
     if (!active_ok) {
         for (int i = 0; i < n; i++) { c[i].better_since = 0; }
-        int b = best_of(c, n);
+        bool have_active = active >= 0 && active < n && c[active].has_gw;
+        /* Leaving a FAILED uplink for one nothing is known about is a coin
+         * toss that can strand the tunnel on a link with no way out (seen:
+         * w0's probes failed, e0 had just got a gateway with no internet
+         * behind it, the policy moved to it, and then e0 failed too). So a
+         * failover target must have answered probes; only the very first
+         * pick, with nothing active, may go by priority alone. */
+        int b = have_active ? best_known(c, n) : best_of(c, n);
         if (b < 0) {
             /* Every probe is failing everywhere: the target is more likely
              * down (or drops ICMP) than every uplink at once. Do not flap,
