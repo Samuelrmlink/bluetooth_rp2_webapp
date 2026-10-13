@@ -74,6 +74,15 @@
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
+/* Link-local (AutoIP, RFC 3927) for the Ethernet port when no DHCP server
+   answers. It pulls in ACD (address conflict detection, which AutoIP needs);
+   the DHCP client's own ACD check above stays off, so WiFi and USB-NCM DHCP
+   behave exactly as before. LWIP_DHCP_AUTOIP_COOP is deliberately NOT used:
+   it is global, and would start AutoIP on the WiFi station too whenever its
+   DHCP was slow. src/net/eth_w5500.c cooperates for e0 alone instead. */
+#if CONFIG_NET_ETH_W5500
+#define LWIP_AUTOIP                 1
+#endif
 
 /* mDNS multicasts to 224.0.0.251 — needs IGMP group membership on the
  * netif to actually receive queries, not just an AP-multicast leftover. */
@@ -153,6 +162,20 @@ struct ip4_addr;
 struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr *dest);
 #define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) uplink_route_src((src), (dest))
 #endif
-#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
+/* lwIP's own count covers the core protocols only. Beyond it:
+     - the mDNS responder keeps up to MDNS_TIMEOUTS_PER_NETIF timeouts on
+       EVERY netif it is bound to (probe/announce, the three multicast rate
+       timers, delayed multicast and unicast replies), all armed at once
+       while a service is re-probed -- and it is bound to up to MDNS_NETIFS
+       (NCM, WiFi STA, AP, Ethernet);
+     - WireGuard, the mDNS group re-announce, and a few for luck.
+   MEASURED, the hard way: at +8 the pool ran dry when a script re-added an
+   mDNS service while another was still announcing (two netifs), and
+   sys_timeout() panics on an empty pool -- a HardFault + watchdog reboot on
+   a board without a debugger. It reproduced on fw 1.97. ~16 B each. */
+#define MDNS_TIMEOUTS_PER_NETIF     7
+#define MDNS_TIMEOUT_NETIFS         4
+#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8 + \
+                                     MDNS_TIMEOUT_NETIFS * MDNS_TIMEOUTS_PER_NETIF)
 
 #endif

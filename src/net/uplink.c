@@ -67,7 +67,7 @@ static cand_t cands[] = {
     { .name = "w0", .kind = "wifi", .get = wifi_uplink_netif },
 #endif
 #if CONFIG_NET_ETH_W5500
-    { .name = "e0", .kind = "ethernet", .get = eth_netif },
+    { .name = "e0", .kind = "ethernet", .get = eth_uplink_netif },
 #endif
 };
 #define N_CANDS ((int)(sizeof cands / sizeof cands[0]))

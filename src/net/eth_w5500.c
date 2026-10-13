@@ -32,6 +32,9 @@
 #include "lwip/dhcp.h"
 #include "lwip/pbuf.h"
 #include "lwip/igmp.h"
+#include "lwip/autoip.h"
+#include "lwip/acd.h"
+#include "dhcpserver.h"
 #include "netif/ethernet.h"
 
 #include "io/spibus.h"
@@ -41,6 +44,7 @@
 #include "api/api.h"
 #include "api/ops.h"
 #include "config/config.h"
+#include "net/eth_cfg.h"
 
 #define ETH_CFG_PATH "cfg/eth.json"
 #define ETH_TXQ 6
@@ -54,15 +58,30 @@ static uint8_t tx_head, tx_count;
 static uint32_t txq_full, tx_dropped, rx_nomem;
 static struct pbuf *rx_p;
 
-/* Config: what is saved, and what is staged by eth.config for the loop. */
-typedef struct {
-    bool manual;
-    ip4_addr_t ip, mask, gw, dns;
-} eth_cfg_t;
+/* Config: what is saved, and what eth.config staged for the loop. */
 static eth_cfg_t cfg, staged;
 static bool staged_pending, cfg_dirty;
 
 static bool had_addr;
+static uint32_t ll_since;     /* link up, or lease lost: when DHCP was left alone */
+static bool ll_active;        /* AutoIP started */
+static bool had_lease;
+static uint32_t ll_starts, leases;
+static dhcp_server_t dsrv;
+static bool srv_on;
+
+static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
+
+static void ll_stop(void) {
+    if (!ll_active) { return; }
+    ll_active = false;
+    autoip_stop(&eth_if);           /* clears the address if it was link-local */
+    /* lwIP 2.2.1's autoip_stop() leaves its ACD defending the old 169.254
+     * address; stop that too, or a later conflict on it would knock a DHCP
+     * lease off the interface. */
+    struct autoip *a = netif_autoip_data(&eth_if);
+    if (a) { acd_stop(&a->acd); }
+}
 
 /* --- chip callbacks (main loop) ------------------------------------------ */
 
@@ -114,8 +133,13 @@ static void on_link(void *ctx, bool up, int speed, bool full) {
     (void)ctx;
     printf("eth: link %s%s\n", up ? "up " : "down", up ? (speed == 100 ? (full ? "100/full" : "100/half")
                                                         : (full ? "10/full" : "10/half")) : "");
-    if (up) { netif_set_link_up(&eth_if); }
-    else { netif_set_link_down(&eth_if); }
+    if (up) {
+        netif_set_link_up(&eth_if);     /* lwIP restarts DHCP itself */
+        ll_since = now_ms();            /* DHCP first, link-local later */
+    } else {
+        ll_stop();
+        netif_set_link_down(&eth_if);
+    }
     emit_state();
     uplink_reselect();
 }
@@ -149,84 +173,60 @@ static err_t eth_netif_init(struct netif *netif) {
 
 /* --- config -------------------------------------------------------------- */
 
-static bool parse_ip(const char *json, const char *key, ip4_addr_t *out, bool required) {
-    char s[24];
-    if (!api_json_str(json, key, s, sizeof s) || !s[0]) {
-        ip4_addr_set_zero(out);
-        return !required;
-    }
-    return ip4addr_aton(s, out) != 0;
-}
-
-static bool mask_ok(const ip4_addr_t *m) {
-    uint32_t v = lwip_ntohl(ip4_addr_get_u32(m));
-    return v != 0 && ((~v + 1) & ~v) == 0;    /* contiguous ones */
-}
-
-static bool parse_cfg(const char *json, eth_cfg_t *c, const char **why) {
-    char mode[12] = "dhcp";
-    api_json_str(json, "mode", mode, sizeof mode);
-    memset(c, 0, sizeof *c);
-    if (strcmp(mode, "dhcp") == 0) {
-        /* Keep any manual fields so switching back restores them in the UI. */
-        parse_ip(json, "ip", &c->ip, false);
-        parse_ip(json, "mask", &c->mask, false);
-        parse_ip(json, "gw", &c->gw, false);
-        parse_ip(json, "dns", &c->dns, false);
-        return true;
-    }
-    if (strcmp(mode, "manual") != 0) { *why = "mode is dhcp or manual"; return false; }
-    c->manual = true;
-    if (!parse_ip(json, "ip", &c->ip, true) || ip4_addr_isany_val(c->ip)) { *why = "manual needs a valid ip"; return false; }
-    if (!parse_ip(json, "mask", &c->mask, true) || !mask_ok(&c->mask)) { *why = "manual needs a valid mask"; return false; }
-    if (!parse_ip(json, "gw", &c->gw, false)) { *why = "gw is not an address"; return false; }
-    if (!ip4_addr_isany_val(c->gw) && !ip4_addr_net_eq(&c->gw, &c->ip, &c->mask)) {
-        *why = "gw is not on the ip/mask subnet"; return false;
-    }
-    if (!parse_ip(json, "dns", &c->dns, false)) { *why = "dns is not an address"; return false; }
-    return true;
-}
+static void to_ip4(const uint8_t a[4], ip4_addr_t *o) { IP4_ADDR(o, a[0], a[1], a[2], a[3]); }
 
 static void load_cfg(void) {
     static char buf[256];
-    memset(&cfg, 0, sizeof cfg);
-    if (!cfg_file_read(ETH_CFG_PATH, buf, sizeof buf)) { return; }
-    const char *why = NULL;
-    if (!parse_cfg(buf, &cfg, &why)) {
-        printf("eth: %s ignored (%s), using DHCP\n", ETH_CFG_PATH, why);
-        memset(&cfg, 0, sizeof cfg);
-    }
+    bool have = cfg_file_read(ETH_CFG_PATH, buf, sizeof buf);
+    eth_cfg_load(have ? buf : NULL, &cfg);       /* anything wrong -> DHCP client */
+    if (have) { printf("eth: %s -> mode %s\n", ETH_CFG_PATH, eth_mode_name(cfg.mode)); }
 }
 
 static void save_cfg(void) {
-    char b[200], ip[16], m[16], g[16], d[16];
-    ip4addr_ntoa_r(&cfg.ip, ip, sizeof ip);
-    ip4addr_ntoa_r(&cfg.mask, m, sizeof m);
-    ip4addr_ntoa_r(&cfg.gw, g, sizeof g);
-    ip4addr_ntoa_r(&cfg.dns, d, sizeof d);
-    snprintf(b, sizeof b, "{\"mode\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"dns\":\"%s\"}",
-             cfg.manual ? "manual" : "dhcp",
-             ip4_addr_isany_val(cfg.ip) ? "" : ip, ip4_addr_isany_val(cfg.mask) ? "" : m,
-             ip4_addr_isany_val(cfg.gw) ? "" : g, ip4_addr_isany_val(cfg.dns) ? "" : d);
+    char b[200];
+    eth_cfg_json(&cfg, b, sizeof b);
     if (cfg_file_write(ETH_CFG_PATH, b)) { cfg_dirty = false; }
 }
 
 static void apply_cfg(void) {
     if (!netif_added) { return; }
-    if (cfg.manual) {
+    if (srv_on) { dhcp_server_deinit(&dsrv); srv_on = false; }
+    ll_stop();
+    ip4_addr_t ip, mask, gw;
+    to_ip4(cfg.ip, &ip); to_ip4(cfg.mask, &mask); to_ip4(cfg.gw, &gw);
+    switch (cfg.mode) {
+    case ETH_MODE_MANUAL:
         dhcp_release_and_stop(&eth_if);
-        netif_set_addr(&eth_if, &cfg.ip, &cfg.mask, &cfg.gw);
-        printf("eth: manual %s\n", ip4addr_ntoa(&cfg.ip));
-    } else {
+        netif_set_addr(&eth_if, &ip, &mask, &gw);
+        printf("eth: manual %s\n", ip4addr_ntoa(&ip));
+        break;
+    case ETH_MODE_SERVER: {
+        dhcp_release_and_stop(&eth_if);
+        netif_set_addr(&eth_if, &ip, &mask, IP4_ADDR_ANY4);   /* no gateway: never an uplink */
+        ip_addr_t sip, smask;
+        ip_addr_copy_from_ip4(sip, ip);
+        ip_addr_copy_from_ip4(smask, mask);
+        dhcp_server_init(&dsrv, &eth_if, &sip, &smask);
+        /* No router/DNS option unless asked: the gateway does no routing, so
+         * a PC on this cable must keep its own default route. */
+        dsrv.no_router = !cfg.dhcp_router;
+        srv_on = true;
+        printf("eth: DHCP server on %s%s\n", ip4addr_ntoa(&ip),
+               cfg.dhcp_router ? " (advertising itself as router)" : "");
+        break;
+    }
+    default:
         netif_set_addr(&eth_if, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4);
         dhcp_start(&eth_if);
-        printf("eth: DHCP\n");
+        ll_since = now_ms();
+        printf("eth: DHCP client (link-local after %u s without a lease)\n", ETH_LL_AFTER_MS / 1000);
+        break;
     }
 }
 
 bool eth_configure(const char *json, const char **why) {
     eth_cfg_t c;
-    if (!parse_cfg(json, &c, why)) { return false; }
+    if (!eth_cfg_parse(json, &c, why)) { return false; }
     staged = c;
     staged_pending = true;
     return true;
@@ -309,6 +309,25 @@ void eth_poll(void) {
         if (!w5500_step(&chip, now)) { break; }
     }
 
+    /* DHCP mode: link-local beside DHCP when no lease comes; a lease
+     * replaces it; a lost lease starts the wait again. */
+    if (cfg.mode == ETH_MODE_DHCP && netif_added) {
+        uint32_t now = now_ms();
+        bool lease = dhcp_supplied_address(&eth_if);
+        if (lease != had_lease) {
+            had_lease = lease;
+            if (lease) { leases++; ll_stop(); printf("eth: DHCP lease %s\n", ip4addr_ntoa(netif_ip4_addr(&eth_if))); }
+            else { ll_since = now; }
+        }
+        if (eth_ll_due(cfg.mode, chip.link_up, lease, ll_active, ll_since, now)) {
+            ll_active = true;
+            ll_starts++;
+            printf("eth: no DHCP lease after %u s -- adding link-local (DHCP keeps trying)\n",
+                   ETH_LL_AFTER_MS / 1000);
+            autoip_start(&eth_if);
+        }
+    }
+
     bool has = !ip4_addr_isany_val(*netif_ip4_addr(&eth_if)) && netif_is_link_up(&eth_if);
     if (has != had_addr) {
         had_addr = has;
@@ -323,15 +342,35 @@ void eth_poll(void) {
     }
 }
 
+static const char *addr_source(void) {
+    if (!netif_added || ip4_addr_isany_val(*netif_ip4_addr(&eth_if))) { return "none"; }
+    if (cfg.mode == ETH_MODE_MANUAL) { return "manual"; }
+    if (cfg.mode == ETH_MODE_SERVER) { return "server"; }
+    if (dhcp_supplied_address(&eth_if)) { return "dhcp"; }
+    if (ip4_addr_islinklocal(netif_ip4_addr(&eth_if))) { return "link-local"; }
+    return "dhcp";
+}
+
+/* For uplink.c: e0 as a candidate. Never in server mode (it has no gateway
+ * then anyway; this makes it explicit). */
+struct netif *eth_uplink_netif(void) {
+    return (present && cfg.mode != ETH_MODE_SERVER) ? &eth_if : NULL;
+}
+
+static void fmt4(const uint8_t a[4], char *s, size_t cap) {
+    if (!(a[0] | a[1] | a[2] | a[3])) { s[0] = 0; return; }
+    snprintf(s, cap, "%u.%u.%u.%u", a[0], a[1], a[2], a[3]);
+}
+
 size_t eth_status_json(char *dst, size_t cap) {
     char ip[16], m[16], g[16], d[16], cip[16], cm[16], cg[16];
     ip4addr_ntoa_r(netif_ip4_addr(&eth_if), ip, sizeof ip);
     ip4addr_ntoa_r(netif_ip4_netmask(&eth_if), m, sizeof m);
     ip4addr_ntoa_r(netif_ip4_gw(&eth_if), g, sizeof g);
-    ip4addr_ntoa_r(&cfg.dns, d, sizeof d);
-    ip4addr_ntoa_r(&cfg.ip, cip, sizeof cip);
-    ip4addr_ntoa_r(&cfg.mask, cm, sizeof cm);
-    ip4addr_ntoa_r(&cfg.gw, cg, sizeof cg);
+    fmt4(cfg.dns, d, sizeof d);
+    fmt4(cfg.ip, cip, sizeof cip);
+    fmt4(cfg.mask, cm, sizeof cm);
+    fmt4(cfg.gw, cg, sizeof cg);
     const struct dhcp *dh = netif_added ? netif_dhcp_data(&eth_if) : NULL;
     const uint8_t *mac = chip.mac;
     return (size_t)snprintf(dst, cap,
@@ -342,22 +381,24 @@ size_t eth_status_json(char *dst, size_t cap) {
         "\"rx_frames\":%lu,\"tx_frames\":%lu,\"rx_bytes\":%lu,\"tx_bytes\":%lu,"
         "\"rx_dropped\":%lu,\"rx_nomem\":%lu,\"tx_dropped\":%lu,\"txq_full\":%lu,"
         "\"resyncs\":%lu,\"tx_timeouts\":%lu,\"bus_busy\":%lu,"
+        "\"addr_source\":\"%s\",\"link_local_starts\":%lu,\"leases\":%lu,\"dhcp_router\":%s,"
         "\"is_default_route\":%s}",
         present ? "true" : "false", chip.link_up ? "true" : "false", chip.speed,
         chip.link_up ? (chip.full_duplex ? "full" : "half") : "",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
-        cfg.manual ? "manual" : "dhcp",
+        eth_mode_name(cfg.mode),
         present ? ip : "", present ? m : "", present ? g : "",
-        ip4_addr_isany_val(cfg.dns) ? "" : d,
+        d,
         dh ? (int)dh->state : -1,
-        ip4_addr_isany_val(cfg.ip) ? "" : cip, ip4_addr_isany_val(cfg.mask) ? "" : cm,
-        ip4_addr_isany_val(cfg.gw) ? "" : cg, ip4_addr_isany_val(cfg.dns) ? "" : d,
+        cip, cm, cg, d,
         (unsigned long)chip.rx_frames, (unsigned long)chip.tx_frames,
         (unsigned long)chip.rx_bytes, (unsigned long)chip.tx_bytes,
         (unsigned long)chip.rx_dropped, (unsigned long)rx_nomem,
         (unsigned long)tx_dropped, (unsigned long)txq_full,
         (unsigned long)chip.resyncs, (unsigned long)chip.tx_timeouts,
         (unsigned long)chip.bus_busy,
+        addr_source(), (unsigned long)ll_starts, (unsigned long)leases,
+        cfg.dhcp_router ? "true" : "false",
         (netif_added && netif_default == &eth_if) ? "true" : "false");
 }
 

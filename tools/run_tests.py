@@ -307,6 +307,72 @@ def t_fwd_released_with_script():
         return False, "net.forward does not record its owner"
     return True, "per script and on VM restart"
 
+def t_sys_timeout_pool_covers_mdns():
+    """MEMP_NUM_SYS_TIMEOUT must cover the mDNS responder's per-netif timers on
+    every netif it can be bound to. At LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8 the
+    pool ran dry when a service was re-added while another announced, and
+    sys_timeout() panics on an empty pool (HardFault, watchdog reboot)."""
+    o = open(os.path.join(ROOT, "include/lwipopts.h")).read()
+    m = re.search(r"#define\s+MDNS_TIMEOUT_NETIFS\s+(\d+)", o)
+    k = re.search(r"#define\s+MDNS_TIMEOUTS_PER_NETIF\s+(\d+)", o)
+    if not m or not k or "MDNS_TIMEOUT_NETIFS * MDNS_TIMEOUTS_PER_NETIF" not in o:
+        return False, "MEMP_NUM_SYS_TIMEOUT no longer reserves mDNS's per-netif timers"
+    c = open(os.path.join(ROOT, "src/net/mdns.c")).read()
+    nn = re.search(r"#define\s+MDNS_NETIFS\s+(\d+)", c)
+    if not nn or int(m.group(1)) < int(nn.group(1)):
+        return False, "fewer netifs reserved for than mdns.c can bind"
+    if int(k.group(1)) < 6:
+        return False, "lwIP mDNS uses up to 6 timeouts per netif"
+    return True, f"{m.group(1)} netifs x {k.group(1)} mDNS timeouts reserved"
+
+def t_eth_cfg():
+    """Ethernet addressing config: a missing/corrupt/unknown cfg is the DHCP
+    client, server mode only from an explicit {"mode":"server"}, link-local
+    only after the DHCP-alone window."""
+    rc, _ = sh("echo 'int main(){}' | gcc -fsanitize=address,undefined -x c - -o /dev/null 2>/dev/null")
+    san = "-fsanitize=address,undefined" if rc == 0 else ""
+    return _host_c("eth_cfg", ["test/host/eth_cfg_test.c", "src/net/eth_cfg.c"], "btgw_eth_cfg", defs=san)
+
+def t_eth_server_mode_only_explicit():
+    """The owner's rule: DHCP-server mode on e0 is NEVER entered on its own.
+    The only code that may produce ETH_MODE_SERVER is eth_cfg_parse() (reached
+    from the eth.config op and from loading cfg/eth.json); nothing else may
+    assign it -- not a DHCP failure path, the uplink logic, Lua or a Kconfig
+    default -- and the boot-time load must fall back to the default."""
+    hits = []
+    for root, _, files in os.walk(os.path.join(ROOT, "src")):
+        for fn in files:
+            if not fn.endswith((".c", ".h")):
+                continue
+            path = os.path.join(root, fn)
+            for i, line in enumerate(open(path), 1):
+                code = line.split("//")[0]
+                # an assignment (or initialiser), not a comparison
+                if re.search(r"(?<![=!<>])=\s*ETH_MODE_SERVER\b", code):
+                    hits.append(f"{os.path.relpath(path, ROOT)}:{i}")
+    rel = [h for h in hits if not h.startswith("src/net/eth_cfg.c:")]
+    if rel:
+        return False, f"ETH_MODE_SERVER assigned outside eth_cfg.c: {rel[0]}"
+    c = open(os.path.join(ROOT, "src/net/eth_cfg.c")).read()
+    body = c[c.index("bool eth_cfg_parse("):c.index("void eth_cfg_load(")]
+    if len(hits) != 1 or "ETH_MODE_SERVER" not in body or 'strcmp(mode, "server") == 0' not in body:
+        return False, "server mode must be set exactly once, in eth_cfg_parse, on an explicit \"server\""
+    load = c[c.index("void eth_cfg_load("):]
+    if "eth_cfg_default(out)" not in load[:load.index("\n}\n")]:
+        return False, "eth_cfg_load no longer falls back to the default"
+    if "eth_cfg_load(" not in open(os.path.join(ROOT, "src/net/eth_w5500.c")).read():
+        return False, "eth_w5500.c does not load its config through eth_cfg_load"
+    for f in ("src/lua/lbind.c", "src/net/uplink.c", "src/net/wifi.c"):
+        if "ETH_MODE_SERVER" in open(os.path.join(ROOT, f)).read():
+            return False, f"{f} refers to ETH_MODE_SERVER"
+    d = open(os.path.join(ROOT, "src/net/dhcpserver.c")).read()
+    if "if (!d->no_router)" not in d:
+        return False, "dhcpserver.c always sends the router option"
+    for f in ("src/net/usb_ncm.c", "src/net/wifi.c"):
+        if "no_router" in open(os.path.join(ROOT, f)).read():
+            return False, f"{f} changed its DHCP server's router option"
+    return True, "only eth_cfg_parse sets it; bad config -> DHCP client; NCM/AP offers unchanged"
+
 def t_wifi_mode_both_everywhere():
     """A mode that the config accepts must also be offered by the UI and named
     in the API's error text, or it exists in one place and is undiscoverable
@@ -854,6 +920,9 @@ def main():
     step(0, "mDNS record groups: encoding and answering", t_mdns_records)
     step(0, "vendored lwIP mDNS carries only the hook", t_lwip_mdns_vendored)
     step(0, "a script's mDNS declarations go when it stops", t_lua_net_released)
+    step(0, "the lwIP timeout pool covers mDNS on every netif", t_sys_timeout_pool_covers_mdns)
+    step(0, "Ethernet config: bad -> DHCP client, link-local timing", t_eth_cfg)
+    step(0, "Ethernet DHCP-server mode is only ever explicit", t_eth_server_mode_only_explicit)
     step(0, "forwarding: sessions, fail fast, backpressure", t_fwd_core)
     step(0, "a script's forwarding rules go when it stops", t_fwd_released_with_script)
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)

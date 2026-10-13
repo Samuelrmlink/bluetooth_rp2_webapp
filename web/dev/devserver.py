@@ -221,7 +221,8 @@ ETH_BASE = {"present": True, "link": True, "speed": 100, "duplex": "full",
             "cfg": {"ip": "", "mask": "", "gw": "", "dns": ""},
             "rx_frames": 1520, "tx_frames": 1311, "rx_bytes": 402113, "tx_bytes": 210877,
             "rx_dropped": 0, "rx_nomem": 0, "tx_dropped": 0, "txq_full": 0,
-            "resyncs": 0, "tx_timeouts": 0, "bus_busy": 3, "is_default_route": False}
+            "resyncs": 0, "tx_timeouts": 0, "bus_busy": 3, "addr_source": "dhcp",
+            "link_local_starts": 0, "leases": 1, "dhcp_router": False, "is_default_route": False}
 
 def _ip_ok(s):
     parts = str(s or "").split(".")
@@ -239,9 +240,18 @@ def eth_configure(p):
     if mode == "dhcp":
         e["mode"] = "dhcp"
         e["cfg"] = {k: p.get(k, "") or "" for k in ("ip", "mask", "gw", "dns")}
-        e.update(ip="192.168.50.23", mask="255.255.255.0", gw="192.168.50.1", dns=e["cfg"]["dns"])
+        e.update(ip="192.168.50.23", mask="255.255.255.0", gw="192.168.50.1", dns=e["cfg"]["dns"], addr_source="dhcp")
         return {"staged": True}
-    if mode != "manual": raise ApiError("bad_request", "mode is dhcp or manual")
+    if mode == "server":
+        ip = p.get("ip") or "192.168.9.1"; mask = p.get("mask") or "255.255.255.0"
+        if not _ip_ok(ip) or not _ip_ok(mask): raise ApiError("bad_request", "an address field is not a dotted IPv4 address")
+        last = int(ip.split(".")[3])
+        if last in (0, 255) or 16 <= last < 24:
+            raise ApiError("bad_request", "server address must not be .0, .255 or in the .16-.23 lease range")
+        e.update(mode="server", ip=ip, mask=mask, gw="0.0.0.0", addr_source="server",
+                 dhcp_router=bool(p.get("dhcp_router")), cfg={"ip": ip, "mask": mask, "gw": "", "dns": ""})
+        return {"staged": True}
+    if mode != "manual": raise ApiError("bad_request", "mode is dhcp, manual or server")
     ip, mask, gw, dns = (p.get(k, "") or "" for k in ("ip", "mask", "gw", "dns"))
     if not _ip_ok(ip) or _u32(ip) == 0: raise ApiError("bad_request", "manual needs a valid ip")
     if not _ip_ok(mask): raise ApiError("bad_request", "manual needs a valid mask")
@@ -250,7 +260,7 @@ def eth_configure(p):
     if gw and (not _ip_ok(gw) or (_u32(gw) & m) != (_u32(ip) & m)):
         raise ApiError("bad_request", "gw is not on the ip/mask subnet")
     if dns and not _ip_ok(dns): raise ApiError("bad_request", "dns is not an address")
-    e.update(mode="manual", ip=ip, mask=mask, gw=gw or "0.0.0.0", dns=dns,
+    e.update(mode="manual", addr_source="manual", ip=ip, mask=mask, gw=gw or "0.0.0.0", dns=dns,
              cfg={"ip": ip, "mask": mask, "gw": gw, "dns": dns})
     return {"staged": True}
 

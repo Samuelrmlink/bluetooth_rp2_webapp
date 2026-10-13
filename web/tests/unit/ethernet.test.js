@@ -22,6 +22,10 @@ test('the form is checked the way the firmware checks it', () => {
   assert.match(ethFormError({ mode: 'manual', ip: '10.0.0.2', mask: '255.255.255.0', gw: '10.0.1.1' }), /subnet/);
   assert.match(ethFormError({ mode: 'manual', ip: '10.0.0.2', mask: '255.255.255.0', dns: '1.1.1' }), /DNS/);
   assert.match(ethFormError({ mode: 'static' }), /mode/);
+  assert.equal(ethFormError({ mode: 'server', ip: '', mask: '' }), null, 'server with the defaults');
+  assert.equal(ethFormError({ mode: 'server', ip: '10.9.0.1', mask: '255.255.0.0' }), null);
+  assert.match(ethFormError({ mode: 'server', ip: '192.168.9.17', mask: '' }), /lease range/);
+  assert.match(ethFormError({ mode: 'server', ip: '192.168.9.1', mask: '255.255.255.240' }), /\/24/);
 });
 
 test('status rows', () => {
@@ -30,8 +34,12 @@ test('status rows', () => {
     ip: '192.168.50.23', mask: '255.255.255.0', gw: '192.168.50.1', rx_frames: 5, tx_frames: 4 }));
   assert.equal(up.State, 'up · 192.168.50.23');
   assert.equal(up.Link, '100 Mb/s full duplex');
-  assert.equal(up.Addressing, 'DHCP');
+  assert.equal(up.Addressing, 'DHCP client');
   const waiting = Object.fromEntries(ethRows({ present: true, link: true, speed: 100, duplex: 'full', mode: 'dhcp', ip: '0.0.0.0' }));
   assert.equal(waiting.State, 'link up, waiting for DHCP…');
   assert.equal(Object.fromEntries(ethRows({ present: true, link: false, mode: 'manual' })).State, 'no link (cable?)');
+  const ll = Object.fromEntries(ethRows({ present: true, link: true, speed: 100, duplex: 'full', mode: 'dhcp', ip: '169.254.7.9', mask: '255.255.0.0', addr_source: 'link-local' }));
+  assert.match(ll['Address from'], /^link-local/);
+  const srv = Object.fromEntries(ethRows({ present: true, link: true, speed: 100, duplex: 'full', mode: 'server', ip: '192.168.9.1', mask: '255.255.255.0', addr_source: 'server', dhcp_router: false }));
+  assert.equal(srv.Addressing, 'DHCP server');
 });

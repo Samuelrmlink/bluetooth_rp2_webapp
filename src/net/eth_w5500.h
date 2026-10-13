@@ -8,11 +8,14 @@
  * compiled, and with it on but no module fitted the chip probe fails, the
  * interface reports "not present", and nothing else is touched.
  *
- * Addressing comes from cfg/eth.json, written by eth.config:
+ * Addressing comes from cfg/eth.json, written by eth.config (see eth_cfg.h):
  *
- *   { "mode": "dhcp" }                                    (the default)
+ *   { "mode": "dhcp" }      the default: DHCP client, link-local (169.254/16)
+ *                           beside it when no server answers
  *   { "mode": "manual", "ip": "192.168.50.2", "mask": "255.255.255.0",
  *     "gw": "192.168.50.1", "dns": "1.1.1.1" }            (gw, dns optional)
+ *   { "mode": "server", "ip": "192.168.9.1", "mask": "255.255.255.0",
+ *     "dhcp_router": false }  e0 serves DHCP; only ever set explicitly
  *
  * It never calls netif_set_default(): which interface carries the default
  * route is src/net/uplink.c's decision alone.
@@ -35,6 +38,9 @@ void eth_poll(void);
 bool eth_present(void);
 /* The netif, or NULL when there is no chip. */
 struct netif *eth_netif(void);
+/* The netif as an uplink candidate: NULL with no chip, and in DHCP-server
+ * mode (e0 then serves a segment; it is nobody's way out). */
+struct netif *eth_uplink_netif(void);
 
 size_t eth_status_json(char *dst, size_t cap);
 
@@ -48,6 +54,7 @@ static inline bool eth_init(void) { return false; }
 static inline void eth_poll(void) {}
 static inline bool eth_present(void) { return false; }
 static inline struct netif *eth_netif(void) { return NULL; }
+static inline struct netif *eth_uplink_netif(void) { return NULL; }
 static inline size_t eth_status_json(char *d, size_t c) { (void)d; (void)c; return 0; }
 
 #endif

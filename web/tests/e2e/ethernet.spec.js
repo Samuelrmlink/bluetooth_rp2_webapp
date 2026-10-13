@@ -36,7 +36,7 @@ test('Manual shows the fields, rejects a gateway off the subnet, then applies', 
 
 test('reachable by keyboard alone: l to Manual, Space, j into the fields, Enter applies', async ({ page }) => {
   await ethernet(page);
-  await page.getByLabel('DHCP').focus();
+  await page.getByLabel('DHCP', { exact: true }).focus();
   await page.keyboard.press('l');                   // the app's nav: next control to the right
   await expect(page.getByLabel('Manual')).toBeFocused();
   await page.keyboard.press('Space');
@@ -48,6 +48,20 @@ test('reachable by keyboard alone: l to Manual, Space, j into the fields, Enter 
   await page.keyboard.type('255.255.255.0');
   await page.keyboard.press('Enter');
   await expect(page.locator('.eth-note')).toHaveText('applied: 192.168.60.5');
+});
+
+test('DHCP server is a choice only: the router box defaults off and applies', async ({ page }) => {
+  await ethernet(page);
+  await expect(page.locator('.eth-status')).toContainText('DHCP client');
+  await page.getByLabel('DHCP server').check();
+  await expect(page.getByLabel('Advertise as router and DNS')).not.toBeChecked();
+  await expect(page.getByLabel('Gateway')).toBeHidden();
+  await page.getByRole('button', { name: 'Apply' }).click();
+  await expect(page.locator('.eth-note')).toHaveText('applied: DHCP server on 192.168.9.1');
+  const st = await page.evaluate(() => window.__btgwApp.ws.call('eth.status'));
+  expect(st.mode).toBe('server');
+  expect(st.dhcp_router).toBe(false);
+  await expect(page.locator('.eth-status')).toContainText('static, serving DHCP');
 });
 
 test('no module fitted reads "not present"; unplugged reads "no link"', async ({ page }) => {

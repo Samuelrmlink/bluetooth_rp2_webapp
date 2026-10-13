@@ -3,6 +3,7 @@
 
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
+#include <stdbool.h>
 
 struct pbuf;
 
@@ -19,6 +20,10 @@ typedef struct {
     dhcp_lease_t lease[DHCP_SERVER_MAX_LEASES];
     struct udp_pcb *udp;
     struct netif *nif;
+    /* Leave the router and DNS options out of offers. Zero (the default for
+     * USB-NCM and the SoftAP) keeps them -- this server's own address -- as
+     * it always did; Ethernet's server mode sets it unless dhcp_router. */
+    bool no_router;
 } dhcp_server_t;
 
 void dhcp_server_init(dhcp_server_t *d, struct netif *nif, const ip_addr_t *ip, const ip_addr_t *nm);
