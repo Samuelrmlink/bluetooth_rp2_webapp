@@ -223,6 +223,29 @@ its default route and DNS were untouched.
 | mDNS service churn (the 1.97 HardFault) | 20 script stop/start cycles + 30 back-to-back replacements, no fault (was: crash within 1-5 cycles) |
 | C1000 (BLE) | connect, GCM negotiation, A1761 telemetry; setters light bar on/off and screen off/on read back through telemetry, all restored |
 
+### Soak and Bluetooth coexistence
+
+The C1000 (BLE, GCM, A1761 telemetry) streamed throughout, with e0 under
+load (HTTP of a ~10 KB asset every 0.3 s over link-local, plus a 5 Hz ping),
+HTTP over WiFi every 3 s, WireGuard keepalives and the 2 s uplink probes:
+
+| run | build | length | result |
+|---|---|---|---|
+| soak 1 | 1.140 | 20 min | no reboot, heap flat (0 alloc fails), telemetry every minute, 3,422/3,422 e0 requests; WiFi lost its link twice (see below) |
+| A: C1000, no load | 1.140 | 20 min | WiFi steady |
+| C: C1000 + HTTP load over USB-NCM | 1.140 | 20 min | WiFi steady, 3,438 requests, no loop stalls |
+| D: C1000 + HTTP load over e0 | 1.140 | 20 min | WiFi steady, 3,471 requests, no loop stalls |
+| E: C1000 + HTTP over WiFi | 1.140 | 20 min | WiFi steady |
+| soak 2 (as soak 1) | 1.140 | 30 min | all steady: 5,160 e0 + 558 WiFi requests, 0 failures, WireGuard confirmed throughout |
+| soak 3, final build | 1.142 | 30 min | see the end of the run below; BLE scan under the full load: 299 results with the C1000 link up |
+
+Soak 1's two WiFi drops did not reproduce under any one of the loads, nor
+under all of them together for 30 minutes (soak 2), so they look
+environmental; they clustered between 03:00 and 03:45 with the silent drop
+noted above. While a BLE link is held the existing WiFi policy does not
+rejoin (a join under BLE wedges the driver), so such a drop lasts until the
+firmware reassociates or the BLE link drops -- unchanged behaviour.
+
 Not possible on this rig, owner-gated:
 * **PC shared mode (e0 DHCP lease, e0 as a real uplink, WireGuard over
   Ethernet, the switch experiment)**: the PC's UFW drops inbound DHCP
