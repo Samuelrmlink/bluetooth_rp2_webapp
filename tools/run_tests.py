@@ -231,6 +231,62 @@ def t_wg_tx_netif_local_change():
         return False, "VENDORED.txt does not record the change"
     return True, "egress via tx_netif, keepalive on switch, recorded"
 
+def t_mdns_records():
+    """mDNS record groups: the table, the wire encoding (A/PTR/SRV/TXT,
+    cache-flush, TTLs, additionals), answering incl. compression pointers,
+    QU and legacy unicast, announce/goodbye, limits -- under ASan/UBSan
+    where the compiler has them."""
+    rc, _ = sh("echo 'int main(){}' | gcc -fsanitize=address,undefined -x c - -o /dev/null 2>/dev/null")
+    san = "-fsanitize=address,undefined" if rc == 0 else ""
+    return _host_c("mdns", ["test/host/mdns_test.c", "src/net/mdns_records.c"], "btgw_mdns", defs=san)
+
+def t_lwip_mdns_vendored():
+    """third_party/lwip-mdns is lwIP 2.2.1's responder with ONE local change:
+    mdns_out.c and mdns_domain.c byte-identical to the SDK's, and mdns.c
+    different only by the hook (every differing line is inside a LOCAL
+    CHANGE block). A drifted copy would silently fork lwIP."""
+    import difflib
+    sdk = os.path.expanduser("~/.pico-sdk/sdk/2.3.0/lib/lwip/src/apps/mdns")
+    if not os.path.isdir(sdk):
+        return True, "skipped (no SDK checkout to compare against)"
+    for f in ("mdns_out.c", "mdns_domain.c"):
+        if open(os.path.join(sdk, f), "rb").read() != open(os.path.join(ROOT, "third_party/lwip-mdns", f), "rb").read():
+            return False, f"{f} differs from lwIP 2.2.1"
+    a = open(os.path.join(sdk, "mdns.c")).read().splitlines()
+    b = open(os.path.join(ROOT, "third_party/lwip-mdns/mdns.c")).read().splitlines()
+    added = [l for l in difflib.unified_diff(a, b, lineterm="", n=0)
+             if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))]
+    if any(l.startswith("-") for l in added):
+        return False, "mdns.c removes upstream lines"
+    allowed = ("btgw", "LOCAL CHANGE", "/*", "*", "*/", "if (packet.questions)", "}", "")
+    for l in added:
+        t = l[1:].strip()
+        if not (t.startswith(allowed[:-1]) or t in allowed or "btgw_mdns_query_hook" in t
+                or t.startswith(("u16_t port", "void btgw"))):
+            return False, f"unrecorded change: {t[:60]}"
+    if "btgw_mdns_query_hook" not in open(os.path.join(ROOT, "third_party/lwip-mdns/VENDORED.txt")).read():
+        return False, "VENDORED.txt does not describe the hook"
+    return True, f"2 files identical, mdns.c +{len(added)} lines (the hook)"
+
+def t_lua_net_released():
+    """What a script declares on the network goes when it stops: mDNS services
+    (they used to leak for the life of the boot) and record groups, per slot
+    and on a VM restart."""
+    c = open(os.path.join(ROOT, "src/lua/lbind.c")).read()
+    i = c.find("static void lbind_release_net(int slot) {")
+    rel = c[i:c.find("\n}\n", i)] if i >= 0 else ""
+    if "mdns_release_owner(slot)" not in rel:
+        return False, "lbind_release_net does not release mDNS"
+    ops = c[c.index("int lbind_release_ops(int slot)"):]
+    if "lbind_release_net(slot)" not in ops[:ops.index("\n}\n")]:
+        return False, "lbind_release_ops does not call lbind_release_net"
+    reset = _fn_body(c, "lbind_reset")
+    if not reset or "mdns_release_all_owned()" not in reset:
+        return False, "lbind_reset does not release every script's mDNS"
+    if "mdns_service_add_owned(lrt_current_slot()" not in c:
+        return False, "mdns.service does not record its owner"
+    return True, "services + groups released per script and on VM restart"
+
 def t_wifi_mode_both_everywhere():
     """A mode that the config accepts must also be offered by the UI and named
     in the API's error text, or it exists in one place and is undiscoverable
@@ -775,6 +831,9 @@ def main():
     step(0, "only uplink.c sets the default route", t_only_uplink_sets_default)
     step(0, "uplink metrics and policy from scripted pings", t_uplink_policy)
     step(0, "WireGuard egress LOCAL CHANGE in place and recorded", t_wg_tx_netif_local_change)
+    step(0, "mDNS record groups: encoding and answering", t_mdns_records)
+    step(0, "vendored lwIP mDNS carries only the hook", t_lwip_mdns_vendored)
+    step(0, "a script's mDNS declarations go when it stops", t_lua_net_released)
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
     step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
     step(0, "OTA flash layout is consistent", t_ota_partition_layout)

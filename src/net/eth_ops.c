@@ -8,16 +8,18 @@
 #include <stdio.h>
 
 #include "api/ops.h"
+#include "api/api.h"
 #include "net/eth_w5500.h"
 #include "autoconf.h"
 
 #if CONFIG_NET_ETH_W5500
 
-static char buf[640];
+/* The shared scratch buffer (api.h). */
+#define buf api_scratch()
 
 static void op_eth_status(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
-    eth_status_json(buf, sizeof buf);
+    eth_status_json(buf, api_scratch_size());
     api_reply_ok(reply, ctx, id, buf);
 }
 

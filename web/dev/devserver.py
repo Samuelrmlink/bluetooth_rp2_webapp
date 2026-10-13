@@ -541,6 +541,12 @@ class MockGateway:
             return uplink_policy(p)
         if op == "uplink.switch":
             return uplink_switch(p.get("iface", ""))
+        if op == "mdns.status":
+            return {"hostname": "bluetooth-rp2-webapp", "fqdn": "bluetooth-rp2-webapp.local", "netifs": 2,
+                    "services": [{"instance": "bluetooth-rp2-webapp", "type": "_http", "proto": "tcp",
+                                  "port": 80, "owner": -1, "txt": ["path=/"]}]}
+        if op == "mdns.groups":
+            return {"groups": STATE.get("mdns_groups", [])}
         if op == "test.eth":                        # mock only: unplug the cable, pull the module
             if isinstance(p.get("set"), dict): STATE["eth"].update(p["set"])
             return STATE["eth"]

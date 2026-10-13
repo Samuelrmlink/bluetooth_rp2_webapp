@@ -244,8 +244,13 @@ if(CONFIG_OTA)
 endif()
 
 if(CONFIG_NET_MDNS)
-    target_sources(btgw PRIVATE src/net/mdns.c)
-    target_link_libraries(btgw pico_lwip_mdns)
+    # lwIP's responder, vendored with one hook for the firmware's own record
+    # groups (third_party/lwip-mdns/VENDORED.txt) -- in place of the SDK's
+    # pico_lwip_mdns, which compiles the same three files unmodified.
+    target_sources(btgw PRIVATE src/net/mdns.c src/net/mdns_records.c
+        third_party/lwip-mdns/mdns.c
+        third_party/lwip-mdns/mdns_out.c
+        third_party/lwip-mdns/mdns_domain.c)
 endif()
 
 target_compile_definitions(btgw PRIVATE

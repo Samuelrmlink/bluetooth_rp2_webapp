@@ -145,6 +145,7 @@ static int l_ops_register(lua_State *L) {
 #if CONFIG_BT_LE
 static void lbind_release_pairing(int slot);
 #endif
+static void lbind_release_net(int slot);
 
 /* A script is going: drop its claim on every op, and the ops it was the last
  * owner of. Returns how many ops were removed. */
@@ -155,6 +156,9 @@ int lbind_release_ops(int slot) {
 #if CONFIG_BT_LE
     lbind_release_pairing(slot);
 #endif
+    /* What it declared on the network goes with it: mDNS services and
+     * record groups, and (CONFIG_NET_FORWARD) its forwarding rules. */
+    lbind_release_net(slot);
     for (int i = 0; i < n_lua_ops; ) {
         if (!(lua_ops[i].owners & bit)) { i++; continue; }
         lua_ops[i].owners &= ~bit;
@@ -1159,8 +1163,9 @@ static int l_mdns_service(lua_State *L) {
     }
     lua_pop(L, 1);
 
-    if (!mdns_service_add(inst_buf[0] ? inst_buf : NULL, type_buf, udp,
-                          (uint16_t)port, txtp, n_txt)) {
+    /* Owned by the calling script: withdrawn when it stops. */
+    if (!mdns_service_add_owned(lrt_current_slot(), inst_buf[0] ? inst_buf : NULL, type_buf, udp,
+                                (uint16_t)port, txtp, n_txt)) {
         lua_pushboolean(L, 0);
         lua_pushstring(L, "no free service slot, or a bad type");
         return 2;
@@ -1182,11 +1187,121 @@ static int l_mdns_announce(lua_State *L) {
     return 0;
 }
 
+/*   id = mdns.group{ records = {
+ *          { type='A',   name='printer.local', addr='192.168.8.50' },
+ *          { type='PTR', name='_ipp._tcp.local', target='Printer._ipp._tcp.local' },
+ *          { type='SRV', name='Printer._ipp._tcp.local', target='printer.local', port=631 },
+ *          { type='TXT', name='Printer._ipp._tcp.local', txt={ 'rp=ipp/print' } } } }
+ *   mdns.ungroup(id)   mdns.groups() -> JSON, like mdns.list()
+ * Records for names that are not ours; announced on add, withdrawn (TTL 0)
+ * by ungroup or when the script stops. */
+static bool lua_field_str(lua_State *L, int t, const char *k, char *out, size_t cap) {
+    lua_getfield(L, t, k);
+    const char *v = lua_tostring(L, -1);
+    bool ok = v != NULL;
+    if (ok) { snprintf(out, cap, "%s", v); }
+    lua_pop(L, 1);
+    return ok;
+}
+
+static lua_Integer lua_field_int(lua_State *L, int t, const char *k, lua_Integer dflt) {
+    lua_getfield(L, t, k);
+    lua_Integer v = lua_isinteger(L, -1) ? lua_tointeger(L, -1) : dflt;
+    lua_pop(L, 1);
+    return v;
+}
+
+static int l_mdns_group(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    lua_getfield(L, 1, "records");
+    if (!lua_istable(L, -1)) { return luaL_error(L, "mdns.group needs records = { ... }"); }
+    int rt = lua_gettop(L);
+    /* On the Lua heap, not static: ~1 KB that is needed only here. */
+    mrec_t *recs = (mrec_t *)lua_newuserdatauv(L, sizeof(mrec_t) * MREC_PER_GROUP, 0);
+    int n = 0;
+    lua_Integer len = (lua_Integer)lua_rawlen(L, rt);
+    if (len > MREC_PER_GROUP) {
+        lua_pushnil(L); lua_pushstring(L, "too many records in one group (max 8)"); return 2;
+    }
+    for (lua_Integer i = 1; i <= len; i++) {
+        lua_rawgeti(L, rt, i);
+        int e = lua_gettop(L);
+        if (!lua_istable(L, e)) { lua_pop(L, 1); continue; }
+        mrec_t *r = &recs[n];
+        memset(r, 0, sizeof *r);
+        char type[8] = "", tmp[24];
+        lua_field_str(L, e, "type", type, sizeof type);
+        lua_field_str(L, e, "name", r->name, sizeof r->name);
+        if (strcmp(type, "A") == 0) {
+            r->type = MREC_A;
+            unsigned a, b, c, d;
+            if (!lua_field_str(L, e, "addr", tmp, sizeof tmp) ||
+                sscanf(tmp, "%u.%u.%u.%u", &a, &b, &c, &d) != 4 || a > 255 || b > 255 || c > 255 || d > 255) {
+                lua_pushnil(L); lua_pushstring(L, "an A record needs addr = 'a.b.c.d'"); return 2;
+            }
+            r->a[0] = (uint8_t)a; r->a[1] = (uint8_t)b; r->a[2] = (uint8_t)c; r->a[3] = (uint8_t)d;
+        } else if (strcmp(type, "PTR") == 0) {
+            r->type = MREC_PTR;
+            lua_field_str(L, e, "target", r->data, sizeof r->data);
+        } else if (strcmp(type, "SRV") == 0) {
+            r->type = MREC_SRV;
+            lua_field_str(L, e, "target", r->data, sizeof r->data);
+            lua_Integer port = lua_field_int(L, e, "port", 0);
+            r->port = (port > 0 && port <= 65535) ? (uint16_t)port : 0;
+            r->prio = (uint16_t)lua_field_int(L, e, "priority", 0);
+            r->weight = (uint16_t)lua_field_int(L, e, "weight", 0);
+        } else if (strcmp(type, "TXT") == 0) {
+            r->type = MREC_TXT;
+            char items[8][64];
+            const char *ip[8];
+            int ni = 0;
+            lua_getfield(L, e, "txt");
+            if (lua_istable(L, -1)) {
+                lua_Integer tn = (lua_Integer)lua_rawlen(L, -1);
+                for (lua_Integer k = 1; k <= tn && ni < 8; k++) {
+                    lua_rawgeti(L, -1, k);
+                    const char *it = lua_tostring(L, -1);
+                    if (it) { snprintf(items[ni], sizeof items[ni], "%s", it); ip[ni] = items[ni]; ni++; }
+                    lua_pop(L, 1);
+                }
+            }
+            lua_pop(L, 1);
+            if (!mrec_txt_pack(ip, ni, r)) {
+                lua_pushnil(L); lua_pushstring(L, "TXT items do not fit in 63 bytes"); return 2;
+            }
+        }
+        n++;
+        lua_pop(L, 1);
+    }
+    const char *why = "bad group";
+    int id = mdns_group_add(lrt_current_slot(), recs, n, &why);
+    if (id < 0) { lua_pushnil(L); lua_pushstring(L, why); return 2; }
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+static int l_mdns_ungroup(lua_State *L) {
+    lua_pushboolean(L, mdns_group_remove((int)luaL_checkinteger(L, 1)));
+    return 1;
+}
+
+static int l_mdns_groups(lua_State *L) {
+    char *js = api_scratch();
+    size_t n = mdns_groups_json(js, api_scratch_size());
+    lua_pushlstring(L, js, n);
+    return 1;
+}
+
 static int l_mdns_list(lua_State *L) {
     static char js[512];
     size_t n = mdns_status_json(js, sizeof js);
     lua_pushlstring(L, js, n);
     return 1;
+}
+
+static void lbind_release_net(int slot) {
+    int n = mdns_release_owner(slot);
+    if (n) { printf("lua: released %d network declaration(s) of slot %d\n", n, slot); }
 }
 
 /* --- net -----------------------------------------------------------------
@@ -1239,10 +1354,12 @@ void lbind_open_all(lua_State *L) {
     static const luaL_Reg mdns_fns[] = {
         { "hostname", l_mdns_hostname }, { "service", l_mdns_service },
         { "remove", l_mdns_remove }, { "announce", l_mdns_announce },
-        { "list", l_mdns_list }, { NULL, NULL } };
+        { "list", l_mdns_list },
+        { "group", l_mdns_group }, { "ungroup", l_mdns_ungroup }, { "groups", l_mdns_groups },
+        { NULL, NULL } };
     set_table(L, "mdns", mdns_fns);
 
-#if CONFIG_NET_UPLINK || CONFIG_NET_FORWARD
+#if CONFIG_NET_UPLINK
     static const luaL_Reg net_fns[] = {
 #if CONFIG_NET_UPLINK
         { "uplinks", l_net_uplinks },
@@ -1304,6 +1421,8 @@ void lbind_pairing_pump(void) {}
 /* The Lua state is being thrown away (lrt_vm_restart): forget every
  * reference into it without touching it. */
 void lbind_reset(void) {
+    /* Not slot-by-slot: the state is gone, so is everything it declared. */
+    mdns_release_all_owned();
     memset(lua_ops, 0, sizeof lua_ops);
     n_lua_ops = 0;
 #if CONFIG_BT_LE

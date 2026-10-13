@@ -466,11 +466,13 @@ size_t uplink_status_json(char *dst, size_t cap) {
     return n;
 }
 
-static char obuf[900];
+/* The shared scratch buffer (api.h): filled and handed off within the call. */
+#define obuf      api_scratch()
+#define OBUF_SIZE api_scratch_size()
 
 static void op_status(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
-    uplink_status_json(obuf, sizeof obuf);
+    uplink_status_json(obuf, OBUF_SIZE);
     api_reply_ok(reply, ctx, id, obuf);
 }
 
@@ -484,7 +486,7 @@ static void op_policy(const char *params, api_reply_fn reply, void *ctx, long id
         api_reply_err(reply, ctx, id, "bad_request", why);
         return;
     }
-    uplink_status_json(obuf, sizeof obuf);
+    uplink_status_json(obuf, OBUF_SIZE);
     api_reply_ok(reply, ctx, id, obuf);
 }
 
@@ -493,7 +495,7 @@ static void op_switch(const char *params, api_reply_fn reply, void *ctx, long id
     const char *why = "bad request";
     if (!api_json_str(params, "iface", ifn, sizeof ifn)) { api_reply_err(reply, ctx, id, "bad_request", "need \"iface\""); return; }
     if (!uplink_force(ifn, &why)) { api_reply_err(reply, ctx, id, "refused", why); return; }
-    uplink_status_json(obuf, sizeof obuf);
+    uplink_status_json(obuf, OBUF_SIZE);
     api_reply_ok(reply, ctx, id, obuf);
 }
 
