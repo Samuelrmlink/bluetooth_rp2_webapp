@@ -206,7 +206,12 @@ static w5500_phase_t after(w5500_t *w, w5500_phase_t p, uint32_t now) {
     switch (p) {
     case W_IR_READ: {
         uint8_t ir = w->reg[0];
-        if ((ir & W5500_IR_SENDOK) && w->send_busy) { w->send_busy = false; }
+        if (w->send_busy) {
+            if (ir & W5500_IR_SENDOK) { w->send_busy = false; }
+            else if ((uint32_t)(now - w->send_ms) > W5500_SEND_TIMEOUT_MS && w->send_polls < 0xFFFF) {
+                w->send_polls++;     /* only reads after the deadline count */
+            }
+        }
         if (ir) { w->reg[0] = ir; return W_IR_CLEAR; }   /* write-1-to-clear */
         return w->want_ir ? W_RX_RSR : W_IDLE;
     }
@@ -254,6 +259,7 @@ static w5500_phase_t after(w5500_t *w, w5500_phase_t p, uint32_t now) {
     case W_TX_SEND:
         w->send_busy = true;
         w->send_ms = now;
+        w->send_polls = 0;
         w->tx_frames++;
         w->tx_bytes += w->tx_len;
         w->ops->tx_done(w->ctx, true);
@@ -292,7 +298,8 @@ static bool int_asserted(const w5500_t *w) {
 
 /* Nothing in flight: pick the next job. */
 static w5500_phase_t choose(w5500_t *w, uint32_t now) {
-    if (w->send_busy && (uint32_t)(now - w->send_ms) > W5500_SEND_TIMEOUT_MS) {
+    if (w->send_busy && (uint32_t)(now - w->send_ms) > W5500_SEND_TIMEOUT_MS &&
+        w->send_polls >= W5500_SEND_TIMEOUT_POLLS) {
         /* SENDOK never came. Not seen on a healthy chip; reopening the
          * socket is cheaper than reasoning about what state it is in. */
         w->tx_timeouts++;

@@ -242,6 +242,20 @@ int main(void) {
     run(&w, 20);
     CHECK(n_rx == before + 1, "then the frame arrives");
 
+    /* --- a main-loop stall is not a lost SEND -------------------------------- */
+    {
+        uint32_t to0 = w.tx_timeouts, rs0 = w.resyncs;
+        sim.defer_sendok = true;
+        queue_tx(t1, 200);
+        run(&w, 3);
+        CHECK(w.send_busy, "SEND issued, SENDOK not seen yet");
+        sim_sendok(&sim);                /* the chip finishes at once... */
+        sim.defer_sendok = false;
+        fake_advance_ms(500);            /* ...but the loop stalls for half a second */
+        run(&w, 5);
+        CHECK(w.tx_timeouts == to0 && w.resyncs == rs0 && !w.send_busy, "SENDOK collected after the stall, no false timeout");
+    }
+
     /* --- SENDOK that never comes -> timeout + reopen ------------------------ */
     sim.defer_sendok = true;
     queue_tx(t2, 90);

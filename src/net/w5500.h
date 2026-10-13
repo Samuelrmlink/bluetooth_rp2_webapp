@@ -112,6 +112,7 @@ typedef struct {
     bool               send_busy;
     uint16_t           tx_len;
     uint32_t           send_ms;
+    uint16_t           send_polls;     /* Sn_IR reads past the deadline without SENDOK */
     uint32_t           last_rx_poll_ms, last_phy_ms;
     bool               want_ir;
 
@@ -140,6 +141,13 @@ bool w5500_step(w5500_t *w, uint32_t now_ms);
 #define W5500_RX_POLL_MS     10     /* fallback when INT is idle/absent */
 #define W5500_RX_POLL_NOINT  2
 #define W5500_PHY_POLL_MS    500
+/* SENDOK takes microseconds; a SEND counts as lost only after this long AND
+ * this many Sn_IR reads that did not see it. Time alone is not enough: the
+ * main loop has pre-existing stalls of a few hundred ms (flash, radio), and
+ * a send that was fine would then look timed out; only reads made after the
+ * deadline count -- seen on the rig as
+ * needless socket reopens that dropped frames. */
 #define W5500_SEND_TIMEOUT_MS 100
+#define W5500_SEND_TIMEOUT_POLLS 8
 
 #endif
