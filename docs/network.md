@@ -41,9 +41,31 @@ interface reports `"present": false` and nothing else is touched.
 
 Settings -> Ethernet (shown only when the build has it): status, DHCP or
 Manual (IP, mask, optional gateway and DNS -- DNS is stored for later; there
-is no resolver yet). Ops: `eth.status`, `eth.config {mode, ip, mask, gw,
-dns}` (validated, then applied and saved from the main loop); topic
-`eth.state`.
+is no resolver yet) or DHCP server. Ops: `eth.status`, `eth.config {mode, ip,
+mask, gw, dns, dhcp_router}` (validated, then applied and saved from the main
+loop); topic `eth.state`.
+
+### Addressing modes (`src/net/eth_cfg.c`)
+
+* **dhcp** (default): DHCP client. With no lease after 8 s, AutoIP link-local
+  (169.254/16, with ACD conflict detection) is added beside it, and DHCP
+  keeps asking -- restarted every 30 s while on link-local, since lwIP's own
+  discover backoff grows to one attempt a minute. A lease replaces the
+  link-local address; losing it, or a link flap, starts the sequence again.
+  This is per-netif, not `LWIP_DHCP_AUTOIP_COOP`: that option is global and
+  would put the WiFi station on 169.254 whenever its DHCP was slow. A
+  link-local-only e0 has no gateway, so it is never an uplink.
+* **manual**: ip/mask, optional gateway (which makes e0 an uplink candidate)
+  and DNS.
+* **server**: e0 takes a static address (default 192.168.9.1/24) and serves
+  DHCP on it (leases .16-.23). Offers carry NO router/DNS option unless
+  `dhcp_router` is set, so a computer on the cable keeps its own internet.
+  Never automatic: only an explicit `{"mode":"server"}` sets it, and a
+  missing, corrupt or unknown `cfg/eth.json` is the DHCP client (host test +
+  tier-0 guard). e0 is never an uplink in this mode.
+
+mDNS answers on whatever address e0 has, and lwIP re-probes/announces on
+every address and link change (netif ext-status callback).
 
 ### The SPI bus layer
 
@@ -175,6 +197,56 @@ pair whatever the interfaces. `iface` binds the listener to one interface
 
 Rules belong to the script that made them. Op: `net.forwards` (read-only,
 with counters and target state).
+
+## Hardware results (2026-10-13, fw 1.139/1.140 trial, PC eth0 cabled to the W5500)
+
+The PC side was switched with nmcli on its own profile only, kept
+`never-default` / `ignore-auto-dns`, and checked after every change that
+its default route and DNS were untouched.
+
+| case | result |
+|---|---|
+| chip probe | VERSIONR ok, MACRAW open, link 100/full |
+| no chip fitted (earlier, 1.136) | `present:false`, SPI1 + DMA + all six pins given back |
+| PC link-local, e0 DHCP | e0 169.254.212.146 (same address every boot, MAC-seeded); ping 1.2-2.7 ms both PC->e0; web UI over e0 200 in 7 ms; avahi-browse `_http._tcp` on eth0 shows it at the link-local address; unicast mDNS query answered with it (A, PTR+SRV+TXT+A) |
+| link-local timing | 15.6 s from a DHCP restart to the link-local address (8 s DHCP-alone + ~7.5 s ACD); mDNS answering 4.6 s later (lwIP probe) |
+| PC manual 192.168.50.1, e0 manual .2 | ping, web UI, avahi on eth0 + unicast query all move to the new address |
+| e0 manual with a gateway that does not route | e0 becomes a candidate, its probes fail, and it is never chosen (after the fix below) |
+| e0 DHCP server, PC manual 192.168.9.50 | e0 192.168.9.1, server bound on e0, ping/web/mDNS on .1, e0 not an uplink, cfg persisted with dhcp_router false. **Not done:** the PC as a DHCP client of it (owner's rule: the PC is never put in DHCP-client mode on this rig) |
+| net.forward TCP in over e0 -> 127.0.0.1:80 | 200 in 10 ms |
+| `iface='e0'` binding | answers on e0, not on USB-NCM |
+| TCP, client on e0 -> router on WiFi (192.168.1.254:80) | 302 in 155 ms |
+| UDP relay, client on e0 -> router DNS over WiFi | answer relayed (the first query of a new session timed out once) |
+| fail fast, TCP to a closed port | first attempt 3 s (connect timeout), then RST in ~4 ms |
+| fail fast, UDP to a closed port | router's ICMP unreachable marks it down; then ICMP port unreachable back in 1-3 ms, one probe let through every 5 s |
+| mDNS group over e0 | printer-test.local answered on e0 |
+| mDNS service churn (the 1.97 HardFault) | 20 script stop/start cycles + 30 back-to-back replacements, no fault (was: crash within 1-5 cycles) |
+| C1000 (BLE) | connect, GCM negotiation, A1761 telemetry; setters light bar on/off and screen off/on read back through telemetry, all restored |
+
+Not possible on this rig, owner-gated:
+* **PC shared mode (e0 DHCP lease, e0 as a real uplink, WireGuard over
+  Ethernet, the switch experiment)**: the PC's UFW drops inbound DHCP
+  requests on eth0 (and every unsolicited inbound packet -- seen as
+  `[UFW BLOCK] IN=eth0` for forwarded TCP/UDP), so dnsmasq never sees a
+  DISCOVER. Needs e.g. `ufw allow in on eth0` (plus forwarding for NAT), which
+  I may not change.
+* Cable unplug/replug (physical).
+* A PC as a DHCP client of the e0 server mode (owner, tomorrow).
+
+Found and fixed on the rig:
+* The mDNS HardFault (also on 1.97): the lwIP timeout pool was too small
+  for the responder's per-netif timers; see `include/lwipopts.h`.
+* Uplink failover to an unmeasured link: when w0's probes failed, the policy
+  moved to e0, which had just been given a gateway and had never answered a
+  probe; it failed too and the tunnel stayed on it. A failover target must
+  now have answered probes.
+
+Observed, not caused by this work as far as I can tell: once, the WiFi AP
+silently dropped the station while the cyw43 driver still reported a link
+(no ARP replies on WiFi, BT unaffected); a `wifi.connect` to the same SSID
+brought it back. WireGuard had started flapping before any e0 change. Uplink
+selection now detects that state (w0 "failed") but, by design, does not touch
+WiFi itself.
 
 ## Memory and flash
 
