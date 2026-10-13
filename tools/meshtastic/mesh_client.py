@@ -22,6 +22,7 @@ Commands (typed, or written one per line into --fifo):
     nodes              nodes the radio knows (id, name, hops, public key?, last heard)
     nodeinfo <dest>    send our NodeInfo (incl. public key) and ask for theirs (key exchange)
     info               our node, firmware, LoRa preset/region/hop limit
+    channels           our channels: name, PSK kind (default/simple/custom), role
     hops <n>           hop limit for our sends (default 1: keep tests off the wider mesh)
     quit
 
@@ -178,7 +179,9 @@ class Client:
         self.me = iface.localNode.nodeNum
 
     def resolve(self, dest):
-        """!hexid, decimal, or a node's short/long name -> node num."""
+        """!hexid, decimal, ^all, or a node's short/long name -> node num."""
+        if dest in ("^all", "all", "broadcast"):
+            return 0xFFFFFFFF
         if dest.startswith("!"):
             return int(dest[1:], 16)
         if dest.isdigit():
@@ -250,6 +253,13 @@ class Client:
 
     # incoming
     def on_receive(self, packet, interface=None):
+        if "decoded" not in packet:
+            # heard but not decryptable here: another channel/PSK, or a PKI DM for someone else
+            frm = int(packet.get("from", 0))
+            log("encrypted", frm=f"!{frm:08x}", to=f"!{int(packet.get('to', 0)):08x}",
+                chan_hash=packet.get("channel"), pki=bool(packet.get("pkiEncrypted", False)),
+                snr=packet.get("rxSnr"), rssi=packet.get("rxRssi"))
+            return
         d = packet.get("decoded", {})
         port = d.get("portnum")
         frm = int(packet.get("from", 0))
@@ -286,6 +296,16 @@ class Client:
             use_preset=lora.use_preset, hop_limit=lora.hop_limit, our_hops=self.hops,
             reboots=getattr(mi, "reboot_count", "?"))
 
+    def channels(self):
+        for ch in self.iface.localNode.channels or []:
+            if ch.role == 0:                      # DISABLED
+                continue
+            psk = bytes(ch.settings.psk)
+            kind = ("default(AQ==)" if psk == b"\x01" else "none" if not psk
+                    else f"simple{psk[0]}" if len(psk) == 1 else f"custom{len(psk) * 8}bit")
+            log("channel", index=ch.index, role=ch.role, name=ch.settings.name or "(preset name)",
+                psk=kind, uplink=ch.settings.uplink_enabled)
+
     def command(self, line):
         parts = line.strip().split(maxsplit=2)
         if not parts:
@@ -300,6 +320,8 @@ class Client:
                 self.nodeinfo(parts[1])
             elif c == "info":
                 self.info()
+            elif c == "channels":
+                self.channels()
             elif c == "hops" and len(parts) >= 2:
                 self.hops = int(parts[1])
                 log("hops", our_hops=self.hops)
