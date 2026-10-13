@@ -134,6 +134,18 @@
    keeps 48KB because it has the room. Both figures appear on the budget
    line every build prints. */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK 1
+
+/* Source routing for uplink selection (src/net/uplink.c): a connection keeps
+   leaving through the interface that owns its source address while that
+   interface is up, so switching the default route moves only NEW
+   connections. Declared with struct tags because this header is read before
+   lwIP's own types exist. */
+#if CONFIG_NET_UPLINK
+struct netif;
+struct ip4_addr;
+struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr *dest);
+#define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) uplink_route_src((src), (dest))
+#endif
 #define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 
 #endif

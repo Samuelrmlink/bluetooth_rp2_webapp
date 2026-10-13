@@ -169,15 +169,67 @@ def t_wifi_ap_is_independent():
     for tok in ("ST_AP", "pending_ap", "have_other_route"):
         if re.search(r"\b" + tok + r"\b", src):
             return False, f"wifi.c still has {tok}"
+    # The default route is uplink.c's decision now (Ethernet can carry it),
+    # but with WiFi alone it must come out exactly as before: the station
+    # whenever it is enabled, never the AP. wifi.c re-asserts it through
+    # uplink_reselect() wherever the driver moves it, and the fallback that
+    # uplink.c uses when nothing is measured up is the enabled station.
     for line in src.splitlines():
         s = line.strip()
         if s.startswith(("*", "/*", "//")):
             continue                      # prose about the SDK, not a call
-        if "netif_set_default(" in line and "sta_netif()" not in line:
-            return False, f"netif_set_default not aimed at the station: {s[:60]}"
-    if "netif_set_default(sta_netif())" not in src:
-        return False, "wifi.c never re-asserts the station as the default route"
-    return True, "AP and station decoupled; default route pinned to the station"
+        if "netif_set_default(" in line:
+            return False, f"wifi.c sets the default route itself: {s[:60]}"
+    body = _fn_body(src, "fix_default_route")
+    if body is None or "uplink_reselect()" not in body:
+        return False, "fix_default_route() no longer hands the decision to uplink_reselect()"
+    fb = src[src.find("struct netif *wifi_fallback_netif(void)"):]
+    if not fb or "CYW43_ITF_STA" not in fb[:300] or "sta_netif()" not in fb[:300]:
+        return False, "wifi_fallback_netif() is not the enabled station"
+    up = open(os.path.join(ROOT, "src/net/uplink.c")).read()
+    if "wifi_fallback_netif()" not in up:
+        return False, "uplink.c does not fall back to the station"
+    return True, "AP and station decoupled; the route falls back to the station, never the AP"
+
+def t_only_uplink_sets_default():
+    """src/net/uplink.c is the ONLY caller of netif_set_default(). Two owners
+    of the default route is how the tunnel once left through the AP: each
+    sets it for good reasons of its own, and the last one wins silently."""
+    rc, out = sh("grep -rn --include=*.c --include=*.h 'netif_set_default(' src/ 2>/dev/null")
+    bad = []
+    for l in out.splitlines():
+        if not l.strip():
+            continue
+        path, _, code = l.split(":", 2)
+        c = code.strip()
+        if c.startswith(("*", "/*", "//")) or "DELIBERATELY NOT" in c or "NOT netif_set_default" in c:
+            continue
+        if path != "src/net/uplink.c":
+            bad.append(l)
+    if bad:
+        return False, bad[0][:90]
+    return True, "uplink.c only"
+
+def t_uplink_policy():
+    """Uplink metrics and selection from scripted ping results: hysteresis
+    (30% better for 20 s), immediate switch on failure, failover, fixed, no
+    flapping when every probe fails, gateway loss."""
+    return _host_c("uplink", ["test/host/uplink_test.c", "src/net/uplink_core.c"], "btgw_uplink", defs="")
+
+def t_wg_tx_netif_local_change():
+    """The WireGuard egress LOCAL CHANGE is in place and recorded: every outer
+    send goes through wg_udp_send(), and VENDORED.txt says so."""
+    w = open(os.path.join(ROOT, "third_party/wireguard-lwip/src/wireguardif.c")).read()
+    code = re.sub(r"//[^\n]*", "", w)
+    sends = re.findall(r"\budp_sendto\s*\(", code)
+    if len(sends) != 1:
+        return False, f"{len(sends)} bare udp_sendto() in wireguardif.c (only wg_udp_send's fallback may remain)"
+    if "udp_sendto_if_src(" not in w or "wireguardif_send_keepalive_now" not in w:
+        return False, "the tx_netif / keepalive-now change is missing"
+    v = open(os.path.join(ROOT, "third_party/wireguard-lwip/VENDORED.txt")).read()
+    if "wireguardif_set_tx_netif" not in v:
+        return False, "VENDORED.txt does not record the change"
+    return True, "egress via tx_netif, keepalive on switch, recorded"
 
 def t_wifi_mode_both_everywhere():
     """A mode that the config accepts must also be offered by the UI and named
@@ -720,6 +772,9 @@ def main():
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
+    step(0, "only uplink.c sets the default route", t_only_uplink_sets_default)
+    step(0, "uplink metrics and policy from scripted pings", t_uplink_policy)
+    step(0, "WireGuard egress LOCAL CHANGE in place and recorded", t_wg_tx_netif_local_change)
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
     step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
     step(0, "OTA flash layout is consistent", t_ota_partition_layout)

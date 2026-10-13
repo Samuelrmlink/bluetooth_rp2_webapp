@@ -254,6 +254,47 @@ def eth_configure(p):
              cfg={"ip": ip, "mask": mask, "gw": gw, "dns": dns})
     return {"staged": True}
 
+# Uplink selection (uplink.*): WiFi active, Ethernet measured and a little worse.
+UPLINK_BASE = {"policy": "best", "active": "w0", "probe_ip": "203.0.113.7", "probe_source": "wireguard",
+               "switches": 1, "last_switch_ms_ago": 42000,
+               "last_switch": {"from": "", "to": "w0", "reason": "initial"},
+               "uplinks": [
+                   {"name": "w0", "kind": "wifi", "ip": "192.168.1.50", "gw": "192.168.1.1", "state": "ok",
+                    "active": True, "rtt_ms": 21, "jitter_ms": 3, "loss_pct": 0, "metric": 27,
+                    "samples": 40, "sent": 40, "replies": 40},
+                   {"name": "e0", "kind": "ethernet", "ip": "192.168.50.23", "gw": "192.168.50.1", "state": "ok",
+                    "active": False, "rtt_ms": 18, "jitter_ms": 1, "loss_pct": 0, "metric": 20,
+                    "samples": 40, "sent": 40, "replies": 40}]}
+
+def uplink_policy(p):
+    u = STATE["uplink"]
+    names = [x["name"] for x in u["uplinks"]]
+    if "policy" in p:
+        pol = p["policy"]
+        if pol not in ("best", "failover") and not (pol.startswith("fixed:") and pol[6:] in names):
+            raise ApiError("bad_request", "policy is best, failover or fixed:<iface> (an uplink this build has)")
+    if "probe_ip" in p and p["probe_ip"] and not _ip_ok(p["probe_ip"]):
+        raise ApiError("bad_request", "probe_ip is not an address")
+    if "policy" not in p and "probe_ip" not in p:
+        raise ApiError("bad_request", "need \"policy\" and/or \"probe_ip\"")
+    if "policy" in p: u["policy"] = p["policy"]
+    if "probe_ip" in p:
+        u["probe_ip"] = p["probe_ip"] or "203.0.113.7"
+        u["probe_source"] = "configured" if p["probe_ip"] else "wireguard"
+    if u["policy"].startswith("fixed:"): uplink_switch(u["policy"][6:], "fixed")
+    return u
+
+def uplink_switch(name, reason="manual"):
+    u = STATE["uplink"]
+    target = next((x for x in u["uplinks"] if x["name"] == name), None)
+    if not target: raise ApiError("refused", "no such uplink in this build")
+    if u["active"] != name:
+        u["last_switch"] = {"from": u["active"], "to": name, "reason": reason}
+        u["switches"] += 1; u["last_switch_ms_ago"] = 0
+        u["active"] = name
+        for x in u["uplinks"]: x["active"] = x["name"] == name
+    return u
+
 STATE = {}
 def reset_state():
     STATE.clear()
@@ -268,6 +309,7 @@ def reset_state():
     STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
     STATE["eth"] = json.loads(json.dumps(ETH_BASE))
+    STATE["uplink"] = json.loads(json.dumps(UPLINK_BASE))
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
 
@@ -493,6 +535,12 @@ class MockGateway:
             return STATE["eth"]
         if op == "eth.config":
             return eth_configure(p)
+        if op == "uplink.status":
+            return STATE["uplink"]
+        if op == "uplink.policy":
+            return uplink_policy(p)
+        if op == "uplink.switch":
+            return uplink_switch(p.get("iface", ""))
         if op == "test.eth":                        # mock only: unplug the cable, pull the module
             if isinstance(p.get("set"), dict): STATE["eth"].update(p["set"])
             return STATE["eth"]

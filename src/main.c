@@ -38,9 +38,10 @@
 #if CONFIG_LUA_ENABLE
 #include "lua/lrt.h"
 #endif
+#include "net/wg.h"
+#include "net/uplink.h"
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
-#include "net/wg.h"
 #if CONFIG_OTA
 #include "ota/smp.h"
 #endif
@@ -145,6 +146,10 @@ int main(void) {
      * it is additive: if this fails, everything above still works. */
     wg_init();
 #endif
+#if CONFIG_NET_UPLINK
+    /* After the tunnel: the chosen uplink is handed to it. */
+    uplink_init();
+#endif
 
     http_server_start();
     ops_init_all();
@@ -224,6 +229,9 @@ int main(void) {
 #endif
 #if CONFIG_LUA_ENABLE
         lrt_tick();
+#endif
+#if CONFIG_NET_UPLINK
+        uplink_tick();
 #endif
 #if CONFIG_NET_WIREGUARD
         wg_tick();

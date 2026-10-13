@@ -26,6 +26,7 @@
 #include "bt/registry.h"
 #include "fs/fs.h"
 #include "net/mdns.h"
+#include "net/uplink.h"
 #include "net/ws.h"
 #include "lua/ljson.h"
 #include "pico/time.h"
@@ -1188,6 +1189,41 @@ static int l_mdns_list(lua_State *L) {
     return 1;
 }
 
+/* --- net -----------------------------------------------------------------
+ *   net.uplinks() -> { {name='w0', kind='wifi', state='ok', active=true,
+ *                       ip=..., gw=..., rtt_ms=21, jitter_ms=3, loss_pct=0,
+ *                       metric=27}, ... }, policy
+ * rtt/jitter/metric are nil until measured. See src/net/uplink.h. */
+#if CONFIG_NET_UPLINK
+static void set_num_or_nil(lua_State *L, const char *k, long v) {
+    if (v < 0) { lua_pushnil(L); } else { lua_pushinteger(L, v); }
+    lua_setfield(L, -2, k);
+}
+
+static int l_net_uplinks(lua_State *L) {
+    int n = uplink_count();
+    lua_createtable(L, n, 0);
+    for (int i = 0; i < n; i++) {
+        uplink_info_t u;
+        if (!uplink_info(i, &u)) { continue; }
+        lua_createtable(L, 0, 10);
+        lua_pushstring(L, u.name);  lua_setfield(L, -2, "name");
+        lua_pushstring(L, u.kind);  lua_setfield(L, -2, "kind");
+        lua_pushstring(L, u.state); lua_setfield(L, -2, "state");
+        lua_pushboolean(L, u.active); lua_setfield(L, -2, "active");
+        lua_pushstring(L, u.ip);    lua_setfield(L, -2, "ip");
+        lua_pushstring(L, u.gw);    lua_setfield(L, -2, "gw");
+        set_num_or_nil(L, "rtt_ms", u.rtt_ms);
+        set_num_or_nil(L, "jitter_ms", u.jitter_ms);
+        set_num_or_nil(L, "metric", u.metric);
+        lua_pushinteger(L, u.loss_pct); lua_setfield(L, -2, "loss_pct");
+        lua_rawseti(L, -2, i + 1);
+    }
+    lua_pushstring(L, uplink_policy_name());
+    return 2;
+}
+#endif
+
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
     /* Not luaL_newlib: its size hint is sizeof(l)/sizeof(l[0]), which on a
      * POINTER argument computes 8/32 - 1 = -1 rather than the entry count.
@@ -1205,6 +1241,15 @@ void lbind_open_all(lua_State *L) {
         { "remove", l_mdns_remove }, { "announce", l_mdns_announce },
         { "list", l_mdns_list }, { NULL, NULL } };
     set_table(L, "mdns", mdns_fns);
+
+#if CONFIG_NET_UPLINK || CONFIG_NET_FORWARD
+    static const luaL_Reg net_fns[] = {
+#if CONFIG_NET_UPLINK
+        { "uplinks", l_net_uplinks },
+#endif
+        { NULL, NULL } };
+    set_table(L, "net", net_fns);
+#endif
 
     static const luaL_Reg bus[] = { { "emit", l_bus_emit }, { NULL, NULL } };
     set_table(L, "bus", bus);

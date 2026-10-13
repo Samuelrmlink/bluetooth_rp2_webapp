@@ -68,6 +68,16 @@ bool wg_is_confirmed(void);
  * time since the last handshake, bytes in and out, and the failure count. */
 size_t wg_status_json(char *dst, size_t cap);
 
+/* For uplink selection (src/net/uplink.c). */
+struct netif;
+struct ip4_addr;
+bool wg_endpoint(struct ip4_addr *out);   /* the configured endpoint, if any */
+/* Send the outer UDP via `nif` (NULL = lwIP's default route) and, on a
+ * change, a keepalive at once so the server roams to the new source. */
+void wg_set_uplink(struct netif *nif);
+uint32_t wg_last_tx_ms(void);             /* sys_now() of the last tunnelled packet out */
+uint32_t wg_last_rx_ms(void);             /* ...and of the last authenticated one in */
+
 #else
 
 static inline bool wg_init(void) { return false; }
@@ -78,6 +88,12 @@ static inline bool wg_is_configured(void) { return false; }
 static inline bool wg_is_connected(void) { return false; }
 static inline bool wg_is_confirmed(void) { return false; }
 static inline size_t wg_status_json(char *dst, size_t cap) { (void)dst; (void)cap; return 0; }
+struct netif;
+struct ip4_addr;
+static inline bool wg_endpoint(struct ip4_addr *out) { (void)out; return false; }
+static inline void wg_set_uplink(struct netif *nif) { (void)nif; }
+static inline uint32_t wg_last_tx_ms(void) { return 0; }
+static inline uint32_t wg_last_rx_ms(void) { return 0; }
 
 #endif
 #endif

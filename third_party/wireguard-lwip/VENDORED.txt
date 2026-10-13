@@ -14,7 +14,9 @@ What was left:   src/crypto/cortex/* -- Cortex-M0 Thumb-1 assembly for
                  worth the risk of hand-written assembly for the wrong core.
                  example/ -- an lwIP port we do not use.
 
-Local changes: ONE, in src/wireguardif.c. Where it delivered a decrypted
+Local changes: TWO, in src/wireguardif.c (+ declarations in wireguardif.h).
+
+  1. Where it delivered a decrypted
                packet with ip_input(pbuf, device->netif) it now calls
                device->netif->input(pbuf, device->netif). netif->input is
                lwIP's documented entry point and what its own drivers use;
@@ -25,7 +27,19 @@ Local changes: ONE, in src/wireguardif.c. Where it delivered a decrypted
                diagnose the tunnel remotely, so a status that under-reports
                a healthy tunnel is worse than no status.
 
-               Search for "LOCAL CHANGE" to find it when rebasing.
+  2. Uplink selection (src/net/uplink.c). The outer UDP used plain
+               udp_sendto(), so it always left through lwIP's default route.
+               It now goes through wg_udp_send(): udp_sendto_if_src() on the
+               interface set by wireguardif_set_tx_netif(), with that
+               interface's address as the source (falling back to the old
+               call when none is set, or it is down). Plus
+               wireguardif_send_keepalive_now(), so the server roams to a
+               new uplink on the first authenticated packet after a switch
+               instead of at the next 25 s keepalive. The receive side is
+               unchanged: the pcb is bound to ANY, so the old interface keeps
+               receiving during the switch (make-before-break).
+
+               Search for "LOCAL CHANGE" to find them when rebasing.
 
 The platform hooks that wireguard-platform.h declares are implemented in
 src/net/wg.c.
