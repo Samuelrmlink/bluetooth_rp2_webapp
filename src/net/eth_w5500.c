@@ -257,7 +257,11 @@ bool eth_init(void) {
 #endif
                          &chip_ops, NULL);
     if (!present) {
-        printf("eth: W5500 not present\n");
+        /* No chip: give everything back -- pins, SPI block, DMA channels --
+         * so the board is as if the driver were not built in. */
+        w5500_release(&chip, CONFIG_ETH_W5500_RST);
+        spibus_deinit(bus);
+        printf("eth: W5500 not present (pins and SPI%d released)\n", CONFIG_ETH_W5500_SPI);
         return false;
     }
     if (!netif_add(&eth_if, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4, NULL,

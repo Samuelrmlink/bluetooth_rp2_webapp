@@ -87,6 +87,10 @@ typedef struct spibus {
  * pins on a bus that is already up. NULL on failure. */
 spibus_t *spibus_init(int index, int sck, int mosi, int miso, const char *owner);
 spibus_t *spibus_get(int index);   /* NULL unless spibus_init()ed */
+/* Take a bus down again (its device was not there): block closed, DMA
+ * channels and pins given back. */
+void spibus_deinit(spibus_t *bus);
+void spibus_dev_deinit(spidev_t *dev);
 
 /* Attach a device. Configures its CS high and reserves the pin. */
 bool spibus_dev_init(spidev_t *dev, spibus_t *bus, int cs, uint32_t baud,

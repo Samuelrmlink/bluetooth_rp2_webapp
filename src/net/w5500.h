@@ -129,6 +129,9 @@ typedef struct {
 bool w5500_init(w5500_t *w, spibus_t *bus, int cs, uint32_t baud, int int_pin, int rst_pin,
                 const uint8_t mac[6], bool mac_filter, const w5500_ops_t *ops, void *ctx);
 
+/* After a failed w5500_init(): give back CS, INT and RST (inputs again). */
+void w5500_release(w5500_t *w, int rst_pin);
+
 /* Advance the state machine by at most one SPI transaction. Returns true
  * when it did something (so the caller may step again this pass). */
 bool w5500_step(w5500_t *w, uint32_t now_ms);

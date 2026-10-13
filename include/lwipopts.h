@@ -21,7 +21,7 @@
 #define MEM_SIZE                    ((CONFIG_LWIP_MEM_SIZE_KB) * 1024)
 #define MEMP_NUM_TCP_SEG            48
 #define MEMP_NUM_TCP_PCB            40
-#define MEMP_NUM_TCP_PCB_LISTEN     4
+#define MEMP_NUM_TCP_PCB_LISTEN     8   /* + forwarding rules (src/net/fwd.c) */
 #define MEMP_NUM_ARP_QUEUE          10
 #define PBUF_POOL_SIZE              24
 #define LWIP_ARP                    1
@@ -49,7 +49,7 @@
 #define LWIP_IPV6                   0
 #define LWIP_TCP                    1
 #define LWIP_UDP                    1
-#define MEMP_NUM_UDP_PCB            8
+#define MEMP_NUM_UDP_PCB            16  /* + forwarding listeners and UDP sessions */
 #define CHECKSUM_CHECK_UDP          0
 #define CHECKSUM_CHECK_IP           0
 #define IP_SOF_BROADCAST            1
@@ -140,6 +140,13 @@
    interface is up, so switching the default route moves only NEW
    connections. Declared with struct tags because this header is read before
    lwIP's own types exist. */
+/* Forwarding to 127.0.0.1 or to one of our own addresses (net.forward to a
+   local port) goes through lwIP's loopback; fwd_tick() polls it. */
+#if CONFIG_NET_FORWARD
+#define LWIP_NETIF_LOOPBACK         1
+#define LWIP_HAVE_LOOPIF            1
+#endif
+
 #if CONFIG_NET_UPLINK
 struct netif;
 struct ip4_addr;

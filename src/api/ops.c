@@ -38,6 +38,9 @@ extern const op_module_t op_module_uplink;
 #if CONFIG_NET_MDNS
 extern const op_module_t op_module_mdns;
 #endif
+#if CONFIG_NET_FORWARD
+extern const op_module_t op_module_net;
+#endif
 
 static const op_module_t *const modules[] = {
     &op_module_sys,
@@ -67,6 +70,9 @@ static const op_module_t *const modules[] = {
 #endif
 #if CONFIG_NET_MDNS
     &op_module_mdns,
+#endif
+#if CONFIG_NET_FORWARD
+    &op_module_net,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

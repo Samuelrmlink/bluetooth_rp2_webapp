@@ -53,6 +53,12 @@ bool pins_reserve(uint8_t pin, pin_function_t fn, const char *owner) {
     return true;
 }
 
+void pins_unreserve(uint8_t pin, const char *owner) {
+    if (pin >= PIN_COUNT || slots[pin].kind != PIN_OWNER_SYSTEM) { return; }
+    if (strcmp(slots[pin].owner, owner ? owner : "") != 0) { return; }   /* never the radio's */
+    memset(&slots[pin], 0, sizeof(slots[pin]));
+}
+
 const char *pins_reserved_by(uint8_t pin) {
     return (pin < PIN_COUNT && slots[pin].kind == PIN_OWNER_SYSTEM) ? slots[pin].owner : NULL;
 }

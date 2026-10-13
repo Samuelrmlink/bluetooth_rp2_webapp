@@ -287,6 +287,26 @@ def t_lua_net_released():
         return False, "mdns.service does not record its owner"
     return True, "services + groups released per script and on VM restart"
 
+def t_fwd_core():
+    """Forwarding decisions: UDP session table (cap, 60 s idle expiry), target
+    health / fail fast with the 5 s re-test, TCP backpressure."""
+    return _host_c("fwd", ["test/host/fwd_test.c", "src/net/fwd_core.c"], "btgw_fwd", defs="")
+
+def t_fwd_released_with_script():
+    """Forwarding rules belong to their script: released per slot and on a VM
+    restart, like mDNS declarations."""
+    c = open(os.path.join(ROOT, "src/lua/lbind.c")).read()
+    i = c.find("static void lbind_release_net(int slot) {")
+    rel = c[i:c.find("\n}\n", i)] if i >= 0 else ""
+    if "fwd_release_owner(slot)" not in rel:
+        return False, "lbind_release_net does not release forwarding rules"
+    reset = _fn_body(c, "lbind_reset")
+    if not reset or "fwd_release_all_owned()" not in reset:
+        return False, "lbind_reset does not release forwarding rules"
+    if "fwd_add(lrt_current_slot()" not in c:
+        return False, "net.forward does not record its owner"
+    return True, "per script and on VM restart"
+
 def t_wifi_mode_both_everywhere():
     """A mode that the config accepts must also be offered by the UI and named
     in the API's error text, or it exists in one place and is undiscoverable
@@ -834,6 +854,8 @@ def main():
     step(0, "mDNS record groups: encoding and answering", t_mdns_records)
     step(0, "vendored lwIP mDNS carries only the hook", t_lwip_mdns_vendored)
     step(0, "a script's mDNS declarations go when it stops", t_lua_net_released)
+    step(0, "forwarding: sessions, fail fast, backpressure", t_fwd_core)
+    step(0, "a script's forwarding rules go when it stops", t_fwd_released_with_script)
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
     step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
     step(0, "OTA flash layout is consistent", t_ota_partition_layout)

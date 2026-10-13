@@ -99,6 +99,8 @@ void spibus_port_dma_start(spibus_t *b, const uint8_t *tx, uint8_t *rx, uint16_t
     if (autocomplete) { fake_dma_complete(); }
 }
 
+void spibus_port_release_pin(int pin, const char *owner) { (void)owner; if (pin >= 0) { reserved[pin] = false; } }
+void spibus_port_close(spibus_t *b) { (void)b; }
 void spibus_port_dma_abort(spibus_t *b) { (void)b; inflight = NULL; }
 
 void spibus_port_gpio_out(int pin, bool level) {

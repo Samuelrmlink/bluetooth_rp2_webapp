@@ -107,6 +107,9 @@ int main(void) {
     CHECK(!w.present, "not present");
     CHECK(!spibus_holds(&w.dev), "bus released after a failed probe");
     CHECK(!w5500_step(&w, fake_now()), "an absent chip never steps");
+    w5500_release(&w, 11);
+    spibus_deinit(bus);
+    CHECK(fake_reserved_count() == 0 && spibus_get(1) == NULL, "absent: every pin and the bus given back");
 
     /* --- present --------------------------------------------------------- */
     fake_reset();

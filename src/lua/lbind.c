@@ -27,6 +27,7 @@
 #include "fs/fs.h"
 #include "net/mdns.h"
 #include "net/uplink.h"
+#include "net/fwd.h"
 #include "net/ws.h"
 #include "lua/ljson.h"
 #include "pico/time.h"
@@ -1301,6 +1302,9 @@ static int l_mdns_list(lua_State *L) {
 
 static void lbind_release_net(int slot) {
     int n = mdns_release_owner(slot);
+#if CONFIG_NET_FORWARD
+    n += fwd_release_owner(slot);
+#endif
     if (n) { printf("lua: released %d network declaration(s) of slot %d\n", n, slot); }
 }
 
@@ -1339,6 +1343,65 @@ static int l_net_uplinks(lua_State *L) {
 }
 #endif
 
+/*   id = net.forward{ proto='tcp'|'udp', listen=6767, iface=nil|'e0'|'w0'|...,
+ *                     to='127.0.0.1', port=80, fail_fast=true }
+ *   net.unforward(id)    net.forwards() -> { {id=, proto=, listen=, ...}, ... }
+ * Rules belong to the calling script. See src/net/fwd.h. */
+#if CONFIG_NET_FORWARD
+static int l_net_forward(lua_State *L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    char proto[8] = "tcp", iface[8] = "", to[24] = "";
+    lua_field_str(L, 1, "proto", proto, sizeof proto);
+    lua_field_str(L, 1, "iface", iface, sizeof iface);
+    lua_field_str(L, 1, "to", to, sizeof to);
+    lua_Integer listen = lua_field_int(L, 1, "listen", 0), port = lua_field_int(L, 1, "port", 0);
+    lua_getfield(L, 1, "fail_fast");
+    bool ff = lua_isnil(L, -1) ? true : lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    bool udp = strcmp(proto, "udp") == 0;
+    if (!udp && strcmp(proto, "tcp") != 0) { lua_pushnil(L); lua_pushstring(L, "proto is 'tcp' or 'udp'"); return 2; }
+    if (listen <= 0 || listen > 65535 || port <= 0 || port > 65535) {
+        lua_pushnil(L); lua_pushstring(L, "listen and port must be 1..65535"); return 2;
+    }
+    if (!to[0]) { snprintf(to, sizeof to, "127.0.0.1"); }
+    const char *why = "bad rule";
+    int id = fwd_add(lrt_current_slot(), udp, (uint16_t)listen, iface, to, (uint16_t)port, ff, &why);
+    if (id < 0) { lua_pushnil(L); lua_pushstring(L, why); return 2; }
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+static int l_net_unforward(lua_State *L) {
+    lua_pushboolean(L, fwd_remove((int)luaL_checkinteger(L, 1)));
+    return 1;
+}
+
+static int l_net_forwards(lua_State *L) {
+    int n = fwd_count();
+    lua_createtable(L, n, 0);
+    fwd_info_t f;
+    for (int i = 0; i < n && fwd_info(i, &f); i++) {
+        lua_createtable(L, 0, 14);
+        lua_pushinteger(L, f.id); lua_setfield(L, -2, "id");
+        lua_pushstring(L, f.udp ? "udp" : "tcp"); lua_setfield(L, -2, "proto");
+        lua_pushinteger(L, f.listen); lua_setfield(L, -2, "listen");
+        if (f.iface[0]) { lua_pushstring(L, f.iface); lua_setfield(L, -2, "iface"); }
+        lua_pushstring(L, f.to); lua_setfield(L, -2, "to");
+        lua_pushinteger(L, f.port); lua_setfield(L, -2, "port");
+        lua_pushboolean(L, f.fail_fast); lua_setfield(L, -2, "fail_fast");
+        lua_pushstring(L, f.state); lua_setfield(L, -2, "target");
+        if (f.why[0]) { lua_pushstring(L, f.why); lua_setfield(L, -2, "why"); }
+        lua_pushinteger(L, (lua_Integer)f.active); lua_setfield(L, -2, "active");
+        lua_pushinteger(L, (lua_Integer)f.total); lua_setfield(L, -2, "total");
+        lua_pushinteger(L, (lua_Integer)f.refused); lua_setfield(L, -2, "refused");
+        lua_pushinteger(L, (lua_Integer)f.bytes_in); lua_setfield(L, -2, "bytes_in");
+        lua_pushinteger(L, (lua_Integer)f.bytes_out); lua_setfield(L, -2, "bytes_out");
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+#endif
+
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
     /* Not luaL_newlib: its size hint is sizeof(l)/sizeof(l[0]), which on a
      * POINTER argument computes 8/32 - 1 = -1 rather than the entry count.
@@ -1359,10 +1422,14 @@ void lbind_open_all(lua_State *L) {
         { NULL, NULL } };
     set_table(L, "mdns", mdns_fns);
 
-#if CONFIG_NET_UPLINK
+#if CONFIG_NET_UPLINK || CONFIG_NET_FORWARD
     static const luaL_Reg net_fns[] = {
 #if CONFIG_NET_UPLINK
         { "uplinks", l_net_uplinks },
+#endif
+#if CONFIG_NET_FORWARD
+        { "forward", l_net_forward }, { "unforward", l_net_unforward },
+        { "forwards", l_net_forwards },
 #endif
         { NULL, NULL } };
     set_table(L, "net", net_fns);
@@ -1423,6 +1490,9 @@ void lbind_pairing_pump(void) {}
 void lbind_reset(void) {
     /* Not slot-by-slot: the state is gone, so is everything it declared. */
     mdns_release_all_owned();
+#if CONFIG_NET_FORWARD
+    fwd_release_all_owned();
+#endif
     memset(lua_ops, 0, sizeof lua_ops);
     n_lua_ops = 0;
 #if CONFIG_BT_LE

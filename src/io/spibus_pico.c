@@ -148,6 +148,26 @@ bool spibus_port_reserve_pin(int pin, const char *owner, bool is_spi) {
 #endif
 }
 
+void spibus_port_release_pin(int pin, const char *owner) {
+    if (pin < 0) { return; }
+#if CONFIG_IO_PINS
+    pins_unreserve((uint8_t)pin, owner);
+#else
+    (void)owner;
+#endif
+    gpio_deinit((uint)pin);
+}
+
+void spibus_port_close(spibus_t *b) {
+    spi_deinit(inst(b->index));
+    if (b->dma_rx >= 0) {
+        dma_irqn_set_channel_enabled(SPIBUS_DMA_IRQ, (uint)b->dma_rx, false);
+        dma_channel_unclaim((uint)b->dma_rx);
+    }
+    if (b->dma_tx >= 0) { dma_channel_unclaim((uint)b->dma_tx); }
+    b->dma_tx = b->dma_rx = -1;
+}
+
 bool spibus_port_adhoc(int index, int sck, int mosi, int miso, int cs, uint32_t hz,
                        const uint8_t *tx, uint8_t *rx, size_t len) {
 #if CONFIG_IO_PINS

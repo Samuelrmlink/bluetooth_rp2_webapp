@@ -45,6 +45,10 @@ uint32_t spibus_port_now_ms(void);
 /* Pin broker hook: reserve a pin for a system driver. True when the pin was
  * free (or the broker is not built). */
 bool     spibus_port_reserve_pin(int pin, const char *owner, bool is_spi);
+/* Undo it (and leave the pin an input, as at reset). */
+void     spibus_port_release_pin(int pin, const char *owner);
+/* Close the block and give back its DMA channels. */
+void     spibus_port_close(struct spibus *bus);
 
 /* spi.xfer's one-off transfer, on a bus no driver owns. */
 bool     spibus_port_adhoc(int index, int sck, int mosi, int miso, int cs, uint32_t hz,

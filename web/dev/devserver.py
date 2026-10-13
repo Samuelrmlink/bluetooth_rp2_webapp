@@ -369,7 +369,7 @@ class MockGateway:
         if op == "sys.info":
             return {"firmware": "bluetooth_rp2_webapp (mock)", "uptime_ms": int(time.time() * 1000) % 10**7,
                     "transports": ["le"], "clients": 1,
-                    "modules": ["sys", "bt", "lua", "io", "wifi", "wg", "ota", "eth", "uplink"]}
+                    "modules": ["sys", "bt", "lua", "io", "wifi", "wg", "ota", "eth", "uplink", "mdns", "net"]}
         if op == "bt.state":
             return {"ready": True, "address": "2C:CF:67:C7:DB:56", "max_links": 4}
         if op == "scan.start":
@@ -545,6 +545,8 @@ class MockGateway:
             return {"hostname": "bluetooth-rp2-webapp", "fqdn": "bluetooth-rp2-webapp.local", "netifs": 2,
                     "services": [{"instance": "bluetooth-rp2-webapp", "type": "_http", "proto": "tcp",
                                   "port": 80, "owner": -1, "txt": ["path=/"]}]}
+        if op == "net.forwards":
+            return {"rules": STATE.get("forwards", []), "udp_sessions": 0}
         if op == "mdns.groups":
             return {"groups": STATE.get("mdns_groups", [])}
         if op == "test.eth":                        # mock only: unplug the cable, pull the module

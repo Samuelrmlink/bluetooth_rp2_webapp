@@ -24,3 +24,6 @@ CONFIG_IO_I2C=y
 CONFIG_IO_SPI=y
 # The W5500 Ethernet uplink is opt-in: see pico2w_eth_defconfig.
 # CONFIG_NET_ETH_W5500 is not set
+# Forwarding off here: this build embeds the WiFi blob (no OTA partition) and
+# sits a few KB under its slot; it also compiles net.* without net.forward.
+# CONFIG_NET_FORWARD is not set

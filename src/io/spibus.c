@@ -47,6 +47,22 @@ spibus_t *spibus_init(int index, int sck, int mosi, int miso, const char *owner)
     return b;
 }
 
+void spibus_deinit(spibus_t *b) {
+    if (!b || !b->present || b->busy) { return; }
+    spibus_port_close(b);
+    spibus_port_release_pin(b->sck, b->owner);
+    spibus_port_release_pin(b->mosi, b->owner);
+    spibus_port_release_pin(b->miso, b->owner);
+    memset(b, 0, sizeof *b);
+}
+
+void spibus_dev_deinit(spidev_t *dev) {
+    if (!dev || !dev->bus) { return; }
+    spibus_release(dev);
+    if (dev->cs >= 0) { spibus_port_release_pin(dev->cs, dev->name); }
+    memset(dev, 0, sizeof *dev);
+}
+
 bool spibus_dev_init(spidev_t *dev, spibus_t *bus, int cs, uint32_t baud,
                      uint8_t mode, const char *name) {
     if (!dev || !bus || !bus->present) { return false; }

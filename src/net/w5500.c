@@ -135,6 +135,13 @@ out:
     return ok;
 }
 
+void w5500_release(w5500_t *w, int rst_pin) {
+    if (w->int_pin >= 0) { spibus_port_release_pin(w->int_pin, "w5500"); }
+    if (rst_pin >= 0) { spibus_port_release_pin(rst_pin, "w5500"); }
+    spibus_dev_deinit(&w->dev);
+    w->present = false;
+}
+
 /* --- the state machine --------------------------------------------------- */
 
 static w5500_buf_t rxb[SPIBUS_MAX_SEGS - 1], txb[SPIBUS_MAX_SEGS - 1];

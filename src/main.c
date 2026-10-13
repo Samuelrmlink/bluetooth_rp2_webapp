@@ -40,6 +40,7 @@
 #endif
 #include "net/wg.h"
 #include "net/uplink.h"
+#include "net/fwd.h"
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
 #if CONFIG_OTA
@@ -150,6 +151,9 @@ int main(void) {
     /* After the tunnel: the chosen uplink is handed to it. */
     uplink_init();
 #endif
+#if CONFIG_NET_FORWARD
+    fwd_init();
+#endif
 
     http_server_start();
     ops_init_all();
@@ -232,6 +236,9 @@ int main(void) {
 #endif
 #if CONFIG_NET_UPLINK
         uplink_tick();
+#endif
+#if CONFIG_NET_FORWARD
+        fwd_tick();
 #endif
 #if CONFIG_NET_WIREGUARD
         wg_tick();
