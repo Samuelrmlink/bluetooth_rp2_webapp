@@ -20,6 +20,7 @@ send is tracked until its routing ACK, classified as:
 Commands (typed, or written one per line into --fifo):
     dm <dest> <text>   send a text DM (dest: !hexid, decimal node num, or a short/long name)
     nodes              nodes the radio knows (id, name, hops, public key?, last heard)
+    nodeinfo <dest>    send our NodeInfo (incl. public key) and ask for theirs (key exchange)
     info               our node, firmware, LoRa preset/region/hop limit
     hops <n>           hop limit for our sends (default 1: keep tests off the wider mesh)
     quit
@@ -71,6 +72,37 @@ def patch_ble_scan():
         return [d for d, adv in found.values() if MESH_SVC in [u.lower() for u in adv.service_uuids]]
 
     BLEInterface.scan = staticmethod(scan)
+
+    # A node that is paired but not advertising (BlueZ still holds a link, or it
+    # just stopped) is missed by the scan; BlueZ knows a paired address, so let
+    # connect() go to it directly.
+    orig_find = BLEInterface.find_device
+
+    def find_device(self, address):
+        try:
+            return orig_find(self, address)
+        except BLEInterface.BLEError:
+            if address and len(address.split(":")) == 6:
+                class Known:
+                    pass
+                k = Known()
+                k.address, k.name = address, address
+                return k
+            raise
+
+    BLEInterface.find_device = find_device
+
+
+def bluez_release(addr):
+    """If the PC's BlueZ still holds a link to the node (e.g. left by pairing),
+    drop it, so the node advertises and our own connection can take it."""
+    if len(addr.split(":")) != 6:
+        return
+    info = subprocess.run(["bluetoothctl", "info", addr], capture_output=True, text=True).stdout
+    if "Connected: yes" in info:
+        subprocess.run(["bluetoothctl", "disconnect", addr], capture_output=True, text=True, timeout=15)
+        time.sleep(2)
+        log("released", addr=addr, note="BlueZ held a link; disconnected it first")
 
 
 def denied(target):
@@ -128,6 +160,8 @@ def cmd_pair(args):
             break
     if ok:
         send(f"trust {args.addr}")
+        send(f"disconnect {args.addr}")    # pairing leaves BlueZ connected; free the node
+        time.sleep(2)
     send("quit")
     p.wait(timeout=5)
     print("PAIRED" if ok else "pairing did not succeed")
@@ -179,6 +213,19 @@ class Client:
         log("sent", id=pkt.id, to=f"!{num:08x}", name=self.name(num), hops=self.hops,
             bytes=len(text.encode()), text=text)
 
+    def nodeinfo(self, dest):
+        """Send our User (with our public key) asking for theirs: how two nodes
+        exchange keys without waiting for the periodic NodeInfo broadcast."""
+        from google.protobuf import json_format
+        from meshtastic.protobuf import mesh_pb2, portnums_pb2
+        num = self.resolve(dest)
+        u = dict(self.iface.getMyNodeInfo().get("user", {}))
+        user = json_format.ParseDict(u, mesh_pb2.User(), ignore_unknown_fields=True)
+        pkt = self.iface.sendData(user.SerializeToString(), destinationId=num,
+                                  portNum=portnums_pb2.PortNum.NODEINFO_APP, wantResponse=True,
+                                  wantAck=False, hopLimit=self.hops)
+        log("nodeinfo", id=pkt.id, to=f"!{num:08x}", hops=self.hops)
+
     def on_ack(self, p):
         d = p.get("decoded", {})
         rid = d.get("requestId")
@@ -215,7 +262,11 @@ class Client:
             log("text", **common, text=d.get("text", ""))
         elif port == "ROUTING_APP":
             pass                                    # handled by on_ack via the response handler
-        elif port in ("TELEMETRY_APP", "POSITION_APP", "NODEINFO_APP"):
+        elif port == "NODEINFO_APP":
+            u = d.get("user", {})
+            log("nodeinfo<", **common, id=u.get("id"), long=u.get("longName"), short=u.get("shortName"),
+                pubkey="yes" if u.get("publicKey") else "no")
+        elif port in ("TELEMETRY_APP", "POSITION_APP") and frm != self.me:
             log(port.split("_")[0].lower(), **common)
 
     def nodes(self):
@@ -245,6 +296,8 @@ class Client:
                 self.dm(parts[1], parts[2])
             elif c == "nodes":
                 self.nodes()
+            elif c == "nodeinfo" and len(parts) >= 2:
+                self.nodeinfo(parts[1])
             elif c == "info":
                 self.info()
             elif c == "hops" and len(parts) >= 2:
@@ -267,6 +320,7 @@ def cmd_run(args):
     from pubsub import pub
     patch_ble_scan()
     from meshtastic.ble_interface import BLEInterface
+    bluez_release(args.target)
     log("connect", target=args.target)
     iface = BLEInterface(args.target, noNodes=False)
     cl = Client(iface, args.hops)
@@ -279,7 +333,9 @@ def cmd_run(args):
     if args.fifo:
         if not os.path.exists(args.fifo):
             os.mkfifo(args.fifo)
-        fifo = os.open(args.fifo, os.O_RDONLY | os.O_NONBLOCK)
+        # O_RDWR: we hold a writer ourselves, so the pipe never reports EOF between
+        # writers (a command written while it was being reopened was lost)
+        fifo = os.open(args.fifo, os.O_RDWR | os.O_NONBLOCK)
         sources = [fifo] + ([sys.stdin] if sys.stdin.isatty() else [])
         log("fifo", path=args.fifo)
     buf = b""
@@ -295,11 +351,9 @@ def cmd_run(args):
                         continue
                     running = cl.command(line) and running
                 else:
-                    chunk = os.read(fifo, 4096)
-                    if not chunk:                   # writer closed: reopen to wait for the next one
-                        os.close(fifo)
-                        fifo = os.open(args.fifo, os.O_RDONLY | os.O_NONBLOCK)
-                        sources[0] = fifo
+                    try:
+                        chunk = os.read(fifo, 4096)
+                    except BlockingIOError:
                         continue
                     buf += chunk
                     while b"\n" in buf:
