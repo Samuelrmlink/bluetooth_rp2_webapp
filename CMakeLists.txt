@@ -59,6 +59,7 @@ add_executable(btgw
     src/fs/littlefs/lfs.c
     src/fs/littlefs/lfs_util.c
     src/config/config.c
+    src/util/crumb.c
 )
 
 target_include_directories(btgw PRIVATE

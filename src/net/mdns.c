@@ -21,6 +21,7 @@
 
 #include "net/mdns_records.h"
 #include "api/ops.h"
+#include "util/crumb.h"
 #include "api/api.h"
 
 #define MDNS_NETIFS 4
@@ -168,8 +169,11 @@ bool mdns_service_add_owned(int owner, const char *instance, const char *type, b
         snprintf(svc[si].txt[svc[si].n_txt], MDNS_TXT_LEN + 1, "%s", txt[t]);
         svc[si].n_txt++;
     }
+    crumb(CRUMB_MDNS_SVC_ADD);
     for (int n = 0; n < MDNS_NETIFS; n++) { bind_service(si, n); }
+    crumb(CRUMB_MDNS_SVC_BOUND);
     mdns_announce_all();
+    crumb(CRUMB_MDNS_SVC_DONE);
     return true;
 }
 
@@ -296,10 +300,12 @@ static void send_all(const uint8_t *data, size_t len) {
 void btgw_mdns_query_hook(struct netif *netif, struct pbuf *p, const ip_addr_t *addr,
                           u16_t port, int recv_unicast) {
     if (!mrec_group_count() || find_netif(netif) < 0) { return; }
+    crumb(CRUMB_MDNS_HOOK);
     u16_t n = pbuf_copy_partial(p, rec_in, sizeof rec_in, 0);
     bool legacy = port != 5353, unicast = false;
     size_t len = mrec_build_answer(rec_in, n, legacy, rec_out, sizeof rec_out, &unicast);
     if (!len) { return; }
+    crumb(CRUMB_MDNS_HOOK_BUILT);
     if (legacy || unicast || recv_unicast) {
         send_pkt(netif, rec_out, len, addr, port);
     } else {
@@ -308,6 +314,7 @@ void btgw_mdns_query_hook(struct netif *netif, struct pbuf *p, const ip_addr_t *
 }
 
 static void announce_again(void *arg) {
+    crumb(CRUMB_MDNS_ANNOUNCE);
     int id = (int)(intptr_t)arg;
     size_t len = mrec_build_announce(id, MREC_TTL_DEFAULT, rec_out, sizeof rec_out);
     if (len) { send_all(rec_out, len); }

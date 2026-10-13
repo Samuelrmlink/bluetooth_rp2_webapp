@@ -31,6 +31,7 @@
 #include "tusb.h"
 #include "net/mdns.h"
 #include "api/ops.h"
+#include "util/crumb.h"
 #if CONFIG_SPI_BUS
 #include "io/spibus.h"
 #endif
@@ -62,6 +63,7 @@
 bool boot_after_watchdog;
 
 int main(void) {
+    crumb_boot();
     stdio_init_all();
     /* busy_wait_ms(): this runs BEFORE watchdog_enable() below, so a hang here
      * has nothing to recover it, and sleep_ms()'s __wfe() depends on an alarm
@@ -70,6 +72,10 @@ int main(void) {
     printf("\n--- bluetooth_rp2_webapp ---\n");
 
     boot_after_watchdog = watchdog_caused_reboot();
+    if (crumb_last || crumb_last_fault_pc) {
+        printf("main: previous boot stopped at crumb 0x%04lx, fault pc 0x%08lx\n",
+               (unsigned long)crumb_last, (unsigned long)crumb_last_fault_pc);
+    }
 
     /* Armed BEFORE the radio and the filesystem, not after init. Init is ~2 s
      * and nothing in it should wait: a cyw43_arch_init() that never returns
@@ -202,6 +208,7 @@ int main(void) {
 #endif
         }
 #if CONFIG_NET_USB_NCM
+        crumb(CRUMB_LOOP_USB);
         tud_task();
         usb_ncm_poll();
         usb_ncm_recover_tick();
@@ -209,9 +216,11 @@ int main(void) {
 #if CONFIG_SPI_BUS
         /* SPI completions: callbacks run here, in the loop, never in the
          * DMA IRQ -- and never from cyw43_wait.c, which pumps USB only. */
+        crumb(CRUMB_LOOP_SPI);
         spibus_poll();
 #endif
 #if CONFIG_NET_ETH_W5500
+        crumb(CRUMB_LOOP_ETH);
         eth_poll();
 #endif
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
@@ -222,34 +231,44 @@ int main(void) {
          * network(s)", and then never scanned, never joined and never started
          * the fallback AP -- for the whole life of the firmware. Nothing
          * complained, because every individual piece was working. */
+        crumb(CRUMB_LOOP_WIFI);
         wifi_poll();
 #else
         cyw43_arch_poll();
 #endif
 
 #if CONFIG_BT_LE
+        crumb(CRUMB_LOOP_BT);
         bt_power_on_tick();   /* deferred controller power-on; staggers BT behind WiFi at boot */
         le_central_tick();
 #endif
 #if CONFIG_LUA_ENABLE
+        crumb(CRUMB_LOOP_LUA);
         lrt_tick();
 #endif
 #if CONFIG_NET_UPLINK
+        crumb(CRUMB_LOOP_UPLINK);
         uplink_tick();
 #endif
 #if CONFIG_NET_FORWARD
+        crumb(CRUMB_LOOP_FWD);
         fwd_tick();
 #endif
 #if CONFIG_NET_WIREGUARD
+        crumb(CRUMB_LOOP_WG);
         wg_tick();
 #endif
 #if CONFIG_OTA
+        crumb(CRUMB_LOOP_OTA);
         ota_tick();
 #endif
+        crumb(CRUMB_LOOP_CFG);
         cfg_tick();
         /* Coalesce whatever the pass produced into as few segments as possible;
          * the per-line tcp_output() was removed deliberately. */
+        crumb(CRUMB_LOOP_WS);
         http_flush_ws();
+        crumb(CRUMB_LOOP_END);
 
         /*
          * How long did that pass take?
