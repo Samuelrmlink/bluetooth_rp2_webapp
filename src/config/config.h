@@ -122,4 +122,9 @@ bool cfg_set_notify(const cfg_notify_t *n, const char **why);
  * bound to other meters. */
 cfg_trigger_t *cfg_notify_trigger_for(cfg_notify_t *n, const char *serial);
 
+/* Whole-file read/write of a small record (cfg/eth.json, cfg/uplink.json).
+ * Write only from the main loop; false = busy or failed, retry next tick. */
+bool cfg_file_read(const char *path, char *buf, size_t cap);
+bool cfg_file_write(const char *path, const char *data);
+
 #endif /* KM003C_CONFIG_H */

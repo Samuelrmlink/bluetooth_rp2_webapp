@@ -214,6 +214,46 @@ C1000_SETTERS = {"ac_output_enabled": (0, 1), "car_output_enabled": (0, 1),
 # A countdown running out switches its output off, as on the C1000.
 TIMER_OUTPUT = {"ac_countdown_s": "ac_output_enabled", "car_countdown_s": "car_output_enabled"}
 
+# The W5500 uplink (eth.*), as a board with the module fitted and a DHCP lease.
+ETH_BASE = {"present": True, "link": True, "speed": 100, "duplex": "full",
+            "mac": "06:e6:61:41:23:45", "mode": "dhcp", "ip": "192.168.50.23",
+            "mask": "255.255.255.0", "gw": "192.168.50.1", "dns": "", "dhcp_state": 10,
+            "cfg": {"ip": "", "mask": "", "gw": "", "dns": ""},
+            "rx_frames": 1520, "tx_frames": 1311, "rx_bytes": 402113, "tx_bytes": 210877,
+            "rx_dropped": 0, "rx_nomem": 0, "tx_dropped": 0, "txq_full": 0,
+            "resyncs": 0, "tx_timeouts": 0, "bus_busy": 3, "is_default_route": False}
+
+def _ip_ok(s):
+    parts = str(s or "").split(".")
+    return len(parts) == 4 and all(x.isdigit() and int(x) <= 255 for x in parts)
+
+def _u32(s):
+    a = 0
+    for x in s.split("."): a = a * 256 + int(x)
+    return a
+
+def eth_configure(p):
+    """eth.config as the firmware validates it (src/net/eth_w5500.c)."""
+    mode = p.get("mode", "dhcp")
+    e = STATE["eth"]
+    if mode == "dhcp":
+        e["mode"] = "dhcp"
+        e["cfg"] = {k: p.get(k, "") or "" for k in ("ip", "mask", "gw", "dns")}
+        e.update(ip="192.168.50.23", mask="255.255.255.0", gw="192.168.50.1", dns=e["cfg"]["dns"])
+        return {"staged": True}
+    if mode != "manual": raise ApiError("bad_request", "mode is dhcp or manual")
+    ip, mask, gw, dns = (p.get(k, "") or "" for k in ("ip", "mask", "gw", "dns"))
+    if not _ip_ok(ip) or _u32(ip) == 0: raise ApiError("bad_request", "manual needs a valid ip")
+    if not _ip_ok(mask): raise ApiError("bad_request", "manual needs a valid mask")
+    m = _u32(mask); inv = (~m) & 0xFFFFFFFF
+    if m == 0 or ((inv + 1) & inv) != 0: raise ApiError("bad_request", "manual needs a valid mask")
+    if gw and (not _ip_ok(gw) or (_u32(gw) & m) != (_u32(ip) & m)):
+        raise ApiError("bad_request", "gw is not on the ip/mask subnet")
+    if dns and not _ip_ok(dns): raise ApiError("bad_request", "dns is not an address")
+    e.update(mode="manual", ip=ip, mask=mask, gw=gw or "0.0.0.0", dns=dns,
+             cfg={"ip": ip, "mask": mask, "gw": gw, "dns": dns})
+    return {"staged": True}
+
 STATE = {}
 def reset_state():
     STATE.clear()
@@ -227,6 +267,7 @@ def reset_state():
     STATE["c1000"] = dict(C1000_BASE)
     STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
+    STATE["eth"] = json.loads(json.dumps(ETH_BASE))
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
 
@@ -285,7 +326,8 @@ class MockGateway:
     def op(self, op, p):
         if op == "sys.info":
             return {"firmware": "bluetooth_rp2_webapp (mock)", "uptime_ms": int(time.time() * 1000) % 10**7,
-                    "transports": ["le"], "clients": 1, "modules": ["sys", "bt"]}
+                    "transports": ["le"], "clients": 1,
+                    "modules": ["sys", "bt", "lua", "io", "wifi", "wg", "ota", "eth", "uplink"]}
         if op == "bt.state":
             return {"ready": True, "address": "2C:CF:67:C7:DB:56", "max_links": 4}
         if op == "scan.start":
@@ -447,6 +489,13 @@ class MockGateway:
             if isinstance(p.get("set"), dict): STATE["a2687"].update(p["set"])
             if "lag" in p: STATE["a2687_lag"] = float(p["lag"])
             return {"state": STATE["a2687"], "writes": STATE.get("a2687_writes", [])}
+        if op == "eth.status":
+            return STATE["eth"]
+        if op == "eth.config":
+            return eth_configure(p)
+        if op == "test.eth":                        # mock only: unplug the cable, pull the module
+            if isinstance(p.get("set"), dict): STATE["eth"].update(p["set"])
+            return STATE["eth"]
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \

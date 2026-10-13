@@ -21,7 +21,7 @@
 #include "hardware/i2c.h"
 #endif
 #if CONFIG_IO_SPI
-#include "hardware/spi.h"
+#include "io/spibus.h"
 #endif
 #if CONFIG_IO_UART
 #include "hardware/uart.h"
@@ -73,7 +73,7 @@ static void op_gpio_set(const char *params, api_reply_fn reply, void *ctx, long 
         api_reply_err(reply, ctx, id, "bad_request", "need \"pin\" and \"value\""); return;
     }
     if (pins_is_reserved((uint8_t)pin)) {
-        api_reply_err(reply, ctx, id, "reserved", "that pin belongs to the radio"); return;
+        api_reply_err(reply, ctx, id, "reserved", "that pin is reserved by a system driver"); return;
     }
     gpio_init((uint)pin);
     gpio_set_dir((uint)pin, GPIO_OUT);
@@ -85,7 +85,7 @@ static void op_gpio_get(const char *params, api_reply_fn reply, void *ctx, long 
     long pin;
     if (!pin_arg(params, &pin)) { api_reply_err(reply, ctx, id, "bad_request", "need \"pin\""); return; }
     if (pins_is_reserved((uint8_t)pin)) {
-        api_reply_err(reply, ctx, id, "reserved", "that pin belongs to the radio"); return;
+        api_reply_err(reply, ctx, id, "reserved", "that pin is reserved by a system driver"); return;
     }
     gpio_init((uint)pin);
     gpio_set_dir((uint)pin, GPIO_IN);
@@ -149,7 +149,7 @@ static void op_i2c_scan(const char *params, api_reply_fn reply, void *ctx, long 
     (void)api_json_int(params, "scl", &scl);
     (void)api_json_int(params, "hz", &hz);
     if (pins_is_reserved((uint8_t)sda) || pins_is_reserved((uint8_t)scl)) {
-        api_reply_err(reply, ctx, id, "reserved", "sda or scl belongs to the radio"); return;
+        api_reply_err(reply, ctx, id, "reserved", "sda or scl is reserved by a system driver"); return;
     }
     i2c_setup(bus, sda, scl, hz);
 
@@ -172,7 +172,11 @@ static void op_i2c_scan(const char *params, api_reply_fn reply, void *ctx, long 
 }
 #endif
 
-/* --- spi ----------------------------------------------------------------- */
+/* --- spi -----------------------------------------------------------------
+ * A one-off transfer for driver bring-up. It goes through the bus layer like
+ * everything else (spibus.c is the only code allowed to touch an SPI block),
+ * which refuses a bus a driver has brought up -- the W5500's, say -- and any
+ * reserved pin. */
 #if CONFIG_IO_SPI
 static void op_spi_xfer(const char *params, api_reply_fn reply, void *ctx, long id) {
     long bus = 0, sck = 18, mosi = 19, miso = 16, cs = 17, hz = 1000000;
@@ -186,29 +190,30 @@ static void op_spi_xfer(const char *params, api_reply_fn reply, void *ctx, long 
     if (!api_json_str(params, "value", hex, sizeof(hex))) {
         api_reply_err(reply, ctx, id, "bad_request", "need \"value\" as hex"); return;
     }
-    spi_inst_t *s = bus == 1 ? spi1 : spi0;
-    spi_init(s, (uint)hz);
-    gpio_set_function((uint)sck, GPIO_FUNC_SPI);
-    gpio_set_function((uint)mosi, GPIO_FUNC_SPI);
-    gpio_set_function((uint)miso, GPIO_FUNC_SPI);
-    /* CS is an ordinary claimed GPIO, not a hardware function, so a bus can
-     * carry several devices. */
-    gpio_init((uint)cs); gpio_set_dir((uint)cs, GPIO_OUT); gpio_put((uint)cs, 1);
-
     static uint8_t tx[256], rx[256];
     size_t len = strlen(hex) / 2;
     if (len > sizeof(tx)) { len = sizeof(tx); }
     for (size_t i = 0; i < len; i++) { unsigned b = 0; sscanf(hex + i * 2, "%2x", &b); tx[i] = (uint8_t)b; }
 
-    gpio_put((uint)cs, 0);
-    spi_write_read_blocking(s, tx, rx, len);
-    gpio_put((uint)cs, 1);
+    const char *err = "unknown";
+    if (!spibus_adhoc_xfer((int)bus, (int)sck, (int)mosi, (int)miso, (int)cs, (uint32_t)hz,
+                           tx, rx, len, &err)) {
+        api_reply_err(reply, ctx, id, "reserved", err); return;
+    }
 
     size_t n = (size_t)snprintf(io_buf, sizeof(io_buf), "{\"rx\":\"");
     for (size_t i = 0; i < len && n + 4 < sizeof(io_buf); i++) {
         n += (size_t)snprintf(io_buf + n, sizeof(io_buf) - n, "%02x", rx[i]);
     }
     snprintf(io_buf + n, sizeof(io_buf) - n, "\"}");
+    api_reply_ok(reply, ctx, id, io_buf);
+}
+
+static void op_spi_buses(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    size_t n = (size_t)snprintf(io_buf, sizeof(io_buf), "{\"buses\":");
+    n += spibus_status_json(io_buf + n, sizeof(io_buf) - n);
+    snprintf(io_buf + n, sizeof(io_buf) - n, "}");
     api_reply_ok(reply, ctx, id, io_buf);
 }
 #endif
@@ -229,6 +234,7 @@ static const op_def_t io_ops_tbl[] = {
 #endif
 #if CONFIG_IO_SPI
     { "spi.xfer",     op_spi_xfer },
+    { "spi.buses",    op_spi_buses },
 #endif
     { NULL, NULL }
 };

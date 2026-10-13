@@ -29,6 +29,9 @@ extern const op_module_t op_module_wg;
 #if CONFIG_OTA
 extern const op_module_t op_module_ota;
 #endif
+#if CONFIG_NET_ETH_W5500
+extern const op_module_t op_module_eth;
+#endif
 
 static const op_module_t *const modules[] = {
     &op_module_sys,
@@ -49,6 +52,9 @@ static const op_module_t *const modules[] = {
 #endif
 #if CONFIG_OTA
     &op_module_ota,
+#endif
+#if CONFIG_NET_ETH_W5500
+    &op_module_eth,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

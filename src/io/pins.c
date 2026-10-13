@@ -17,7 +17,14 @@ static pin_slot_t slots[PIN_COUNT];
  * down, and with it both transports and the only way back in. */
 static const uint8_t reserved[] = APP_RADIO_PINS;
 
+/* Idempotent: a system driver (the W5500, through spibus) may reserve its
+ * pins during network init, before the io module's init runs this from
+ * ops_init_all(), and a second call must not wipe those reservations. */
+static bool inited;
+
 void pins_init(void) {
+    if (inited) { return; }
+    inited = true;
     memset(slots, 0, sizeof(slots));
     for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++) {
         uint8_t p = reserved[i];
@@ -29,6 +36,25 @@ void pins_init(void) {
     }
     printf("io: pin broker up, %u reserved for the radio\n",
            (unsigned)(sizeof(reserved) / sizeof(reserved[0])));
+}
+
+bool pins_reserve(uint8_t pin, pin_function_t fn, const char *owner) {
+    pins_init();
+    if (pin >= PIN_COUNT) { return false; }
+    if (slots[pin].kind == PIN_OWNER_SYSTEM) {
+        /* The same driver asking again (a re-init) is fine; anyone else is not. */
+        return strcmp(slots[pin].owner, owner ? owner : "") == 0;
+    }
+    if (slots[pin].kind != PIN_OWNER_NONE) { return false; }
+    slots[pin].kind = PIN_OWNER_SYSTEM;
+    slots[pin].fn = fn;
+    snprintf(slots[pin].owner, sizeof(slots[pin].owner), "%s", owner ? owner : "system");
+    printf("io: pin %u reserved for %s\n", pin, slots[pin].owner);
+    return true;
+}
+
+const char *pins_reserved_by(uint8_t pin) {
+    return (pin < PIN_COUNT && slots[pin].kind == PIN_OWNER_SYSTEM) ? slots[pin].owner : NULL;
 }
 
 bool pins_is_reserved(uint8_t pin) {
@@ -51,7 +77,10 @@ bool pins_claim(uint8_t pin, pin_function_t fn, pin_owner_kind_t kind,
                 const char *owner_id, const char **err) {
     if (pin >= PIN_COUNT) { *err = "no such pin"; return false; }
     if (slots[pin].kind == PIN_OWNER_SYSTEM) {
-        *err = "pin is reserved by the radio and can never be claimed";
+        static char rmsg[80];
+        snprintf(rmsg, sizeof(rmsg), "pin is reserved by %s and can never be claimed",
+                 strcmp(slots[pin].owner, "cyw43") == 0 ? "the radio" : slots[pin].owner);
+        *err = rmsg;
         return false;
     }
     if (slots[pin].kind != PIN_OWNER_NONE) {

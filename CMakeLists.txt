@@ -116,6 +116,17 @@ if(CONFIG_IO_PINS)
     endif()
 endif()
 
+# The SPI bus layer: the only code that touches an SPI block (spi.xfer and
+# every SPI driver go through it). See src/io/spibus.h.
+if(CONFIG_SPI_BUS)
+    target_sources(btgw PRIVATE src/io/spibus.c src/io/spibus_pico.c)
+    target_link_libraries(btgw hardware_spi hardware_dma hardware_irq pico_sync)
+endif()
+
+if(CONFIG_NET_ETH_W5500)
+    target_sources(btgw PRIVATE src/net/w5500.c src/net/eth_w5500.c src/net/eth_ops.c)
+endif()
+
 if(CONFIG_PROTO_ANKER)
     target_sources(btgw PRIVATE src/codec/anker_frame.c src/codec/anker_tlv.c)
     if(CONFIG_PROTO_ANKER_CRYPTO)

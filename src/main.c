@@ -31,6 +31,10 @@
 #include "tusb.h"
 #include "net/mdns.h"
 #include "api/ops.h"
+#if CONFIG_SPI_BUS
+#include "io/spibus.h"
+#endif
+#include "net/eth_w5500.h"
 #if CONFIG_LUA_ENABLE
 #include "lua/lrt.h"
 #endif
@@ -126,6 +130,16 @@ int main(void) {
     printf("ncm: device %d.%d.%d.%d\n", USB_IP0, USB_IP1, USB_IP2, USB_IP3);
 #endif
 
+#if CONFIG_NET_ETH_W5500
+    /* After cyw43_arch_init() -- the radio has claimed its DMA channels by
+     * now, and spibus takes two of what is left -- and after mdns_start(),
+     * which would otherwise forget the netif registration. No chip fitted
+     * is a log line and nothing else. */
+    if (!eth_init()) {
+        printf("eth: no Ethernet this boot\n");
+    }
+#endif
+
 #if CONFIG_NET_WIREGUARD
     /* After the interfaces, because the tunnel rides on one of them -- and
      * it is additive: if this fails, everything above still works. */
@@ -182,6 +196,14 @@ int main(void) {
         tud_task();
         usb_ncm_poll();
         usb_ncm_recover_tick();
+#endif
+#if CONFIG_SPI_BUS
+        /* SPI completions: callbacks run here, in the loop, never in the
+         * DMA IRQ -- and never from cyw43_wait.c, which pumps USB only. */
+        spibus_poll();
+#endif
+#if CONFIG_NET_ETH_W5500
+        eth_poll();
 #endif
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
 #if CONFIG_NET_WIFI

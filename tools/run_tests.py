@@ -508,10 +508,84 @@ def t_webapp_dom():
         return False, f"{total - good} of {total} failed: {first[:70]}"
     return True, f"{good} checks in chromium"
 
+def _host_c(name, srcs, binname, defs="-DSPIBUS_HOST"):
+    """Build and run one host C test that prints 'N checks, M failed'."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), binname)
+    rc, out = sh(f"gcc -O1 -Wall -Wextra {defs} -Isrc -Itest/host -o {binp} {' '.join(srcs)}")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else f"{name} harness build failed"
+    rc, out = sh(binp)
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m:
+        return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+    if rc or int(m.group(2)):
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return False, f"{m.group(2)} of {m.group(1)} failed: {first[:70]}"
+    return True, f"{m.group(1)} checks"
+
+def t_spibus():
+    """The SPI bus layer against a fake DMA: exclusive claims, CS held across
+    a chained transfer, completion only from the loop, clock per device."""
+    return _host_c("spibus", ["test/host/spibus_test.c", "src/io/spibus.c",
+                              "test/host/fake_spi.c"], "btgw_spibus")
+
+def t_w5500():
+    """The W5500 MACRAW state machine against a simulated chip: ring
+    wrap-around, back-to-back frames, chained buffers, ring full, one SEND at
+    a time, link, resync on a corrupt length, and a bus held by another
+    device."""
+    return _host_c("w5500", ["test/host/w5500_test.c", "src/net/w5500.c", "src/io/spibus.c",
+                             "test/host/fake_spi.c"], "btgw_w5500")
+
+def t_spi_only_through_spibus():
+    """Every SPI access goes through src/io/spibus*.c, which claims the bus.
+    A direct spi_write/spi_read/spi_init anywhere else would bypass the
+    semaphore and could interleave with the W5500's DMA mid-frame."""
+    rc, out = sh(r"grep -rnE '\bspi_(write|read|init|set_baudrate|set_format|get_hw)\w*\s*\(' src/ 2>/dev/null")
+    hits = [l for l in out.splitlines() if l.strip() and not l.startswith("src/io/spibus")]
+    return (len(hits) == 0), (hits[0][:90] if hits else "spibus.c / spibus_pico.c only")
+
+def t_cyw43_wait_stays_usb_only():
+    """cyw43_wait.c pumps USB from inside the radio driver's waits. Nothing
+    that touches lwIP may run there -- that includes the SPI completions and
+    the Ethernet state machine, which deliver frames into lwIP."""
+    src = open(os.path.join(ROOT, "src/net/cyw43_wait.c")).read()
+    for bad in ("spibus_", "eth_", "w5500", "uplink_", "fwd_"):
+        if bad in src:
+            return False, f"cyw43_wait.c calls {bad}*"
+    return True, "no spibus/eth/uplink/fwd in the radio's wait hook"
+
+def t_w5500_pins_reserved():
+    """The W5500's pins must be SYSTEM-reserved in the pin broker, or a
+    script's gpio.set on GP13 would yank CS in the middle of a DMA frame.
+    Follow the chain: eth passes the Kconfig pins to spibus/w5500, spibus
+    reserves sck/mosi/miso and each device's CS, w5500 reserves INT and RST,
+    and the Pico port turns that into pins_reserve()."""
+    e = open(os.path.join(ROOT, "src/net/eth_w5500.c")).read()
+    for k in ("CONFIG_ETH_W5500_SCK", "CONFIG_ETH_W5500_MOSI", "CONFIG_ETH_W5500_MISO",
+              "CONFIG_ETH_W5500_CS", "CONFIG_ETH_W5500_INT", "CONFIG_ETH_W5500_RST"):
+        if k not in e:
+            return False, f"eth_w5500.c does not use {k}"
+    b = open(os.path.join(ROOT, "src/io/spibus.c")).read()
+    if b.count("spibus_port_reserve_pin(") < 4:
+        return False, "spibus.c no longer reserves sck/mosi/miso and the CS pin"
+    w = open(os.path.join(ROOT, "src/net/w5500.c")).read()
+    if 'spibus_port_reserve_pin(int_pin' not in w or 'spibus_port_reserve_pin(rst_pin' not in w:
+        return False, "w5500.c no longer reserves INT and RST"
+    pc = open(os.path.join(ROOT, "src/io/spibus_pico.c")).read()
+    if "pins_reserve(" not in pc:
+        return False, "spibus_pico.c does not reserve through the pin broker"
+    return True, "SCK/MOSI/MISO/CS/INT/RST all SYSTEM-owned"
+
 # --- tier 1 -------------------------------------------------------------------
+# BTGW_BUILD_PREFIX lets two checkouts (worktrees) run tier 1 at once without
+# building into, and wiping, each other's directories.
+BUILD_PREFIX = os.environ.get("BTGW_BUILD_PREFIX", "/tmp/btgw_")
+
 def build(cfg):
     def fn():
-        bdir = f"/tmp/btgw_{cfg}"
+        bdir = f"{BUILD_PREFIX}{cfg}"
         env = ('PICO_SDK_PATH=$HOME/.pico-sdk/sdk/2.3.0 '
                'PICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/15_2_Rel1 ')
         sh(f"rm -rf {bdir}")
@@ -526,6 +600,25 @@ def build(cfg):
         last = sz.strip().splitlines()[-1].split()
         return True, f"{last[0]} text / {last[2]} bss"
     return fn
+
+def t_w5500_symbols():
+    """CONFIG_NET_ETH_W5500=n must carry none of it: no w5500_/eth_ symbol in
+    the builds that leave it off, and all of it in the one that turns it on."""
+    nm = os.path.expanduser("~/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-nm")
+    pat = re.compile(r"\b(w5500_\w+|eth_(init|poll|status_json|configure)|op_module_eth)\b")
+    for cfg in ("pico2w", "pico2w_minimal", "pico2w_noanker"):
+        elf = f"{BUILD_PREFIX}{cfg}/btgw.elf"
+        if not os.path.exists(elf):
+            return False, f"{cfg} was not built"
+        rc, out = sh(f"{nm} {elf}")
+        hit = next((l for l in out.splitlines() if pat.search(l)), None)
+        if hit:
+            return False, f"{cfg} links {hit.split()[-1]}"
+    rc, out = sh(f"{nm} {BUILD_PREFIX}pico2w_eth/btgw.elf")
+    if not pat.search(out):
+        return False, "pico2w_eth has no W5500 code at all"
+    return True, "absent from pico2w/minimal/noanker, present in pico2w_eth"
+
 
 def _kb(v):
     """picotool sizes: "864K", "2048K", "64K"."""
@@ -633,6 +726,11 @@ def main():
     step(0, "OTA keys: public in tree, private out", t_ota_keys)
     step(0, "SMP writes flash from the loop only", t_ota_flash_from_loop_only)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
+    step(0, "SPI bus: claims, chains, completes from the loop", t_spibus)
+    step(0, "W5500 MACRAW state machine vs a simulated chip", t_w5500)
+    step(0, "SPI only through the bus layer", t_spi_only_through_spibus)
+    step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
+    step(0, "W5500 pins are reserved", t_w5500_pins_reserved)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:
@@ -644,6 +742,10 @@ def main():
         # device codec absent. Without it the #if in lbind.c that skips
         # lbind_proto_open is never once compiled out.
         step(1, "build pico2w_noanker (lua, no device codec)", build("pico2w_noanker"))
+        # The W5500 is opt-in (default n, like WiFi): this is the only build
+        # that compiles it, so it is the only thing keeping it compiling.
+        step(1, "build pico2w_eth (pico2w + W5500 Ethernet)", build("pico2w_eth"))
+        step(1, "W5500 off means none of its code is linked", t_w5500_symbols)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)
