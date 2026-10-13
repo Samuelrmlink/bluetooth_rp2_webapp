@@ -1,0 +1,3 @@
+# PC-side Meshtastic client for hardware-in-the-loop tests (tools/meshtastic/mesh_client.py)
+meshtastic==2.7.11
+bleak==3.0.2
