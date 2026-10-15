@@ -242,9 +242,44 @@ HTTP over WiFi every 3 s, WireGuard keepalives and the 2 s uplink probes:
 Soak 1's two WiFi drops did not reproduce under any one of the loads, nor
 under all of them together for 30 minutes (soak 2), so they look
 environmental; they clustered between 03:00 and 03:45 with the silent drop
-noted above. While a BLE link is held the existing WiFi policy does not
-rejoin (a join under BLE wedges the driver), so such a drop lasts until the
-firmware reassociates or the BLE link drops -- unchanged behaviour.
+noted above. A drop while a BLE link is held used to last until the BLE
+link dropped (joins were deferred while any link was open); see "WiFi rejoin
+with Bluetooth links open" below for the fix.
+
+### WiFi rejoin with Bluetooth links open
+
+A join used to be deferred while `le_radio_busy()` -- any open BLE link -- so
+a gateway holding the C1000 never rejoined after its AP went away (stuck in
+`idle`). Two ways out, chosen by `wifi.mode {coex: "window"|"live"}` (RAM
+only, default `window`):
+
+* **window** (default): 60 s after the station is lost, with a saved network
+  to join, the radio is released (`le_release_radio()`: BLE links dropped,
+  scans stopped), new BLE activity is held off (`wifi_bt_hold()`) for at most
+  30 s (hard 45 s), the join runs, and the window closes on success or
+  failure. Failed windows back off 2 min, doubling to 30 min. Status:
+  `bt_window`, `bt_windows`, `bt_windows_ok`, `bt_window_next_s`. The Connect
+  button opens a window at once.
+* **live** (experimental): the join runs with the links up; only an active
+  BLE scan makes it wait. Status: `coex`, `last_join_ms`, `last_join_links`,
+  `live_joins_ok`, `live_joins_fail`.
+
+Bench (fw 1.149, C1000 linked and streaming, RTT watched), WiFi dropped with
+`wifi.mode off` -> `auto` (simulated; a real AP power-off is still to do):
+
+| mode | runs | result |
+|---|---|---|
+| window, auto | 3 | window at +71 s, up at +76 s, C1000 back at ~+117 s |
+| window, Connect | 3 | up in ~7 s |
+| window, out-of-range AP | 1 | join fails -> AP fallback -> retried after the 2 min back-off |
+| live, rejoin | 10 | 10/10, joins 3.0-5.0 s, link never dropped, telemetry gaps 5.5-6.0 s (5 s poll) |
+| live, Connect | 5 | 5/5, 4.5-4.9 s |
+| live, two links open | 10 | 10/10 |
+| live, ~20 GATT reads/s during the join | 10 | 10/10, reads answered during the join (longest gap 0.6-0.9 s), 0 errors |
+
+36/36 live joins, no CYW43 warnings, ioctl timeouts or reboots; worst radio
+wait ~1.1 ms, longest main-loop stall 488 ms. The wedge behind the one-radio
+rule (544d443) predates the bounded cyw43 wait (`cyw43_wait.c`).
 
 Not possible on this rig, owner-gated:
 * **PC shared mode (e0 DHCP lease, e0 as a real uplink, WireGuard over

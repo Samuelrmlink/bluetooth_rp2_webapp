@@ -172,6 +172,12 @@ def t_wifi_radio_window():
         return False, "the radio window does not close when the join fails"
     if "no interface up; re-enabling the station" not in src:
         return False, "the no-interface safety net is gone: scans can fail forever with the AP down and the station parked"
+    # coex "live" (experimental, 2026-10-15): joins with links open, but a
+    # BLE scan still blocks, and it is opt-in -- window stays the default.
+    if "le_scanning()" not in body:
+        return False, "begin_join() no longer waits out a BLE scan in coex live"
+    if re.search(r"static\s+bool\s+coex_live\s*=\s*true", src):
+        return False, "coex live became the default without a decision"
     c = open(os.path.join(ROOT, "src/bt/le/central.c")).read()
     if "int le_release_radio(" not in c:
         return False, "central.c has no le_release_radio()"
