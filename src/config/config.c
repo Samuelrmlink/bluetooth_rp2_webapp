@@ -601,3 +601,27 @@ bool cfg_set_mode(const char *m) {
     dirty = true;
     return true;
 }
+
+/* --- small JSON records owned by other modules ----------------------------
+ * cfg/eth.json, cfg/uplink.json. The module keeps its own dirty flag and calls
+ * cfg_file_write() from its main-loop tick -- never from an lwIP callback,
+ * for the reason at the top of config.h. */
+bool cfg_file_read(const char *path, char *buf, size_t cap) {
+    size_t size = 0;
+    int h = fs_begin_read(path, &size);
+    if (h < 0) { return false; }
+    int n = fs_read(h, (uint8_t *)buf, cap - 1);
+    fs_end_read(h);
+    if (n <= 0) { return false; }
+    buf[n] = 0;
+    return true;
+}
+
+bool cfg_file_write(const char *path, const char *data) {
+    if (fs_begin_write(path) != 0) { return false; }   /* busy: retry next tick */
+    if (fs_write((const uint8_t *)data, strlen(data)) < 0) {
+        fs_abort_write();
+        return false;
+    }
+    return fs_end_write() == 0;
+}

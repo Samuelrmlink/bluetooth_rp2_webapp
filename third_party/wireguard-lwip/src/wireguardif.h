@@ -128,4 +128,10 @@ err_t wireguardif_disconnect(struct netif *netif, u8_t peer_index);
 // Is the given peer "up"? A peer is up if it has a valid session key it can communicate with
 err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *current_ip, u16_t *current_port);
 
+// LOCAL CHANGE (btgw): egress interface for the outer UDP (NULL = lwIP's
+// default route) and an immediate keepalive -- see wireguardif.c.
+void wireguardif_set_tx_netif(struct netif *netif);
+struct netif *wireguardif_get_tx_netif(void);
+err_t wireguardif_send_keepalive_now(struct netif *netif, u8_t peer_index);
+
 #endif /* _WIREGUARDIF_H_ */

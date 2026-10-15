@@ -15,9 +15,7 @@
 #include "lwip/pbuf.h"
 
 #include "autoconf.h"
-#if CONFIG_NET_WIFI
-#include "net/wifi.h"   /* wifi_is_up(): only reach for the tunnel once WiFi has an IP */
-#endif
+#include "net/uplink.h"  /* uplink_any_up(): only reach for the tunnel once an uplink is up */
 
 #include "wireguardif.h"
 #include "wireguard.h"
@@ -318,8 +316,11 @@ static err_t wg_count_input(struct pbuf *p, struct netif *inp) {
     return ip_input(p, inp);
 }
 
+static uint32_t last_tx_sys;   /* sys_now() of the last tunnelled packet out */
+
 static err_t wg_count_output(struct netif *netif, struct pbuf *p, const ip4_addr_t *ipaddr) {
     if (p) { tx_bytes += p->tot_len; }
+    last_tx_sys = sys_now();
     return inner_output ? inner_output(netif, p, ipaddr) : ERR_IF;
 }
 
@@ -533,13 +534,12 @@ static void emit_state(bool connected, bool confirmed) {
 
 void wg_tick(void) {
     if (!netif_added || peer_index == WIREGUARDIF_INVALID_INDEX) { return; }
-#if CONFIG_NET_WIFI
-    /* No tunnel activity -- not even a handshake attempt -- until WiFi is
-     * associated AND has a DHCP address. A WiFi drop pauses new attempts. */
-    if (!wifi_is_up()) { return; }
-#else
-    return;   /* no-WiFi build: WireGuard is disabled */
-#endif
+    /* No tunnel activity -- not even a handshake attempt -- until an uplink
+     * is up: the WiFi station associated AND addressed, or Ethernet with a
+     * gateway. With WiFi alone that is exactly the old wifi_is_up() gate
+     * (WireGuard must not contend for the shared radio while WiFi is still
+     * associating); an uplink drop pauses new attempts. */
+    if (!uplink_any_up()) { return; }
 
     bool up = wg_is_connected();
     bool confirmed = wg_is_confirmed();
@@ -582,6 +582,31 @@ void wg_tick(void) {
         wireguardif_connect(&wg_netif, peer_index);
         connect_attempts++;
     }
+}
+
+bool wg_endpoint(ip4_addr_t *out) {
+    if (!cfg.present) { return false; }
+    ip4_addr_copy(*out, *ip_2_ip4(&cfg.endpoint));
+    return true;
+}
+
+void wg_set_uplink(struct netif *nif) {
+    if (!netif_added) { return; }
+    struct netif *was = wireguardif_get_tx_netif();
+    wireguardif_set_tx_netif(nif);
+    if (nif && nif != was && peer_index != WIREGUARDIF_INVALID_INDEX) {
+        /* The server learns the new source address from this packet. */
+        err_t e = wireguardif_send_keepalive_now(&wg_netif, peer_index);
+        printf("wg: outer UDP now via %c%c%s\n", nif->name[0], nif->name[1],
+               e == ERR_OK ? ", keepalive sent" : " (no session yet; next handshake goes there)");
+    }
+}
+
+uint32_t wg_last_tx_ms(void) { return last_tx_sys; }
+
+uint32_t wg_last_rx_ms(void) {
+    const struct wireguard_peer *pr = peer0();
+    return pr ? pr->last_rx : 0;
 }
 
 size_t wg_status_json(char *dst, size_t cap) {
@@ -632,6 +657,11 @@ size_t wg_status_json(char *dst, size_t cap) {
         }
     }
 
+    char tx_if[3] = "";
+    {
+        struct netif *t = wireguardif_get_tx_netif();
+        if (t) { tx_if[0] = t->name[0]; tx_if[1] = t->name[1]; }
+    }
     return (size_t)snprintf(dst, cap,
         "{\"configured\":%s,\"netif_up\":%s,\"connected\":%s,\"confirmed\":%s,"
         "\"address\":\"%s\",\"endpoint\":\"%s\",\"endpoint_port\":%u,"
@@ -642,7 +672,7 @@ size_t wg_status_json(char *dst, size_t cap) {
         "\"peer_active\":%s,\"handshake_in_progress\":%s,\"session_valid\":%s,"
         "\"initiation_sent_ms_ago\":%ld,\"last_rx_ms_ago\":%ld,"
         "\"boot_count\":%lu,\"tai64n_offset_s\":%llu,"
-        "\"is_default_route\":%s}",
+        "\"uplink\":\"%s\",\"is_default_route\":%s}",
         cfg.present ? "true" : "false",
         (netif_added && netif_is_up(&wg_netif)) ? "true" : "false",
         up ? "true" : "false",
@@ -669,6 +699,7 @@ size_t wg_status_json(char *dst, size_t cap) {
         (unsigned long long)tai64n_offset_s,
         /* Reported so a monitor can assert it, not just trust the comment
          * in wg_up(). If this is ever true, something regressed badly. */
+        tx_if,
         (netif_added && netif_default == &wg_netif) ? "true" : "false");
 }
 

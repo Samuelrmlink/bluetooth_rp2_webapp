@@ -50,6 +50,7 @@
 #include "net/mdns.h"
 #include "dhcpserver.h"
 #include "net/wg.h"
+#include "net/uplink.h"
 #if CONFIG_BT_LE
 #include "bt/bt.h"
 #include "bt/le/central.h"
@@ -270,9 +271,27 @@ static bool want_idle_scan(uint32_t now) {
  * is the honest answer while the station is away.
  */
 static void fix_default_route(void) {
-    if (cyw43_state.itf_state & (1 << CYW43_ITF_STA)) {
-        netif_set_default(sta_netif());
-    }
+    /* The decision itself now lives in src/net/uplink.c -- the only caller
+     * of netif_set_default() -- because with a second uplink (Ethernet) the
+     * station is no longer the only interface that reaches the Internet.
+     * With WiFi alone the outcome is exactly what this function used to do:
+     * the station whenever it is enabled (uplink_fallback_netif() below),
+     * never the AP. */
+    uplink_reselect();
+}
+
+/* For src/net/uplink.c. The station as an uplink candidate: only once this
+ * state machine says it is up (associated AND addressed), which is the same
+ * gate WireGuard always waited behind. */
+struct netif *wifi_uplink_netif(void) {
+    return state == ST_UP ? sta_netif() : NULL;
+}
+
+/* Where the default route goes when no uplink is usable: the station
+ * whenever it is enabled, as fix_default_route() always did. NULL when it is
+ * not (AP-only, off), leaving the route where it is. */
+struct netif *wifi_fallback_netif(void) {
+    return (cyw43_state.itf_state & (1 << CYW43_ITF_STA)) ? sta_netif() : NULL;
 }
 
 /*

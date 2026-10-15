@@ -70,4 +70,9 @@ bool wifi_ap_up(void);
  * window, or in mode "off". */
 bool wifi_bt_hold(void);
 
+/* For uplink selection (src/net/uplink.c), which owns the default route. */
+struct netif;
+struct netif *wifi_uplink_netif(void);    /* the station, once up; else NULL */
+struct netif *wifi_fallback_netif(void);  /* the station while enabled; else NULL */
+
 #endif /* KM003C_NET_WIFI_H */

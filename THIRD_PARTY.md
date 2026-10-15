@@ -104,3 +104,11 @@ Cryptography Research, reproduced as `licenses/x25519-cryptography-research
 
 `third_party/wireguard-lwip/VENDORED.txt` records the upstream commit, what
 was taken and what was left behind.
+
+## lwip-mdns
+
+`third_party/lwip-mdns/` is lwIP 2.2.1's mDNS responder (`src/apps/mdns`,
+BSD-3-Clause, covered by `licenses/lwIP.LICENSE`), copied from the pico-sdk
+so that one hook could be added to its receive path for the firmware's own
+record groups. `third_party/lwip-mdns/VENDORED.txt` records the version and
+the single local change.

@@ -66,6 +66,86 @@ config NET_WIREGUARD
       Costs about 25 KB of flash (the implementation plus ChaCha20-Poly1305,
       BLAKE2s and X25519) and a few KB of RAM for one peer.
 
+config NET_ETH_W5500
+    bool "Ethernet: WIZnet W5500 on SPI (an optional second uplink)"
+    default n
+    select SPI_BUS
+    help
+      A W5500 in MACRAW mode as lwIP netif "e0": lwIP does ARP, IP and the
+      DHCP client; the chip only moves frames. Optional in the same way WiFi
+      is -- a build without it carries none of its code. The SPI traffic
+      goes through src/io/spibus.c (semaphore-claimed bus, DMA in the
+      background, completion from the main loop), so nothing ever waits on
+      the chip. A board without the module fitted reports "not present" and
+      touches nothing else.
+
+      Costs about 12 KB of flash and ~1 KB of static RAM; frames in flight
+      live in lwIP's own pools.
+
+if NET_ETH_W5500
+
+config ETH_W5500_SPI
+    int "SPI block (0 or 1)"
+    range 0 1
+    default 1
+
+config ETH_W5500_SCK
+    int "SCK pin"
+    default 14
+
+config ETH_W5500_MOSI
+    int "MOSI (TX) pin"
+    default 15
+
+config ETH_W5500_MISO
+    int "MISO (RX) pin"
+    default 8
+
+config ETH_W5500_CS
+    int "CS pin (driven as a plain GPIO)"
+    default 13
+
+config ETH_W5500_INT
+    int "INT pin (-1 = none, poll only)"
+    default 10
+
+config ETH_W5500_RST
+    int "RST pin (-1 = none, soft reset through MR)"
+    default 11
+
+config ETH_W5500_BAUD
+    int "SPI clock (Hz)"
+    default 30000000
+
+config ETH_W5500_MAC_FILTER
+    bool "Hardware MAC filter (own MAC + broadcast + multicast only)"
+    default y
+    help
+      Sn_MR.MFEN. Off makes the socket promiscuous: harmless on a switched
+      LAN, but every flooded unicast frame then crosses the SPI bus.
+
+endif
+
+config NET_UPLINK
+    bool
+    default y if NET_WIFI || NET_ETH_W5500
+    help
+      Uplink health and selection (src/net/uplink.c): the ONLY code that
+      calls netif_set_default(). Pings the WireGuard endpoint on every
+      interface with a gateway and moves the tunnel and new connections to
+      the best one.
+
+config NET_FORWARD
+    bool "Forwarding rules from Lua (TCP proxy + UDP relay)"
+    default y
+    depends on LUA_ENABLE
+    help
+      net.forward{} from a script: a listen port relayed to another port on
+      this device or to a host on any interface. Not IP forwarding: the
+      gateway terminates and re-originates, so replies come back on the
+      same pair whatever the interfaces. Rules belong to the script that
+      made them.
+
 config LWIP_MEM_SIZE_KB
     int "lwIP heap (KB)"
     default 48

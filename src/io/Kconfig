@@ -35,6 +35,7 @@ config IO_I2C
 config IO_SPI
     bool "SPI"
     depends on IO_PINS
+    select SPI_BUS
     default n
 
 config IO_UART
@@ -45,5 +46,14 @@ config IO_UART
 config IO_CDC
     bool "USB CDC-ACM data ports"
     default n
+
+config SPI_BUS
+    bool
+    help
+      The SPI bus layer (src/io/spibus.c): the only code allowed to touch a
+      hardware SPI block. A device claims its bus through a semaphore, moves
+      data by DMA in the background, and gets its completion callback from
+      the main loop. Selected by whatever needs it (the W5500, spi.xfer);
+      never offered on its own.
 
 endmenu

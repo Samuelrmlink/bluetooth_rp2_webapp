@@ -21,6 +21,7 @@
 #include <stdbool.h>
 
 #include "api/api.h"
+#include "util/crumb.h"
 #include "api/ops.h"
 #include "fs/fs.h"
 #include "net/http.h"
@@ -226,6 +227,15 @@ bool api_reboot_due(void) {
     return s_reboot_at_ms && (int32_t)(now_ms() - s_reboot_at_ms) >= 0;
 }
 
+/* What stopped the previous boot (src/util/crumb.h): the main-loop stage,
+ * the last few deep breadcrumbs, and a HardFault's frame and status. */
+static void op_sys_fault(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    char r[900];
+    crumb_report_json(r, sizeof r);
+    api_reply_ok(reply, ctx, id, r);
+}
+
 static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     char mods[512];
@@ -236,7 +246,8 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              "\"watchdog_reboot\":%s,\"radio_wait_max_us\":%lu,"
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
-             "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s}",
+             "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
+             "\"last_crumb\":%lu,\"last_fault_pc\":%lu}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
               * because a device reached over WireGuard has no RTT, and a
@@ -255,7 +266,10 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
 #else
              "",
 #endif
-             http_client_count(), mods);
+             http_client_count(), mods,
+             /* Where the previous boot's loop was when it stopped, and the PC
+              * of a HardFault if that is what stopped it (src/util/crumb.h). */
+             (unsigned long)crumb_last, (unsigned long)crumb_last_fault_pc);
     api_reply_ok(reply, ctx, id, result);
 }
 
@@ -326,6 +340,7 @@ static void op_sys_secret_put(const char *params, api_reply_fn reply, void *ctx,
 
 static const op_def_t sys_ops[] = {
     { "sys.info", op_sys_info },
+    { "sys.fault", op_sys_fault },
     { "sys.reboot", op_sys_reboot },
     { "sys.secret_put", op_sys_secret_put },
     { NULL, NULL }

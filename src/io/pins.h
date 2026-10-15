@@ -44,6 +44,16 @@ bool pins_release(uint8_t pin, const char **err);
 int pins_release_owner(const char *owner_id);
 
 bool pins_is_reserved(uint8_t pin);
+
+/* Reserve a pin for a system driver (the W5500's SPI and control pins):
+ * PIN_OWNER_SYSTEM, so neither the API nor a script can ever claim it. Safe
+ * before pins_init(). False if the pin is already owned by someone else. */
+bool pins_reserve(uint8_t pin, pin_function_t fn, const char *owner);
+/* Who reserved it ("cyw43", "w5500", ...), or NULL. */
+const char *pins_reserved_by(uint8_t pin);
+/* Give back a pins_reserve() made by `owner` (a driver whose chip was not
+ * there). Pins reserved by anyone else -- the radio -- are left alone. */
+void pins_unreserve(uint8_t pin, const char *owner);
 bool pins_owned_by(uint8_t pin, const char *owner_id);
 
 const char *pins_function_name(pin_function_t fn);

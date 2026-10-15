@@ -214,6 +214,97 @@ C1000_SETTERS = {"ac_output_enabled": (0, 1), "car_output_enabled": (0, 1),
 # A countdown running out switches its output off, as on the C1000.
 TIMER_OUTPUT = {"ac_countdown_s": "ac_output_enabled", "car_countdown_s": "car_output_enabled"}
 
+# The W5500 uplink (eth.*), as a board with the module fitted and a DHCP lease.
+ETH_BASE = {"present": True, "link": True, "speed": 100, "duplex": "full",
+            "mac": "06:e6:61:41:23:45", "mode": "dhcp", "ip": "192.168.50.23",
+            "mask": "255.255.255.0", "gw": "192.168.50.1", "dns": "", "dhcp_state": 10,
+            "cfg": {"ip": "", "mask": "", "gw": "", "dns": ""},
+            "rx_frames": 1520, "tx_frames": 1311, "rx_bytes": 402113, "tx_bytes": 210877,
+            "rx_dropped": 0, "rx_nomem": 0, "tx_dropped": 0, "txq_full": 0,
+            "resyncs": 0, "tx_timeouts": 0, "bus_busy": 3, "addr_source": "dhcp",
+            "link_local_starts": 0, "leases": 1, "dhcp_router": False, "is_default_route": False}
+
+def _ip_ok(s):
+    parts = str(s or "").split(".")
+    return len(parts) == 4 and all(x.isdigit() and int(x) <= 255 for x in parts)
+
+def _u32(s):
+    a = 0
+    for x in s.split("."): a = a * 256 + int(x)
+    return a
+
+def eth_configure(p):
+    """eth.config as the firmware validates it (src/net/eth_w5500.c)."""
+    mode = p.get("mode", "dhcp")
+    e = STATE["eth"]
+    if mode == "dhcp":
+        e["mode"] = "dhcp"
+        e["cfg"] = {k: p.get(k, "") or "" for k in ("ip", "mask", "gw", "dns")}
+        e.update(ip="192.168.50.23", mask="255.255.255.0", gw="192.168.50.1", dns=e["cfg"]["dns"], addr_source="dhcp")
+        return {"staged": True}
+    if mode == "server":
+        ip = p.get("ip") or "192.168.9.1"; mask = p.get("mask") or "255.255.255.0"
+        if not _ip_ok(ip) or not _ip_ok(mask): raise ApiError("bad_request", "an address field is not a dotted IPv4 address")
+        last = int(ip.split(".")[3])
+        if last in (0, 255) or 16 <= last < 24:
+            raise ApiError("bad_request", "server address must not be .0, .255 or in the .16-.23 lease range")
+        e.update(mode="server", ip=ip, mask=mask, gw="0.0.0.0", addr_source="server",
+                 dhcp_router=bool(p.get("dhcp_router")), cfg={"ip": ip, "mask": mask, "gw": "", "dns": ""})
+        return {"staged": True}
+    if mode != "manual": raise ApiError("bad_request", "mode is dhcp, manual or server")
+    ip, mask, gw, dns = (p.get(k, "") or "" for k in ("ip", "mask", "gw", "dns"))
+    if not _ip_ok(ip) or _u32(ip) == 0: raise ApiError("bad_request", "manual needs a valid ip")
+    if not _ip_ok(mask): raise ApiError("bad_request", "manual needs a valid mask")
+    m = _u32(mask); inv = (~m) & 0xFFFFFFFF
+    if m == 0 or ((inv + 1) & inv) != 0: raise ApiError("bad_request", "manual needs a valid mask")
+    if gw and (not _ip_ok(gw) or (_u32(gw) & m) != (_u32(ip) & m)):
+        raise ApiError("bad_request", "gw is not on the ip/mask subnet")
+    if dns and not _ip_ok(dns): raise ApiError("bad_request", "dns is not an address")
+    e.update(mode="manual", addr_source="manual", ip=ip, mask=mask, gw=gw or "0.0.0.0", dns=dns,
+             cfg={"ip": ip, "mask": mask, "gw": gw, "dns": dns})
+    return {"staged": True}
+
+# Uplink selection (uplink.*): WiFi active, Ethernet measured and a little worse.
+UPLINK_BASE = {"policy": "best", "active": "w0", "probe_ip": "203.0.113.7", "probe_source": "wireguard",
+               "switches": 1, "last_switch_ms_ago": 42000,
+               "last_switch": {"from": "", "to": "w0", "reason": "initial"},
+               "uplinks": [
+                   {"name": "w0", "kind": "wifi", "ip": "192.168.1.50", "gw": "192.168.1.1", "state": "ok",
+                    "active": True, "rtt_ms": 21, "jitter_ms": 3, "loss_pct": 0, "metric": 27,
+                    "samples": 40, "sent": 40, "replies": 40},
+                   {"name": "e0", "kind": "ethernet", "ip": "192.168.50.23", "gw": "192.168.50.1", "state": "ok",
+                    "active": False, "rtt_ms": 18, "jitter_ms": 1, "loss_pct": 0, "metric": 20,
+                    "samples": 40, "sent": 40, "replies": 40}]}
+
+def uplink_policy(p):
+    u = STATE["uplink"]
+    names = [x["name"] for x in u["uplinks"]]
+    if "policy" in p:
+        pol = p["policy"]
+        if pol not in ("best", "failover") and not (pol.startswith("fixed:") and pol[6:] in names):
+            raise ApiError("bad_request", "policy is best, failover or fixed:<iface> (an uplink this build has)")
+    if "probe_ip" in p and p["probe_ip"] and not _ip_ok(p["probe_ip"]):
+        raise ApiError("bad_request", "probe_ip is not an address")
+    if "policy" not in p and "probe_ip" not in p:
+        raise ApiError("bad_request", "need \"policy\" and/or \"probe_ip\"")
+    if "policy" in p: u["policy"] = p["policy"]
+    if "probe_ip" in p:
+        u["probe_ip"] = p["probe_ip"] or "203.0.113.7"
+        u["probe_source"] = "configured" if p["probe_ip"] else "wireguard"
+    if u["policy"].startswith("fixed:"): uplink_switch(u["policy"][6:], "fixed")
+    return u
+
+def uplink_switch(name, reason="manual"):
+    u = STATE["uplink"]
+    target = next((x for x in u["uplinks"] if x["name"] == name), None)
+    if not target: raise ApiError("refused", "no such uplink in this build")
+    if u["active"] != name:
+        u["last_switch"] = {"from": u["active"], "to": name, "reason": reason}
+        u["switches"] += 1; u["last_switch_ms_ago"] = 0
+        u["active"] = name
+        for x in u["uplinks"]: x["active"] = x["name"] == name
+    return u
+
 STATE = {}
 def reset_state():
     STATE.clear()
@@ -227,6 +318,8 @@ def reset_state():
     STATE["c1000"] = dict(C1000_BASE)
     STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
+    STATE["eth"] = json.loads(json.dumps(ETH_BASE))
+    STATE["uplink"] = json.loads(json.dumps(UPLINK_BASE))
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
 
@@ -285,7 +378,8 @@ class MockGateway:
     def op(self, op, p):
         if op == "sys.info":
             return {"firmware": "bluetooth_rp2_webapp (mock)", "uptime_ms": int(time.time() * 1000) % 10**7,
-                    "transports": ["le"], "clients": 1, "modules": ["sys", "bt"]}
+                    "transports": ["le"], "clients": 1,
+                    "modules": ["sys", "bt", "lua", "io", "wifi", "wg", "ota", "eth", "uplink", "mdns", "net"]}
         if op == "bt.state":
             return {"ready": True, "address": "2C:CF:67:C7:DB:56", "max_links": 4}
         if op == "scan.start":
@@ -447,6 +541,27 @@ class MockGateway:
             if isinstance(p.get("set"), dict): STATE["a2687"].update(p["set"])
             if "lag" in p: STATE["a2687_lag"] = float(p["lag"])
             return {"state": STATE["a2687"], "writes": STATE.get("a2687_writes", [])}
+        if op == "eth.status":
+            return STATE["eth"]
+        if op == "eth.config":
+            return eth_configure(p)
+        if op == "uplink.status":
+            return STATE["uplink"]
+        if op == "uplink.policy":
+            return uplink_policy(p)
+        if op == "uplink.switch":
+            return uplink_switch(p.get("iface", ""))
+        if op == "mdns.status":
+            return {"hostname": "bluetooth-rp2-webapp", "fqdn": "bluetooth-rp2-webapp.local", "netifs": 2,
+                    "services": [{"instance": "bluetooth-rp2-webapp", "type": "_http", "proto": "tcp",
+                                  "port": 80, "owner": -1, "txt": ["path=/"]}]}
+        if op == "net.forwards":
+            return {"rules": STATE.get("forwards", []), "udp_sessions": 0}
+        if op == "mdns.groups":
+            return {"groups": STATE.get("mdns_groups", [])}
+        if op == "test.eth":                        # mock only: unplug the cable, pull the module
+            if isinstance(p.get("set"), dict): STATE["eth"].update(p["set"])
+            return STATE["eth"]
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \

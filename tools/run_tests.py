@@ -169,15 +169,209 @@ def t_wifi_ap_is_independent():
     for tok in ("ST_AP", "pending_ap", "have_other_route"):
         if re.search(r"\b" + tok + r"\b", src):
             return False, f"wifi.c still has {tok}"
+    # The default route is uplink.c's decision now (Ethernet can carry it),
+    # but with WiFi alone it must come out exactly as before: the station
+    # whenever it is enabled, never the AP. wifi.c re-asserts it through
+    # uplink_reselect() wherever the driver moves it, and the fallback that
+    # uplink.c uses when nothing is measured up is the enabled station.
     for line in src.splitlines():
         s = line.strip()
         if s.startswith(("*", "/*", "//")):
             continue                      # prose about the SDK, not a call
-        if "netif_set_default(" in line and "sta_netif()" not in line:
-            return False, f"netif_set_default not aimed at the station: {s[:60]}"
-    if "netif_set_default(sta_netif())" not in src:
-        return False, "wifi.c never re-asserts the station as the default route"
-    return True, "AP and station decoupled; default route pinned to the station"
+        if "netif_set_default(" in line:
+            return False, f"wifi.c sets the default route itself: {s[:60]}"
+    body = _fn_body(src, "fix_default_route")
+    if body is None or "uplink_reselect()" not in body:
+        return False, "fix_default_route() no longer hands the decision to uplink_reselect()"
+    fb = src[src.find("struct netif *wifi_fallback_netif(void)"):]
+    if not fb or "CYW43_ITF_STA" not in fb[:300] or "sta_netif()" not in fb[:300]:
+        return False, "wifi_fallback_netif() is not the enabled station"
+    up = open(os.path.join(ROOT, "src/net/uplink.c")).read()
+    if "wifi_fallback_netif()" not in up:
+        return False, "uplink.c does not fall back to the station"
+    return True, "AP and station decoupled; the route falls back to the station, never the AP"
+
+def t_only_uplink_sets_default():
+    """src/net/uplink.c is the ONLY caller of netif_set_default(). Two owners
+    of the default route is how the tunnel once left through the AP: each
+    sets it for good reasons of its own, and the last one wins silently."""
+    rc, out = sh("grep -rn --include=*.c --include=*.h 'netif_set_default(' src/ 2>/dev/null")
+    bad = []
+    for l in out.splitlines():
+        if not l.strip():
+            continue
+        path, _, code = l.split(":", 2)
+        c = code.strip()
+        if c.startswith(("*", "/*", "//")) or "DELIBERATELY NOT" in c or "NOT netif_set_default" in c:
+            continue
+        if path != "src/net/uplink.c":
+            bad.append(l)
+    if bad:
+        return False, bad[0][:90]
+    return True, "uplink.c only"
+
+def t_uplink_policy():
+    """Uplink metrics and selection from scripted ping results: hysteresis
+    (30% better for 20 s), immediate switch on failure, failover, fixed, no
+    flapping when every probe fails, gateway loss."""
+    return _host_c("uplink", ["test/host/uplink_test.c", "src/net/uplink_core.c"], "btgw_uplink", defs="")
+
+def t_wg_tx_netif_local_change():
+    """The WireGuard egress LOCAL CHANGE is in place and recorded: every outer
+    send goes through wg_udp_send(), and VENDORED.txt says so."""
+    w = open(os.path.join(ROOT, "third_party/wireguard-lwip/src/wireguardif.c")).read()
+    code = re.sub(r"//[^\n]*", "", w)
+    sends = re.findall(r"\budp_sendto\s*\(", code)
+    if len(sends) != 1:
+        return False, f"{len(sends)} bare udp_sendto() in wireguardif.c (only wg_udp_send's fallback may remain)"
+    if "udp_sendto_if_src(" not in w or "wireguardif_send_keepalive_now" not in w:
+        return False, "the tx_netif / keepalive-now change is missing"
+    v = open(os.path.join(ROOT, "third_party/wireguard-lwip/VENDORED.txt")).read()
+    if "wireguardif_set_tx_netif" not in v:
+        return False, "VENDORED.txt does not record the change"
+    return True, "egress via tx_netif, keepalive on switch, recorded"
+
+def t_mdns_records():
+    """mDNS record groups: the table, the wire encoding (A/PTR/SRV/TXT,
+    cache-flush, TTLs, additionals), answering incl. compression pointers,
+    QU and legacy unicast, announce/goodbye, limits -- under ASan/UBSan
+    where the compiler has them."""
+    rc, _ = sh("echo 'int main(){}' | gcc -fsanitize=address,undefined -x c - -o /dev/null 2>/dev/null")
+    san = "-fsanitize=address,undefined" if rc == 0 else ""
+    return _host_c("mdns", ["test/host/mdns_test.c", "src/net/mdns_records.c"], "btgw_mdns", defs=san)
+
+def t_lwip_mdns_vendored():
+    """third_party/lwip-mdns is lwIP 2.2.1's responder with ONE local change:
+    mdns_out.c and mdns_domain.c byte-identical to the SDK's, and mdns.c
+    different only by the hook (every differing line is inside a LOCAL
+    CHANGE block). A drifted copy would silently fork lwIP."""
+    import difflib
+    sdk = os.path.expanduser("~/.pico-sdk/sdk/2.3.0/lib/lwip/src/apps/mdns")
+    if not os.path.isdir(sdk):
+        return True, "skipped (no SDK checkout to compare against)"
+    for f in ("mdns_out.c", "mdns_domain.c"):
+        if open(os.path.join(sdk, f), "rb").read() != open(os.path.join(ROOT, "third_party/lwip-mdns", f), "rb").read():
+            return False, f"{f} differs from lwIP 2.2.1"
+    a = open(os.path.join(sdk, "mdns.c")).read().splitlines()
+    b = open(os.path.join(ROOT, "third_party/lwip-mdns/mdns.c")).read().splitlines()
+    added = [l for l in difflib.unified_diff(a, b, lineterm="", n=0)
+             if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))]
+    if any(l.startswith("-") for l in added):
+        return False, "mdns.c removes upstream lines"
+    allowed = ("btgw", "LOCAL CHANGE", "/*", "*", "*/", "if (packet.questions)", "}", "")
+    for l in added:
+        t = l[1:].strip()
+        if not (t.startswith(allowed[:-1]) or t in allowed or "btgw_mdns_query_hook" in t
+                or t.startswith(("u16_t port", "void btgw"))):
+            return False, f"unrecorded change: {t[:60]}"
+    if "btgw_mdns_query_hook" not in open(os.path.join(ROOT, "third_party/lwip-mdns/VENDORED.txt")).read():
+        return False, "VENDORED.txt does not describe the hook"
+    return True, f"2 files identical, mdns.c +{len(added)} lines (the hook)"
+
+def t_lua_net_released():
+    """What a script declares on the network goes when it stops: mDNS services
+    (they used to leak for the life of the boot) and record groups, per slot
+    and on a VM restart."""
+    c = open(os.path.join(ROOT, "src/lua/lbind.c")).read()
+    i = c.find("static void lbind_release_net(int slot) {")
+    rel = c[i:c.find("\n}\n", i)] if i >= 0 else ""
+    if "mdns_release_owner(slot)" not in rel:
+        return False, "lbind_release_net does not release mDNS"
+    ops = c[c.index("int lbind_release_ops(int slot)"):]
+    if "lbind_release_net(slot)" not in ops[:ops.index("\n}\n")]:
+        return False, "lbind_release_ops does not call lbind_release_net"
+    reset = _fn_body(c, "lbind_reset")
+    if not reset or "mdns_release_all_owned()" not in reset:
+        return False, "lbind_reset does not release every script's mDNS"
+    if "mdns_service_add_owned(lrt_current_slot()" not in c:
+        return False, "mdns.service does not record its owner"
+    return True, "services + groups released per script and on VM restart"
+
+def t_fwd_core():
+    """Forwarding decisions: UDP session table (cap, 60 s idle expiry), target
+    health / fail fast with the 5 s re-test, TCP backpressure."""
+    return _host_c("fwd", ["test/host/fwd_test.c", "src/net/fwd_core.c"], "btgw_fwd", defs="")
+
+def t_fwd_released_with_script():
+    """Forwarding rules belong to their script: released per slot and on a VM
+    restart, like mDNS declarations."""
+    c = open(os.path.join(ROOT, "src/lua/lbind.c")).read()
+    i = c.find("static void lbind_release_net(int slot) {")
+    rel = c[i:c.find("\n}\n", i)] if i >= 0 else ""
+    if "fwd_release_owner(slot)" not in rel:
+        return False, "lbind_release_net does not release forwarding rules"
+    reset = _fn_body(c, "lbind_reset")
+    if not reset or "fwd_release_all_owned()" not in reset:
+        return False, "lbind_reset does not release forwarding rules"
+    if "fwd_add(lrt_current_slot()" not in c:
+        return False, "net.forward does not record its owner"
+    return True, "per script and on VM restart"
+
+def t_sys_timeout_pool_covers_mdns():
+    """MEMP_NUM_SYS_TIMEOUT must cover the mDNS responder's per-netif timers on
+    every netif it can be bound to. At LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8 the
+    pool ran dry when a service was re-added while another announced, and
+    sys_timeout() panics on an empty pool (HardFault, watchdog reboot)."""
+    o = open(os.path.join(ROOT, "include/lwipopts.h")).read()
+    m = re.search(r"#define\s+MDNS_TIMEOUT_NETIFS\s+(\d+)", o)
+    k = re.search(r"#define\s+MDNS_TIMEOUTS_PER_NETIF\s+(\d+)", o)
+    if not m or not k or "MDNS_TIMEOUT_NETIFS * MDNS_TIMEOUTS_PER_NETIF" not in o:
+        return False, "MEMP_NUM_SYS_TIMEOUT no longer reserves mDNS's per-netif timers"
+    c = open(os.path.join(ROOT, "src/net/mdns.c")).read()
+    nn = re.search(r"#define\s+MDNS_NETIFS\s+(\d+)", c)
+    if not nn or int(m.group(1)) < int(nn.group(1)):
+        return False, "fewer netifs reserved for than mdns.c can bind"
+    if int(k.group(1)) < 6:
+        return False, "lwIP mDNS uses up to 6 timeouts per netif"
+    return True, f"{m.group(1)} netifs x {k.group(1)} mDNS timeouts reserved"
+
+def t_eth_cfg():
+    """Ethernet addressing config: a missing/corrupt/unknown cfg is the DHCP
+    client, server mode only from an explicit {"mode":"server"}, link-local
+    only after the DHCP-alone window."""
+    rc, _ = sh("echo 'int main(){}' | gcc -fsanitize=address,undefined -x c - -o /dev/null 2>/dev/null")
+    san = "-fsanitize=address,undefined" if rc == 0 else ""
+    return _host_c("eth_cfg", ["test/host/eth_cfg_test.c", "src/net/eth_cfg.c"], "btgw_eth_cfg", defs=san)
+
+def t_eth_server_mode_only_explicit():
+    """The owner's rule: DHCP-server mode on e0 is NEVER entered on its own.
+    The only code that may produce ETH_MODE_SERVER is eth_cfg_parse() (reached
+    from the eth.config op and from loading cfg/eth.json); nothing else may
+    assign it -- not a DHCP failure path, the uplink logic, Lua or a Kconfig
+    default -- and the boot-time load must fall back to the default."""
+    hits = []
+    for root, _, files in os.walk(os.path.join(ROOT, "src")):
+        for fn in files:
+            if not fn.endswith((".c", ".h")):
+                continue
+            path = os.path.join(root, fn)
+            for i, line in enumerate(open(path), 1):
+                code = line.split("//")[0]
+                # an assignment (or initialiser), not a comparison
+                if re.search(r"(?<![=!<>])=\s*ETH_MODE_SERVER\b", code):
+                    hits.append(f"{os.path.relpath(path, ROOT)}:{i}")
+    rel = [h for h in hits if not h.startswith("src/net/eth_cfg.c:")]
+    if rel:
+        return False, f"ETH_MODE_SERVER assigned outside eth_cfg.c: {rel[0]}"
+    c = open(os.path.join(ROOT, "src/net/eth_cfg.c")).read()
+    body = c[c.index("bool eth_cfg_parse("):c.index("void eth_cfg_load(")]
+    if len(hits) != 1 or "ETH_MODE_SERVER" not in body or 'strcmp(mode, "server") == 0' not in body:
+        return False, "server mode must be set exactly once, in eth_cfg_parse, on an explicit \"server\""
+    load = c[c.index("void eth_cfg_load("):]
+    if "eth_cfg_default(out)" not in load[:load.index("\n}\n")]:
+        return False, "eth_cfg_load no longer falls back to the default"
+    if "eth_cfg_load(" not in open(os.path.join(ROOT, "src/net/eth_w5500.c")).read():
+        return False, "eth_w5500.c does not load its config through eth_cfg_load"
+    for f in ("src/lua/lbind.c", "src/net/uplink.c", "src/net/wifi.c"):
+        if "ETH_MODE_SERVER" in open(os.path.join(ROOT, f)).read():
+            return False, f"{f} refers to ETH_MODE_SERVER"
+    d = open(os.path.join(ROOT, "src/net/dhcpserver.c")).read()
+    if "if (!d->no_router)" not in d:
+        return False, "dhcpserver.c always sends the router option"
+    for f in ("src/net/usb_ncm.c", "src/net/wifi.c"):
+        if "no_router" in open(os.path.join(ROOT, f)).read():
+            return False, f"{f} changed its DHCP server's router option"
+    return True, "only eth_cfg_parse sets it; bad config -> DHCP client; NCM/AP offers unchanged"
 
 def t_wifi_mode_both_everywhere():
     """A mode that the config accepts must also be offered by the UI and named
@@ -508,10 +702,84 @@ def t_webapp_dom():
         return False, f"{total - good} of {total} failed: {first[:70]}"
     return True, f"{good} checks in chromium"
 
+def _host_c(name, srcs, binname, defs="-DSPIBUS_HOST"):
+    """Build and run one host C test that prints 'N checks, M failed'."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), binname)
+    rc, out = sh(f"gcc -O1 -Wall -Wextra {defs} -Isrc -Itest/host -o {binp} {' '.join(srcs)}")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else f"{name} harness build failed"
+    rc, out = sh(binp)
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m:
+        return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+    if rc or int(m.group(2)):
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return False, f"{m.group(2)} of {m.group(1)} failed: {first[:70]}"
+    return True, f"{m.group(1)} checks"
+
+def t_spibus():
+    """The SPI bus layer against a fake DMA: exclusive claims, CS held across
+    a chained transfer, completion only from the loop, clock per device."""
+    return _host_c("spibus", ["test/host/spibus_test.c", "src/io/spibus.c",
+                              "test/host/fake_spi.c"], "btgw_spibus")
+
+def t_w5500():
+    """The W5500 MACRAW state machine against a simulated chip: ring
+    wrap-around, back-to-back frames, chained buffers, ring full, one SEND at
+    a time, link, resync on a corrupt length, and a bus held by another
+    device."""
+    return _host_c("w5500", ["test/host/w5500_test.c", "src/net/w5500.c", "src/io/spibus.c",
+                             "test/host/fake_spi.c"], "btgw_w5500")
+
+def t_spi_only_through_spibus():
+    """Every SPI access goes through src/io/spibus*.c, which claims the bus.
+    A direct spi_write/spi_read/spi_init anywhere else would bypass the
+    semaphore and could interleave with the W5500's DMA mid-frame."""
+    rc, out = sh(r"grep -rnE '\bspi_(write|read|init|set_baudrate|set_format|get_hw)\w*\s*\(' src/ 2>/dev/null")
+    hits = [l for l in out.splitlines() if l.strip() and not l.startswith("src/io/spibus")]
+    return (len(hits) == 0), (hits[0][:90] if hits else "spibus.c / spibus_pico.c only")
+
+def t_cyw43_wait_stays_usb_only():
+    """cyw43_wait.c pumps USB from inside the radio driver's waits. Nothing
+    that touches lwIP may run there -- that includes the SPI completions and
+    the Ethernet state machine, which deliver frames into lwIP."""
+    src = open(os.path.join(ROOT, "src/net/cyw43_wait.c")).read()
+    for bad in ("spibus_", "eth_", "w5500", "uplink_", "fwd_"):
+        if bad in src:
+            return False, f"cyw43_wait.c calls {bad}*"
+    return True, "no spibus/eth/uplink/fwd in the radio's wait hook"
+
+def t_w5500_pins_reserved():
+    """The W5500's pins must be SYSTEM-reserved in the pin broker, or a
+    script's gpio.set on GP13 would yank CS in the middle of a DMA frame.
+    Follow the chain: eth passes the Kconfig pins to spibus/w5500, spibus
+    reserves sck/mosi/miso and each device's CS, w5500 reserves INT and RST,
+    and the Pico port turns that into pins_reserve()."""
+    e = open(os.path.join(ROOT, "src/net/eth_w5500.c")).read()
+    for k in ("CONFIG_ETH_W5500_SCK", "CONFIG_ETH_W5500_MOSI", "CONFIG_ETH_W5500_MISO",
+              "CONFIG_ETH_W5500_CS", "CONFIG_ETH_W5500_INT", "CONFIG_ETH_W5500_RST"):
+        if k not in e:
+            return False, f"eth_w5500.c does not use {k}"
+    b = open(os.path.join(ROOT, "src/io/spibus.c")).read()
+    if b.count("spibus_port_reserve_pin(") < 4:
+        return False, "spibus.c no longer reserves sck/mosi/miso and the CS pin"
+    w = open(os.path.join(ROOT, "src/net/w5500.c")).read()
+    if 'spibus_port_reserve_pin(int_pin' not in w or 'spibus_port_reserve_pin(rst_pin' not in w:
+        return False, "w5500.c no longer reserves INT and RST"
+    pc = open(os.path.join(ROOT, "src/io/spibus_pico.c")).read()
+    if "pins_reserve(" not in pc:
+        return False, "spibus_pico.c does not reserve through the pin broker"
+    return True, "SCK/MOSI/MISO/CS/INT/RST all SYSTEM-owned"
+
 # --- tier 1 -------------------------------------------------------------------
+# BTGW_BUILD_PREFIX lets two checkouts (worktrees) run tier 1 at once without
+# building into, and wiping, each other's directories.
+BUILD_PREFIX = os.environ.get("BTGW_BUILD_PREFIX", "/tmp/btgw_")
+
 def build(cfg):
     def fn():
-        bdir = f"/tmp/btgw_{cfg}"
+        bdir = f"{BUILD_PREFIX}{cfg}"
         env = ('PICO_SDK_PATH=$HOME/.pico-sdk/sdk/2.3.0 '
                'PICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/15_2_Rel1 ')
         sh(f"rm -rf {bdir}")
@@ -526,6 +794,25 @@ def build(cfg):
         last = sz.strip().splitlines()[-1].split()
         return True, f"{last[0]} text / {last[2]} bss"
     return fn
+
+def t_w5500_symbols():
+    """CONFIG_NET_ETH_W5500=n must carry none of it: no w5500_/eth_ symbol in
+    the builds that leave it off, and all of it in the one that turns it on."""
+    nm = os.path.expanduser("~/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-nm")
+    pat = re.compile(r"\b(w5500_\w+|eth_(init|poll|status_json|configure)|op_module_eth)\b")
+    for cfg in ("pico2w", "pico2w_minimal", "pico2w_noanker"):
+        elf = f"{BUILD_PREFIX}{cfg}/btgw.elf"
+        if not os.path.exists(elf):
+            return False, f"{cfg} was not built"
+        rc, out = sh(f"{nm} {elf}")
+        hit = next((l for l in out.splitlines() if pat.search(l)), None)
+        if hit:
+            return False, f"{cfg} links {hit.split()[-1]}"
+    rc, out = sh(f"{nm} {BUILD_PREFIX}pico2w_eth/btgw.elf")
+    if not pat.search(out):
+        return False, "pico2w_eth has no W5500 code at all"
+    return True, "absent from pico2w/minimal/noanker, present in pico2w_eth"
+
 
 def _kb(v):
     """picotool sizes: "864K", "2048K", "64K"."""
@@ -627,12 +914,28 @@ def main():
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
+    step(0, "only uplink.c sets the default route", t_only_uplink_sets_default)
+    step(0, "uplink metrics and policy from scripted pings", t_uplink_policy)
+    step(0, "WireGuard egress LOCAL CHANGE in place and recorded", t_wg_tx_netif_local_change)
+    step(0, "mDNS record groups: encoding and answering", t_mdns_records)
+    step(0, "vendored lwIP mDNS carries only the hook", t_lwip_mdns_vendored)
+    step(0, "a script's mDNS declarations go when it stops", t_lua_net_released)
+    step(0, "the lwIP timeout pool covers mDNS on every netif", t_sys_timeout_pool_covers_mdns)
+    step(0, "Ethernet config: bad -> DHCP client, link-local timing", t_eth_cfg)
+    step(0, "Ethernet DHCP-server mode is only ever explicit", t_eth_server_mode_only_explicit)
+    step(0, "forwarding: sessions, fail fast, backpressure", t_fwd_core)
+    step(0, "a script's forwarding rules go when it stops", t_fwd_released_with_script)
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
     step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
     step(0, "OTA flash layout is consistent", t_ota_partition_layout)
     step(0, "OTA keys: public in tree, private out", t_ota_keys)
     step(0, "SMP writes flash from the loop only", t_ota_flash_from_loop_only)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
+    step(0, "SPI bus: claims, chains, completes from the loop", t_spibus)
+    step(0, "W5500 MACRAW state machine vs a simulated chip", t_w5500)
+    step(0, "SPI only through the bus layer", t_spi_only_through_spibus)
+    step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
+    step(0, "W5500 pins are reserved", t_w5500_pins_reserved)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:
@@ -644,6 +947,10 @@ def main():
         # device codec absent. Without it the #if in lbind.c that skips
         # lbind_proto_open is never once compiled out.
         step(1, "build pico2w_noanker (lua, no device codec)", build("pico2w_noanker"))
+        # The W5500 is opt-in (default n, like WiFi): this is the only build
+        # that compiles it, so it is the only thing keeping it compiling.
+        step(1, "build pico2w_eth (pico2w + W5500 Ethernet)", build("pico2w_eth"))
+        step(1, "W5500 off means none of its code is linked", t_w5500_symbols)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)

@@ -59,6 +59,7 @@ add_executable(btgw
     src/fs/littlefs/lfs.c
     src/fs/littlefs/lfs_util.c
     src/config/config.c
+    src/util/crumb.c
 )
 
 target_include_directories(btgw PRIVATE
@@ -114,6 +115,27 @@ if(CONFIG_IO_PINS)
     if(CONFIG_IO_PWM)
         target_link_libraries(btgw hardware_pwm)
     endif()
+endif()
+
+# The SPI bus layer: the only code that touches an SPI block (spi.xfer and
+# every SPI driver go through it). See src/io/spibus.h.
+if(CONFIG_SPI_BUS)
+    target_sources(btgw PRIVATE src/io/spibus.c src/io/spibus_pico.c)
+    target_link_libraries(btgw hardware_spi hardware_dma hardware_irq pico_sync)
+endif()
+
+if(CONFIG_NET_ETH_W5500)
+    target_sources(btgw PRIVATE src/net/w5500.c src/net/eth_w5500.c src/net/eth_cfg.c src/net/eth_ops.c)
+endif()
+# The per-netif DHCP server: USB-NCM, the SoftAP and Ethernet's server mode.
+if(CONFIG_NET_USB_NCM OR CONFIG_NET_WIFI OR CONFIG_NET_ETH_W5500)
+    target_sources(btgw PRIVATE src/net/dhcpserver.c)
+endif()
+if(CONFIG_NET_UPLINK)
+    target_sources(btgw PRIVATE src/net/uplink.c src/net/uplink_core.c)
+endif()
+if(CONFIG_NET_FORWARD)
+    target_sources(btgw PRIVATE src/net/fwd.c src/net/fwd_core.c)
 endif()
 
 if(CONFIG_PROTO_ANKER)
@@ -172,7 +194,7 @@ if(CONFIG_NET_WIREGUARD)
 endif()
 
 if(CONFIG_NET_USB_NCM)
-    target_sources(btgw PRIVATE src/net/usb_ncm.c src/net/dhcpserver.c src/usb/usb_descriptors.c)
+    target_sources(btgw PRIVATE src/net/usb_ncm.c src/usb/usb_descriptors.c)
     target_link_libraries(btgw tinyusb_device tinyusb_board)
 endif()
 if(CONFIG_OTA)
@@ -230,8 +252,13 @@ if(CONFIG_OTA)
 endif()
 
 if(CONFIG_NET_MDNS)
-    target_sources(btgw PRIVATE src/net/mdns.c)
-    target_link_libraries(btgw pico_lwip_mdns)
+    # lwIP's responder, vendored with one hook for the firmware's own record
+    # groups (third_party/lwip-mdns/VENDORED.txt) -- in place of the SDK's
+    # pico_lwip_mdns, which compiles the same three files unmodified.
+    target_sources(btgw PRIVATE src/net/mdns.c src/net/mdns_records.c
+        third_party/lwip-mdns/mdns.c
+        third_party/lwip-mdns/mdns_out.c
+        third_party/lwip-mdns/mdns_domain.c)
 endif()
 
 target_compile_definitions(btgw PRIVATE

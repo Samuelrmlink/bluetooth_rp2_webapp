@@ -1,0 +1,24 @@
+lwIP 2.2.1 src/apps/mdns/{mdns.c,mdns_out.c,mdns_domain.c}
+as shipped in pico-sdk 2.3.0 (lib/lwip at 77dcd25a72509eb83f72b033d219b1d40cd8eb95,
+2025-02-05). BSD-3-Clause, the same licence and notice as the rest of lwIP
+(licenses/lwIP.LICENSE). The headers are NOT copied: lwip/apps/mdns*.h still
+come from the SDK, unchanged, which is what keeps this a drop-in for the
+SDK's pico_lwip_mdns library (CMakeLists.txt uses these files instead).
+
+Why vendored: the firmware answers mDNS for record groups that scripts
+declare (mdns.group{} in Lua: A, PTR, SRV and TXT records for names that are
+not the device's own -- src/net/mdns.c, src/net/mdns_records.c), and lwIP's
+responder has no API for that. Those records must be answered from source
+port 5353, and only one pcb can own the port, so the queries have to be seen
+from inside lwIP's receive path.
+
+Local changes: ONE, in mdns.c (search for "LOCAL CHANGE"):
+
+  mdns_recv() calls btgw_mdns_query_hook(netif, p, addr, port, recv_unicast)
+  for every query that has passed lwIP's own source checks, before lwIP
+  handles it as usual. The hook reads the packet and, if any question is
+  for one of the firmware's records, answers it in a separate packet sent
+  with get_mdns_pcb() (already exported by lwIP in mdns_priv.h). Nothing in
+  lwIP's own answering, probing or announcing is changed.
+
+mdns_out.c and mdns_domain.c are unmodified.

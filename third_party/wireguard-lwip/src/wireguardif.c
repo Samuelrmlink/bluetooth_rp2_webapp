@@ -78,15 +78,43 @@ static bool wireguardif_can_send_initiation(struct wireguard_peer *peer) {
 	return ((peer->last_initiation_tx == 0) || (wireguard_expired(peer->last_initiation_tx, REKEY_TIMEOUT)));
 }
 
+// LOCAL CHANGE (btgw, uplink selection): the outer UDP leaves through an
+// interface chosen by the platform (wireguardif_set_tx_netif), with that
+// interface's own address as the source, instead of following lwIP's default
+// route. Switching uplinks is then make-before-break: the platform points
+// this at the new interface and sends a keepalive at once
+// (wireguardif_send_keepalive_now); the server roams to the new source on
+// that first authenticated packet (update_peer_addr on its side, as on ours),
+// while the old interface stays up and -- the pcb being bound to ANY -- keeps
+// receiving whatever was already in flight to it. NULL, or an interface that
+// is down or unaddressed, falls back to the original udp_sendto().
+static struct netif *wg_tx_netif;
+
+void wireguardif_set_tx_netif(struct netif *netif) {
+	wg_tx_netif = netif;
+}
+
+struct netif *wireguardif_get_tx_netif(void) {
+	return wg_tx_netif;
+}
+
+static err_t wg_udp_send(struct udp_pcb *pcb, struct pbuf *q, const ip_addr_t *ip, u16_t port) {
+	struct netif *n = wg_tx_netif;
+	if (n && netif_is_up(n) && netif_is_link_up(n) && !ip4_addr_isany_val(*netif_ip4_addr(n))) {
+		return udp_sendto_if_src(pcb, q, ip, port, n, netif_ip_addr4(n));
+	}
+	return udp_sendto(pcb, q, ip, port);
+}
+
 static err_t wireguardif_peer_output(struct netif *netif, struct pbuf *q, struct wireguard_peer *peer) {
 	struct wireguard_device *device = (struct wireguard_device *)netif->state;
 	// Send to last know port, not the connect port
 	//TODO: Support DSCP and ECN - lwip requires this set on PCB globally, not per packet
-	return udp_sendto(device->udp_pcb, q, &peer->ip, peer->port);
+	return wg_udp_send(device->udp_pcb, q, &peer->ip, peer->port);
 }
 
 static err_t wireguardif_device_output(struct wireguard_device *device, struct pbuf *q, const ip4_addr_t *ipaddr, u16_t port) {
-	return udp_sendto(device->udp_pcb, q, ipaddr, port);
+	return wg_udp_send(device->udp_pcb, q, ipaddr, port);
 }
 
 static err_t wireguardif_output_to_peer(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr, struct wireguard_peer *peer) {
@@ -654,6 +682,23 @@ static err_t wireguardif_lookup_peer(struct netif *netif, u8_t peer_index, struc
 	}
 	*out = peer;
 	return result;
+}
+
+// LOCAL CHANGE (btgw, uplink selection): a keepalive now, so the server
+// learns a new source address immediately after wireguardif_set_tx_netif()
+// rather than at the next 25 s keepalive. ERR_CONN when there is no session
+// (the next handshake goes out on the new interface anyway).
+err_t wireguardif_send_keepalive_now(struct netif *netif, u8_t peer_index) {
+	struct wireguard_peer *peer;
+	err_t result = wireguardif_lookup_peer(netif, peer_index, &peer);
+	if (result != ERR_OK) {
+		return result;
+	}
+	if (!peer->curr_keypair.valid) {
+		return ERR_CONN;
+	}
+	wireguardif_send_keepalive((struct wireguard_device *)netif->state, peer);
+	return ERR_OK;
 }
 
 err_t wireguardif_connect(struct netif *netif, u8_t peer_index) {

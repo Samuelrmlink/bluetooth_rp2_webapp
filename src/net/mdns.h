@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "autoconf.h"
+#include "net/mdns_records.h"
 
 struct netif;
 
@@ -57,8 +58,22 @@ const char *mdns_hostname(void);
  */
 bool mdns_service_add(const char *instance, const char *type, bool udp,
                       uint16_t port, const char *const *txt, int n_txt);
+/* The same, recording the script slot that added it so the service is
+ * withdrawn when that script stops (mdns_release_owner). -1 = nobody's. */
+bool mdns_service_add_owned(int owner, const char *instance, const char *type, bool udp,
+                            uint16_t port, const char *const *txt, int n_txt);
 bool mdns_service_remove(const char *type, bool udp);
 void mdns_services_clear(void);
+
+/* Record groups for names other than ours (src/net/mdns_records.h): added
+ * and announced, removed with a goodbye. owner as above. */
+int    mdns_group_add(int owner, const mrec_t *recs, int n, const char **why);
+bool   mdns_group_remove(int id);
+size_t mdns_groups_json(char *dst, size_t cap);
+/* Withdraw everything a script declared (groups and services); returns how
+ * many. Called when it stops. */
+int    mdns_release_owner(int owner);
+int    mdns_release_all_owned(void);
 
 /* Re-announce on every bound interface. Needed after a change that lwIP does
  * not announce for itself. */
@@ -79,6 +94,17 @@ static inline bool mdns_service_add(const char *i, const char *t, bool u, uint16
 }
 static inline bool mdns_service_remove(const char *t, bool u) { (void)t; (void)u; return false; }
 static inline void mdns_services_clear(void) {}
+static inline bool mdns_service_add_owned(int o, const char *i, const char *t, bool u, uint16_t p,
+                                          const char *const *x, int n) {
+    (void)o; (void)i; (void)t; (void)u; (void)p; (void)x; (void)n; return false;
+}
+static inline int mdns_group_add(int o, const mrec_t *r, int n, const char **why) {
+    (void)o; (void)r; (void)n; *why = "mDNS is not in this build"; return -1;
+}
+static inline bool mdns_group_remove(int id) { (void)id; return false; }
+static inline size_t mdns_groups_json(char *d, size_t c) { (void)d; (void)c; return 0; }
+static inline int mdns_release_owner(int o) { (void)o; return 0; }
+static inline int mdns_release_all_owned(void) { return 0; }
 static inline void mdns_announce_all(void) {}
 static inline size_t mdns_status_json(char *dst, size_t cap) {
     (void)dst; (void)cap; return 0;
