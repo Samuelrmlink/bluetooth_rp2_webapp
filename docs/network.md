@@ -250,8 +250,9 @@ with Bluetooth links open" below for the fix.
 
 A join used to be deferred while `le_radio_busy()` -- any open BLE link -- so
 a gateway holding the C1000 never rejoined after its AP went away (stuck in
-`idle`). Two ways out, chosen by `wifi.mode {coex: "window"|"live"}` (RAM
-only, default `window`):
+`idle`). Two ways out, chosen by Settings › WiFi › "Bluetooth during join"
+or `wifi.mode {coex: "window"|"live"}`; saved in `cfg/wifi.json` as `coex`
+(default `window`; a missing or unknown value reads as `window`):
 
 * **window** (default): 60 s after the station is lost, with a saved network
   to join, the radio is released (`le_release_radio()`: BLE links dropped,
@@ -260,7 +261,7 @@ only, default `window`):
   failure. Failed windows back off 2 min, doubling to 30 min. Status:
   `bt_window`, `bt_windows`, `bt_windows_ok`, `bt_window_next_s`. The Connect
   button opens a window at once.
-* **live** (experimental): the join runs with the links up; only an active
+* **live**: the join runs with the links up; only an active
   BLE scan makes it wait. Status: `coex`, `last_join_ms`, `last_join_links`,
   `live_joins_ok`, `live_joins_fail`.
 

@@ -319,6 +319,9 @@ def reset_state():
     STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
     STATE["eth"] = json.loads(json.dumps(ETH_BASE))
+    STATE["wifi"] = {"driver": True, "mode": "sta", "want": "auto", "ssid": "bench", "ip": "192.168.1.50",
+                     "ap": False, "ap_ssid": "BTGW-Setup", "ap_psk": "", "error": "", "coex": "window",
+                     "last_join_ms": 4200, "last_join_links": 1}
     STATE["uplink"] = json.loads(json.dumps(UPLINK_BASE))
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
@@ -541,6 +544,21 @@ class MockGateway:
             if isinstance(p.get("set"), dict): STATE["a2687"].update(p["set"])
             if "lag" in p: STATE["a2687_lag"] = float(p["lag"])
             return {"state": STATE["a2687"], "writes": STATE.get("a2687_writes", [])}
+        if op == "wifi.status":
+            return STATE["wifi"]
+        if op == "wifi.mode":
+            w = STATE["wifi"]
+            if "mode" in p:
+                if p["mode"] not in ("auto", "sta", "ap", "both", "off"): raise ApiError("bad_request", "mode")
+                w["want"] = p["mode"]
+            if "coex" in p:
+                if p["coex"] not in ("window", "live"): raise ApiError("bad_request", "coex must be window or live")
+                w["coex"] = p["coex"]
+            return {"mode": w["want"], "coex": w["coex"]}
+        if op == "wifi.scan_results":
+            return {"aps": []}
+        if op == "wifi.networks":
+            return {"networks": [{"ssid": "bench"}]}
         if op == "eth.status":
             return STATE["eth"]
         if op == "eth.config":

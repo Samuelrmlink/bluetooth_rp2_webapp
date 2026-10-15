@@ -149,7 +149,8 @@ static uint32_t last_scan_end;   /* when the most recent scan stopped */
 static bool deferred_for_bt;     /* so the deferral is logged once, not per pass */
 static uint32_t fw_rejoins;      /* links taken over from the radio's own rejoin */
 static uint32_t sta_down_at;     /* when the station last went down (boot counts); 0 = up */
-static bool     coex_live;       /* join with BLE links up (experimental; RAM only) */
+/* Join with the BLE links kept up (cfg/wifi.json "coex": "live"). */
+static bool coex_live(void) { return strcmp(cfg_coex(), "live") == 0; }
 static uint32_t last_join_ms;    /* begin_join -> station up, the last successful join */
 static int      join_links;      /* BLE links open when the current join began */
 static int      last_join_links; /* ...and for the last successful one */
@@ -565,7 +566,7 @@ static void begin_join(const char *ssid, const char *psk) {
      * forever then WiFi waits forever, which is the right way round -- a
      * degraded network path beats a board that needs a power cycle.
      */
-    if (le_radio_busy() && !(coex_live && !le_scanning())) {
+    if (le_radio_busy() && !(coex_live() && !le_scanning())) {
         if (!deferred_for_bt) {
             printf("wifi: deferring the join, Bluetooth has the radio\n");
             deferred_for_bt = true;
@@ -595,7 +596,7 @@ static void begin_join(const char *ssid, const char *psk) {
     join_links = le_link_count();
 #endif
     printf("wifi: joining '%s' (%d BLE link(s) open, coex %s)\n", ssid, join_links,
-           coex_live ? "live" : "window");
+           coex_live() ? "live" : "window");
     join_start = now_ms();
     state = ST_JOIN;
 }
@@ -964,8 +965,8 @@ void wifi_poll(void) {
 #if CONFIG_BT_LE
         /* Bluetooth has the radio: take it for a bounded window (see THE RADIO
          * WINDOW) and keep the join pending until its links have closed. */
-        if (le_radio_busy() && !(coex_live && !le_scanning())) {
-            if (coex_live) return;                /* live: only a BLE scan blocks; wait it out */
+        if (le_radio_busy() && !(coex_live() && !le_scanning())) {
+            if (coex_live()) return;                /* live: only a BLE scan blocks; wait it out */
             if (!win_start) win_open(now, "connect");
             return;
         }
@@ -1103,7 +1104,7 @@ void wifi_poll(void) {
             /* A saved network in range but Bluetooth holds the radio: after
              * WIFI_WIN_AFTER_MS down, take a window and let the pending-join
              * path run once the links have closed. */
-            if (k && le_radio_busy() && !(coex_live && !le_scanning())) {
+            if (k && le_radio_busy() && !(coex_live() && !le_scanning())) {
                 /* Bluetooth holds the radio. Never take the AP down (or touch
                  * the station) for a join that cannot start: the AP flip below
                  * followed by begin_join's deferral left NO interface up, every
@@ -1189,12 +1190,12 @@ bool wifi_ap_up(void) { return ap_up; }
 
 bool wifi_is_up(void) { return state == ST_UP; }
 
-const char *wifi_coex(void) { return coex_live ? "live" : "window"; }
+const char *wifi_coex(void) { return cfg_coex(); }
 
+/* Persisted (cfg/wifi.json, written by cfg_tick); takes effect at the next
+ * join decision -- a window already open runs to its end. */
 bool wifi_set_coex(const char *name) {
-    if (strcmp(name, "live") == 0) { coex_live = true; }
-    else if (strcmp(name, "window") == 0) { coex_live = false; }
-    else { return false; }
+    if (!cfg_set_coex(name)) return false;
     printf("wifi: coex %s\n", wifi_coex());
     return true;
 }
