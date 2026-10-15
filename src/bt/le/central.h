@@ -42,6 +42,9 @@ bool le_radio_busy(void);
  */
 int le_release_radio(const char *why);
 
+/* Open links right now (for measurement; le_radio_busy() is the gate). */
+int le_link_count(void);
+
 /* Connect by address. addr_type comes from the scan table -- you cannot assume
  * public, and guessing produces a connect that never completes. */
 bool le_connect(const uint8_t *addr, uint8_t addr_type);

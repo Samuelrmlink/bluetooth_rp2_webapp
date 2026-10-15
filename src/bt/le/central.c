@@ -393,6 +393,12 @@ int le_link_slot(const char *addr) {
 
 /* Defined here rather than beside le_scanning() because it needs links[],
  * which is declared just above. */
+int le_link_count(void) {
+    int n = 0;
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) { if (links[i].active) n++; }
+    return n;
+}
+
 int le_release_radio(const char *why) {
     if (!bt_stack_up()) { return 0; }
     if (s_scanning) {
