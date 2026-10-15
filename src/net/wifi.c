@@ -898,6 +898,12 @@ void wifi_poll(void) {
     uint32_t now = now_ms();
     refresh_ap_clients(now);
 
+    /* How long the station has been without a network, whichever way it got
+     * there -- a loss (on_lost), the mode going off and back, a failed join,
+     * boot. Only on_up() clears it. Setting it in on_lost alone missed every
+     * other way down, and the radio window never opened (bench, 2026-10-15). */
+    if (state != ST_UP && !sta_down_at) sta_down_at = now ? now : 1;
+
 #if CONFIG_BT_LE
     if (win_start && timed_out(now, win_start, state == ST_JOIN ? WIFI_WIN_HARD_MS : WIFI_WIN_MAX_MS)) {
         if (pending_join) {
@@ -948,6 +954,13 @@ void wifi_poll(void) {
         }
 #endif
         pending_join = false;
+        if (sta_parked) {
+            /* The AP -> station flip, now that the join can really start. */
+            printf("wifi: '%s' requested, AP down for the join\n", pending_ssid);
+            stop_ap();
+            ap_changed = now;
+            sta_parked = false;
+        }
         const cfg_net_t *k = cfg_net_find(pending_ssid);
         begin_join(pending_ssid, k ? k->psk : NULL);
         return;
@@ -1023,6 +1036,15 @@ void wifi_poll(void) {
     switch (state) {
     case ST_IDLE:
         if (ap_only) break;                 /* the station stays down on purpose */
+        /* SAFETY NET: no interface up at all means no scan can ever run, so no
+         * network can ever be found -- the dead end above, by any route. Bring
+         * the station back; scanning (and so recovery) needs an interface. */
+        if (!ap_up && !sta_parked && !sta_enabled()) {
+            printf("wifi: no interface up; re-enabling the station so scans can run\n");
+            cyw43_arch_enable_sta_mode();
+            apply_radio_power();
+            break;
+        }
         if (ap_settling(now)) break;        /* the AP just came up; see WIFI_AP_SETTLE_MS */
         if (sta_parked) {
             /* Parked for an AP start. Stay down until the AP is actually UP
@@ -1064,10 +1086,22 @@ void wifi_poll(void) {
             /* A saved network in range but Bluetooth holds the radio: after
              * WIFI_WIN_AFTER_MS down, take a window and let the pending-join
              * path run once the links have closed. */
-            if (k && le_radio_busy() && !win_start && !sta_parked && win_auto_ok(now)) {
-                snprintf(pending_ssid, sizeof(pending_ssid), "%s", k->ssid);
-                pending_join = true;
-                win_open(now, "rejoin");
+            if (k && le_radio_busy()) {
+                /* Bluetooth holds the radio. Never take the AP down (or touch
+                 * the station) for a join that cannot start: the AP flip below
+                 * followed by begin_join's deferral left NO interface up, every
+                 * scan then failed ("scan failed to start") and nothing could
+                 * ever find a network again (bench, 2026-10-15). Join through a
+                 * window when one is allowed; the pending-join path does the AP
+                 * flip once the radio is actually free. */
+                if (!win_start && win_auto_ok(now)) {
+                    snprintf(pending_ssid, sizeof(pending_ssid), "%s", k->ssid);
+                    pending_join = true;
+                    win_open(now, "rejoin");
+                } else if (!deferred_for_bt) {
+                    printf("wifi: '%s' in range; waiting for a radio window\n", k->ssid);
+                    deferred_for_bt = true;
+                }
                 break;
             }
 #endif

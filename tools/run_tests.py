@@ -170,6 +170,8 @@ def t_wifi_radio_window():
         return False, "the radio window is unbounded or never closes on success"
     if "win_close(" not in (_fn_body(src, "on_lost") or ""):
         return False, "the radio window does not close when the join fails"
+    if "no interface up; re-enabling the station" not in src:
+        return False, "the no-interface safety net is gone: scans can fail forever with the AP down and the station parked"
     c = open(os.path.join(ROOT, "src/bt/le/central.c")).read()
     if "int le_release_radio(" not in c:
         return False, "central.c has no le_release_radio()"
