@@ -147,6 +147,35 @@ def _fn_body(src, name):
     j = src.find("\n}\n", i)
     return src[i:j] if j > 0 else src[i:]
 
+def t_wifi_radio_window():
+    """A lost station can rejoin while Bluetooth holds links -- by a bounded
+    radio window, never by joining under BLE.
+
+    begin_join() must still refuse while le_radio_busy() (a join under BLE
+    wedges the driver); the window must actually free the radio
+    (le_release_radio), hold new BLE scans/connects off while open
+    (wifi_bt_hold), be bounded (WIFI_WIN_MAX_MS) and close on success and on
+    loss. Without it a gateway that keeps the C1000 connected could never
+    rejoin a different AP (2026-10-15)."""
+    src = open(os.path.join(ROOT, "src/net/wifi.c")).read()
+    body = _fn_body(src, "begin_join")
+    if body is None or "le_radio_busy()" not in body:
+        return False, "begin_join() no longer refuses while Bluetooth has the radio"
+    if "le_release_radio(" not in (_fn_body(src, "win_open") or ""):
+        return False, "win_open() does not release the radio"
+    i = src.find("bool wifi_bt_hold(void)")
+    if i < 0 or "win_start" not in src[i:src.find("\n}\n", i)]:
+        return False, "wifi_bt_hold() does not hold Bluetooth off during a radio window"
+    if "WIFI_WIN_MAX_MS" not in src or "win_close(" not in (_fn_body(src, "on_up") or ""):
+        return False, "the radio window is unbounded or never closes on success"
+    if "win_close(" not in (_fn_body(src, "on_lost") or ""):
+        return False, "the radio window does not close when the join fails"
+    c = open(os.path.join(ROOT, "src/bt/le/central.c")).read()
+    if "int le_release_radio(" not in c:
+        return False, "central.c has no le_release_radio()"
+    return True, "joins never run under BLE; a bounded window frees the radio and holds BLE off"
+
+
 def t_wifi_ap_is_independent():
     """The SoftAP is a parallel service, not a state the station has to leave.
 
@@ -913,6 +942,7 @@ def main():
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
+    step(0, "WiFi rejoins under Bluetooth only through a radio window", t_wifi_radio_window)
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
     step(0, "only uplink.c sets the default route", t_only_uplink_sets_default)
     step(0, "uplink metrics and policy from scripted pings", t_uplink_policy)

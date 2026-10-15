@@ -33,6 +33,15 @@ bool le_scanning(void);
  */
 bool le_radio_busy(void);
 
+/*
+ * Give the radio up for a WiFi join: stop a scan, cancel a pending connect,
+ * disconnect every link. Disconnects complete asynchronously -- poll
+ * le_radio_busy() for the result. Returns the number of links asked to close.
+ * Profiles see an ordinary link loss and reconnect once WiFi lets them
+ * (wifi_bt_hold() refuses new scans/connects meanwhile).
+ */
+int le_release_radio(const char *why);
+
 /* Connect by address. addr_type comes from the scan table -- you cannot assume
  * public, and guessing produces a connect that never completes. */
 bool le_connect(const uint8_t *addr, uint8_t addr_type);
