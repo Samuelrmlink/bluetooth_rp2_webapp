@@ -218,15 +218,19 @@ void bond_init(void) {
 
 size_t bond_list_json(char *dst, size_t cap) {
     size_t n = (size_t)snprintf(dst, cap, "[");
-    int count = le_device_db_count();
+    /* Bonds sit in any of the max_count slots, with holes after a removal:
+     * le_device_db_count() is how many are valid, NOT the last index. Walking
+     * 0..count listed an empty slot -- reported by BTstack as 00:00:00:00:00:00
+     * type 254 (BD_ADDR_TYPE_UNKNOWN) -- and missed the real bond above it. */
+    int slots = le_device_db_max_count();
     bool first = true;
-    for (int i = 0; i < count && n + 64 < cap; i++) {
-        int type = 0;
+    for (int i = 0; i < slots && n + 64 < cap; i++) {
+        int type = BD_ADDR_TYPE_UNKNOWN;
         bd_addr_t addr;
         sm_key_t irk;
         le_device_db_info(i, &type, addr, irk);
-        if (type < 0) {
-            continue;
+        if (type == BD_ADDR_TYPE_UNKNOWN || type < 0) {
+            continue;   /* empty slot */
         }
         n += (size_t)snprintf(dst + n, cap - n,
                               "%s{\"index\":%d,\"addr\":\"%s\",\"addr_type\":%d}",
@@ -237,12 +241,13 @@ size_t bond_list_json(char *dst, size_t cap) {
 }
 
 bool bond_remove(const uint8_t *addr, uint8_t addr_type) {
-    int count = le_device_db_count();
-    for (int i = 0; i < count; i++) {
-        int type = 0;
+    int slots = le_device_db_max_count();   /* slots, not count: see bond_list_json */
+    for (int i = 0; i < slots; i++) {
+        int type = BD_ADDR_TYPE_UNKNOWN;
         bd_addr_t a;
         sm_key_t irk;
         le_device_db_info(i, &type, a, irk);
+        if (type == BD_ADDR_TYPE_UNKNOWN) continue;   /* empty: "removing" 00:00.. must not say ok */
         if (type == addr_type && memcmp(a, addr, 6) == 0) {
             le_device_db_remove(i);
             return true;
