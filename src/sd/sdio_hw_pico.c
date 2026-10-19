@@ -27,6 +27,7 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "pico/stdlib.h"
 #include "sd/sd_card.h"
 #include "sd/sd_port.h"
 #include "sdio.pio.h"

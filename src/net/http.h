@@ -20,6 +20,8 @@ void http_broadcast_line(const char *line);
  * was deliberately removed so lines coalesce into MSS-sized segments; without
  * this they would sit in the send buffer until something else flushed them. */
 void http_flush_ws(void);
+/* Moves /api/sd transfers along (main loop; a no-op without CONFIG_SD). */
+void http_sd_pump(void);
 
 /* Frames this client lost to a full send buffer. Surfaced rather than silently
  * dropped, because a stalled link otherwise looks like missing data. */

@@ -32,6 +32,9 @@ extern const op_module_t op_module_ota;
 #if CONFIG_NET_ETH_W5500
 extern const op_module_t op_module_eth;
 #endif
+#if CONFIG_SD
+extern const op_module_t op_module_sd;
+#endif
 #if CONFIG_NET_UPLINK
 extern const op_module_t op_module_uplink;
 #endif
@@ -64,6 +67,9 @@ static const op_module_t *const modules[] = {
 #endif
 #if CONFIG_NET_ETH_W5500
     &op_module_eth,
+#endif
+#if CONFIG_SD
+    &op_module_sd,
 #endif
 #if CONFIG_NET_UPLINK
     &op_module_uplink,

@@ -147,6 +147,34 @@ def _fn_body(src, name):
     j = src.find("\n}\n", i)
     return src[i:j] if j > 0 else src[i:]
 
+def t_sd_guards():
+    """The SD card's standing rules, as greps:
+    - its code runs only in the storage worker, resumed from the main loop:
+      never from cyw43_wait.c (the radio's wait hook pumps USB only);
+    - the SPI transport ends every transaction with spibus_release_trailing
+      (the card drives MISO until a clock with CS high) and never releases
+      the bus any other way;
+    - its pins are reserved in the pin broker (SDIO lines and card detect);
+    - no carlk3 / ZuluSCSI SDIO source in this MIT tree (GPL-3.0; it may
+      only ever be fetched into a test build, test/sdio_diff)."""
+    w = open(os.path.join(ROOT, "src/net/cyw43_wait.c")).read()
+    if re.search(r"\bsd_(poll|core|card|api)|sdw_|sdio_", w):
+        return False, "cyw43_wait.c reaches SD code"
+    spi = open(os.path.join(ROOT, "src/sd/sd_spi.c")).read()
+    if "spibus_release_trailing(" not in spi or re.search(r"spibus_release\(", spi):
+        return False, "sd_spi.c releases the bus without the trailing clock"
+    hw = open(os.path.join(ROOT, "src/sd/sdio_hw_pico.c")).read()
+    if hw.count("reserve(") < 4 or "pins_reserve(" not in hw:
+        return False, "sdio_hw_pico.c does not reserve CLK/CMD/D0-D3"
+    port = open(os.path.join(ROOT, "src/sd/sd_port_pico.c")).read()
+    if "pins_reserve(" not in port:
+        return False, "card detect is not reserved"
+    rc, out = sh("grep -rliE 'zuluscsi|rabbit hole computing|carlk3|no-OS-FatFS' src third_party 2>/dev/null")
+    if out.strip():
+        return False, f"GPL SDIO source in the tree: {out.split()[0]}"
+    return True, "worker-only, trailing-clock releases, pins reserved, no GPL SDIO code"
+
+
 def t_wifi_ap_is_independent():
     """The SoftAP is a parallel service, not a state the station has to leave.
 
@@ -871,6 +899,29 @@ def t_w5500_symbols():
     return True, "absent from pico2w/minimal/noanker, present in pico2w_eth"
 
 
+def t_sd_symbols():
+    """CONFIG_SD=n must carry none of it (no FatFs, no sd_ symbols, no /api/sd
+    routes) in the four builds that leave it off; the SDIO build has the PIO
+    driver and not the SPI one, and the SPI build the reverse."""
+    nm = os.path.expanduser("~/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-nm")
+    pat = re.compile(r"\b(f_mount|f_mkfs|sd_card_init|sd_api_status_json|sd_routes|op_module_sd|sdio_hw_init)\b")
+    for cfg in ("pico2w", "pico2w_minimal", "pico2w_noanker", "pico2w_eth"):
+        elf = f"{BUILD_PREFIX}{cfg}/btgw.elf"
+        if not os.path.exists(elf):
+            return False, f"{cfg} was not built"
+        rc, out = sh(f"{nm} {elf}")
+        hit = next((l for l in out.splitlines() if pat.search(l)), None)
+        if hit:
+            return False, f"{cfg} links {hit.split()[-1]}"
+    rc, sdio = sh(f"{nm} {BUILD_PREFIX}pico2w_sd/btgw.elf")
+    rc, spi = sh(f"{nm} {BUILD_PREFIX}pico2w_sdspi/btgw.elf")
+    if "sdio_hw_init" not in sdio or "f_mkfs" not in sdio or "sd_bus_spi" in sdio:
+        return False, "pico2w_sd: not the SDIO driver alone"
+    if "sd_bus_spi" not in spi or "sdio_hw_init" in spi:
+        return False, "pico2w_sdspi: not the SPI driver alone"
+    return True, "absent from the four non-SD builds; SDIO and SPI builds each carry their own bus"
+
+
 def _kb(v):
     """picotool sizes: "864K", "2048K", "64K"."""
     v = str(v).strip().upper()
@@ -992,6 +1043,7 @@ def main():
     step(0, "SD CRCs (CRC7, CRC16, 4-line CRC16 as one CRC64)", t_sd_crc)
     step(0, "SD card on SDIO and on SPI vs a simulated card", t_sd_card)
     step(0, "SD stack (worker, API, FatFs) on both buses + fsck", t_sd_stack)
+    step(0, "SD rules: worker-only, trailing-clock releases, pins, no GPL", t_sd_guards)
     step(0, "W5500 MACRAW state machine vs a simulated chip", t_w5500)
     step(0, "SPI only through the bus layer", t_spi_only_through_spibus)
     step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
@@ -1011,6 +1063,11 @@ def main():
         # that compiles it, so it is the only thing keeping it compiling.
         step(1, "build pico2w_eth (pico2w + W5500 Ethernet)", build("pico2w_eth"))
         step(1, "W5500 off means none of its code is linked", t_w5500_symbols)
+        # The SD card is opt-in and no board has the slot yet: these two
+        # builds are what keep both buses compiling.
+        step(1, "build pico2w_sd (pico2w_eth + SD card on SDIO)", build("pico2w_sd"))
+        step(1, "build pico2w_sdspi (pico2w_eth + SD card on SPI, shared bus)", build("pico2w_sdspi"))
+        step(1, "SD off means none of its code is linked", t_sd_symbols)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)

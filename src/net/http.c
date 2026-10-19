@@ -17,6 +17,10 @@
 #include "fs/fs.h"
 #include "net/ws.h"
 #include "api/api.h"
+#include "autoconf.h"
+#if CONFIG_SD
+#include "sd/sd_api.h"
+#endif
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
 #include "config/config.h"
@@ -26,6 +30,13 @@
 #include "net/usb_ncm.h"
 
 #define HTTP_HDR 1024
+/* A request's path. SD names arrive percent-encoded (/api/sd/files/...), so
+ * an SD build takes twice the usual; others keep the 96 they always had. */
+#if CONFIG_SD
+#define HTTP_PATH 192
+#else
+#define HTTP_PATH 96
+#endif
 #define HTTP_CONNS 8
 #define FILE_CHUNK 1460
 #define HTTP_POLL_INT 2
@@ -54,7 +65,7 @@ typedef struct {
     uint64_t tar_left;      /* archive bytes still to send */
     char fs_name[FS_PATH_MAX + 1];
     char method[8];
-    char path[96];
+    char path[HTTP_PATH];
     /* 512, not 256: PUT /api/notify carries a URL, an MQTT host, a topic
      * and credentials in one body, and the WiFi PUTs were already close to
      * the old limit with a 63-character PSK. */
@@ -73,7 +84,19 @@ typedef struct {
      * floor silently, and a 1.6 s WiFi stall looked like a hole in the
      * meter's data. Reported on STATE as DROPPED= for the asking client. */
     uint32_t dropped;
-
+#if CONFIG_SD
+    /* an /api/sd transfer this connection is waiting on (sd_service) */
+    bool sd_on;
+    bool sd_hdr_sent;
+    bool sd_in_ended;
+    bool taking_sd_body;
+    uint8_t sd_x;
+    uint8_t sd_op;
+    struct pbuf *sd_hold;        /* upload bytes the worker has not taken yet */
+    uint16_t sd_hold_off;
+    uint32_t sd_acked_ahead;     /* held bytes already tcp_recved (they came with the headers) */
+    size_t sd_put_got;
+#endif
 } http_conn_t;
 
 static http_conn_t conns[HTTP_CONNS];
@@ -87,12 +110,16 @@ static const char *status_text(int code) {
     switch (code) {
         case 200: return "OK";
         case 201: return "Created";
+        case 202: return "Accepted";
         case 204: return "No Content";
         case 400: return "Bad Request";
         case 404: return "Not Found";
         case 409: return "Conflict";
         case 413: return "Payload Too Large";
         case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
+        case 503: return "Service Unavailable";
+        case 507: return "Insufficient Storage";
         default: return "OK";
     }
 }
@@ -147,6 +174,16 @@ static void conn_cleanup(http_conn_t *c) {
     if (c->sending_tar) {
         fs_tar_end();
     }
+#if CONFIG_SD
+    if (c->sd_on) {
+        sd_xfer_release(c->sd_x); /* the worker stops; an unfinished upload is deleted */
+        c->sd_on = false;
+    }
+    if (c->sd_hold) {
+        pbuf_free(c->sd_hold);
+        c->sd_hold = NULL;
+    }
+#endif
 }
 
 static void conn_reset(http_conn_t *c) {
@@ -155,7 +192,11 @@ static void conn_reset(http_conn_t *c) {
 }
 
 static bool conn_held(const http_conn_t *c) {
-    return c->sending_file || c->sending_tar || c->closing || c->pending_file || c->is_ws;
+    return c->sending_file || c->sending_tar || c->closing || c->pending_file || c->is_ws
+#if CONFIG_SD
+           || c->sd_on
+#endif
+        ;
 }
 
 static void conn_drop(struct tcp_pcb *tpcb) {
@@ -983,12 +1024,346 @@ static int wifi_routes(struct tcp_pcb *tpcb, const char *method, const char *pat
 }
 #endif /* CONFIG_NET_WIFI */
 
+#if CONFIG_SD
+/* ---- the SD card: /api/sd (src/sd/sd_api.h) --------------------------------
+ * Ported from km003c_rp2_webapp's http.c with the same routes and answers:
+ *   GET    /api/sd[?reset=1]          status JSON
+ *   POST   /api/sd/format {fs,cluster}
+ *   POST   /api/sd/bench {mb}
+ *   GET    /api/sd/files[/<path>]     a file, or a folder's listing
+ *   PUT    /api/sd/files/<path>       upload (parents made); <path>/ = mkdir
+ *   DELETE /api/sd/files/<path>
+ *   POST   /api/sd/rename {from,to}
+ * A transfer holds its connection while the storage worker does the card
+ * I/O; http_sd_pump() (main loop) moves it along. An upload is held as
+ * pbufs and acknowledged only as the worker takes the bytes -- real TCP
+ * back-pressure, unlike /api/fs's PUT, so a slow card slows the sender
+ * instead of stalling the loop. */
+
+static err_t sd_http_err(struct tcp_pcb *tpcb, const struct sd_reply *r) {
+    char body[160];
+    snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"%s\",\"card\":\"%s\"}", r->error,
+             r->card ? r->card : sd_card_state());
+    char hdr[400];
+    char ra[32] = "";
+    if (r->retry_after > 0) {
+        snprintf(ra, sizeof(ra), "Retry-After: %d\r\n", r->retry_after);
+    }
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %u\r\n%s"
+                      "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\n"
+                      "Access-Control-Allow-Methods: %s\r\nConnection: close\r\n\r\n",
+                      r->status, status_text(r->status), (unsigned)strlen(body), ra, cors_methods());
+    tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY);
+    tcp_write(tpcb, body, (uint16_t)strlen(body), TCP_WRITE_FLAG_COPY);
+    tcp_output(tpcb);
+    tcp_close(tpcb);
+    return ERR_OK;
+}
+
+static uint32_t json_u32_field(const char *body, const char *key) {
+    char pat[40];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(body ? body : "", pat);
+    if (!p) {
+        return 0;
+    }
+    p = strchr(p + strlen(pat), ':');
+    return p ? (uint32_t)strtoul(p + 1, NULL, 10) : 0;
+}
+
+/* Request paths, percent-encoded as they arrive (sd_path_clean decodes);
+ * one request is parsed at a time. */
+static char s_sdp1[192], s_sdp2[192];
+
+/* Hold a connection on transfer x. */
+static err_t sd_hold_conn(http_conn_t *c, int x, enum sd_op op) {
+    c->sd_on = true;
+    c->sd_x = (uint8_t)x;
+    c->sd_op = (uint8_t)op;
+    c->retries = 0;
+    return ERR_OK;      /* held: http_sd_pump answers */
+}
+
+/* /api/sd, /api/sd/format, /api/sd/bench, /api/sd/files[/...] (GET,
+ * DELETE), /api/sd/rename. PUT is taken in http_recv, as its body streams.
+ * -1 = not ours. */
+static int sd_routes(http_conn_t *c, struct tcp_pcb *tpcb, const char *method, const char *path,
+                     const char *body) {
+    static struct sd_reply r;
+    memset(&r, 0, sizeof(r));
+    if (path_is(path, "/api/sd")) {
+        if (sd_api_status_json(json_buf, sizeof(json_buf)) < 0) {
+            return http_reply(tpcb, 500, "application/json", "{\"ok\":false,\"error\":\"status too long\"}");
+        }
+        if (strstr(path, "reset=1")) {
+            sd_api_stats_reset();
+        }
+        return http_reply(tpcb, 200, "application/json", json_buf);
+    }
+    if (path_is(path, "/api/sd/format")) {
+        if (strcmp(method, "POST") != 0) {
+            return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"POST\"}");
+        }
+        char fs[12] = "";
+        json_str_field(body, "fs", fs, sizeof(fs));
+        if (!sd_format_start(fs, json_u32_field(body, "cluster"), &r)) {
+            return sd_http_err(tpcb, &r);
+        }
+        return http_reply(tpcb, 202, "application/json", "{\"ok\":true}");
+    }
+    if (path_is(path, "/api/sd/bench")) {
+        if (strcmp(method, "POST") != 0) {
+            return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"POST\"}");
+        }
+        if (!sd_bench_start(json_u32_field(body, "mb"), &r)) {
+            return sd_http_err(tpcb, &r);
+        }
+        return http_reply(tpcb, 202, "application/json", "{\"ok\":true}");
+    }
+    bool rename = path_is(path, "/api/sd/rename");
+    bool files = strncmp(path, "/api/sd/files", 13) == 0 &&
+                 (path[13] == 0 || path[13] == '/' || path[13] == '?' || path[13] == '#');
+    if (!rename && !files) {
+        return -1;
+    }
+    if (!sd_api_gate(&r)) {
+        return sd_http_err(tpcb, &r);
+    }
+    char *p1 = s_sdp1, *p2 = s_sdp2;
+    p1[0] = p2[0] = 0;
+    enum sd_op op;
+    if (rename) {
+        if (strcmp(method, "POST") != 0 || !json_str_field(body, "from", p1, sizeof(s_sdp1)) ||
+            !json_str_field(body, "to", p2, sizeof(s_sdp2)) || !sd_path_clean(p1, sizeof(s_sdp1)) ||
+            !sd_path_clean(p2, sizeof(s_sdp2)) || !p1[0] || !p2[0]) {
+            return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad path\"}");
+        }
+        op = SD_OP_RENAME;
+    } else {
+        if (path[13] == '/' && !copy_path_token(path + 14, p1, sizeof(s_sdp1))) {
+            p1[0] = 0; /* "/api/sd/files/" = the root */
+        }
+        if (!sd_path_clean(p1, sizeof(s_sdp1))) {
+            return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad path\"}");
+        }
+        if (strcmp(method, "GET") == 0) {
+            op = SD_OP_GET;
+        } else if (strcmp(method, "DELETE") == 0) {
+            op = SD_OP_DELETE;
+        } else {
+            return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"GET, PUT or DELETE\"}");
+        }
+    }
+    int x = sd_xfer_start(op, p1, p2, 0, &r);
+    if (x < 0) {
+        return sd_http_err(tpcb, &r);
+    }
+    return sd_hold_conn(c, x, op);
+}
+
+/* PUT /api/sd/files/<path>: from http_recv once the headers are in. A
+ * trailing '/' makes a folder. Returns an err_t the caller passes on; the
+ * pbuf is the caller's unless *took_p. */
+static err_t sd_put_begin(http_conn_t *c, struct tcp_pcb *tpcb, const char *path, struct pbuf *p, size_t offset,
+                          bool *took_p) {
+    static struct sd_reply sr;
+    char *sp = s_sdp1;
+    memset(&sr, 0, sizeof(sr));
+    *took_p = false;
+    if (!sd_api_gate(&sr)) {
+        return sd_http_err(tpcb, &sr);
+    }
+    size_t tok = strcspn(path, "?#");
+    bool mkdir = tok > 14 && path[tok - 1] == '/';
+    if (!copy_path_token(path + 14, sp, sizeof(s_sdp1)) || !sd_path_clean(sp, sizeof(s_sdp1)) || !sp[0]) {
+        return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad path\"}");
+    }
+    enum sd_op op = mkdir ? SD_OP_MKDIR : SD_OP_PUT;
+    int x = sd_xfer_start(op, sp, NULL, mkdir ? 0 : (uint64_t)c->content_len, &sr);
+    if (x < 0) {
+        return sd_http_err(tpcb, &sr);
+    }
+    sd_hold_conn(c, x, op);
+    if (mkdir) {
+        return ERR_OK;
+    }
+    c->taking_sd_body = true;
+    c->sd_put_got = 0;
+    if (offset < p->tot_len) {
+        /* The body's first bytes came with the headers, and this pbuf was
+         * acknowledged already. */
+        c->sd_hold = p;
+        c->sd_hold_off = (uint16_t)offset;
+        c->sd_acked_ahead = (uint32_t)(p->tot_len - offset);
+        *took_p = true;
+    }
+    return ERR_OK;
+}
+
+/* Hands held upload bytes to the worker and acknowledges what it took. The
+ * hold is a pbuf chain; c->sd_hold_off is how far into it the worker is. */
+static void sd_feed(http_conn_t *c) {
+    if (!c->sd_hold) {
+        return;
+    }
+    size_t took = 0; /* bytes of the chain consumed, from sd_hold_off */
+    struct pbuf *q = c->sd_hold;
+    size_t off = c->sd_hold_off;
+    while (q && off >= q->len) {
+        off -= q->len;
+        q = q->next;
+    }
+    for (; q; q = q->next, off = 0) {
+        size_t len = q->len - off;
+        size_t left = c->content_len - c->sd_put_got;
+        size_t want = len < left ? len : left; /* past Content-Length: consumed, ignored */
+        size_t k = want ? sd_xfer_put(c->sd_x, (const uint8_t *)q->payload + off, want) : 0;
+        c->sd_put_got += k;
+        if (k < want) {
+            took += k;
+            break; /* the worker's buffer is full */
+        }
+        took += len;
+    }
+    if (!took) {
+        return;
+    }
+    /* Acknowledge it, less what the header pbuf already acknowledged. */
+    size_t pre = took < c->sd_acked_ahead ? took : c->sd_acked_ahead;
+    c->sd_acked_ahead -= (uint32_t)pre;
+    for (size_t ack = took - pre; ack;) {
+        uint16_t n = ack > 0xFFFF ? 0xFFFF : (uint16_t)ack;
+        tcp_recved(c->pcb, n);
+        ack -= n;
+    }
+    /* Free the pbufs at the front that are wholly consumed. */
+    size_t pos = c->sd_hold_off + took;
+    while (c->sd_hold && pos >= c->sd_hold->len) {
+        struct pbuf *head = c->sd_hold;
+        struct pbuf *next = head->next;
+        pos -= head->len;
+        if (next) {
+            pbuf_ref(next); /* survives the dechain below */
+            pbuf_dechain(head);
+        }
+        pbuf_free(head);
+        c->sd_hold = next;
+    }
+    c->sd_hold_off = (uint16_t)pos;
+}
+
+/* Moves one connection's transfer along. Sends nothing it cannot fit. */
+static void sd_service(http_conn_t *c) {
+    struct tcp_pcb *tpcb = c->pcb;
+    int x = c->sd_x;
+    enum sd_xstate st = sd_xfer_state(x);
+    c->retries = 0; /* the worker is on it; lwIP notices a vanished client */
+    if (c->sd_op == SD_OP_PUT && st == SDX_STREAM) {
+        sd_feed(c);
+        if (!c->sd_hold && c->sd_put_got >= c->content_len && !c->sd_in_ended) {
+            sd_xfer_end_input(x);
+            c->sd_in_ended = true;
+        }
+        return;
+    }
+    if (c->sd_op == SD_OP_GET && (st == SDX_STREAM || st == SDX_DONE || (st == SDX_FAIL && c->sd_hdr_sent))) {
+        if (!c->sd_hdr_sent) {
+            char hdr[360], cl[40] = "";
+            uint64_t size = sd_xfer_size(x);
+            if (size != UINT64_MAX) {
+                snprintf(cl, sizeof(cl), "Content-Length: %llu\r\n", (unsigned long long)size);
+            }
+            int hl = snprintf(hdr, sizeof(hdr),
+                              "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n%sCache-Control: no-store\r\n"
+                              "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: %s\r\n"
+                              "Connection: close\r\n\r\n",
+                              sd_xfer_mime(x), cl, cors_methods());
+            if (tcp_sndbuf(tpcb) < hl || tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+                return;
+            }
+            c->sd_hdr_sent = true;
+        }
+        const uint8_t *p;
+        size_t n;
+        while ((n = sd_xfer_peek(x, &p)) > 0) {
+            u16_t room = tcp_sndbuf(tpcb);
+            if (room < 64) {
+                break;
+            }
+            if (n > room) {
+                n = room;
+            }
+            if (tcp_write(tpcb, p, (u16_t)n, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+                break;
+            }
+            sd_xfer_consume(x, n);
+        }
+        tcp_output(tpcb);
+        if (st == SDX_FAIL) {
+            /* Headers are out (200 + Content-Length): cut the body short so
+             * the client sees a short read, never wrong data. */
+            conn_cleanup(c);
+            conn_reset(c);
+            tcp_abort(tpcb);
+            return;
+        }
+        if (st == SDX_DONE && sd_xfer_peek(x, &p) == 0) {
+            sd_xfer_release(x);
+            c->sd_on = false;
+            http_try_close(c, tpcb);
+        }
+        return;
+    }
+    if (st == SDX_DONE) {
+        if (c->sd_op == SD_OP_PUT) {
+            snprintf(json_buf, sizeof(json_buf), "{\"ok\":true,\"bytes\":%llu}",
+                     (unsigned long long)sd_xfer_size(x));
+            http_reply(tpcb, 200, "application/json", json_buf);
+        } else if (c->sd_op == SD_OP_MKDIR) {
+            http_reply(tpcb, 200, "application/json", "{\"ok\":true,\"dir\":true}");
+        } else {
+            http_reply(tpcb, 200, "application/json", "{\"ok\":true}");
+        }
+        conn_cleanup(c); /* releases the transfer */
+        conn_reset(c);
+        return;
+    }
+    if (st == SDX_FAIL) {
+        static struct sd_reply r;
+        sd_xfer_result(x, &r);
+        sd_http_err(tpcb, &r);
+        conn_cleanup(c);
+        conn_reset(c);
+    }
+}
+
+void http_sd_pump(void) {
+    for (int i = 0; i < HTTP_CONNS; i++) {
+        if (conns[i].pcb && conns[i].sd_on) {
+            sd_service(&conns[i]);
+        }
+    }
+}
+#else
+void http_sd_pump(void) {
+}
+#endif
+
 static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, const char *path,
                     const char *body, size_t body_len) {
     (void)body_len;
     if (strcmp(method, "OPTIONS") == 0) {
         return http_reply(tpcb, 204, "text/plain", "");
     }
+#if CONFIG_SD
+    if (strncmp(path, "/api/sd", 7) == 0 && (path[7] == 0 || path[7] == '/' || path[7] == '?')) {
+        int rc = sd_routes(c, tpcb, method, path, body);
+        if (rc >= 0) {
+            return rc;
+        }
+    }
+#endif
     if (path_is(path, "/api/fs/rename") && strcmp(method, "POST") == 0) {
         /* The path buffers below are static for the reason given on
          * ws_on_text's line buffer: dispatch() has a branch per route
@@ -1130,6 +1505,9 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
                               "bluetooth_rp2_webapp\n"
                               "GET /api/fs  GET/PUT/DELETE /api/fs/<path>  POST /api/fs/rename\n"
                               "GET /api/tar/<folder>  (a folder as tar)  PUT /api/fs/<folder>/  (mkdir)\n"
+#if CONFIG_SD
+                              "GET /api/sd  GET/PUT/DELETE /api/sd/files/<path>  POST /api/sd/rename|format|bench\n"
+#endif
                               "WS " WS_PATH "  JSON API, e.g. {\"id\":1,\"op\":\"sys.info\"}\n");
         }
     }
@@ -1220,10 +1598,31 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
     (void)arg;
     (void)err;
     if (!p) {
+#if CONFIG_SD
+        http_conn_t *cx = conn_find(tpcb);
+        if (cx && cx->sd_on) {
+            sd_xfer_note_end(cx->sd_x, "client closed", 0);
+        }
+#endif
         conn_drop(tpcb);
         tcp_close(tpcb);
         return ERR_OK;
     }
+#if CONFIG_SD
+    {
+        http_conn_t *cx = conn_find(tpcb);
+        if (cx && cx->taking_sd_body) {
+            /* Held, and acknowledged as the worker takes it (sd_feed). */
+            if (cx->sd_hold) {
+                pbuf_cat(cx->sd_hold, p);
+            } else {
+                cx->sd_hold = p;
+                cx->sd_hold_off = 0;
+            }
+            return ERR_OK;
+        }
+    }
+#endif
     tcp_recved(tpcb, p->tot_len);
     http_conn_t *c = conn_for(tpcb);
     if (!c) {
@@ -1269,8 +1668,12 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         c->content_len = header_content_length(c->hdr);
 
         char method[8] = {0};
-        char path[96] = {0};
+        char path[HTTP_PATH] = {0};
+#if CONFIG_SD
+        sscanf(c->hdr, "%7s %191s", method, path);
+#else
         sscanf(c->hdr, "%7s %95s", method, path);
+#endif
 
         if (try_ws_upgrade(c, tpcb, method, path)) {
             /* Any bytes past the header in this same pbuf are the start
@@ -1305,6 +1708,19 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
             return ERR_OK;
         }
 
+#if CONFIG_SD
+        if (strcmp(method, "PUT") == 0 && strncmp(path, "/api/sd/files/", 14) == 0) {
+            bool took = false;
+            err_t e = sd_put_begin(c, tpcb, path, p, offset, &took);
+            if (!took) {
+                pbuf_free(p);
+            }
+            if (!c->sd_on) {
+                conn_drop(tpcb);
+            }
+            return e;
+        }
+#endif
         bool want_fs_put = strcmp(method, "PUT") == 0 && strncmp(path, "/api/fs/", 8) == 0;
         bool want_post_body = c->content_len > 0 && !want_fs_put &&
                               (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 ||

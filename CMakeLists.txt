@@ -128,6 +128,24 @@ endif()
 if(CONFIG_NET_ETH_W5500)
     target_sources(btgw PRIVATE src/net/w5500.c src/net/eth_w5500.c src/net/eth_cfg.c src/net/eth_ops.c)
 endif()
+# The SD card (src/sd, FatFs). SDIO adds the PIO programs; SPI goes through
+# the bus layer above (CONFIG_SD_BUS_SPI selects CONFIG_SPI_BUS).
+if(CONFIG_SD)
+    target_sources(btgw PRIVATE
+        src/sd/sd_card.c src/sd/sd_crc.c src/sd/sd_diskio.c src/sd/sd_store.c
+        src/sd/sd_api.c src/sd/sd_core.c src/sd/sd_ops.c src/sd/sd_worker_coro.c
+        src/sd/sd_port_pico.c
+        third_party/fatfs/ff.c third_party/fatfs/ffunicode.c)
+    target_include_directories(btgw PRIVATE third_party/fatfs)
+    if(CONFIG_SD_BUS_SDIO)
+        target_sources(btgw PRIVATE src/sd/sd_sdio.c src/sd/sdio_hw_pico.c)
+        pico_generate_pio_header(btgw ${CMAKE_CURRENT_LIST_DIR}/src/sd/sdio.pio)
+        target_link_libraries(btgw hardware_pio hardware_dma hardware_clocks)
+    endif()
+    if(CONFIG_SD_BUS_SPI)
+        target_sources(btgw PRIVATE src/sd/sd_spi.c)
+    endif()
+endif()
 # The per-netif DHCP server: USB-NCM, the SoftAP and Ethernet's server mode.
 if(CONFIG_NET_USB_NCM OR CONFIG_NET_WIFI OR CONFIG_NET_ETH_W5500)
     target_sources(btgw PRIVATE src/net/dhcpserver.c)
