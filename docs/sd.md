@@ -7,12 +7,15 @@ same API as km003c_rp2_webapp) and shown in the web editor as a top-level
 SPI bus layer. No board has the slot yet. The feature is compiled, and
 tested in simulation, so it is ready when one does.
 
-Status: every layer except the PIO wire is tested on the host against a
-simulated card, on both buses (tier 0). The PIO/DMA layer
-(`sdio.pio`, `sdio_hw_pico.c`) and the HTTP routes compile and link but are
-**not yet run**: the first runs are the mcusim differential tests (planned:
-our SDIO against carlk3's on the same simulated card, see "Testing"), then
-hardware.
+Status: every layer above the wire is tested on the host against a
+simulated card, on both buses (tier 0). The firmware builds themselves run
+in mcusim (`tools/run_tests.py --sim`): boot, the storage worker switching on
+the M33, `/api/sd` over the simulated USB network, and, with card detect
+held low and nothing on the bus, the PIO driver and the SPI driver (on SPI1
+after the absent W5500 let go of it) identifying, failing and retrying
+cleanly. **Not yet run against a card**: real data over the PIO/DMA wire
+waits for mcusim's SD card model (then the differential test against
+carlk3's driver, "Testing"), then hardware.
 
 ## Build
 
@@ -187,7 +190,10 @@ the editor's `sd/` folder (browse, open, edit and save, New folder, the
 without the module) and Settings › SD card (status, format with
 confirmation and progress, bench).
 
-`tools/run_tests.py --sim`: the **differential test** (`test/sdio_diff/`,
+`tools/run_tests.py --sim` (needs `~/Work/mcusim` built): the SD
+builds booted in mcusim with card detect low and no card -- state `error`,
+retries, no worker slice over 10 ms, `/api/sd` answering -- and the
+**differential test** (`test/sdio_diff/`,
 `tools/sdio_diff.py`). One seeded script on our SDIO driver and on
 carlk3's, each in mcusim on the same simulated card with the same faults;
 compared: every result class, read hashes, identification, the final card

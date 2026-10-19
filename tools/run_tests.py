@@ -8,7 +8,7 @@
 The tiering exists so the common case stays fast: a suite that is slow does not
 get run, and a suite that does not get run is not a regression guard.
 """
-import argparse, os, subprocess, sys, re
+import argparse, os, subprocess, sys, re, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAILS = []
 
@@ -940,6 +940,56 @@ def t_sdio_diff():
     return rc == 0, last[:90]
 
 
+def t_sd_gateway_sim():
+    """The SD builds themselves in mcusim, over the simulated USB network:
+    with card detect held low and no card on the bus (mcusim has no SD model
+    yet) the worker must identify, fail and retry without a slice over 10 ms,
+    report state "error", and keep /api/sd answering. Runs the PIO driver
+    (pico2w_sd) and the SPI one on the shared bus (pico2w_sdspi) for real."""
+    import json as _j, signal, urllib.request
+    mc = os.path.expanduser("~/Work/mcusim/target/release/mcusim")
+    rom = os.path.expanduser("~/Work/mcusim/third_party/bootrom/rp2350-A2/bootrom-combined.bin")
+    if not os.path.exists(mc):
+        return True, "skipped: no mcusim"
+    cfg = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_sd_present.toml")
+    with open(cfg, "w") as f:
+        f.write('chip = "rp2350"\n[[device]]\ntype = "button"\nname = "sd_detect"\npin = 22\n'
+                'released = "low"\nstdin = false\n')
+    notes = []
+    for cfgname in ("pico2w_sd", "pico2w_sdspi"):
+        elf = f"{BUILD_PREFIX}{cfgname}/btgw.elf"
+        if not os.path.exists(elf):
+            return False, f"{cfgname} not built (run with --tier 1)"
+        p = subprocess.Popen([mc, "--bootrom", rom, "-c", cfg, "--set", "boot=direct", "--rtt", "stdio",
+                              "--usb-host", "net", "--usb-net-forward", "18081:80", "-t", "120s", elf],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            st = None
+            t0 = time.time()
+            while time.time() - t0 < 120:
+                try:
+                    st = _j.load(urllib.request.urlopen("http://127.0.0.1:18081/api/sd", timeout=5))
+                    if st["worker"]["card_inits"] >= 3:
+                        break
+                except Exception:
+                    pass
+                time.sleep(2)
+            if not st:
+                return False, f"{cfgname}: /api/sd never answered"
+            w = st["worker"]
+            if st["state"] != "error" or w["slices_over_10ms"] or w["card_inits"] < 3:
+                return False, (f"{cfgname}: state {st['state']}, inits {w['card_inits']}, "
+                               f"slices over 10 ms {w['slices_over_10ms']} (max {w['slice_max_us']} us)")
+            notes.append(f"{cfgname} {st['bus']['type']} max slice {w['slice_max_us']} us")
+        finally:
+            p.send_signal(signal.SIGTERM)
+            try:
+                p.wait(10)
+            except Exception:
+                p.kill()
+    return True, "; ".join(notes)
+
+
 def _kb(v):
     """picotool sizes: "864K", "2048K", "64K"."""
     v = str(v).strip().upper()
@@ -1091,6 +1141,7 @@ def main():
 
     if a.sim:
         step(3, "SDIO differential test in mcusim (ours vs carlk3)", t_sdio_diff)
+        step(3, "SD builds in mcusim: identify/fail/retry, slices, /api/sd", t_sd_gateway_sim)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)
