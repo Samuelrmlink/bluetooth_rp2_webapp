@@ -15,7 +15,7 @@ static sdsim_t *card;
 static uint32_t khz = 400;
 static int width = 1;
 static uint8_t *armed_buf;
-static uint32_t armed_len;
+static uint32_t armed_blocks;
 static uint32_t dma_blocks;
 int sdio_sim_commands;         /* for tests */
 
@@ -45,6 +45,7 @@ bool sdio_hw_init(const sdio_pins_t *pins) {
 }
 void sdio_hw_set_clock_khz(uint32_t k) { khz = k; }
 void sdio_hw_set_width(int w) { width = w; }
+uint32_t sdio_hw_clock_khz(void) { return khz; }
 void sdio_hw_idle_clocks(uint32_t n) { clocks(n); }
 
 int sdio_hw_command(const uint8_t c[6], int resp_bits, uint8_t *resp) {
@@ -64,25 +65,27 @@ int sdio_hw_command(const uint8_t c[6], int resp_bits, uint8_t *resp) {
     return SD_OK;
 }
 
-void sdio_hw_read_arm(uint8_t *buf, uint32_t len) { armed_buf = buf; armed_len = len; }
+void sdio_hw_read_arm(uint8_t *buf, uint32_t blocks) { armed_buf = buf; armed_blocks = blocks; }
 
-int sdio_hw_read_wait(uint64_t *crc, uint32_t timeout_us) {
-    if (!armed_buf || armed_len != 512) { return SD_EPARAM; }
-    uint8_t blk[512];
-    uint64_t c = 0;
-    if (sdsim_sd_read_block(card, blk, &c) != 0) {
-        sdsim_advance_us(timeout_us);
-        armed_buf = NULL;
-        return SD_ETIMEOUT;
+int sdio_hw_read_wait(uint64_t *crcs, uint32_t timeout_us) {
+    if (!armed_buf || !armed_blocks || armed_blocks > SDIO_MAX_BLOCKS) { return SD_EPARAM; }
+    for (uint32_t i = 0; i < armed_blocks; i++) {
+        uint8_t blk[512];
+        uint64_t c = 0;
+        if (sdsim_sd_read_block(card, blk, &c) != 0) {
+            sdsim_advance_us(timeout_us);
+            armed_buf = NULL;
+            return SD_ETIMEOUT;
+        }
+        if (card->width != width) {                     /* the host samples the wrong lines */
+            for (int k = 0; k < 512; k++) { blk[k] ^= 0x5A; }
+        }
+        memcpy(armed_buf + 512 * i, blk, 512);
+        crcs[i] = c;
+        clocks(1024 + 16 + 2);
+        dma_blocks++;
     }
-    if (card->width != width) {                         /* the host samples the wrong lines */
-        for (int i = 0; i < 512; i++) { blk[i] ^= 0x5A; }
-    }
-    memcpy(armed_buf, blk, 512);
-    *crc = c;
     armed_buf = NULL;
-    clocks(width == 4 ? 1024 + 16 + 2 : 4096 + 16 + 2);
-    dma_blocks++;
     return SD_OK;
 }
 

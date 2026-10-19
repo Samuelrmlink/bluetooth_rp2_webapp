@@ -25,7 +25,8 @@ typedef struct {
 
 bool sdio_hw_init(const sdio_pins_t *pins);
 void sdio_hw_set_clock_khz(uint32_t khz);
-void sdio_hw_set_width(int width);          /* 1 or 4 data lines */
+void sdio_hw_set_width(int width);          /* 4 (1 is identification only: no data then) */
+uint32_t sdio_hw_clock_khz(void);           /* what the clock really runs at */
 
 /* At least `cycles` clocks with CMD high and nothing armed (power-up: 74). */
 void sdio_hw_idle_clocks(uint32_t cycles);
@@ -37,14 +38,17 @@ void sdio_hw_idle_clocks(uint32_t cycles);
  * while this clocks. */
 int  sdio_hw_command(const uint8_t cmd[6], int resp_bits, uint8_t *resp);
 
-/* Arm the data lines for one block of `len` bytes: wait for the start bit,
- * take len bytes and the CRC (64 bits in 4-bit mode, 16 in 1-bit). */
-void sdio_hw_read_arm(uint8_t *buf, uint32_t len);
-/* Clock until the armed block is in, or timeout_us passes without its start
- * bit. *crc gets the CRC the card sent. SD_OK / SD_ETIMEOUT. */
-int  sdio_hw_read_wait(uint64_t *crc, uint32_t timeout_us);
+/* Arm the data lines for `blocks` 512-byte blocks (at most SDIO_MAX_BLOCKS):
+ * each is a start bit, 512 bytes and its CRC. All of it is set up -- DMA
+ * descriptors for every block and every CRC -- before the command goes out,
+ * because the data machine follows the clock and cannot pause it. */
+#define SDIO_MAX_BLOCKS 32
+void sdio_hw_read_arm(uint8_t *buf, uint32_t blocks);
+/* Clock until every armed block is in, or timeout_us passes without
+ * progress. crcs[i] gets block i's CRC as the card sent it. */
+int  sdio_hw_read_wait(uint64_t *crcs, uint32_t timeout_us);
 
-/* Send one block: start bit, data, crc (as sd_crc16x4 / sd_crc16 gives it),
+/* Send one block: start bit, data, crc (as sd_crc16x4 gives it),
  * end bit; then read the card's CRC status token on D0. *token = the 3
  * status bits (0b010 accepted, 0b101 CRC error, 0b110 write error).
  * SD_OK when a token came back (whatever it says), SD_ETIMEOUT if none. */

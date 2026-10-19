@@ -744,6 +744,43 @@ def t_sd_card():
     return _host_c("sd_card", ["test/host/sd_card_test.c"] + SD_SIM_SRCS, "btgw_sd_card",
                    defs="-DSPIBUS_HOST -DCONFIG_SD_DETECT=22")
 
+SD_STACK_SRCS = ["src/sd/sd_card.c", "src/sd/sd_sdio.c", "src/sd/sd_spi.c", "src/sd/sd_crc.c",
+                 "src/sd/sd_store.c", "src/sd/sd_api.c", "src/sd/sd_core.c", "src/sd/sd_diskio.c",
+                 "third_party/fatfs/ff.c", "third_party/fatfs/ffunicode.c", "src/io/spibus.c",
+                 "test/host/fake_spi.c", "test/host/sdcard_sim.c", "test/host/sdio_hw_sim.c",
+                 "test/host/sd_port_host.c", "test/host/sd_worker_uc.c"]
+
+def t_sd_stack():
+    """The whole SD stack on both buses: worker -> /api/sd transfers -> store
+    -> FatFs -> card driver -> simulated card. Format FAT32 and exFAT, upload,
+    download, list, mkdir, rename, delete, the error map, bench, card pulled
+    and reinserted. Then the card images go through fsck.fat / fsck.exfat --
+    Linux's own checkers, independent of FatFs."""
+    import tempfile
+    d = tempfile.mkdtemp(prefix="btgw_sdimg_")
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_sd_stack")
+    rc, out = sh(f"gcc -O1 -Wall -Wextra -DSPIBUS_HOST -DCONFIG_SD_DETECT=22 -Isrc -Ithird_party/fatfs "
+                 f"-Itest/host -o {binp} test/host/sd_stack_test.c {' '.join(SD_STACK_SRCS)}")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "sd_stack build failed"
+    rc, out = sh(f"SD_IMG_DIR={d} {binp}")
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m or rc or int(m.group(2)):
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), out.strip()[-90:])
+        return False, first[:100]
+    imgs = re.findall(r"IMAGE (\S+)", out)
+    fscks = 0
+    for img in imgs:
+        tool = "fsck.exfat -n" if "exfat" in img else "fsck.fat -n"
+        if sh(f"command -v {tool.split()[0]}")[0]:
+            continue
+        rc2, o2 = sh(f"{tool} {img}")
+        if rc2:
+            return False, f"{os.path.basename(img)}: {tool.split()[0]} says: {o2.strip().splitlines()[-1][:60]}"
+        fscks += 1
+    return True, f"{m.group(1)} checks, {fscks}/{len(imgs)} images fsck-clean"
+
 def t_w5500():
     """The W5500 MACRAW state machine against a simulated chip: ring
     wrap-around, back-to-back frames, chained buffers, ring full, one SEND at
@@ -954,6 +991,7 @@ def main():
     step(0, "SPI bus: claims, chains, completes from the loop", t_spibus)
     step(0, "SD CRCs (CRC7, CRC16, 4-line CRC16 as one CRC64)", t_sd_crc)
     step(0, "SD card on SDIO and on SPI vs a simulated card", t_sd_card)
+    step(0, "SD stack (worker, API, FatFs) on both buses + fsck", t_sd_stack)
     step(0, "W5500 MACRAW state machine vs a simulated chip", t_w5500)
     step(0, "SPI only through the bus layer", t_spi_only_through_spibus)
     step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)

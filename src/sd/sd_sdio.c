@@ -1,5 +1,5 @@
 /*
- * SD card over SDIO (SD mode, 1- or 4-bit): the protocol. Written from the
+ * SD card over SDIO (SD mode, 4-bit): the protocol. Written from the
  * SD Physical Layer Simplified Specification (Part 1, v9.10): commands,
  * responses (R1/R1b/R2/R3/R6/R7), the identification sequence, block
  * read/write, CRC checks. The wire is sdio_hw.h -- PIO on the board, a
@@ -14,7 +14,7 @@
  *   CMD3              R6    -> RCA
  *   CMD9  RCA         R2    -> CSD
  *   CMD7  RCA         R1b   -> transfer state
- *   ACMD6 4-bit       R1    -> 4 data lines (stays 1-bit if refused)
+ *   ACMD6 4-bit       R1    -> 4 data lines (mandatory for SD memory cards)
  *   CMD16 512         R1    -> SDSC only
  *   then the data clock goes to CONFIG_SD_SDIO_KHZ.
  *
@@ -163,20 +163,21 @@ static int identify(sd_info_t *info) {
     if ((e = command(7, (uint32_t)info->rca << 16, '1', NULL)) != SD_OK) { return e; }
     if ((e = wait_busy(SD_BUSY_TIMEOUT_US)) != SD_OK) { return e; }
 
-    if (app_command(6, 2, '1', NULL) == SD_OK) {               /* 4-bit bus */
-        width = 4;
-        sdio_hw_set_width(4);
-    }
+    /* 4-bit bus. Every SD memory card supports it (spec 3.4); the data
+     * path is built for four lines, so a card that refuses is not used. */
+    if ((e = app_command(6, 2, '1', NULL)) != SD_OK) { return e; }
+    width = 4;
+    sdio_hw_set_width(4);
     if (!info->block_addr && (e = command(16, 512, '1', NULL)) != SD_OK) { return e; }
 
     info->bus_width = width;
-    info->clock_khz = CONFIG_SD_SDIO_KHZ;
     sdio_hw_set_clock_khz(CONFIG_SD_SDIO_KHZ);
+    info->clock_khz = sdio_hw_clock_khz();
     return SD_OK;
 }
 
 static uint64_t block_crc(const uint8_t *buf) {
-    return width == 4 ? sd_crc16x4(buf, 512) : sd_crc16(buf, 512);
+    return sd_crc16x4(buf, 512);
 }
 
 /* Stop a multi-block transfer (or whatever the card was left doing). */
@@ -186,24 +187,34 @@ static void stop_transmission(void) {
     wait_busy(SD_BUSY_TIMEOUT_US);
 }
 
-static int sdio_read(uint32_t addr, uint8_t *buf, uint32_t count) {
+/* One CMD17/CMD18 of at most SDIO_MAX_BLOCKS. */
+static int read_run(uint32_t addr, uint8_t *buf, uint32_t count) {
+    static uint64_t crcs[SDIO_MAX_BLOCKS];
     bool multi = count > 1;
-    sdio_hw_read_arm(buf, 512);                     /* before the command: see sdio_hw.h */
+    sdio_hw_read_arm(buf, count);                   /* before the command: see sdio_hw.h */
     int e = command(multi ? 18 : 17, addr, '1', NULL);
     if (e != SD_OK) {
         sdio_hw_abort();
         return e;
     }
-    for (uint32_t i = 0; i < count; i++) {
-        if (i) { sdio_hw_read_arm(buf, 512); }
-        uint64_t crc = 0;
-        e = sdio_hw_read_wait(&crc, SD_READ_TIMEOUT_US);
-        if (e == SD_OK && crc != block_crc(buf)) { e = SD_ECRC; }
-        if (e != SD_OK) { break; }
-        buf += 512;
+    e = sdio_hw_read_wait(crcs, SD_READ_TIMEOUT_US);
+    for (uint32_t i = 0; e == SD_OK && i < count; i++) {
+        if (crcs[i] != block_crc(buf + 512 * i)) { e = SD_ECRC; }
     }
     if (multi || e != SD_OK) { stop_transmission(); }
     return e;
+}
+
+static int sdio_read(uint32_t addr, uint8_t *buf, uint32_t count) {
+    while (count) {
+        uint32_t n = count > SDIO_MAX_BLOCKS ? SDIO_MAX_BLOCKS : count;
+        int e = read_run(addr, buf, n);
+        if (e != SD_OK) { return e; }
+        addr += cur->block_addr ? n : n * 512u;
+        buf += 512u * n;
+        count -= n;
+    }
+    return SD_OK;
 }
 
 static int sdio_write(uint32_t addr, const uint8_t *buf, uint32_t count) {
