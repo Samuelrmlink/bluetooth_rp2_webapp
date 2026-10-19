@@ -179,6 +179,7 @@ static void recover_card(void) {
     xchg(0xFD);
     xchg(0xFF);
     wait_ready(600000);
+    sd_port_yield();
     xfer(cmd12, NULL, 6);
     xfer(ff, NULL, 16);
     wait_ready(600000);
@@ -195,6 +196,10 @@ static bool go_idle(void) {
         for (int n = 0; n < 10 && (r & 0x80); n++) { r = xchg(0xFF); }
         deselect();
         if (r == 0x01) { return true; }
+        /* At 400 kHz each try is ~0.4 ms of blocking bytes; ten of them
+         * (and recovery) in one slice made a 12 ms worker slice in mcusim
+         * with no card answering. The card is mid-nothing here: yield. */
+        sd_port_yield();
     }
     return false;
 }
