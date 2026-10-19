@@ -181,9 +181,38 @@ Tier 0 (host, `tools/run_tests.py`):
 Tier 1: `pico2w_sd` and `pico2w_sdspi` build; the four other builds link no
 SD code.
 
-Planned, owner-gated on mcusim's SD model (SPI and SDIO front ends,
-fault injection, command trace): a differential suite running the same
-seeded script on our SDIO driver and on carlk3's (fetched at build time into
-a test-only ELF, never into this tree), comparing the final card image,
-every result class, the identification and the normalised command trace;
-then the gateway ELFs end to end in mcusim; then hardware.
+Tier 2: Playwright against the devserver's mock card (`web/tests/e2e/sdcard.spec.js`):
+the editor's `sd/` folder (browse, open, edit and save, New folder, the
+128 KB flash limit not applying, a cross-root move refused, no card, a build
+without the module) and Settings › SD card (status, format with
+confirmation and progress, bench).
+
+`tools/run_tests.py --sim`: the **differential test** (`test/sdio_diff/`,
+`tools/sdio_diff.py`). One seeded script on our SDIO driver and on
+carlk3's, each in mcusim on the same simulated card with the same faults;
+compared: every result class, read hashes, identification, the final card
+image (raw scenario) or file hashes plus fsck (FatFs scenario), and the
+card's normalised command trace (`test/sdio_diff/allowlist.txt` for accepted
+differences, each with a reason). carlk3's library is fetched at a pinned
+commit into the build directory only (GPL-3.0 SDIO core: never in this tree,
+never in the gateway). Today the four ELFs build and run in mcusim; the
+comparison is skipped until mcusim has its `sdcard` device (the stanza it
+needs is `CARD_TOML` in `tools/sdio_diff.py`). Then: the gateway ELFs
+(`pico2w_sd`, `pico2w_sdspi`) end to end in mcusim over USB-NCM; then
+hardware.
+
+## Web
+
+* `web/js/fs.js` routes any path under `sd/` to `/api/sd/files` (same
+  answers as `/api/fs`), adds the `sd` folder at the root when `sys.info`
+  lists the `sd` module, refuses a move between the card and flash, and has
+  no 128 KB limit there (FAT32's 4 GB).
+* The editor keeps flash-only rules off the card: no `.bak` on save, no
+  compression, no tar download of a card folder, Lua script status only for
+  `lua/` and `staged/`, `sd/` skipped by a whole-device search (search it by
+  starting inside). The card's own folder has no rename/delete and links to
+  its settings; every folder now has "New folder here…".
+* Settings › SD card (`web/js/settings/sdcard.js`, km003c's format
+  arithmetic in `sd-format.js`): state, card and CID, filesystem and space,
+  bus and clock; Format with the cluster sizes the card can take and a
+  confirmation naming it, with progress; a 10 MB bench.

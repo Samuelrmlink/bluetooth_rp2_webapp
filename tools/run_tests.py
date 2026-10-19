@@ -922,6 +922,24 @@ def t_sd_symbols():
     return True, "absent from the four non-SD builds; SDIO and SPI builds each carry their own bus"
 
 
+def t_sdio_diff():
+    """test/sdio_diff in mcusim: our SDIO driver and carlk3's run the same
+    script on the same simulated card; tools/sdio_diff.py compares them.
+    Builds the four ELFs first (carlk3 fetched into the build dir only).
+    Skipped, not failed, while mcusim has no SD card model."""
+    bdir = os.path.join(ROOT, "build-sdio-diff")
+    env = ('PICO_SDK_PATH=$HOME/.pico-sdk/sdk/2.3.0 '
+           'PICO_TOOLCHAIN_PATH=$HOME/.pico-sdk/toolchain/15_2_Rel1 ')
+    rc, out = sh(f"{env} cmake -S test/sdio_diff -B {bdir} -G Ninja -Wno-dev && {env} cmake --build {bdir}")
+    if rc:
+        return False, (out.strip().splitlines() or ["build failed"])[-1][:90]
+    rc, out = sh(f"python3 tools/sdio_diff.py --build {bdir}")
+    last = (out.strip().splitlines() or [""])[-1]
+    if rc == 77:
+        return True, "skipped: " + last.replace("SKIP: ", "")[:80]
+    return rc == 0, last[:90]
+
+
 def _kb(v):
     """picotool sizes: "864K", "2048K", "64K"."""
     v = str(v).strip().upper()
@@ -1004,6 +1022,8 @@ def t_ota_flash_from_loop_only():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tier", type=int, default=0)
+    ap.add_argument("--sim", action="store_true",
+                    help="also the mcusim differential test: our SDIO driver vs carlk3's (test/sdio_diff)")
     a = ap.parse_args()
 
     step(0, "webapp + model unit tests", t_unit)
@@ -1068,6 +1088,9 @@ def main():
         step(1, "build pico2w_sd (pico2w_eth + SD card on SDIO)", build("pico2w_sd"))
         step(1, "build pico2w_sdspi (pico2w_eth + SD card on SPI, shared bus)", build("pico2w_sdspi"))
         step(1, "SD off means none of its code is linked", t_sd_symbols)
+
+    if a.sim:
+        step(3, "SDIO differential test in mcusim (ours vs carlk3)", t_sdio_diff)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)
