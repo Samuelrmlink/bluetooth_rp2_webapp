@@ -30,6 +30,7 @@ const DEVICE_DIRS = /^(lua|staged|cfg|var|cache|ota)\//;
 // Saving one keeps the previous version as <file>.bak: a broken page is the
 // one mistake that also takes away the editor to fix it with.
 export function isWebAsset(path) {
+  if (/^sd(\/|$)/.test(path)) return false;      // the SD card is never served as the UI
   return !DEVICE_DIRS.test(path) && /\.(js|mjs|css|html?|svg|json|webmanifest)$/i.test(plainName(path));
 }
 
@@ -38,6 +39,7 @@ export function isWebAsset(path) {
 // firmware reads it plain), not the device's own state, not a backup, and
 // not a format that is compressed already.
 export function canCompress(path) {
+  if (/^sd(\/|$)/.test(path)) return false;      // the card serves nothing: no point
   if (isGz(path) || /^(staged|cfg|var|cache|ota)\//.test(path) || /\.bak$/i.test(path)) return false;
   if (/\.(png|jpe?g|gif|webp|gz|zip|bin|luac)$/i.test(path)) return false;
   return true;

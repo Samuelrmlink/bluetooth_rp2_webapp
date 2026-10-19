@@ -5,7 +5,7 @@ import { fileMenuItems } from '../../js/editor/filemenu.js';
 const ids = (items) => items.map((i) => i.id);
 
 test('a folder: new file, upload, refresh, rename', () => {
-  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename', 'delete']);
+  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'mkdir', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename', 'delete']);
 });
 
 test('a plain file: open, download, rename, delete (last, marked)', () => {
@@ -70,4 +70,14 @@ test('Restore .bak only when there is one', () => {
 
 test('a compressed file says so on its info line', () => {
   assert.match(fileInfo({ path: 'lua/x.lua.gz', size: 900, alloc: 4096 }), /^compressed \(gzip\) · 900 B · 4\.0 KB on flash$/);
+});
+
+test('the SD card: its own folder has no rename/delete and links to its settings; tar is flash-only', () => {
+  const card = ids(fileMenuItems({ dir: true, path: 'sd' }, { card: true }));
+  assert.ok(card.includes('sd-settings') && card.includes('mkdir'));
+  assert.ok(!card.includes('delete') && !card.includes('rename') && !card.includes('tar'));
+  const sub = ids(fileMenuItems({ dir: true, path: 'sd/logs' }));
+  assert.ok(sub.includes('delete') && sub.includes('rename') && !sub.includes('tar'));
+  assert.ok(!ids(fileMenuItems({ dir: false, path: 'sd/notes.txt' })).includes('compress'));
+  assert.match(sizeInfo({ files: 2, dirs: 1, bytes: 2048, alloc: 0, block: 0 }, 'sd/logs'), /on the SD card$/);
 });

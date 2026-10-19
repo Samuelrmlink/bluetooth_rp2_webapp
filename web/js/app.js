@@ -34,6 +34,7 @@ import { GattLog } from './gattlog.js';
 import { DeviceStore } from './gattdb.js';
 import { DeviceHost } from './devices/host.js';
 import { PairingPrompt } from './pairing.js';
+import { setSd } from './fs.js';
 
 const NUDGE_PX = 24;
 const RESIZE_PX = 32;
@@ -492,6 +493,7 @@ class App {
       try {
         const s = await this.ws.call('sys.info');
         this.sysInfo = s;
+        setSd((s.modules || []).includes('sd'));    // the editor's sd/ folder (fs.js)
         info.textContent = s.firmware ? `firmware ${s.firmware}` : '';
       } catch {
         info.textContent = '';

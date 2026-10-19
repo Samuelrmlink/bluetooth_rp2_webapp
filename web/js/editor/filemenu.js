@@ -12,18 +12,24 @@
 // The path itself is added by the menu as the last item, and copies.
 import { isGz, canCompress, imageKind } from '../gz.js';
 
-export function fileMenuItems(node, { isOpen = false, script = null, empty = false, hasBak = false } = {}) {
+const onSd = (p) => /^sd(\/|$)/.test(p || '');
+
+export function fileMenuItems(node, { isOpen = false, script = null, empty = false, hasBak = false, card = false } = {}) {
   if (node.dir) {
+    // card: the SD card's own top-level folder (the editor knows it from fs.js)
     const out = [
       { id: 'new', label: 'New file here…' },
+      { id: 'mkdir', label: 'New folder here…' },
       { id: 'upload', label: 'Upload here…' },
       { id: 'untar', label: 'Upload archive here… (.tar)' },
-      { id: 'tar', label: 'Download as .tar' },
+      // the device streams tar from flash only
+      ...(onSd(node.path) ? [] : [{ id: 'tar', label: 'Download as .tar' }]),
       // keep: it answers in the menu (the info line), so the menu stays open
       { id: 'size', label: 'Calculate size', keep: true },
       { id: 'refresh', label: 'Refresh' },
-      { id: 'rename', label: 'Rename / move…' },
+      ...(card ? [{ id: 'sd-settings', label: 'SD card settings…' }] : [{ id: 'rename', label: 'Rename / move…' }]),
     ];
+    if (card) return out;           // the card itself: no rename, no delete (format it in Settings)
     // an empty folder goes in one step; any other with everything in it,
     // after saying how much that is (and, for the gateway's own folders,
     // asking for the name to be typed)
@@ -103,7 +109,11 @@ export async function folderSize(list, path, onProgress = () => {}) {
   return t;
 }
 
-export function sizeInfo(t) {
+export function sizeInfo(t, path = '') {
+  if (onSd(path)) {
+    const sub = t.dirs ? ` and ${t.dirs} subfolder${t.dirs === 1 ? '' : 's'}` : '';
+    return `${bytes(t.bytes)} in ${t.files} file${t.files === 1 ? '' : 's'}${sub} on the SD card`;
+  }
   const sub = t.dirs ? ` and ${t.dirs} subfolder${t.dirs === 1 ? '' : 's'}` : '';
   return `${bytes(t.bytes)} in ${t.files} file${t.files === 1 ? '' : 's'}${sub} · ${bytes(t.alloc)} on flash, `
     + `counting each folder's ${bytes(2 * (t.block || 4096))} of metadata`;

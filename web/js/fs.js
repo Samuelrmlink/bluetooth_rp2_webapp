@@ -1,4 +1,8 @@
-// The device's filesystem, over its HTTP API (src/net/http.c, /api/fs).
+// The device's filesystem, over its HTTP API (src/net/http.c, /api/fs) --
+// and, on a build with an SD card, the card as a top-level "sd" folder: any
+// path under sd/ goes to /api/sd/files instead (docs/sd.md), with the same
+// {ok, ...} answers, so the editor, the tree, search and upload work on
+// either without knowing which.
 //
 // HTTP rather than the WebSocket because files are the one thing too big for
 // it: a WS frame caps at 4 KB and an op reply at less, while a file may be
@@ -30,10 +34,32 @@ export function apiUrl(path) {
 // before sending rather than after.
 export const FILE_MAX = 128 * 1024;
 
+// --- the SD card's place in the tree -------------------------------------
+// Off until the app has seen "sd" in sys.info's modules (setSd), so a build
+// without a card shows no sd folder at all.
+export const SD_ROOT = 'sd';
+let sdOn = false;
+export function setSd(on) { sdOn = !!on; }
+export function sdAvailable() { return sdOn; }
+export function isSd(path) {
+  const p = String(path || '');
+  return sdOn && (p === SD_ROOT || p.startsWith(SD_ROOT + '/'));
+}
+const sdRel = (path) => String(path).slice(SD_ROOT.length + 1);   // 'sd/a/b' -> 'a/b', 'sd' -> ''
+// The largest file each side takes: LittleFS's 128 KB; FAT32's 4 GiB - 1.
+export const SD_FILE_MAX = 4 * 1024 * 1024 * 1024 - 1;
+export const fileMax = (path) => (isSd(path) ? SD_FILE_MAX : FILE_MAX);
+
+const enc = (path) => String(path).split('/').map(encodeURIComponent).join('/');
+
 // Encode each path segment, never the separators: the device matches on the
 // literal path, and an encoded '/' would name a different file.
 function fsPath(path) {
-  return '/api/fs/' + String(path).split('/').map(encodeURIComponent).join('/');
+  if (isSd(path)) {
+    const rel = sdRel(path);
+    return rel ? '/api/sd/files/' + enc(rel) : '/api/sd/files';
+  }
+  return '/api/fs/' + enc(path);
 }
 
 async function send(method, url, body, as) {
@@ -61,11 +87,15 @@ async function send(method, url, body, as) {
 // Directories first, then files, each alphabetical -- the order a file tree
 // is read in.
 export async function list(dir = '') {
-  const r = await send('GET', dir ? fsPath(dir) + '/' : '/api/fs/', undefined, 'json');
+  const sd = isSd(dir);
+  const url = sd ? fsPath(dir) : dir ? fsPath(dir) + '/' : '/api/fs/';
+  const r = await send('GET', url, undefined, 'json');
   if (!r.ok) return r;
-  const files = (r.files || []).slice().sort((a, b) =>
-    (b.dir ? 1 : 0) - (a.dir ? 1 : 0) || a.name.localeCompare(b.name));
-  return { ok: true, files, block: r.block };
+  let files = (r.files || []).slice();
+  // The card hangs off the root, in place of any flash folder of that name.
+  if (!dir && sdOn) files = files.filter((f) => f.name !== SD_ROOT).concat([{ name: SD_ROOT, dir: true, sd: true }]);
+  files.sort((a, b) => (b.dir ? 1 : 0) - (a.dir ? 1 : 0) || a.name.localeCompare(b.name));
+  return { ok: true, files, block: sd ? undefined : r.block, sd };
 }
 
 // A file's URL (for a link or a drag out of the page).
@@ -76,9 +106,10 @@ export const readBlob = (path) => send('GET', fsPath(path), undefined, 'blob');
 
 export function write(path, data) {
   const size = typeof data === 'string' ? new TextEncoder().encode(data).length : data.size;
-  if (size > FILE_MAX) {
+  if (!isSd(path) && size > FILE_MAX) {
     return Promise.resolve({ ok: false, error: `larger than the device's ${FILE_MAX / 1024} KB file limit`, status: 413 });
   }
+  if (isSd(path) && !sdRel(path)) return Promise.resolve({ ok: false, error: 'that is the card itself', status: 400 });
   return send('PUT', fsPath(path), data, 'json');
 }
 
@@ -93,6 +124,7 @@ export const mkdir = (path) => send('PUT', fsPath(path) + '/', '', 'json');
 // disk, with its progress, and nothing is held in the page. The board has no
 // clock, so the archive's file times are the time asked for.
 export function tarUrl(folder = '') {
+  if (isSd(folder)) return null;           // the device streams tar from flash only
   const p = folder ? '/api/tar/' + String(folder).split('/').map(encodeURIComponent).join('/') : '/api/tar/';
   return apiUrl(`${p}?mtime=${Math.floor(Date.now() / 1000)}`);
 }
@@ -100,5 +132,17 @@ export function tarUrl(folder = '') {
 // The device takes a JSON body here, as text/plain so a cross-origin dev page
 // does not provoke a CORS preflight it would not answer.
 export function rename(from, to) {
+  if (isSd(from) !== isSd(to)) {
+    return Promise.resolve({ ok: false, error: 'moving between the SD card and flash is not supported (download, then upload)', status: 400 });
+  }
+  if (isSd(from)) {
+    if (!sdRel(from) || !sdRel(to)) return Promise.resolve({ ok: false, error: 'the card itself cannot be renamed', status: 400 });
+    return send('POST', '/api/sd/rename', JSON.stringify({ from: sdRel(from), to: sdRel(to) }), 'json');
+  }
   return send('POST', '/api/fs/rename', JSON.stringify({ from, to }), 'json');
 }
+
+// GET /api/sd: the card's status (docs/sd.md).
+export const sdStatus = () => send('GET', '/api/sd', undefined, 'json');
+export const sdFormat = (fs, cluster = 0) => send('POST', '/api/sd/format', JSON.stringify({ fs, cluster }), 'json');
+export const sdBench = (mb = 10) => send('POST', '/api/sd/bench', JSON.stringify({ mb }), 'json');
