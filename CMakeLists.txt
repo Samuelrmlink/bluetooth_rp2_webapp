@@ -42,6 +42,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_LIST_DIR}/src/lua/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/io/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/ota/Kconfig
+    ${CMAKE_CURRENT_LIST_DIR}/src/sd/Kconfig
     ${APP_DEFCONFIG})
 
 pico_sdk_init()

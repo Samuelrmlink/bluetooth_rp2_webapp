@@ -36,7 +36,8 @@
 
 typedef void (*spibus_done_fn)(void *ctx, bool ok);
 
-/* One piece of a transfer. tx NULL clocks out zeros; rx NULL discards. */
+/* One piece of a transfer. tx NULL clocks out the device's fill byte (0x00
+ * unless set: an SD card wants 0xFF); rx NULL discards. */
 typedef struct {
     const uint8_t *tx;
     uint8_t       *rx;
@@ -52,6 +53,7 @@ typedef struct spidev {
     int8_t         cs;
     uint8_t        mode;         /* SPI mode 0..3 */
     uint32_t       baud;
+    uint8_t        fill;         /* clocked when a segment has no tx (default 0x00) */
     const char    *name;
 } spidev_t;
 
@@ -60,6 +62,7 @@ typedef struct spibus {
     uint8_t        index;
     int8_t         sck, mosi, miso;
     const char    *owner;        /* who brought the bus up ("w5500") */
+    uint8_t        users;        /* spibus_init()s not yet spibus_deinit()ed */
     spibus_sem_t   sem;
     const spidev_t *holder;      /* the device that holds the claim */
     uint32_t       cur_baud;
@@ -73,6 +76,7 @@ typedef struct spibus {
     volatile uint8_t seg_i;
     volatile bool  busy;
     volatile bool  done;
+    uint8_t        cs_high_mask; /* bit i: segment i is clocked with CS high */
     spibus_done_fn cb;
     void          *cb_ctx;
 
@@ -83,12 +87,14 @@ typedef struct spibus {
 } spibus_t;
 
 /* Bring a hardware SPI block up on the given pins (reserving them in the pin
- * broker when it is built). Idempotent for the same pins; refuses different
- * pins on a bus that is already up. NULL on failure. */
+ * broker when it is built). A second caller with the same pins shares the bus
+ * (counted: each spibus_init() is paired with one spibus_deinit()); different
+ * pins on a bus that is already up are refused. NULL on failure. */
 spibus_t *spibus_init(int index, int sck, int mosi, int miso, const char *owner);
 spibus_t *spibus_get(int index);   /* NULL unless spibus_init()ed */
-/* Take a bus down again (its device was not there): block closed, DMA
- * channels and pins given back. */
+/* Drop one user of the bus (its device was not there). The block is closed
+ * and its DMA channels and pins given back only when the LAST user leaves, so
+ * an absent W5500 cannot take down an SD card's shared bus. */
 void spibus_deinit(spibus_t *bus);
 void spibus_dev_deinit(spidev_t *dev);
 
@@ -99,6 +105,11 @@ bool spibus_dev_init(spidev_t *dev, spibus_t *bus, int cs, uint32_t baud,
 bool spibus_try_claim(spidev_t *dev);                      /* never waits */
 bool spibus_claim_blocking(spidev_t *dev, uint32_t timeout_ms);   /* init only */
 void spibus_release(spidev_t *dev);
+/* Release after clocking `n` fill bytes with this device's CS high, still
+ * holding the claim: an SD card keeps driving MISO until it sees a clock
+ * with CS high, so releasing without it would corrupt the next device's
+ * first read on a shared bus. False (claim kept) if not held or busy. */
+bool spibus_release_trailing(spidev_t *dev, uint16_t n);
 bool spibus_holds(const spidev_t *dev);
 
 /* Start a chained transfer; only while claimed and not already busy. The
@@ -106,10 +117,16 @@ bool spibus_holds(const spidev_t *dev);
  * valid until the callback). cb runs from spibus_poll(). */
 bool spibus_xfer_async(spidev_t *dev, const spiseg_t *segs, int nseg,
                        spibus_done_fn cb, void *ctx);
+/* The same, with bit i of cs_high_mask clocking segment i with the device's
+ * CS HIGH: an SD card's power-up clocks, and the byte after a command that
+ * makes it let go of MISO. Still only while claimed. */
+bool spibus_xfer_async_cs(spidev_t *dev, const spiseg_t *segs, int nseg, uint8_t cs_high_mask,
+                          spibus_done_fn cb, void *ctx);
 bool spibus_busy(const spidev_t *dev);
 
 /* The same, waiting for completion (with a timeout). Init and probe only. */
 bool spibus_xfer_blocking(spidev_t *dev, const spiseg_t *segs, int nseg);
+bool spibus_xfer_blocking_cs(spidev_t *dev, const spiseg_t *segs, int nseg, uint8_t cs_high_mask);
 
 /* Main loop: run completion callbacks. */
 void spibus_poll(void);

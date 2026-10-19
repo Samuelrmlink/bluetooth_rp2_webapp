@@ -91,7 +91,6 @@ void spibus_port_format(spibus_t *b, uint32_t baud, uint8_t mode) {
 
 void spibus_port_dma_start(spibus_t *b, const uint8_t *tx, uint8_t *rx, uint16_t len) {
     spi_inst_t *s = inst(b->index);
-    b->zero_tx = 0;
 
     dma_channel_config ct = dma_channel_get_default_config((uint)b->dma_tx);
     channel_config_set_transfer_data_size(&ct, DMA_SIZE_8);
