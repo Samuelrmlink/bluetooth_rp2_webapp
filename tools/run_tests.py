@@ -8,7 +8,7 @@
 The tiering exists so the common case stays fast: a suite that is slow does not
 get run, and a suite that does not get run is not a regression guard.
 """
-import argparse, os, subprocess, sys, re, time
+import argparse, os, shutil, subprocess, sys, re, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FAILS = []
 
@@ -786,6 +786,13 @@ def t_sd_stack():
     Linux's own checkers, independent of FatFs."""
     import tempfile
     d = tempfile.mkdtemp(prefix="btgw_sdimg_")
+    try:
+        return _sd_stack_in(d)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)    # four ~300 MB partitions per run
+
+
+def _sd_stack_in(d):
     binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_sd_stack")
     rc, out = sh(f"gcc -O1 -Wall -Wextra -DSPIBUS_HOST -DCONFIG_SD_DETECT=22 -Isrc -Ithird_party/fatfs "
                  f"-Itest/host -o {binp} test/host/sd_stack_test.c {' '.join(SD_STACK_SRCS)}")

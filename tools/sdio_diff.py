@@ -206,7 +206,11 @@ def main():
             print("  " + x)
         print(f"(runs kept in {work})")
         return 1
-    print(f"SAME: raw and fs scenarios match (runs in {work})")
+    if a.keep:
+        print(f"SAME: raw and fs scenarios match (runs in {work})")
+    else:
+        shutil.rmtree(work, ignore_errors=True)      # four 256 MiB card images
+        print("SAME: raw and fs scenarios match")
     return 0
 
 
