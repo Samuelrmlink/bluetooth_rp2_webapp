@@ -86,7 +86,10 @@ int ls_mount(void) {
     sd_card_forget();                        /* identify afresh on every mount */
     FRESULT r = f_mount(&s_fs, "", 1);
     if (r != FR_OK) {
-        s_media = r == FR_NOT_READY ? LS_MEDIA_NONE : LS_MEDIA_ERROR;
+        /* Not ready with card detect saying present = a card that does not
+         * answer: "error", not an endless "settling" (seen in mcusim with
+         * the detect pin low and nothing on the bus). */
+        s_media = r == FR_NOT_READY && !sd_card_present() ? LS_MEDIA_NONE : LS_MEDIA_ERROR;
         f_mount(NULL, "", 0);
         /* Settle again before the next try: a card that is half in, or
          * still waking, should not be hammered. */

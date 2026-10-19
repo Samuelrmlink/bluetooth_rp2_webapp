@@ -12,7 +12,7 @@ const STATE_TEXT = {
   ok: 'ready',
   none: 'no card',
   settling: 'card inserted, settling…',
-  error: 'card present but not readable (unformatted?) — format it below',
+  error: 'card present but not readable — unformatted (format it below), or not answering',
   formatting: 'formatting…',
 };
 
