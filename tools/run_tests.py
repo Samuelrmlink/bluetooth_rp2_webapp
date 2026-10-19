@@ -724,6 +724,26 @@ def t_spibus():
     return _host_c("spibus", ["test/host/spibus_test.c", "src/io/spibus.c",
                               "test/host/fake_spi.c"], "btgw_spibus")
 
+def t_sd_crc():
+    """SD CRC7/CRC16 against the spec's examples and bit-serial references,
+    and the claim the SDIO driver rests on: one CRC64 over a 4-bit block is
+    the four per-line CRC16s, interleaved in wire order."""
+    return _host_c("sd_crc", ["test/host/sd_crc_test.c", "src/sd/sd_crc.c"], "btgw_sd_crc", defs="")
+
+SD_SIM_SRCS = ["src/sd/sd_card.c", "src/sd/sd_sdio.c", "src/sd/sd_spi.c", "src/sd/sd_crc.c",
+               "src/io/spibus.c", "test/host/fake_spi.c", "test/host/sdcard_sim.c",
+               "test/host/sdio_hw_sim.c", "test/host/sd_port_host.c"]
+
+def t_sd_card():
+    """Both SD buses -- SDIO (SD mode) and SPI on the shared bus -- through
+    sd_card.c against one simulated card: identification (SDHC, SDSC, v1,
+    slow power-up), 1-64 block reads/writes at the edges, CRC/write errors
+    retried, long busy waited out (and the W5500 getting the bus meanwhile),
+    a dead command, a card pulled mid-read and reinserted, and never a MISO
+    conflict on the shared bus."""
+    return _host_c("sd_card", ["test/host/sd_card_test.c"] + SD_SIM_SRCS, "btgw_sd_card",
+                   defs="-DSPIBUS_HOST -DCONFIG_SD_DETECT=22")
+
 def t_w5500():
     """The W5500 MACRAW state machine against a simulated chip: ring
     wrap-around, back-to-back frames, chained buffers, ring full, one SEND at
@@ -932,6 +952,8 @@ def main():
     step(0, "SMP writes flash from the loop only", t_ota_flash_from_loop_only)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
     step(0, "SPI bus: claims, chains, completes from the loop", t_spibus)
+    step(0, "SD CRCs (CRC7, CRC16, 4-line CRC16 as one CRC64)", t_sd_crc)
+    step(0, "SD card on SDIO and on SPI vs a simulated card", t_sd_card)
     step(0, "W5500 MACRAW state machine vs a simulated chip", t_w5500)
     step(0, "SPI only through the bus layer", t_spi_only_through_spibus)
     step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
