@@ -290,6 +290,7 @@ typedef struct {
     uint8_t  chr_i;
     uint8_t  mode;             /* subscribe: 0 off, 1 notify, 2 indicate */
     bool     with_response;    /* write */
+    bool     want_done;        /* write: report completion in the inbox (source "write") */
     uint16_t len;
     uint32_t deadline_ms;
     uint8_t  data[OP_DATA_MAX];
@@ -969,7 +970,8 @@ typedef struct {
     uint32_t seq;
     char     addr[18];
     char     id[8];
-    char     source[10];   /* notify | indicate | read */
+    char     source[10];   /* notify | indicate | read | write */
+    int16_t  status;       /* write: att_error | reason << 8 (LE_WRITE_*); -1 otherwise */
     uint16_t len;
     uint8_t  val[NOTIFY_VAL_MAX];
 } notify_slot_t;
@@ -988,8 +990,15 @@ static int oldest_slot(const char *addr) {
     return best;
 }
 
+static void notify_push_st(const char *addr, const char *id, const char *source,
+                           const uint8_t *val, uint16_t len, int16_t status);
 static void notify_push(const char *addr, const char *id, const char *source,
                         const uint8_t *val, uint16_t len) {
+    notify_push_st(addr, id, source, val, len, -1);
+}
+
+static void notify_push_st(const char *addr, const char *id, const char *source,
+                           const uint8_t *val, uint16_t len, int16_t status) {
     if (len > NOTIFY_VAL_MAX) {
         /* Truncating would hand a script a frame whose checksum cannot pass,
          * which is a worse failure than never seeing it. */
@@ -1014,8 +1023,9 @@ static void notify_push(const char *addr, const char *id, const char *source,
     snprintf(s->addr, sizeof s->addr, "%s", addr);
     snprintf(s->id, sizeof s->id, "%s", id);
     snprintf(s->source, sizeof s->source, "%s", source);
+    s->status = status;
     s->len = len;
-    memcpy(s->val, val, len);
+    if (len) { memcpy(s->val, val, len); }
 
     /* Wake whoever is blocked on this device. The inbox still holds the
      * frame -- the waiter drains it on its next resume -- so a script that
@@ -1029,7 +1039,7 @@ static void notify_push(const char *addr, const char *id, const char *source,
 
 int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,
                    char *id_out, size_t id_cap, char *src_out, size_t src_cap,
-                   uint8_t *val, size_t val_cap) {
+                   uint8_t *val, size_t val_cap, int *status_out) {
     int i = oldest_slot(addr_filter && addr_filter[0] ? addr_filter : NULL);
     if (i < 0) { return -1; }
     notify_slot_t *s = &s_inbox[i];
@@ -1037,6 +1047,7 @@ int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,
     if (addr_out) { snprintf(addr_out, addr_cap, "%s", s->addr); }
     if (id_out) { snprintf(id_out, id_cap, "%s", s->id); }
     if (src_out) { snprintf(src_out, src_cap, "%s", s->source); }
+    if (status_out) { *status_out = s->status; }
     memcpy(val, s->val, s->len);
     s->used = false;
     return (int)s->len;
@@ -1197,6 +1208,26 @@ static void op_pop(le_link_t *l) {
     l->op_inflight = false;
 }
 
+/* bt.write(..., want_done): the outcome of a write, into the inbox as a
+ * frame with source "write" (lbind turns status into ok/att_error/error). */
+static void write_done(le_link_t *l, const le_op_t *op, uint8_t att_status, uint8_t reason) {
+#if CONFIG_LUA_ENABLE
+    if (op->kind != OP_WRITE || !op->want_done) { return; }
+    gattdb_t *db = &l->db;
+    for (uint8_t si = 0; si < db->n_svc; si++) {
+        if (op->chr_i < db->svc[si].first_chr || op->chr_i >= db->svc[si].first_chr + db->svc[si].n_chr) { continue; }
+        char a[18], pid[8];
+        snprintf(a, sizeof a, "%02X:%02X:%02X:%02X:%02X:%02X",
+                 l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4], l->addr[5]);
+        snprintf(pid, sizeof pid, "%u.%u", si, (unsigned)(op->chr_i - db->svc[si].first_chr));
+        notify_push_st(a, pid, "write", NULL, 0, (int16_t)(att_status | (reason << 8)));
+        return;
+    }
+#else
+    (void)l; (void)op; (void)att_status; (void)reason;
+#endif
+}
+
 /*
  * A procedure finished. Before this existed, value_handler ignored
  * GATT_EVENT_QUERY_COMPLETE entirely: a write had NO completion at all and a
@@ -1220,6 +1251,7 @@ static void op_complete(struct le_link *l, uint8_t att_status) {
                  l->addr[5], op_kind_name(op->kind), op->chr_i, att_status);
         api_emit("gatt.op_failed", ev);
     }
+    write_done(l, op, att_status, LE_WRITE_DONE);
     op_pop(l);
 }
 
@@ -1246,7 +1278,7 @@ static void op_issue(le_link_t *l) {
                  * completion event, so there is nothing to wait for. It is
                  * the one kind whose delivery we cannot confirm -- say so
                  * here rather than let a reader assume otherwise. */
-                if (rc == 0) { op_pop(l); return; }
+                if (rc == 0) { write_done(l, op, 0, LE_WRITE_DONE); op_pop(l); return; }
             }
             break;
 
@@ -1296,6 +1328,7 @@ static void op_pump(struct le_link *l) {
              * completion will arrive after we have moved on. */
             l->op_stale++;
         }
+        write_done(l, op, 0, LE_WRITE_TIMEOUT);
         op_pop(l);
         return;
     }
@@ -1320,16 +1353,26 @@ int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i) {
 }
 
 int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
-             const uint8_t *data, uint16_t len, bool with_response) {
+             const uint8_t *data, uint16_t len, bool with_response, bool want_done) {
     (void)svc_i;
     le_link_t *l = NULL;
     int rc = op_link_for(addr, chr_i, &l);
     if (rc) { return rc; }
     if (len > OP_DATA_MAX) { return -3; }
     le_op_t op = { .kind = OP_WRITE, .chr_i = chr_i, .with_response = with_response,
-                   .len = len, .deadline_ms = now_ms() + OP_TIMEOUT_MS };
+                   .want_done = want_done, .len = len, .deadline_ms = now_ms() + OP_TIMEOUT_MS };
     if (len) { memcpy(op.data, data, len); }
     return op_enqueue(l, &op);
+}
+
+uint16_t le_mtu(const uint8_t *addr) {
+    bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
+    if (!d || !d->connected) { return 0; }
+    uint16_t mtu = 0;
+    /* Only once exchanged (or auto-exchange disabled): before that BTstack
+     * answers 23 and an "in wrong state" error, which is not the MTU yet. */
+    if (gatt_client_get_mtu(d->con_handle, &mtu) != ERROR_CODE_SUCCESS) { return 0; }
+    return mtu;
 }
 
 int le_subscribe(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i, int mode) {

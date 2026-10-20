@@ -82,4 +82,10 @@ size_t bt_device_json(const bt_device_t *d, char *dst, size_t cap);
 
 const char *bt_transport_name(bt_transport_t t);
 
+/* Every 128-bit service UUID in the stored advertisement and scan response
+ * (complete and incomplete lists, AD types 0x06/0x07), as canonical
+ * upper-case 8-4-4-4-12 strings, de-duplicated. Returns how many (<= max). */
+#define BT_UUID128_STR 37
+int bt_device_uuids128(const bt_device_t *d, char (*out)[BT_UUID128_STR], int max);
+
 #endif

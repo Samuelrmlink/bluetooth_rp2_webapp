@@ -82,8 +82,16 @@ void le_on_link_secured(uint16_t con_handle, bool ok);
  * completion for it, so it is reported as issued and never confirmed.
  */
 int le_read(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i);
+/* want_done: queue a source="write" inbox frame when the write completes
+ * (with response: the ATT response arrives; without: handed to the
+ * controller), fails, or times out -- see LE_WRITE_* for its status. */
 int le_write(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i,
-             const uint8_t *data, uint16_t len, bool with_response);
+             const uint8_t *data, uint16_t len, bool with_response, bool want_done);
+/* A "write" frame's status: att_error | reason << 8. */
+#define LE_WRITE_DONE    0
+#define LE_WRITE_TIMEOUT 1
+/* The negotiated ATT MTU of a connected peer, 0 before the exchange. */
+uint16_t le_mtu(const uint8_t *addr);
 int le_subscribe(const uint8_t *addr, uint8_t svc_i, uint8_t chr_i, int mode);
 void le_register_notifications(uint16_t con_handle);
 
@@ -110,7 +118,7 @@ void le_register_notifications(uint16_t con_handle);
  * polled. Returns the value length, or -1 when empty. */
 int le_notify_take(const char *addr_filter, char *addr_out, size_t addr_cap,
                    char *id_out, size_t id_cap, char *src_out, size_t src_cap,
-                   uint8_t *val, size_t val_cap);
+                   uint8_t *val, size_t val_cap, int *status_out);
 /* The link SLOT for an address (-1 if not connected), and the token a script
  * blocks on to await that device. Both feed the wait contract in lua/lwait.h:
  * the slot says which link a wait belongs to, so a disconnect can resolve it. */

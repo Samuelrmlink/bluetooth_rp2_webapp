@@ -515,6 +515,19 @@ static int l_bt_devices(lua_State *L) {
             lua_pushstring(L, hex);
             lua_setfield(L, -2, "mfg_data");
         }
+        {
+            /* 128-bit service UUIDs, from the raw advertisement and scan
+             * response, so a profile can match a vendor service. */
+            char u128[4][BT_UUID128_STR];
+            int k = bt_device_uuids128(d, u128, 4);
+            lua_createtable(L, k, 0);
+            for (int j = 0; j < k; j++) { lua_pushstring(L, u128[j]); lua_rawseti(L, -2, j + 1); }
+            lua_setfield(L, -2, "uuids128");
+        }
+        /* How long since the last advertising report: the table keeps
+         * entries for devices long gone, and this is how to tell. */
+        lua_pushinteger(L, (lua_Integer)(to_ms_since_boot(get_absolute_time()) - d->last_seen_ms));
+        lua_setfield(L, -2, "age_ms");
         if (d->have_uuids) {
             lua_createtable(L, d->n_uuid16, 0);
             for (uint8_t k = 0; k < d->n_uuid16; k++) {
@@ -592,6 +605,15 @@ static int l_bt_disconnect(lua_State *L) {
     return 1;
 }
 
+/* bt.write(addr, path, hex, with_response=true, want_done=false)
+ *   -> true | false, why | nil, "too_long"
+ *
+ * A value longer than MTU-3 is refused at once ("too_long"): queued, the
+ * stack would refuse it on every pass until its 5 s deadline and then drop it
+ * silently, holding up the writes behind it. With want_done the outcome comes
+ * through bt.await (and bt.notify_take) as
+ *   { addr, id = path, source = "write", ok = bool, att_error = n [, error = "timeout"] }
+ * -- with response when the peer answers, without when the controller takes it. */
 static int l_bt_write(lua_State *L) {
     uint8_t a[6];
     if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
@@ -599,6 +621,7 @@ static int l_bt_write(lua_State *L) {
     const char *id = luaL_checkstring(L, 2);
     const char *hex = luaL_checklstring(L, 3, &hexlen);
     bool with_resp = lua_isnoneornil(L, 4) ? true : lua_toboolean(L, 4);
+    bool want_done = lua_toboolean(L, 5);
 
     bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
     if (!d || !d->connected) { lua_pushboolean(L, 0); lua_pushstring(L, "not connected"); return 2; }
@@ -609,11 +632,26 @@ static int l_bt_write(lua_State *L) {
     }
     static uint8_t buf[512];
     size_t n = hexlen / 2;
-    if (n > sizeof(buf)) { n = sizeof(buf); }
+    uint16_t mtu = le_mtu(d->addr);
+    if (n > (size_t)(mtu ? mtu : 23) - 3) { lua_pushnil(L); lua_pushstring(L, "too_long"); return 2; }
     for (size_t i = 0; i < n; i++) {
         unsigned b = 0; sscanf(hex + i * 2, "%2x", &b); buf[i] = (uint8_t)b;
     }
-    lua_pushboolean(L, le_write(d->addr, si, ci, buf, (uint16_t)n, with_resp) == 0);
+    int rc = le_write(d->addr, si, ci, buf, (uint16_t)n, with_resp, want_done);
+    if (rc == 0) { lua_pushboolean(L, 1); return 1; }
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, rc == -5 ? "queue_full" : rc == -3 ? "too_long" : "not ready");
+    return 2;
+}
+
+/* bt.mtu(addr) -> the negotiated ATT MTU, or nil before the exchange (or
+ * when not connected). A write without response carries at most MTU-3. */
+static int l_bt_mtu(lua_State *L) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
+    uint16_t m = le_mtu(a);
+    if (!m) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, m);
     return 1;
 }
 
@@ -739,6 +777,25 @@ static int l_bt_find(lua_State *L) {
     return 1;
 }
 
+/* One inbox entry as the table bt.await / bt.notify_take return. A "write"
+ * entry (bt.write's want_done) carries ok / att_error (/ error) instead of a
+ * value. */
+static void push_frame(lua_State *L, const char *addr, const char *id, const char *src,
+                       const uint8_t *val, int n, int st) {
+    lua_createtable(L, 0, 5);
+    lua_pushstring(L, addr);                  lua_setfield(L, -2, "addr");
+    lua_pushstring(L, id);                    lua_setfield(L, -2, "id");
+    lua_pushstring(L, src);                   lua_setfield(L, -2, "source");
+    if (st >= 0) {
+        int att = st & 0xFF, reason = st >> 8;
+        lua_pushboolean(L, att == 0 && reason == LE_WRITE_DONE); lua_setfield(L, -2, "ok");
+        lua_pushinteger(L, att);                                lua_setfield(L, -2, "att_error");
+        if (reason == LE_WRITE_TIMEOUT) { lua_pushstring(L, "timeout"); lua_setfield(L, -2, "error"); }
+    } else {
+        lua_pushlstring(L, (const char *)val, (size_t)n); lua_setfield(L, -2, "value");
+    }
+}
+
 /* Drain one queued notification, non-blocking. nil when the inbox is empty.
  *
  * This is the primitive under the profile's link:await(): a Lua helper polls
@@ -761,14 +818,11 @@ static int l_bt_notify_take(lua_State *L) {
         filter = fbuf;
     }
     static uint8_t val[256];
+    int st = -1;
     int n = le_notify_take(filter, addr, sizeof addr, id, sizeof id, src, sizeof src,
-                           val, sizeof val);
+                           val, sizeof val, &st);
     if (n < 0) { lua_pushnil(L); return 1; }
-    lua_createtable(L, 0, 4);
-    lua_pushstring(L, addr);                  lua_setfield(L, -2, "addr");
-    lua_pushstring(L, id);                    lua_setfield(L, -2, "id");
-    lua_pushstring(L, src);                   lua_setfield(L, -2, "source");
-    lua_pushlstring(L, (const char *)val, (size_t)n); lua_setfield(L, -2, "value");
+    push_frame(L, addr, id, src, val, n, st);
     return 1;
 }
 
@@ -805,14 +859,11 @@ static int await_k(lua_State *L, int status, lua_KContext ctx) {
 static int await_drain(lua_State *L, const char *filter) {
     char addr[18], id[8], src[10];
     static uint8_t val[256];
+    int st = -1;
     int n = le_notify_take(filter, addr, sizeof addr, id, sizeof id,
-                           src, sizeof src, val, sizeof val);
+                           src, sizeof src, val, sizeof val, &st);
     if (n < 0) { return -1; }
-    lua_createtable(L, 0, 4);
-    lua_pushstring(L, addr);                  lua_setfield(L, -2, "addr");
-    lua_pushstring(L, id);                    lua_setfield(L, -2, "id");
-    lua_pushstring(L, src);                   lua_setfield(L, -2, "source");
-    lua_pushlstring(L, (const char *)val, (size_t)n); lua_setfield(L, -2, "value");
+    push_frame(L, addr, id, src, val, n, st);
     return 1;
 }
 
@@ -1544,6 +1595,7 @@ void lbind_open_all(lua_State *L) {
         { "devices", l_bt_devices }, { "connect", l_bt_connect },
         { "disconnect", l_bt_disconnect }, { "scan", l_bt_scan },
         { "write", l_bt_write }, { "subscribe", l_bt_subscribe },
+        { "mtu", l_bt_mtu },
         { "find", l_bt_find },
         { "read", l_bt_read },
         { "notify_take", l_bt_notify_take },

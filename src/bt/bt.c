@@ -642,7 +642,7 @@ static void op_gatt_write(const char *params, api_reply_fn reply, void *ctx, lon
     }
     bool with_response = true;
     (void)api_json_bool(params, "response", &with_response);
-    int rc = le_write(d->addr, si, ci, buf, (uint16_t)n, with_response);
+    int rc = le_write(d->addr, si, ci, buf, (uint16_t)n, with_response, false);
     if (rc == -5) {
         /* Not "busy" any more: operations are queued, so the only way to be
          * refused is a queue that is genuinely full -- which means the

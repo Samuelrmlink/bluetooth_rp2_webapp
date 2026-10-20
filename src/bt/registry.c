@@ -112,6 +112,36 @@ static size_t hex_append(char *dst, size_t cap, const uint8_t *b, size_t n) {
     return w;
 }
 
+/* AD structures are generic (length, type, data) on every transport that has
+ * them; only the stored payloads are LE's. */
+static int uuids128_in(const uint8_t *p, uint8_t len, char (*out)[BT_UUID128_STR], int n, int max) {
+    for (uint8_t i = 0; i + 1 < len && n < max; ) {
+        uint8_t l = p[i];
+        if (l == 0 || i + 1 + l > len) { break; }
+        uint8_t type = p[i + 1];
+        if (type == 0x06 || type == 0x07) {
+            for (uint8_t off = 2; off + 16 <= l + 1 && n < max; off += 16) {
+                const uint8_t *u = p + i + off;          /* little-endian on air */
+                char s[BT_UUID128_STR];
+                snprintf(s, sizeof s,
+                         "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+                         u[15], u[14], u[13], u[12], u[11], u[10], u[9], u[8],
+                         u[7], u[6], u[5], u[4], u[3], u[2], u[1], u[0]);
+                bool dup = false;
+                for (int k = 0; k < n; k++) { if (!strcmp(out[k], s)) { dup = true; } }
+                if (!dup) { memcpy(out[n++], s, sizeof s); }
+            }
+        }
+        i = (uint8_t)(i + 1 + l);
+    }
+    return n;
+}
+
+int bt_device_uuids128(const bt_device_t *d, char (*out)[BT_UUID128_STR], int max) {
+    int n = uuids128_in(d->adv, d->adv_len, out, 0, max);
+    return uuids128_in(d->rsp, d->rsp_len, out, n, max);
+}
+
 size_t bt_device_json(const bt_device_t *d, char *dst, size_t cap) {
     char name_esc[BT_NAME_MAX * 2 + 8] = "";
     if (d->have_name) {
@@ -145,6 +175,15 @@ size_t bt_device_json(const bt_device_t *d, char *dst, size_t cap) {
             n += (size_t)snprintf(dst + n, cap - n, "%s\"%04x\"", i ? "," : "", d->uuid16[i]);
         }
         n += (size_t)snprintf(dst + n, cap - n, "]");
+    }
+    {
+        char u128[4][BT_UUID128_STR];
+        int k = bt_device_uuids128(d, u128, 4);
+        if (k && n + 16 + (size_t)k * 40 < cap) {
+            n += (size_t)snprintf(dst + n, cap - n, ",\"uuids128\":[");
+            for (int i = 0; i < k; i++) { n += (size_t)snprintf(dst + n, cap - n, "%s\"%s\"", i ? "," : "", u128[i]); }
+            n += (size_t)snprintf(dst + n, cap - n, "]");
+        }
     }
     if (d->adv_len && n + 2u * d->adv_len + 12 < cap) {
         n += (size_t)snprintf(dst + n, cap - n, ",\"adv\":\"");
