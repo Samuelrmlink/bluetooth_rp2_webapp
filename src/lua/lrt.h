@@ -39,6 +39,9 @@ void lrt_yield_soon(void);
  * is established -- see lrt.c for what the caller must also do. */
 bool lrt_unload_module(const char *name);
 size_t lrt_collect(void);
+/* Called when a Lua allocation fails even after the emergency collection;
+ * returns true if it gave memory back (the allocation is then retried). */
+void lrt_set_oom_hook(bool (*fn)(void));
 
 /* --- script lifecycle ---------------------------------------------------- */
 /* Source resolution, in order: RAM draft, staged/<name>.lua, lua/<name>.lua.

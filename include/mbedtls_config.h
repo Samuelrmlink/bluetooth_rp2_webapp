@@ -93,7 +93,9 @@
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
 #define MBEDTLS_SSL_IN_CONTENT_LEN  16384
-#define MBEDTLS_SSL_OUT_CONTENT_LEN 4096
+/* A client sends a ClientHello, its key exchange and small requests; larger
+ * writes go out as several records. 2 KiB saves 2 KiB per session. */
+#define MBEDTLS_SSL_OUT_CONTENT_LEN 2048
 #define MBEDTLS_SSL_CIPHERSUITES \
     MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, \
     MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,   \

@@ -70,7 +70,7 @@ typedef struct {
     uint32_t done_ms;
     /* headers: "name\0value\0" pairs */
     char    *hdr;
-    size_t   hdr_len;
+    size_t   hdr_len, hdr_cap;
     /* in-memory body */
     chunk_t *head, *tail;
     size_t   mem_len;
@@ -85,11 +85,16 @@ typedef struct {
     httpc_err_t file_errc;
     int      lfs_h;
     void    *lfs_mem;
+    size_t   lfs_budget;       /* flash bytes this pass may still write */
 #if CONFIG_SD
     int      sd_state, sd_file;
-    uint32_t sd_token;
-    uint8_t *stage;
-    size_t   stage_len;
+    uint32_t sd_token;         /* a posted job: open, write, close, remove */
+    uint32_t fill_token;       /* a WRITE being filled in place (sdj_begin_write) */
+    size_t   fill_len;         /* bytes in it */
+    size_t   written;          /* the committed write's length */
+    uint32_t fill_since;       /* when its first byte arrived */
+    uint8_t *early;            /* body that came with the headers, before the file was open */
+    size_t   early_len;
 #endif
 } hreq_t;
 
@@ -108,13 +113,25 @@ static void *arena_alloc(size_t n) {
         lrt_collect();
         p = lheap_alloc_high(n);
     }
-    if (p) { memset(p, 0, n); }
+    if (!p && httpc_release_reserve()) { p = lheap_alloc_high(n); }   /* an idle TLS reservation */
+    if (!p) {
+        printf("lhttp: %u B not available: arena %u B used, largest free %u B\n",
+               (unsigned)n, (unsigned)lheap_used(), (unsigned)lheap_largest_free());
+        return NULL;
+    }
+    memset(p, 0, n);
     return p;
 }
 
+static void arena_stat(size_t *used, size_t *largest) {
+    *used = lheap_used();
+    *largest = lheap_largest_free();
+}
+
 static void lhttp_mem_init(void) {
-    static const httpc_alloc_fns fns = { arena_alloc, lheap_free };
+    static const httpc_alloc_fns fns = { arena_alloc, lheap_free, arena_stat };
     httpc_set_alloc(&fns);
+    lrt_set_oom_hook(httpc_release_reserve);
 }
 
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
@@ -137,9 +154,10 @@ static void release(hreq_t *h) {
     if (h->lfs_h >= 0 && h->fvol == F_LFS) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free(h->lfs_mem); h->lfs_mem = NULL; }
 #if CONFIG_SD
     if (h->sd_token) { sdj_abandon(h->sd_token); h->sd_token = 0; }
+    if (h->fill_token) { sdj_abandon(h->fill_token); h->fill_token = 0; }
     if (h->sd_file >= 0) { sdj_close_async(h->sd_file); h->sd_file = -1; }
-    lheap_free(h->stage);
-    h->stage = NULL;
+    lheap_free(h->early);
+    h->early = NULL;
 #endif
     h->used = false;
 }
@@ -159,7 +177,7 @@ static void on_status(void *u, int status) {
     if (h->fvol == F_NONE || status < 200 || status > 299) { return; }
     h->to_file = true;
     if (h->fvol == F_LFS) {
-        h->lfs_mem = lheap_alloc_high(fs_file_mem());
+        h->lfs_mem = arena_alloc(fs_file_mem());
         h->lfs_h = fs_fopen(h->fpath, FS_O_WRITE, h->lfs_mem);
         if (h->lfs_h < 0) {
             lheap_free(h->lfs_mem);
@@ -171,14 +189,16 @@ static void on_status(void *u, int status) {
     }
 #if CONFIG_SD
     else {
-        /* The stage now, not when the file is open: the piece that ends the
-         * headers can carry the start of the body (httpc.h), and it has to
-         * land somewhere while the card is still opening the file. */
-        h->stage = lheap_alloc_high(SDJ_BUF);
-        h->stage_len = 0;
-        if (!h->stage) {
+        /* The body is written straight into the SD job's buffer (the
+         * borrowed transfer ring: no 4 KiB of arena, which a busy arena had
+         * no hole for -- measured 37 KB free, largest 3.4 KB). Only the body
+         * that arrives with the headers, while the card is still opening the
+         * file, needs somewhere: at most one parser piece (httpc.h). */
+        h->early = arena_alloc(512);
+        h->early_len = 0;
+        if (!h->early) {
             h->file_err = true; h->file_errc = HTTPC_ENOMEM;
-            snprintf(h->msg, sizeof h->msg, "out of memory for the stage");
+            snprintf(h->msg, sizeof h->msg, "out of memory");
             h->sd_state = SDW_FAILED;
             return;
         }
@@ -190,10 +210,19 @@ static void on_status(void *u, int status) {
 static void on_header(void *u, const char *name, const char *value) {
     hreq_t *h = u;
     size_t nl = strlen(name) + 1, vl = strlen(value) + 1;
-    if (h->hdr_len + nl + vl > HDR_MAX) { return; }
-    if (!h->hdr) {
-        h->hdr = lheap_alloc_high(HDR_MAX);
-        if (!h->hdr) { return; }
+    size_t need = h->hdr_len + nl + vl;
+    if (need > HDR_MAX) { return; }
+    if (need > h->hdr_cap) {
+        /* Grown as headers arrive (1 KiB, doubling): one fixed 8 KiB block
+         * was a contiguous hole a busy arena often did not have. */
+        size_t cap = h->hdr_cap ? h->hdr_cap : 1024;
+        while (cap < need) { cap *= 2; }
+        if (cap > HDR_MAX) { cap = HDR_MAX; }
+        char *n = arena_alloc(cap);
+        if (!n) { return; }                /* headers are dropped, not the response */
+        if (h->hdr) { memcpy(n, h->hdr, h->hdr_len); lheap_free(h->hdr); }
+        h->hdr = n;
+        h->hdr_cap = cap;
     }
     memcpy(h->hdr + h->hdr_len, name, nl);
     memcpy(h->hdr + h->hdr_len + nl, value, vl);
@@ -204,10 +233,18 @@ static size_t room(void *u) {
     hreq_t *h = u;
     if (h->want_cancel || h->file_err) { return 0; }
     if (!h->to_file) { return (size_t)-1; }
-    if (h->fvol == F_LFS) { return (size_t)-1; }
+    /* One flash sector a pass: a LittleFS write may erase one (~50-400 ms),
+     * and the pump can move 32 KB in one go -- a 237 KB download held the
+     * loop 4.3 s at a time (mcusim). TCP's window holds the rest back. */
+    if (h->fvol == F_LFS) { return h->lfs_budget; }
 #if CONFIG_SD
-    if ((h->sd_state != SDW_READY && h->sd_state != SDW_OPENING) || !h->stage) { return 0; }
-    return SDJ_BUF - h->stage_len;
+    if (h->sd_state == SDW_OPENING) { return h->early ? 512 - h->early_len : 0; }
+    if (h->sd_state != SDW_READY) { return 0; }
+    if (!h->fill_token) {
+        if (!sdj_begin_write(h->sd_file, &h->fill_token)) { return 0; }   /* the card's job is busy */
+        h->fill_len = 0;
+    }
+    return SDJ_BUF - h->fill_len;
 #else
     return 0;
 #endif
@@ -220,6 +257,7 @@ static void on_body(void *u, const uint8_t *d, size_t n) {
         if (h->file_err) { return; }
         if (h->fvol == F_LFS) {
             int w = fs_fwrite(h->lfs_h, d, n);
+            h->lfs_budget = n < h->lfs_budget ? h->lfs_budget - n : 0;
             if (w < 0) {
                 h->file_err = true;
                 h->file_errc = w == FS_ERR_TOOLARGE ? HTTPC_ETOOLARGE : HTTPC_EIO;
@@ -229,17 +267,21 @@ static void on_body(void *u, const uint8_t *d, size_t n) {
             return;
         }
 #if CONFIG_SD
-        /* room() never offers more than the stage has free; only the first
-         * piece after the headers is not bounded by it, and the stage is
-         * empty then. Anything that still does not fit is a failure, never a
-         * silently shorter file. */
-        if (!h->stage) { h->file_err = true; h->file_errc = HTTPC_ENOMEM; return; }
-        size_t take = n <= SDJ_BUF - h->stage_len ? n : SDJ_BUF - h->stage_len;
-        memcpy(h->stage + h->stage_len, d, take);
-        h->stage_len += take;
+        /* room() bounds what arrives, except the piece that ends the
+         * headers, which lands in `early`. Anything that does not fit is a
+         * failure, never a silently shorter file. */
+        uint8_t *dst;
+        size_t cap, *len;
+        if (h->fill_token) { dst = sdj_buf(); cap = SDJ_BUF; len = &h->fill_len; }
+        else if (h->early) { dst = h->early; cap = 512; len = &h->early_len; }
+        else { h->file_err = true; h->file_errc = HTTPC_EIO; return; }
+        if (*len == 0) { h->fill_since = now_ms(); }
+        size_t take = n <= cap - *len ? n : cap - *len;
+        memcpy(dst + *len, d, take);
+        *len += take;
         if (take < n) {
             h->file_err = true; h->file_errc = HTTPC_EIO;
-            snprintf(h->msg, sizeof h->msg, "stage overrun");
+            snprintf(h->msg, sizeof h->msg, "buffer overrun");
         }
 #endif
         return;
@@ -248,7 +290,7 @@ static void on_body(void *u, const uint8_t *d, size_t n) {
     if (n > can) { n = can; h->truncated = true; h->want_cancel = true; }
     while (n) {
         if (!h->tail || h->tail->len == CHUNK) {
-            chunk_t *c = lheap_alloc_high(sizeof *c);
+            chunk_t *c = arena_alloc(sizeof *c);
             if (!c) {
                 h->file_err = true;
                 h->file_errc = HTTPC_ENOMEM;
@@ -301,8 +343,10 @@ static void finish_lfs(hreq_t *h) {
 }
 
 #if CONFIG_SD
-/* The SD side is a little state machine over jobs: open, write the stage
- * whenever it fills (or at the end), close, and on failure remove. */
+/* The SD side is a little state machine over jobs: open, write each filled
+ * buffer, close, and on failure remove. */
+#define FILL_IDLE_MS 200          /* a part-filled buffer goes to the card after this */
+
 static void sd_step(hreq_t *h) {
     if (h->sd_token) {
         sdj_t r;
@@ -323,13 +367,12 @@ static void sd_step(hreq_t *h) {
                 }
                 break;
             case SDW_WRITING:
-                if (rc < 0 || (size_t)rc != h->stage_len) {
+                if (rc < 0 || (size_t)rc != h->written) {
                     h->file_err = true;
                     h->file_errc = rc == LS_ENOSPC ? HTTPC_ETOOLARGE : HTTPC_EIO;
                     snprintf(h->msg, sizeof h->msg, rc == LS_ENOSPC ? "the card is full" : "write failed (%d)", rc);
                     h->sd_state = SDW_FAILED;
                 } else {
-                    h->stage_len = 0;
                     h->sd_state = SDW_READY;
                 }
                 break;
@@ -352,15 +395,36 @@ static void sd_step(hreq_t *h) {
         sdj_post(&q, &h->sd_token);
         return;
     }
-    if (h->sd_state == SDW_READY && h->stage_len && (h->stage_len == SDJ_BUF || h->net_done)) {
-        q.op = SDJ_WRITE; q.file = h->sd_file; q.len = (uint32_t)h->stage_len;
-        if (sdj_post(&q, &h->sd_token)) {
-            memcpy(sdj_buf(), h->stage, h->stage_len);
-            h->sd_state = SDW_WRITING;
+    if (h->sd_state == SDW_FAILED && h->fill_token) { sdj_abandon(h->fill_token); h->fill_token = 0; }
+    if (h->sd_state == SDW_READY && h->early_len) {
+        /* What came with the headers goes first. */
+        if (!h->fill_token) {
+            if (!sdj_begin_write(h->sd_file, &h->fill_token)) { return; }
+            h->fill_len = 0;
         }
-        return;
+        memcpy(sdj_buf() + h->fill_len, h->early, h->early_len);
+        h->fill_len += h->early_len;
+        h->early_len = 0;
+        lheap_free(h->early);
+        h->early = NULL;
     }
-    bool end = h->net_done && (h->sd_state == SDW_FAILED || (h->sd_state == SDW_READY && h->stage_len == 0));
+    if (h->sd_state == SDW_READY && h->fill_token) {
+        bool full = h->fill_len >= SDJ_BUF;
+        bool idle = h->fill_len && (int32_t)(now_ms() - h->fill_since) >= FILL_IDLE_MS;
+        if (h->fill_len && (full || h->net_done || idle)) {
+            sdj_commit(h->fill_token, (uint32_t)h->fill_len);
+            h->sd_token = h->fill_token;
+            h->fill_token = 0;
+            h->written = h->fill_len;
+            h->fill_len = 0;
+            h->sd_state = SDW_WRITING;
+            return;
+        }
+        if (!h->fill_len && h->net_done) { sdj_abandon(h->fill_token); h->fill_token = 0; }
+        else { return; }
+    }
+    bool end = h->net_done && (h->sd_state == SDW_FAILED ||
+                               (h->sd_state == SDW_READY && !h->fill_token && !h->early_len));
     if (!end) { return; }
     if (h->file_err) { fail_file(h); }
     if (h->sd_file >= 0) {
@@ -378,7 +442,10 @@ static void sd_step(hreq_t *h) {
 }
 #endif
 
+#define LFS_PASS_BUDGET 4096
+
 void lhttp_tick(void) {
+    for (int i = 0; i < HTTPC_MAX; i++) { s_r[i].lfs_budget = LFS_PASS_BUDGET; }
     httpc_tick();
     for (int i = 0; i < HTTPC_MAX; i++) {
         hreq_t *h = &s_r[i];
@@ -640,6 +707,19 @@ static int l_cancel(lua_State *L) {
     return 1;
 }
 
+/* http.reserve(on) -> bool
+ *   false: give the reserved TLS record buffers (22.5 KB) back to the arena,
+ *          if no HTTPS session is using them; false if one is.
+ *   true:  reserve them now (normally the first HTTPS request does); false
+ *          if the arena has no room for them.
+ * Either way the next HTTPS request reserves them again if they are not. */
+static int l_reserve(lua_State *L) {
+    bool on = lua_toboolean(L, 1);
+    lhttp_mem_init();
+    lua_pushboolean(L, on ? httpc_reserve() : httpc_unreserve());
+    return 1;
+}
+
 static int l_stats(lua_State *L) {
     httpc_stats_t s;
     httpc_stats(&s);
@@ -656,7 +736,7 @@ static int l_stats(lua_State *L) {
 void lhttp_open(lua_State *L) {
     static const luaL_Reg fns[] = {
         { "start", l_start }, { "status", l_status }, { "await", l_await },
-        { "cancel", l_cancel }, { "stats", l_stats }, { NULL, NULL } };
+        { "cancel", l_cancel }, { "stats", l_stats }, { "reserve", l_reserve }, { NULL, NULL } };
     lua_newtable(L);
     luaL_setfuncs(L, fns, 0);
     lua_setglobal(L, "http");

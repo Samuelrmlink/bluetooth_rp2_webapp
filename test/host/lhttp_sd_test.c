@@ -51,6 +51,7 @@ static int s_slot = -1;
 int lrt_current_slot(void) { return s_slot; }
 void lrt_yield_soon(void) {}
 size_t lrt_collect(void) { return 0; }
+void lrt_set_oom_hook(bool (*fn)(void)) { (void)fn; }
 /* The wait: the test's scheduler resumes the script every pass, so a wait is
  * just "come back next pass"; DELIVERED makes await look at the result. */
 lwait_reason_t lrt_block_current(uint32_t token, uint8_t link, uint32_t timeout_ms) {
@@ -98,6 +99,9 @@ int httpc_start(const httpc_opts_t *o, const httpc_sink_t *sink, void *user, htt
     return s_fake.id;
 }
 void httpc_cancel(int id) { if (s_fake.used && s_fake.id == id) { s_fake.cancelled = true; s_fake.used = false; } }
+bool httpc_release_reserve(void) { return false; }
+bool httpc_reserve(void) { return false; }
+bool httpc_unreserve(void) { return true; }
 bool httpc_info(int id, httpc_state_t *st, uint64_t *bytes, int64_t *total, int *status) {
     if (!s_fake.used || s_fake.id != id) { return false; }
     if (st) { *st = s_fake.finished ? HTTPC_DONE : HTTPC_RECV; }

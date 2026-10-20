@@ -62,6 +62,28 @@ bool sdj_post(const sdj_t *req, uint32_t *token) {
     return true;
 }
 
+bool sdj_begin_write(int file, uint32_t *token) {
+    sdj_t q;
+    memset(&q, 0, sizeof q);
+    q.op = SDJ_WRITE;
+    q.file = file;
+    if (!sdj_post(&q, token)) { return false; }
+    sdw_lock();
+    s_state = SDJ_FILLING;          /* not the worker's until committed */
+    sdw_unlock();
+    return true;
+}
+
+void sdj_commit(uint32_t token, uint32_t len) {
+    sdw_lock();
+    if (token && token == s_token && s_state == SDJ_FILLING) {
+        s_job.len = len;
+        s_state = SDJ_POSTED;
+    }
+    sdw_unlock();
+    sdw_kick();
+}
+
 enum sdj_state sdj_poll(uint32_t token, sdj_t *out) {
     sdw_lock();
     enum sdj_state st = (token && token == s_token) ? s_state : SDJ_IDLE;
@@ -97,6 +119,10 @@ void sdj_abandon(uint32_t token) {
         give_back();
     } else if (s_state == SDJ_POSTED) {
         s_abandoned = true;     /* the worker frees it (and closes) when done */
+    } else if (s_state == SDJ_FILLING) {
+        s_state = SDJ_IDLE;     /* never handed over: nothing to wait for */
+        s_token = 0;
+        give_back();
     }
     sdw_unlock();
 }

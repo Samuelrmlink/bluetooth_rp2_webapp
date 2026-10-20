@@ -31,9 +31,19 @@
  * reverted attempts at its in-place realloc broke. */
 
 /* Lua's allocator hook. The work is in lheap_realloc; this only drops `ud`. */
+static bool (*s_oom_hook)(void);
+void lrt_set_oom_hook(bool (*fn)(void)) { s_oom_hook = fn; }
+
 static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     (void)ud;
-    return lheap_realloc(ptr, osize, nsize);
+    void *p = lheap_realloc(ptr, osize, nsize);
+    /* Out of arena even after Lua's emergency collection: memory the C side
+     * keeps in reserve (the HTTP client's TLS record buffers) goes back
+     * before a script is told "not enough memory". */
+    if (!p && nsize && s_oom_hook && s_oom_hook()) {
+        p = lheap_realloc(ptr, osize, nsize);
+    }
+    return p;
 }
 
 /* --- state --------------------------------------------------------------- */
@@ -619,7 +629,15 @@ static bool cache_load(lua_State *Ls, const char *rel, const char *chunkname,
     if (!cache_matches(path, hash, srclen)) { return false; }
     size_t len = 0;
     if (!read_fs(path, src_buf, sizeof(src_buf), &len) || len <= CACHE_HDR) { return false; }
-    if (luaL_loadbufferx(Ls, src_buf + CACHE_HDR, len - CACHE_HDR, chunkname, "b") != LUA_OK) {
+    int rc = luaL_loadbufferx(Ls, src_buf + CACHE_HDR, len - CACHE_HDR, chunkname, "b");
+    if (rc == LUA_ERRMEM) {
+        /* Out of memory, not a bad cache: compiling the source instead needs
+         * about twice as much, so it would only fail later and worse. Keep
+         * the cache and say what happened. */
+        lua_pop(Ls, 1);
+        luaL_error(Ls, "module '%s': not enough memory to load it", rel);
+    }
+    if (rc != LUA_OK) {
         printf("lua: cache for %s unusable (%s); compiling the source\n", rel, lua_tostring(Ls, -1));
         lua_pop(Ls, 1);
         fs_delete(path);

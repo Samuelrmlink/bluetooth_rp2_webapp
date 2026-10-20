@@ -98,7 +98,9 @@ local id, err = http.start{
 http.status(id)    -- {state="dns"|"connect"|"tls"|"send"|"recv"|"done"|"error", status=n, bytes=n, total=n|nil}
 http.await(id, ms) -- the result, or nil, "timeout" (the request keeps going) | nil, "badid"
 http.cancel(id)    -- true (false: no such request)
-http.stats()       -- {requests=, failures=, tls_sessions=, tls_bytes=, tls_peak_bytes=}
+http.stats()       -- {requests=, failures=, tls_sessions=, tls_bytes=, tls_peak_bytes=, tls_reserved=}
+http.reserve(on)   -- the TLS record-buffer reservation (below): false gives it back
+                   -- (false while a session uses it), true takes it now
 ```
 
 `http.start` fails with `nil, "busy"` (3 requests already), `"badurl"`,
@@ -125,7 +127,11 @@ one of `dns`, `connect`, `tls`, `timeout`, `toolarge`, `io`, `cancelled`, `nomem
   failed or cancelled download removes the partial file (on SD: a *cancelled*
   one stays, as cancel cannot wait for the card). LittleFS files obey the 1 MiB
   limit (`toolarge`). The download is held back by TCP flow control while the
-  card or flash writes, so it never buffers more than ~4 KiB.
+  card or flash writes, so it never buffers more than ~4 KiB. On the card the
+  body is written straight into the storage job's buffer (a borrowed `/api/sd`
+  transfer ring), so a download needs no 4 KiB block of the arena; on LittleFS
+  at most one flash sector (4 KiB) is written per main-loop pass, so a long
+  download never holds the loop for more than one erase.
 * **Redirects** 301/302/303/307/308: `Location` may be absolute, scheme-relative,
   absolute-path or relative. 303, and 301/302 after anything but GET/HEAD,
   continue as a GET without the body (what browsers do). https -> http is
@@ -190,7 +196,11 @@ each one contiguous block, and a script that has run for a while leaves the
 first-fit arena in pieces (measured: 51 KB free, no 17 KB hole). So the first
 HTTPS request **reserves one pair, 22.5 KB, and keeps it for the life of the Lua
 VM** (`http.stats().tls_reserved`); a second session at the same time takes
-its buffers from the arena like everything else. And because memory a script
+its buffers from the arena like everything else. The reservation gives way to
+scripts: `http.reserve(false)` returns it while no HTTPS is needed, and a Lua
+allocation that fails even after the emergency collection frees it (if idle)
+and retries. Either way the next HTTPS request reserves it again, or fails
+cleanly with `nomem` if the arena cannot give 22.5 KB in two pieces. And because memory a script
 has dropped is garbage until the collector runs -- which only Lua's own
 allocations trigger -- an HTTP/TLS allocation that fails runs a full
 collection and tries once more. A handshake that still runs out says
@@ -198,7 +208,7 @@ collection and tries once more. A handshake that still runs out says
 
 | | bytes |
 |---|---|
-| a session, after setup / steady after the handshake | 22.5 K / 22.7 K |
+| a session, after setup / steady after the handshake (4 KiB out buffer; now 2 KiB, ~2 K less) | 22.5 K / 22.7 K |
 | a session at its handshake peak (RSA-4096 root, RSA-2048 intermediate, ECDSA or RSA leaf) | ~37 K |
 | on the device against firebasestorage.googleapis.com (mcusim, real network), `tls_peak_bytes` | 33.0 K |
 | reserved for the record buffers after the first HTTPS request, kept | 22.5 K |
@@ -272,6 +282,10 @@ the file's new contents.
 
 ## Notes for whoever changes this
 
+* **Modules and memory.** When a module's cached bytecode cannot be loaded
+  because the arena is full, `require` fails with "not enough memory to load
+  it" and keeps the cache -- compiling the source instead needs about twice as
+  much and only failed later.
 * **USB-NCM drops frames with ERR_USE.** `usb_ncm.c`'s `ncm_linkoutput`
   returns `ERR_USE` when its single transmit buffer is busy and the frame is
   gone. lwIP then leaves the TCP segment on `unsent` with no timer to retry it:

@@ -62,6 +62,7 @@ typedef struct {
 typedef struct {
     void *(*alloc)(size_t n);  /* zeroed */
     void  (*free)(void *p);
+    void  (*stat)(size_t *used, size_t *largest_free);   /* for diagnostics; may be NULL */
 } httpc_alloc_fns;
 void httpc_set_alloc(const httpc_alloc_fns *fns);
 
@@ -80,5 +81,12 @@ void httpc_reset(void);
 /* For sys/http stats: TLS sessions now, and the most arena any one used. */
 typedef struct { uint32_t tls_now, tls_peak_bytes, tls_bytes_now, requests, failures, tls_reserved; } httpc_stats_t;
 void httpc_stats(httpc_stats_t *out);
+/* Give back the reserved TLS record buffers if no session is using them
+ * (the Lua runtime's out-of-memory hook). True if anything was freed. */
+bool httpc_release_reserve(void);
+/* http.reserve(): reserve the record buffers now / give them back (false
+ * while a session uses them). */
+bool httpc_reserve(void);
+bool httpc_unreserve(void);
 
 #endif

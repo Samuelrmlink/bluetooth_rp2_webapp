@@ -167,7 +167,10 @@ static size_t s_tls_fail_size;
  * request, from the top of the arena, and kept for the life of the Lua VM
  * (httpc_reset forgets it: the VM restart that calls it resets the arena).
  * A second session at the same time takes its buffers from the arena like
- * everything else. Everything smaller always comes from the arena. */
+ * everything else. Everything smaller always comes from the arena. And the
+ * reservation yields: when a script's allocation fails even after the
+ * collector, lrt.c calls httpc_release_reserve() and retries -- the next
+ * HTTPS request reserves again if it can. */
 #define TLS_SLOT_IN  (MBEDTLS_SSL_IN_CONTENT_LEN + 1024)
 #define TLS_SLOT_OUT (MBEDTLS_SSL_OUT_CONTENT_LEN + 1024)
 typedef struct { uint8_t *mem; size_t cap; bool used; } tls_slot_t;
@@ -199,7 +202,17 @@ static void *tls_calloc(size_t n, size_t sz) {
         if ((b = slot_take(&s_slot_out, TLS_SLOT_OUT, total))) { kind = 2; }
     }
     if (!b) { b = xalloc(total); }
-    if (!b) { s_tls_alloc_fails++; s_tls_fail_size = want; return NULL; }
+    if (!b) {
+        s_tls_alloc_fails++;
+        s_tls_fail_size = want;
+        if (s_mem.stat) {
+            size_t used = 0, largest = 0;
+            s_mem.stat(&used, &largest);
+            printf("httpc: TLS wanted %u B: arena %u B used, largest free %u B, %u B held by TLS\n",
+                   (unsigned)want, (unsigned)used, (unsigned)largest, (unsigned)s_tls_now);
+        }
+        return NULL;
+    }
     b->n = want;
     b->kind = kind;
     s_tls_now += want;
@@ -917,6 +930,43 @@ void httpc_reset(void) {
      * reset: forget them, the next HTTPS request reserves them again. */
     memset(&s_slot_in, 0, sizeof s_slot_in);
     memset(&s_slot_out, 0, sizeof s_slot_out);
+#endif
+}
+
+bool httpc_reserve(void) {
+#if CONFIG_NET_HTTP_TLS
+    if (!s_slot_in.mem) {
+        if (!(s_slot_in.mem = xalloc(TLS_SLOT_IN))) { return false; }
+        s_slot_in.cap = TLS_SLOT_IN;
+    }
+    if (!s_slot_out.mem) {
+        if (!(s_slot_out.mem = xalloc(TLS_SLOT_OUT))) { return false; }
+        s_slot_out.cap = TLS_SLOT_OUT;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool httpc_unreserve(void) {
+#if CONFIG_NET_HTTP_TLS
+    if (s_slot_in.used || s_slot_out.used) { return false; }   /* a session has them */
+    httpc_release_reserve();
+    return true;
+#else
+    return true;
+#endif
+}
+
+bool httpc_release_reserve(void) {
+#if CONFIG_NET_HTTP_TLS
+    bool freed = false;
+    if (s_slot_in.mem && !s_slot_in.used)   { xfree(s_slot_in.mem);  memset(&s_slot_in, 0, sizeof s_slot_in);  freed = true; }
+    if (s_slot_out.mem && !s_slot_out.used) { xfree(s_slot_out.mem); memset(&s_slot_out, 0, sizeof s_slot_out); freed = true; }
+    return freed;
+#else
+    return false;
 #endif
 }
 

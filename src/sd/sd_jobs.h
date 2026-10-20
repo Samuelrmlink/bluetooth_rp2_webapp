@@ -49,7 +49,7 @@ enum sdj_op {
     SDJ_STATFS,    /* -> free, total */
 };
 
-enum sdj_state { SDJ_IDLE = 0, SDJ_POSTED, SDJ_DONE };
+enum sdj_state { SDJ_IDLE = 0, SDJ_POSTED, SDJ_DONE, SDJ_FILLING };
 
 typedef struct {
     int op;
@@ -77,6 +77,13 @@ typedef struct {
  * is already in flight: try again on a later pass. *token identifies this
  * job to sdj_poll/sdj_abandon. */
 bool sdj_post(const sdj_t *req, uint32_t *token);
+/* A WRITE filled in place: claims the job and its buffer (state FILLING,
+ * which the worker leaves alone), the caller copies up to SDJ_BUF bytes into
+ * sdj_buf() as they arrive, and sdj_commit() posts it with that length. For
+ * a stream (an HTTP download) this needs no buffer of the caller's own. */
+bool sdj_begin_write(int file, uint32_t *token);
+void sdj_commit(uint32_t token, uint32_t len);
+
 /* The data buffer, valid from a successful sdj_post of READ/WRITE/LIST until
  * sdj_finish(): fill it right after posting a WRITE (the worker only runs
  * between main-loop passes); read it after a READ or LIST completes. */
