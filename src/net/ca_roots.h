@@ -450,15 +450,17 @@ static const uint8_t ca_root_6[] = {
     0xfe, 0xae, 0x00, 0x68, 0xe7, 0x8c, 0x49, 0x0f, 0xb6, 0x6f, 0x5b, 0x5b, 0x15, 0xf2, 0xe7,
 };
 
-typedef struct { const char *name; const uint8_t *der; size_t len; } ca_root_t;
+/* subject_off/subject_len: the DER subject Name (tag and length included), so
+ * a chain's issuer can be matched without parsing the root. */
+typedef struct { const char *name; const uint8_t *der; size_t len; uint16_t subject_off, subject_len; } ca_root_t;
 static const ca_root_t ca_roots[] = {
-    { "GTS Root R1", ca_root_0, 1371 },
-    { "GTS Root R2", ca_root_1, 1371 },
-    { "GTS Root R3", ca_root_2, 525 },
-    { "GTS Root R4", ca_root_3, 525 },
-    { "GlobalSign Root CA (R1)", ca_root_4, 889 },
-    { "ISRG Root X1", ca_root_5, 1391 },
-    { "ISRG Root X2", ca_root_6, 543 },
+    { "GTS Root R1", ca_root_0, 1371, 148, 73 },
+    { "GTS Root R2", ca_root_1, 1371, 148, 73 },
+    { "GTS Root R3", ca_root_2, 525, 145, 73 },
+    { "GTS Root R4", ca_root_3, 525, 145, 73 },
+    { "GlobalSign Root CA (R1)", ca_root_4, 889, 162, 89 },
+    { "ISRG Root X1", ca_root_5, 1391, 160, 81 },
+    { "ISRG Root X2", ca_root_6, 543, 156, 81 },
 };
 #define CA_ROOTS_N (sizeof ca_roots / sizeof ca_roots[0])
 

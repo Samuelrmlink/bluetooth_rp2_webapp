@@ -95,8 +95,19 @@ typedef struct {
 
 static hreq_t s_r[HTTPC_MAX];
 
+/* From the top of the arena -- and, like Lua's own allocator, collect and
+ * try again before giving up: memory a script has dropped is garbage until
+ * the collector runs, and the collector only runs when LUA allocates. Without
+ * this a request failed "out of memory" with 30 KB of the arena reclaimable
+ * (mcusim). Never reached from inside Lua's allocator (lheap_realloc), so a
+ * collection here is safe; finalizers that run (file handles) do not
+ * allocate through it. */
 static void *arena_alloc(size_t n) {
     void *p = lheap_alloc_high(n);
+    if (!p) {
+        lrt_collect();
+        p = lheap_alloc_high(n);
+    }
     if (p) { memset(p, 0, n); }
     return p;
 }
@@ -638,6 +649,7 @@ static int l_stats(lua_State *L) {
     lua_pushinteger(L, s.tls_now);        lua_setfield(L, -2, "tls_sessions");
     lua_pushinteger(L, s.tls_bytes_now);  lua_setfield(L, -2, "tls_bytes");
     lua_pushinteger(L, s.tls_peak_bytes); lua_setfield(L, -2, "tls_peak_bytes");
+    lua_pushinteger(L, s.tls_reserved);   lua_setfield(L, -2, "tls_reserved");
     return 1;
 }
 

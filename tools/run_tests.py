@@ -689,12 +689,16 @@ def t_httpc_parse():
 
 def t_tls_mem():
     """The firmware's mbedTLS configuration against a local `openssl s_server`
-    (127.0.0.1 only): chains shaped like Google's (RSA-4096 root signed with
-    SHA-384 -> RSA-2048 intermediate -> ECDSA or RSA leaf) and like GTS R4
-    (ECDSA P-384 root -> P-256 leaf), found through the trusted-CA callback,
-    a 200 KB body in 16 KiB records, an untrusted root refused, `insecure`
-    accepted; and the session's memory, which is what the Lua arena must
-    have free on the device."""
+    (127.0.0.1 only), set up as httpc.c does (restartable ECC, the roots held
+    only while the server's chain is verified), with ALL SEVEN embedded roots
+    loaded -- so a root that does not parse fails here, not on a board (GSR1
+    did, until SHA-1 was enabled). Chains: Google's (P-256 leaf <- WE2-like
+    P-256 intermediate signed ecdsa-with-SHA384 <- a P-384 root, and that root
+    cross-signed by an RSA root); RSA-4096/SHA-384 root -> RSA-2048
+    intermediate -> ECDSA or RSA leaf; untrusted refused; insecure accepted.
+    Three sessions per case in one process, and the heap must be back where it
+    started after each: what the Lua arena must have free, and that nothing
+    leaks between sessions."""
     import tempfile, signal, socket
     if sh("command -v openssl")[0]:
         return True, "skipped: no openssl"
@@ -707,31 +711,49 @@ def t_tls_mem():
     d = tempfile.mkdtemp(prefix="btgw_tls_")
     o = lambda c: sh(c, cwd=d)
     try:
-        o("openssl req -x509 -newkey rsa:4096 -sha384 -days 3650 -nodes -keyout r.key -out r.pem "
-          "-subj '/CN=Test Root R1' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign")
-        o("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -sha384 -days 3650 -nodes "
-          "-keyout r4.key -out r4.pem -subj '/CN=Test Root R4' -addext basicConstraints=critical,CA:TRUE "
-          "-addext keyUsage=critical,keyCertSign")
+        real = []
+        for f in sorted(os.listdir(os.path.join(ROOT, "third_party/ca_roots"))):
+            if f.endswith(".pem"):
+                o(f"openssl x509 -in {ROOT}/third_party/ca_roots/{f} -outform der -out real_{f[:-4]}.der")
+                real.append(f"real_{f[:-4]}.der")
+        o("printf 'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n' > root.ext")
         o("printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,digitalSignature\n' > ca.ext")
         o("printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > leaf.ext")
+        # RSA-shaped
+        o("openssl req -x509 -newkey rsa:4096 -sha384 -days 3650 -nodes -keyout r.key -out r.pem "
+          "-subj '/CN=Test Root R1' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign")
         o("openssl req -newkey rsa:2048 -nodes -keyout i.key -out i.csr -subj '/CN=Test WR2'")
         o("openssl x509 -req -in i.csr -CA r.pem -CAkey r.key -CAcreateserial -days 900 -sha256 -extfile ca.ext -out i.pem")
         o("openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout le.key -out le.csr -subj /CN=localhost")
         o("openssl x509 -req -in le.csr -CA i.pem -CAkey i.key -CAcreateserial -days 90 -sha256 -extfile leaf.ext -out le.pem")
         o("openssl req -newkey rsa:2048 -nodes -keyout lr.key -out lr.csr -subj /CN=localhost")
         o("openssl x509 -req -in lr.csr -CA i.pem -CAkey i.key -CAcreateserial -days 90 -sha256 -extfile leaf.ext -out lr.pem")
-        o("openssl x509 -req -in le.csr -CA r4.pem -CAkey r4.key -CAcreateserial -days 90 -sha384 -extfile leaf.ext -out l4.pem")
+        # Google-shaped: P-384 root, cross-signed by an RSA root; P-256 intermediate (SHA-384); P-256 leaf
+        o("openssl ecparam -name secp384r1 -genkey -noout -out r4.key")
+        o("openssl req -x509 -new -key r4.key -sha384 -days 3650 -subj '/O=Test Trust LLC/CN=Test Root R4' "
+          "-addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign -out r4.pem")
+        o("openssl req -x509 -newkey rsa:2048 -nodes -keyout gs.key -sha256 -days 3650 -subj '/CN=Test GlobalSign' "
+          "-addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign -out gs.pem")
+        o("openssl req -new -key r4.key -subj '/O=Test Trust LLC/CN=Test Root R4' -out r4.csr")
+        o("openssl x509 -req -in r4.csr -CA gs.pem -CAkey gs.key -CAcreateserial -days 1000 -sha256 -extfile root.ext -out r4x.pem")
+        o("openssl ecparam -name prime256v1 -genkey -noout -out we.key")
+        o("openssl req -new -key we.key -subj '/CN=Test WE2' -out we.csr")
+        o("openssl x509 -req -in we.csr -CA r4.pem -CAkey r4.key -CAcreateserial -days 900 -sha384 -extfile ca.ext -out we.pem")
+        o("openssl x509 -req -in le.csr -CA we.pem -CAkey we.key -CAcreateserial -days 90 -sha256 -extfile leaf.ext -out lg.pem")
+        o("cat we.pem r4x.pem > gchain.pem")
         o("openssl req -x509 -newkey rsa:2048 -nodes -keyout x.key -out x.pem -subj /CN=Other -days 30")
-        for n in ("r", "r4", "x"):
+        for n in ("r", "r4", "gs", "x"):
             o(f"openssl x509 -in {n}.pem -outform der -out {n}.der")
         o("head -c 200000 /dev/urandom > big.bin")
-        cases = [("RSA chain, ECDSA leaf", "le.pem", "le.key", "i.pem", "r.der", "", 0),
-                 ("RSA chain, RSA leaf", "lr.pem", "lr.key", "i.pem", "r.der", "", 0),
-                 ("P-384 root, P-256 leaf", "l4.pem", "le.key", None, "r4.der", "", 0),
-                 ("untrusted root refused", "le.pem", "le.key", "i.pem", "x.der", "", 1),
+        R = ",".join(real)
+        cases = [("Google-shaped ECDSA chain (+RSA cross-sign)", "lg.pem", "le.key", "gchain.pem", f"r4.der,{R}", "", 0),
+                 ("the same via the RSA cross-sign only", "lg.pem", "le.key", "gchain.pem", f"gs.der,{R}", "", 0),
+                 ("RSA chain, ECDSA leaf", "le.pem", "le.key", "i.pem", f"r.der,{R}", "", 0),
+                 ("RSA chain, RSA leaf", "lr.pem", "lr.key", "i.pem", f"r.der,{R}", "", 0),
+                 ("untrusted root refused", "le.pem", "le.key", "i.pem", f"x.der,{R}", "", 1),
                  ("untrusted root, insecure", "le.pem", "le.key", "i.pem", "x.der", "insecure", 0)]
         peaks = []
-        for i, (what, cert, key, chain, root, extra, want) in enumerate(cases):
+        for what, cert, key, chain, root, extra, want in cases:
             s0 = socket.socket(); s0.bind(("127.0.0.1", 0)); port = s0.getsockname()[1]; s0.close()
             args = ["openssl", "s_server", "-accept", f"127.0.0.1:{port}", "-cert", cert, "-key", key,
                     "-WWW", "-tls1_2", "-quiet"] + (["-cert_chain", chain] if chain else [])
@@ -739,15 +761,16 @@ def t_tls_mem():
             try:
                 time.sleep(0.6)
                 p = subprocess.run([binp, str(port), root, "big.bin"] + ([extra] if extra else []),
-                                   cwd=d, capture_output=True, text=True, timeout=60)
+                                   cwd=d, capture_output=True, text=True, timeout=120, env=dict(os.environ, SESSIONS="3"))
             finally:
                 srv.send_signal(signal.SIGTERM); srv.wait()
             if (p.returncode != 0) != bool(want):
                 return False, f"{what}: {(p.stdout.strip().splitlines() or ['?'])[-1][:70]}"
-            mm = re.search(r"(\d+) B handshake peak", p.stdout)
-            if mm and not want:
-                peaks.append(int(mm.group(1)))
-        return True, f"5 cases; session peak {max(peaks)} B (64-bit host)"
+            left = re.findall(r"(\d+) B left after free", p.stdout)
+            if len(left) != 3 or any(int(x) for x in left):
+                return False, f"{what}: heap not back to baseline after each session ({left})"
+            peaks += [int(x) for x in re.findall(r"(\d+) B handshake peak", p.stdout)]
+        return True, f"6 cases x 3 sessions, heap back to 0 each time; peak {max(peaks)} B (64-bit host)"
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

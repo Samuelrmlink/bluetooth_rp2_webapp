@@ -88,6 +88,7 @@ typedef struct req {
     bool     started;          /* the first connection has been begun (httpc_tick) */
 #if CONFIG_NET_HTTP_TLS
     mbedtls_ssl_context *ssl;
+    bool roots_held;           /* this handshake holds a reference on s_roots */
 #endif
 } req_t;
 
@@ -146,19 +147,60 @@ static req_t *by_id(int id) {
 /* ---- TLS -------------------------------------------------------------------- */
 #if CONFIG_NET_HTTP_TLS
 static mbedtls_ssl_config s_conf;
+/* insecure = true: the same, with verification off (mbedTLS lets only a
+ * server change the auth mode per handshake). No roots are loaded for it. */
+static mbedtls_ssl_config s_conf_insecure;
 static mbedtls_ctr_drbg_context s_drbg;
 static bool s_tls_ready;
 static size_t s_tls_now, s_tls_peak;
+static uint32_t s_tls_alloc_fails;        /* allocations mbedTLS asked for and did not get */
+static size_t s_tls_fail_size;
 
 /* mbedtls' allocator: the same as the requests', with a header so the bytes
  * held by TLS can be reported (http.stats()). */
-typedef struct { size_t n; size_t pad; } tlsblk_t;
+/* The two record buffers (16 KiB in, 4 KiB out, plus mbedTLS's overhead)
+ * are the only large blocks TLS asks for, and they must be contiguous. A
+ * script that has run for a while leaves the first-fit arena in pieces --
+ * measured in mcusim: 51 KB free and no 17 KB hole, so every HTTPS request
+ * failed "out of memory for tls" -- so one set is reserved at the first HTTPS
+ * request, from the top of the arena, and kept for the life of the Lua VM
+ * (httpc_reset forgets it: the VM restart that calls it resets the arena).
+ * A second session at the same time takes its buffers from the arena like
+ * everything else. Everything smaller always comes from the arena. */
+#define TLS_SLOT_IN  (MBEDTLS_SSL_IN_CONTENT_LEN + 1024)
+#define TLS_SLOT_OUT (MBEDTLS_SSL_OUT_CONTENT_LEN + 1024)
+typedef struct { uint8_t *mem; size_t cap; bool used; } tls_slot_t;
+static tls_slot_t s_slot_in, s_slot_out;
+
+typedef struct { size_t n; uint8_t kind; uint8_t pad[3]; } tlsblk_t;   /* kind: 0 arena, 1 in slot, 2 out slot */
+_Static_assert(sizeof(tlsblk_t) % 8 == 0, "tlsblk_t keeps the payload 8-aligned");
+
+static tlsblk_t *slot_take(tls_slot_t *sl, size_t cap, size_t total) {
+    if (total > cap || sl->used) { return NULL; }
+    if (!sl->mem) {
+        sl->mem = xalloc(cap);
+        if (!sl->mem) { return NULL; }
+        sl->cap = cap;
+    }
+    sl->used = true;
+    memset(sl->mem, 0, total);
+    return (tlsblk_t *)sl->mem;
+}
+
 static void *tls_calloc(size_t n, size_t sz) {
     if (sz && n > (SIZE_MAX - sizeof(tlsblk_t)) / sz) { return NULL; }
-    size_t want = n * sz;
-    tlsblk_t *b = xalloc(sizeof(tlsblk_t) + want);
-    if (!b) { return NULL; }
+    size_t want = n * sz, total = sizeof(tlsblk_t) + want;
+    tlsblk_t *b = NULL;
+    uint8_t kind = 0;
+    if (want >= MBEDTLS_SSL_IN_CONTENT_LEN) {
+        if ((b = slot_take(&s_slot_in, TLS_SLOT_IN, total))) { kind = 1; }
+    } else if (want >= MBEDTLS_SSL_OUT_CONTENT_LEN) {
+        if ((b = slot_take(&s_slot_out, TLS_SLOT_OUT, total))) { kind = 2; }
+    }
+    if (!b) { b = xalloc(total); }
+    if (!b) { s_tls_alloc_fails++; s_tls_fail_size = want; return NULL; }
     b->n = want;
+    b->kind = kind;
     s_tls_now += want;
     if (s_tls_now > s_tls_peak) { s_tls_peak = s_tls_now; }
     return b + 1;
@@ -167,6 +209,8 @@ static void tls_free(void *p) {
     if (!p) { return; }
     tlsblk_t *b = (tlsblk_t *)p - 1;
     s_tls_now -= b->n;
+    if (b->kind == 1) { s_slot_in.used = false; return; }     /* kept for the next session */
+    if (b->kind == 2) { s_slot_out.used = false; return; }
     xfree(b);
 }
 
@@ -182,25 +226,44 @@ mbedtls_ms_time_t mbedtls_ms_time(void) {
     return (mbedtls_ms_time_t)to_ms_since_boot(get_absolute_time());
 }
 
-/* The trusted-CA callback: the root whose subject is the child's issuer. */
-static int ca_cb(void *ctx, mbedtls_x509_crt const *child, mbedtls_x509_crt **candidates) {
-    (void)ctx;
-    *candidates = NULL;
-    for (size_t i = 0; i < CA_ROOTS_N; i++) {
-        mbedtls_x509_crt *c = mbedtls_calloc(1, sizeof *c);
-        if (!c) { return MBEDTLS_ERR_X509_ALLOC_FAILED; }
-        mbedtls_x509_crt_init(c);
-        /* _nocopy: the DER stays in flash, the parse points into it. */
-        if (mbedtls_x509_crt_parse_der_nocopy(c, ca_roots[i].der, ca_roots[i].len) == 0 &&
-            child->issuer_raw.len == c->subject_raw.len &&
-            memcmp(child->issuer_raw.p, c->subject_raw.p, c->subject_raw.len) == 0) {
-            *candidates = c;
-            return 0;
+/* The trusted roots, as a parsed chain -- but only while some handshake
+ * needs them. Parsed in place (_nocopy: the DER stays in flash), ~7 KB of
+ * arena for all seven, taken by the first handshake and freed when the last
+ * one is done.
+ *
+ * Not the trusted-CA callback this used to be: mbedTLS verifies a chain
+ * found through a callback in ONE call, never restarting it, and Google's
+ * all-ECDSA chain (P-256 leaf <- WE2 <- GTS Root R4, P-384) then held the
+ * loop ~1.35 s per handshake (mcusim, against the real server). With the
+ * roots as a chain the verification runs in the same bounded steps as the
+ * key exchange. The callback also turned an allocation failure while parsing
+ * a root into BADCERT_NOT_TRUSTED (0x8) -- a full arena looked like a
+ * certificate problem; a failure here is reported as the memory it is. */
+static mbedtls_x509_crt s_roots;
+static int s_roots_users;
+
+static int roots_ref(void) {
+    if (s_roots_users == 0) {
+        mbedtls_x509_crt_init(&s_roots);
+        for (size_t i = 0; i < CA_ROOTS_N; i++) {
+            int rc = mbedtls_x509_crt_parse_der_nocopy(&s_roots, ca_roots[i].der, ca_roots[i].len);
+            if (rc != 0) {
+                mbedtls_x509_crt_free(&s_roots);
+                return rc;
+            }
         }
-        mbedtls_x509_crt_free(c);
-        mbedtls_free(c);
+        mbedtls_ssl_conf_ca_chain(&s_conf, &s_roots, NULL);
     }
-    return 0;      /* none: verification then fails as "not trusted" */
+    s_roots_users++;
+    return 0;
+}
+
+static void roots_unref(void) {
+    if (s_roots_users <= 0) { return; }
+    if (--s_roots_users == 0) {
+        mbedtls_ssl_conf_ca_chain(&s_conf, NULL, NULL);
+        mbedtls_x509_crt_free(&s_roots);
+    }
 }
 
 /* Per-connection verify hook: `insecure` passes anything, and before the
@@ -213,19 +276,26 @@ static int verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flag
     return 0;
 }
 
-static bool tls_init(void) {
-    if (s_tls_ready) { return true; }
-    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
-    mbedtls_ssl_config_init(&s_conf);
-    mbedtls_ctr_drbg_init(&s_drbg);
-    if (mbedtls_ctr_drbg_seed(&s_drbg, entropy, NULL, (const unsigned char *)"btgw-httpc", 10) != 0) { return false; }
-    if (mbedtls_ssl_config_defaults(&s_conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+static bool conf_init(mbedtls_ssl_config *c, int authmode) {
+    mbedtls_ssl_config_init(c);
+    if (mbedtls_ssl_config_defaults(c, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                     MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
         return false;
     }
-    mbedtls_ssl_conf_rng(&s_conf, mbedtls_ctr_drbg_random, &s_drbg);
-    mbedtls_ssl_conf_authmode(&s_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_ca_cb(&s_conf, ca_cb, NULL);
+    mbedtls_ssl_conf_rng(c, mbedtls_ctr_drbg_random, &s_drbg);
+    mbedtls_ssl_conf_authmode(c, authmode);
+    return true;
+}
+
+static bool tls_init(void) {
+    if (s_tls_ready) { return true; }
+    mbedtls_platform_set_calloc_free(tls_calloc, tls_free);
+    mbedtls_ctr_drbg_init(&s_drbg);
+    if (mbedtls_ctr_drbg_seed(&s_drbg, entropy, NULL, (const unsigned char *)"btgw-httpc", 10) != 0) { return false; }
+    if (!conf_init(&s_conf, MBEDTLS_SSL_VERIFY_REQUIRED) ||
+        !conf_init(&s_conf_insecure, MBEDTLS_SSL_VERIFY_NONE)) {
+        return false;
+    }
     /* Bounded ECC steps: see MBEDTLS_ECP_RESTARTABLE in mbedtls_config.h. */
     mbedtls_ecp_set_max_ops(HTTPC_ECP_MAX_OPS);
     s_tls_ready = true;
@@ -293,6 +363,7 @@ static void conn_close(req_t *r, bool abort_it) {
     if (r->rx) { pbuf_free(r->rx); r->rx = NULL; r->rx_off = 0; }
     r->rx_closed = false;
 #if CONFIG_NET_HTTP_TLS
+    if (r->roots_held) { roots_unref(); r->roots_held = false; }
     if (r->ssl) {
         mbedtls_ssl_free(r->ssl);
         mbedtls_free(r->ssl);
@@ -515,10 +586,36 @@ static void recv_some(req_t *r) {
     }
 }
 
+#if CONFIG_NET_HTTP_TLS
+/* The handshake, one state at a time, so the trusted roots are parsed only
+ * for the state that verifies the server's chain and let go the moment it is
+ * done -- they never add to the key exchange's peak. Returns what
+ * mbedtls_ssl_handshake would: 0 when the handshake is over. */
+static int tls_step(req_t *r) {
+    for (int guard = 0; guard < 32; guard++) {
+        if (mbedtls_ssl_is_handshake_over(r->ssl)) { break; }
+        int st = r->ssl->MBEDTLS_PRIVATE(state);
+        if (st == MBEDTLS_SSL_SERVER_CERTIFICATE && !r->roots_held && !r->insecure) {
+            int rr = roots_ref();
+            if (rr != 0) { return MBEDTLS_ERR_SSL_ALLOC_FAILED; }
+            r->roots_held = true;
+        } else if (st > MBEDTLS_SSL_SERVER_CERTIFICATE && r->roots_held) {
+            roots_unref();
+            r->roots_held = false;
+        }
+        int rc = mbedtls_ssl_handshake_step(r->ssl);
+        if (rc != 0) { return rc; }
+    }
+    if (r->roots_held) { roots_unref(); r->roots_held = false; }
+    return mbedtls_ssl_is_handshake_over(r->ssl) ? 0 : MBEDTLS_ERR_SSL_WANT_READ;
+}
+#endif
+
 static void pump(req_t *r) {
 #if CONFIG_NET_HTTP_TLS
     if (r->state == HTTPC_TLS) {
-        int rc = mbedtls_ssl_handshake(r->ssl);
+        uint32_t fails_before = s_tls_alloc_fails;
+        int rc = tls_step(r);
         if (rc == MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS) { return; }     /* the next pass carries on */
         if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
             if (r->rx_closed) { finish(r, HTTPC_ETLS, "closed during the handshake"); }
@@ -526,7 +623,15 @@ static void pump(req_t *r) {
         }
         if (rc != 0) {
             uint32_t v = mbedtls_ssl_get_verify_result(r->ssl);
-            static char msg[64];
+            static char msg[80];
+            if (s_tls_alloc_fails != fails_before) {
+                /* Whatever mbedTLS made of it (a fatal X.509 error, a failed
+                 * key parse...), the cause is memory: say so. */
+                snprintf(msg, sizeof msg, "out of memory in the TLS handshake (wanted %u B)",
+                         (unsigned)s_tls_fail_size);
+                finish(r, HTTPC_ENOMEM, msg);
+                return;
+            }
             if (v && v != (uint32_t)-1) {
                 snprintf(msg, sizeof msg, "certificate not accepted (flags 0x%lx)", (unsigned long)v);
             } else {
@@ -535,6 +640,7 @@ static void pump(req_t *r) {
             finish(r, HTTPC_ETLS, msg);
             return;
         }
+        if (r->roots_held) { roots_unref(); r->roots_held = false; }   /* verified: let them go */
         r->state = HTTPC_SEND;
     }
 #endif
@@ -600,7 +706,7 @@ static err_t cb_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
         if (!r->ssl) { finish(r, HTTPC_ENOMEM, "out of memory for tls"); return ERR_OK; }
         mbedtls_ssl_init(r->ssl);
         s_stats.tls_now++;
-        if (mbedtls_ssl_setup(r->ssl, &s_conf) != 0 || mbedtls_ssl_set_hostname(r->ssl, r->u.host) != 0) {
+        if (mbedtls_ssl_setup(r->ssl, r->insecure ? &s_conf_insecure : &s_conf) != 0 || mbedtls_ssl_set_hostname(r->ssl, r->u.host) != 0) {
             finish(r, HTTPC_ENOMEM, "out of memory for tls");
             return ERR_OK;
         }
@@ -792,8 +898,11 @@ void httpc_reset(void) {
         if (s_req[i]) { s_req[i]->done_called = true; req_free(s_req[i]); }
     }
 #if CONFIG_NET_HTTP_TLS
-    /* The shared config and RNG hold no arena memory (they are static), so
-     * they survive; only the sessions went with the requests above. */
+    /* The shared configs and RNG hold no arena memory (they are static) and
+     * survive. The reserved record buffers were in the arena that is being
+     * reset: forget them, the next HTTPS request reserves them again. */
+    memset(&s_slot_in, 0, sizeof s_slot_in);
+    memset(&s_slot_out, 0, sizeof s_slot_out);
 #endif
 }
 
@@ -802,5 +911,6 @@ void httpc_stats(httpc_stats_t *out) {
 #if CONFIG_NET_HTTP_TLS
     out->tls_bytes_now = (uint32_t)s_tls_now;
     out->tls_peak_bytes = (uint32_t)s_tls_peak;
+    out->tls_reserved = (uint32_t)((s_slot_in.mem ? s_slot_in.cap : 0) + (s_slot_out.mem ? s_slot_out.cap : 0));
 #endif
 }

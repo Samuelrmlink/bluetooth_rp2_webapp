@@ -78,7 +78,7 @@ void httpc_tick(void);
 void httpc_reset(void);
 
 /* For sys/http stats: TLS sessions now, and the most arena any one used. */
-typedef struct { uint32_t tls_now, tls_peak_bytes, tls_bytes_now, requests, failures; } httpc_stats_t;
+typedef struct { uint32_t tls_now, tls_peak_bytes, tls_bytes_now, requests, failures, tls_reserved; } httpc_stats_t;
 void httpc_stats(httpc_stats_t *out);
 
 #endif

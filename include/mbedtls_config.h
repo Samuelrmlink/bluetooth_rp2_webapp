@@ -37,6 +37,11 @@
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_CTR_DRBG_C
 #define MBEDTLS_MD_C
+/* SHA-1 only so GlobalSign Root CA (R1), self-signed sha1WithRSA, parses at
+ * all -- without it the root was unusable. A trust anchor's own signature is
+ * never checked, and the default verification profile still refuses SHA-1
+ * signatures anywhere in a chain. */
+#define MBEDTLS_SHA1_C
 #define MBEDTLS_SHA224_C
 #define MBEDTLS_SHA256_C
 #define MBEDTLS_SHA256_SMALLER
@@ -77,7 +82,6 @@
 /* --- X.509 ------------------------------------------------------------------- */
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
-#define MBEDTLS_X509_TRUSTED_CERTIFICATE_CALLBACK   /* roots parsed one at a time, on demand */
 #define MBEDTLS_X509_MAX_INTERMEDIATE_CA 4
 
 /* --- TLS --------------------------------------------------------------------- */

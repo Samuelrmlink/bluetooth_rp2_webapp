@@ -170,24 +170,38 @@ the roots in `third_party/ca_roots/` (generated into `src/net/ca_roots.h` by
 | ISRG Root X1 | system trust store (Mozilla) | `96bcec06...bddf08c6` |
 | ISRG Root X2 | system trust store (Mozilla) | `69729b8e...3ccb1470` |
 
-Roots are found through mbedTLS's trusted-CA callback: one is parsed (in place,
-from flash) only when a chain names it as its issuer, so the set costs flash and
-no RAM between handshakes. Certificate validity dates are checked once the clock
-is set (`sys.time()` ~= nil, SNTP); before that they are not, rather than failing
-every handshake on a board that has not heard from a time server yet.
-`insecure = true` skips verification entirely.
+The roots are parsed (in place, from flash) only for the handshake state
+that verifies the server's chain -- ~9 KB for all seven, freed the moment that
+state is done -- and handed to mbedTLS as an ordinary CA chain, so the chain
+verification is restartable like the key exchange. (A trusted-CA callback
+would cost less, but mbedTLS verifies a callback's chain in one call, and
+Google's all-ECDSA chain then held the loop ~1.35 s per handshake.) SHA-1 is
+compiled in only so GlobalSign Root CA R1, self-signed with SHA-1, parses; the
+verification profile still refuses SHA-1 inside a chain. Certificate validity
+dates are checked once the clock is set (`sys.time()` ~= nil, SNTP); before
+that they are not, rather than failing every handshake on a board that has not
+heard from a time server yet. `insecure = true` skips verification entirely.
 
 **Memory.** Every request, its buffers and its TLS session come from the *top*
 of the Lua arena (`lheap_alloc_high`), so they sit above everything Lua packs
-from the bottom and go back as one block. A TLS session needs the full 16 KiB
-receive record buffer (servers -- Google's included -- ignore
-`max_fragment_length`) plus a 4 KiB send buffer:
+from the bottom. A TLS session needs a 16 KiB receive record buffer (servers --
+Google's included -- ignore `max_fragment_length`) and a 4 KiB send buffer,
+each one contiguous block, and a script that has run for a while leaves the
+first-fit arena in pieces (measured: 51 KB free, no 17 KB hole). So the first
+HTTPS request **reserves one pair, 22.5 KB, and keeps it for the life of the Lua
+VM** (`http.stats().tls_reserved`); a second session at the same time takes
+its buffers from the arena like everything else. And because memory a script
+has dropped is garbage until the collector runs -- which only Lua's own
+allocations trigger -- an HTTP/TLS allocation that fails runs a full
+collection and tries once more. A handshake that still runs out says
+`error = "nomem"` with what it wanted, never a certificate error.
 
 | | bytes |
 |---|---|
 | a session, after setup / steady after the handshake | 22.5 K / 22.7 K |
 | a session at its handshake peak (RSA-4096 root, RSA-2048 intermediate, ECDSA or RSA leaf) | ~37 K |
-| the same, on the device (mcusim, `http.stats().tls_peak_bytes`, a 2-certificate chain) | ~28.6 K |
+| on the device against firebasestorage.googleapis.com (mcusim, real network), `tls_peak_bytes` | 33.0 K |
+| reserved for the record buffers after the first HTTPS request, kept | 22.5 K |
 | an in-memory body | up to `max_body` (2 KiB chunks) |
 | response headers kept | at most 8 KiB |
 
@@ -276,10 +290,10 @@ the file's new contents.
   | | flash used | free in the 864 KiB slot | static RAM | C heap left |
   |---|---|---|---|---|
   | pico2w, before | 729 504 | 155 232 | 493 108 | 31 180 |
-  | pico2w, after | 777 012 | 107 724 | 496 664 | 27 624 |
+  | pico2w, after | 782 020 | 102 716 | 497 216 | 27 072 |
   | pico2w_sd, before | 806 496 | 78 240 | 512 084 | 12 204 |
-  | pico2w_sd, after | 854 748 | 29 988 | 516 720 | 7 568 |
-  | pico2w_sdspi, after | 848 356 | 36 380 | 515 552 | 8 736 |
+  | pico2w_sd, after | 859 764 | 24 972 | 517 272 | 7 016 |
+  | pico2w_sdspi, after | 853 372 | 31 364 | — | — |
 
   The feature itself is ~105 KB (mbedTLS ~60 KB at `-Os`, the client ~17 KB
   with the 7 KB of roots, `file`/`json` ~12 KB, DNS + SNTP ~5 KB); two
@@ -292,7 +306,7 @@ the file's new contents.
 * **C heap.** Everything that could live in the Lua arena does (TLS sessions,
   HTTP requests and bodies, LittleFS handle storage, the `/api/op` body, SD job
   requests); the static cost is the slot tables, one TLS configuration, the DNS
-  table and the extra FatFs file objects. The SD build's C heap is now ~7.6 KB.
+  table and the extra FatFs file objects. The SD build's C heap is now ~7.0 KB.
 
 ## Tests
 

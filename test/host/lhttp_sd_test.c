@@ -50,6 +50,7 @@ absolute_time_t get_absolute_time(void) { return s_now_us; }
 static int s_slot = -1;
 int lrt_current_slot(void) { return s_slot; }
 void lrt_yield_soon(void) {}
+size_t lrt_collect(void) { return 0; }
 /* The wait: the test's scheduler resumes the script every pass, so a wait is
  * just "come back next pass"; DELIVERED makes await look at the result. */
 lwait_reason_t lrt_block_current(uint32_t token, uint8_t link, uint32_t timeout_ms) {
