@@ -4,7 +4,7 @@
  *
  *   key exchange  ECDHE-ECDSA and ECDHE-RSA (no static RSA, no DHE, no PSK)
  *   ciphers       AES-128/256-GCM (SHA-256 / SHA-384 PRF)
- *   curves        P-256, P-384 (every root here and Google's chains), X25519
+ *   curves        P-256, P-384 (every root here and Google's chains)
  *   certificates  RSA (PKCS#1 v1.5, up to 4096 bits: GTS R1/R2, GlobalSign
  *                 R1, ISRG X1) and ECDSA (GTS R3/R4, ISRG X2)
  *
@@ -53,10 +53,19 @@
 #define MBEDTLS_ECP_C
 #define MBEDTLS_ECP_DP_SECP256R1_ENABLED
 #define MBEDTLS_ECP_DP_SECP384R1_ENABLED
-#define MBEDTLS_ECP_DP_CURVE25519_ENABLED
+/* No X25519: mbedTLS's Montgomery ladder is not restartable (below), so an
+ * X25519 key exchange is one long stall; every server that matters offers P-256. */
 #define MBEDTLS_ECP_NIST_OPTIM
 #define MBEDTLS_ECP_WINDOW_SIZE 2
 #define MBEDTLS_ECP_FIXED_POINT_OPTIM 0
+/* Restartable ECC: with an ECDHE-ECDSA suite the handshake's curve arithmetic
+ * (key generation, ECDH, ECDSA verification) runs in bounded steps
+ * (mbedtls_ecp_set_max_ops, httpc.c) and the handshake returns "in progress"
+ * between them, so the main loop keeps turning. Without it one handshake
+ * call held the loop for ~1 s (measured in mcusim) -- USB, the radio and
+ * Bluetooth with it. ECDHE-RSA suites do not get this (mbedTLS restarts only
+ * the ECDSA flow), which is one reason ECDSA suites are offered first. */
+#define MBEDTLS_ECP_RESTARTABLE
 #define MBEDTLS_ECDH_C
 #define MBEDTLS_ECDSA_C
 #define MBEDTLS_ASN1_PARSE_C

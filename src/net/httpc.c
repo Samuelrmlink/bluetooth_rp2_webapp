@@ -36,6 +36,7 @@
 #include "mbedtls/ssl.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/x509_crt.h"
+#include "mbedtls/ecp.h"
 #include "mbedtls/platform.h"
 #include "pico/rand.h"
 #include "net/ca_roots.h"
@@ -43,7 +44,11 @@
 
 #include "net/sntp_time.h"
 
-#define RX_PIECE 512           /* bytes moved into the parser per step */
+#define RX_PIECE 512
+/* Basic ECC operations per handshake step (mbedtls_ecp_set_max_ops). */
+#ifndef HTTPC_ECP_MAX_OPS
+#define HTTPC_ECP_MAX_OPS 600
+#endif          /* bytes moved into the parser per step */
 #define LOC_MAX  1024          /* the longest Location followed */
 
 typedef struct req {
@@ -221,6 +226,8 @@ static bool tls_init(void) {
     mbedtls_ssl_conf_rng(&s_conf, mbedtls_ctr_drbg_random, &s_drbg);
     mbedtls_ssl_conf_authmode(&s_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     mbedtls_ssl_conf_ca_cb(&s_conf, ca_cb, NULL);
+    /* Bounded ECC steps: see MBEDTLS_ECP_RESTARTABLE in mbedtls_config.h. */
+    mbedtls_ecp_set_max_ops(HTTPC_ECP_MAX_OPS);
     s_tls_ready = true;
     return true;
 }
@@ -512,6 +519,7 @@ static void pump(req_t *r) {
 #if CONFIG_NET_HTTP_TLS
     if (r->state == HTTPC_TLS) {
         int rc = mbedtls_ssl_handshake(r->ssl);
+        if (rc == MBEDTLS_ERR_SSL_CRYPTO_IN_PROGRESS) { return; }     /* the next pass carries on */
         if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
             if (r->rx_closed) { finish(r, HTTPC_ETLS, "closed during the handshake"); }
             return;
