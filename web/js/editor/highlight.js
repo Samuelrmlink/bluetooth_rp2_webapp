@@ -18,7 +18,8 @@ const LUA_KW = new Set(('and break do else elseif end for function goto if in lo
 const LUA_LIT = new Set(['nil', 'true', 'false']);
 // The gateway's own bindings and the Lua builtins scripts actually use: a
 // hint that a name is provided, not an exhaustive list.
-const LUA_LIB = new Set(('sys bt bytes crypto ops log require print pairs ipairs next type ' +
+const LUA_LIB = new Set(('sys bt bytes crypto ops log bus mdns net gatt_server file http json ' +
+  'frame tlv require print pairs ipairs next type ' +
   'tostring tonumber select error assert pcall xpcall setmetatable getmetatable rawget rawset ' +
   'string table math coroutine utf8 os').split(' '));
 
