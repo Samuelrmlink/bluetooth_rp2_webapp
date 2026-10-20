@@ -61,6 +61,7 @@ add_executable(btgw
     src/fs/littlefs/lfs_util.c
     src/config/config.c
     src/util/crumb.c
+    src/util/libc_slim.c
 )
 
 target_include_directories(btgw PRIVATE
@@ -173,6 +174,8 @@ if(CONFIG_LUA_ENABLE)
     add_subdirectory(third_party/lua)
     target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lheap.c src/lua/lwait.c src/lua/ljson.c src/lua/lbind.c src/lua/lops.c
         src/lua/lfile.c src/lua/lfile_path.c)
+    # The file module is bound by flash and card speed, not by its own code.
+    set_property(SOURCE src/lua/lfile.c src/lua/lfile_path.c APPEND PROPERTY COMPILE_OPTIONS -Os)
     if(CONFIG_PROTO_ANKER)
         target_sources(btgw PRIVATE src/lua/lbind_proto.c)
     endif()
@@ -181,6 +184,30 @@ endif()
 
 if(CONFIG_NET_WIFI)
     target_sources(btgw PRIVATE src/net/wifi.c src/net/wifi_ops.c)
+endif()
+# Wall-clock time (sys.time, TLS dates). sntp_time.c is always built: with
+# SNTP off it just reports "no time".
+target_sources(btgw PRIVATE src/net/sntp_time.c)
+if(CONFIG_NET_SNTP)
+    target_link_libraries(btgw pico_lwip_sntp)
+endif()
+# The Lua HTTP client (src/net/httpc.c, src/lua/lhttp.c) and, for https://,
+# mbedTLS configured by include/mbedtls_config.h. mbedTLS is compiled -Os:
+# it is the largest thing added, the firmware slot is 864 KiB, and none of
+# it is on a hot path a script can feel (a handshake is dominated by the
+# elliptic-curve and RSA arithmetic, which -Os barely slows).
+if(CONFIG_NET_HTTP_CLIENT)
+    target_sources(btgw PRIVATE src/net/httpc.c src/net/httpc_parse.c src/lua/lhttp.c)
+    # Not on any hot path either: the client moves at most a few hundred KB/s.
+    set_property(SOURCE src/net/httpc.c src/net/httpc_parse.c src/lua/lhttp.c
+                 APPEND PROPERTY COMPILE_OPTIONS -Os)
+    if(CONFIG_NET_HTTP_TLS)
+        target_link_libraries(btgw pico_mbedtls)
+        foreach(_lib crypto x509 tls)
+            get_target_property(_srcs pico_mbedtls_${_lib} INTERFACE_SOURCES)
+            set_property(SOURCE ${_srcs} APPEND PROPERTY COMPILE_OPTIONS -Os)
+        endforeach()
+    endif()
 endif()
 if(CONFIG_NET_WIREGUARD)
     # Vendored from smartalock/wireguard-lwip; see third_party/wireguard-lwip/
@@ -301,5 +328,25 @@ pico_enable_stdio_usb(btgw 0)
 # PICO_FLASH_SIZE_BYTES and would then stop hardware_flash writing past it.
 pico_add_linker_script_override_path(btgw ${CMAKE_CURRENT_LIST_DIR}/linker
     FILES pico_flash_region.ld)
+
+# Flash, measured: the SD build's slot is 864 KiB and HTTPS (mbedTLS) took
+# most of what was left. BTstack (~105 KB at -O3) and FatFs (~27 KB) go -Os:
+# both are protocol/bookkeeping code bound by the radio and the card, not by
+# the CPU (the card worker yields every ~2 ms regardless, and BTstack's hot
+# loop is waiting on HCI). Measured on the SD build: ~45 KB.
+foreach(_lib pico_btstack_base pico_btstack_ble pico_btstack_cyw43 pico_btstack_flash_bank)
+    if(TARGET ${_lib})
+        get_target_property(_srcs ${_lib} INTERFACE_SOURCES)
+        # ...except its crypto: micro-ecc is also Lua's crypto.ecdh (a P-256
+        # handshake step is ~41 ms already) and rijndael its AES.
+        list(FILTER _srcs EXCLUDE REGEX "micro-ecc|rijndael")
+        if(_srcs)
+            set_property(SOURCE ${_srcs} APPEND PROPERTY COMPILE_OPTIONS -Os)
+        endif()
+    endif()
+endforeach()
+if(CONFIG_SD)
+    set_property(SOURCE third_party/fatfs/ff.c third_party/fatfs/ffunicode.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+endif()
 
 pico_add_extra_outputs(btgw)

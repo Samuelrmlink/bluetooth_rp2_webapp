@@ -679,6 +679,14 @@ def t_lfile_path():
     return _host_c("lfile_path", ["test/host/lfile_path_test.c", "src/lua/lfile_path.c"],
                    "btgw_lfile_path", defs="")
 
+def t_httpc_parse():
+    """The HTTP client's response parser (Content-Length, chunked with
+    extensions and trailers, read-until-close, 1xx, HEAD/204, every error),
+    each response fed whole, byte by byte and split at every offset; and URL
+    parsing / redirect Location resolution."""
+    return _host_c("httpc_parse", ["test/host/httpc_parse_test.c", "src/net/httpc_parse.c"],
+                   "btgw_httpc_parse", defs="")
+
 def t_ca_roots():
     """The HTTP client's embedded roots match the pinned SHA-256 fingerprints
     and src/net/ca_roots.h is what the PEMs generate."""
@@ -1158,6 +1166,7 @@ def main():
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "json.decode: types, escapes, depth, malformed, bounds", t_lua_json_decode)
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
+    step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)
     step(0, "HTTPS roots match their pinned fingerprints", t_ca_roots)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)

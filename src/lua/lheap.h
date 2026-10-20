@@ -33,6 +33,9 @@ void  lheap_init(void);
  * lheap_realloc, which is the lua_Alloc shape. */
 void *lheap_alloc(size_t want);
 void  lheap_free(void *p);
+/* The same, but from the top of the arena (see lheap.c): for long-lived C
+ * allocations made on Lua's behalf. Freed with lheap_free. Not zeroed. */
+void *lheap_alloc_high(size_t want);
 
 /*
  * The allocator Lua sees, minus the unused `ud`. Three rules from Lua's

@@ -8,6 +8,7 @@
 
 #include "lua/lrt.h"
 #include "lua/lbind.h"
+#include "lua/lhttp.h"
 #include "fs/fs.h"
 #include "util/inflate.h"
 #include "api/api.h"
@@ -1253,6 +1254,9 @@ void lrt_tick(void) {
     }
     cache_tick();
     lbind_pairing_pump();
+#if CONFIG_NET_HTTP_CLIENT
+    lhttp_tick();
+#endif
 
     /* The watchdog half of the wait contract. A coroutine blocked on an event
      * that never arrives is exactly as stuck as one blocked forever, and

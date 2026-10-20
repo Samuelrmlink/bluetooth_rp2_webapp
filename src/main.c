@@ -45,6 +45,7 @@
 #include "net/wg.h"
 #include "net/uplink.h"
 #include "net/fwd.h"
+#include "net/sntp_time.h"
 #if CONFIG_NET_WIFI
 #include "net/wifi.h"
 #if CONFIG_OTA
@@ -162,6 +163,10 @@ int main(void) {
 #endif
 #if CONFIG_NET_FORWARD
     fwd_init();
+#endif
+#if CONFIG_NET_SNTP
+    /* Wall-clock time for sys.time() and TLS dates; it waits for a route. */
+    sntp_time_init();
 #endif
 
 #if CONFIG_SD

@@ -38,6 +38,7 @@
 #include "lua/lfile.h"
 #include "lua/lfile_path.h"
 #include "lua/lrt.h"
+#include "lua/lheap.h"
 #include "pico/time.h"
 
 #if CONFIG_SD
@@ -60,6 +61,7 @@ typedef struct {
     int      h;            /* fs pool handle, or SD job-table file */
     uint32_t gen;          /* matches the userdata; a closed slot's old handles go stale */
     uint64_t pos, size;    /* SD: as the worker last reported */
+    void    *mem;          /* LittleFS: the handle's storage (fs_file_mem), top of the arena */
 } lf_t;
 
 typedef struct { int slot; uint32_t gen; } lf_ud;
@@ -135,6 +137,8 @@ static void close_now(lf_t *f) {
     if (!f->used) { return; }
     if (f->vol == LFILE_LFS) {
         fs_fclose(f->h);
+        lheap_free(f->mem);
+        f->mem = NULL;
     }
 #if CONFIG_SD
     else {
@@ -409,14 +413,19 @@ static int l_open(lua_State *L) {
         if (m == FS_O_READ && !fs_stat(rel, NULL)) {
             return fail(L, fs_is_dir(rel) ? "badpath" : "enoent");
         }
-        int h = fs_fopen(rel, m);
-        if (h < 0) { return fail(L, lfs_code(h)); }
+        void *mem = lheap_alloc_high(fs_file_mem());
+        if (!mem) { return fail(L, "nohandle"); }
+        int h = fs_fopen(rel, m, mem);
+        if (h < 0) { lheap_free(mem); return fail(L, lfs_code(h)); }
         int32_t sz = fs_fsize(h);
         int32_t at = fs_ftell(h);
-        if (new_handle(L, LFILE_LFS, h, sz < 0 ? 0 : (uint64_t)sz, at < 0 ? 0 : (uint64_t)at) < 0) {
+        int slot = new_handle(L, LFILE_LFS, h, sz < 0 ? 0 : (uint64_t)sz, at < 0 ? 0 : (uint64_t)at);
+        if (slot < 0) {
             fs_fclose(h);
+            lheap_free(mem);
             return fail(L, "nohandle");
         }
+        s_h[slot].mem = mem;
         return 1;
     }
 #if CONFIG_SD
@@ -555,6 +564,8 @@ static int l_close(lua_State *L) {
     if (!f) { lua_pushboolean(L, 1); return 1; }     /* already closed: idempotent */
     if (f->vol == LFILE_LFS) {
         int r = fs_fclose(f->h);
+        lheap_free(f->mem);
+        f->mem = NULL;
         f->used = false;
         if (r < 0) { return fail(L, lfs_code(r)); }
         lua_pushboolean(L, 1);

@@ -60,15 +60,25 @@
  * share it by binding to their own addresses instead -- see dhcpserver.c. */
 #define ETHARP_SUPPORT_STATIC_ENTRIES 1
 #define DHCP_OPTIONS_LEN            312
-/* DNS is only needed to reach an ntfy server or MQTT broker by name; the
-   device itself is only ever addressed by IP or mDNS. Costs a 4-entry table
-   and a UDP pcb. */
-#if 0
+/* DNS for the Lua HTTP client (src/net/httpc.c) and SNTP. Servers come
+   from DHCP (Wi-Fi, Ethernet); uplink.c falls back to the active uplink's
+   gateway when DHCP named none (USB-NCM). A 4-entry table and a UDP pcb. */
+#if CONFIG_NET_HTTP_CLIENT || CONFIG_NET_SNTP
 #define LWIP_DNS                    1
 #define DNS_TABLE_SIZE              4
-#define DNS_MAX_NAME_LENGTH         96
+#define DNS_MAX_NAME_LENGTH         96   /* firebasestorage.googleapis.com is 30 */
+#define DNS_MAX_SERVERS             2
 #else
 #define LWIP_DNS                    0
+#endif
+/* SNTP (src/net/sntp_time.c): sys.time() and TLS certificate dates. */
+#if CONFIG_NET_SNTP
+#define SNTP_SERVER_DNS             1
+#define SNTP_MAX_SERVERS            1
+#define SNTP_UPDATE_DELAY           3600000
+#include <stdint.h>
+void sntp_time_set_us(uint32_t sec, uint32_t us);
+#define SNTP_SET_SYSTEM_TIME_US(sec, us) sntp_time_set_us((uint32_t)(sec), (uint32_t)(us))
 #endif
 #define LWIP_TCP_KEEPALIVE          1
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
@@ -175,7 +185,9 @@ struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr
    a board without a debugger. It reproduced on fw 1.97. ~16 B each. */
 #define MDNS_TIMEOUTS_PER_NETIF     7
 #define MDNS_TIMEOUT_NETIFS         4
-#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8 + \
+/* +2: SNTP's poll/retry timer and DNS's (DNS is in the internal count, the
+   SNTP app is not). */
+#define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8 + 2 + \
                                      MDNS_TIMEOUT_NETIFS * MDNS_TIMEOUTS_PER_NETIF)
 
 #endif

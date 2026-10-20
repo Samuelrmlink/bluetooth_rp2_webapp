@@ -106,8 +106,8 @@ void fs_on_change(fs_change_fn fn);
  * bytecode cache and sys.secret_put share: a script holding a file open must
  * never make an upload fail, and the other way round.
  *
- * Each handle has its own static cache buffer (lfs_file_opencfg), so opening
- * one never touches the C heap. Opening a file for writing that anything else
+ * Each handle has its own cache buffer (lfs_file_opencfg), in memory the
+ * caller supplies, so opening one never touches the C heap. Opening a file for writing that anything else
  * has open (a pool handle, the write slot, a reader), or opening for reading a
  * file a pool handle is writing, is refused with FS_ERR_BUSY: LittleFS keeps
  * two handles on one file coherent only in narrow cases, and an upload that
@@ -120,7 +120,10 @@ void fs_on_change(fs_change_fn fn);
 #define FS_ERR_NOHANDLE (-1000)
 #define FS_ERR_TOOLARGE (-1001)
 enum { FS_O_READ = 0, FS_O_WRITE = 1, FS_O_APPEND = 2 };
-int fs_fopen(const char *name, int mode);
+/* `mem` is fs_file_mem() bytes the caller owns and keeps until fs_fclose()
+ * returns (or until fs_fopen fails): free it then. */
+size_t fs_file_mem(void);
+int fs_fopen(const char *name, int mode, void *mem);
 int fs_fread(int h, void *buf, size_t n);
 /* Refuses (FS_ERR_TOOLARGE) a write that would take the file past
  * FS_FILE_MAX; nothing is written then. */

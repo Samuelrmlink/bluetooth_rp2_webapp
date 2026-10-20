@@ -94,6 +94,41 @@ void *lheap_alloc(size_t want) {
     return NULL;
 }
 
+/* Last fit, carved from the TOP of the highest free block that fits. For
+ * memory the C side holds on Lua's behalf for a while (an HTTP request, a TLS
+ * session's 16 KiB record buffer): first fit would put it in the lowest hole,
+ * in the middle of the Lua objects, and leave the arena in pieces when it
+ * goes. From the top it sits above everything Lua packs from the bottom, and
+ * its free coalesces back into the big block above Lua's high-water mark. */
+void *lheap_alloc_high(size_t want) {
+    want = ALIGN8(want);
+    blk_t *best = NULL;
+    for (blk_t *b = heap_head; b; b = b->next) {
+        if (b->free && b->size >= want) { best = b; }
+    }
+    if (!best) {
+        fail_last = want;
+        fail_count++;
+        return NULL;
+    }
+    blk_t *got = best;
+    if (best->size >= want + HDR + MIN_SPLIT) {
+        /* Split: best keeps the bottom, a new live block takes the top. */
+        blk_t *n = (blk_t *)((uint8_t *)best + HDR + (best->size - want - HDR));
+        n->size = want;
+        n->next = best->next;
+        n->free = false;
+        best->size -= want + HDR;
+        best->next = n;
+        got = n;
+    } else {
+        got->free = false;
+    }
+    heap_used += got->size;
+    if (heap_used > heap_peak) { heap_peak = heap_used; }
+    return (uint8_t *)got + HDR;
+}
+
 void lheap_walk(lheap_walk_fn cb, void *ctx) {
     for (blk_t *b = heap_head; b; b = b->next) {
         cb((uint8_t *)b + HDR, b->size, b->free, ctx);

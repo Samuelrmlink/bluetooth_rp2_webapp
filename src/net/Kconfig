@@ -50,6 +50,38 @@ config NET_HOSTNAME
       letters, digits and hyphens, so the underscores in "bluetooth_rp2_webapp"
       become hyphens. Reachable as <name>.local once mDNS is up.
 
+config NET_HTTP_CLIENT
+    bool "HTTP client for Lua scripts (http.start)"
+    depends on LUA_ENABLE
+    default y
+    help
+      An HTTP/1.1 client on raw lwIP TCP (src/net/httpc.c) for the Lua
+      `http` module: DNS, Content-Length and chunked bodies, redirects,
+      streaming into a LittleFS or SD file, timeouts, several requests at
+      once. Turns lwIP's DNS client on. Requests and their buffers live in
+      the Lua arena, not in static RAM.
+
+config NET_HTTP_TLS
+    bool "HTTPS (mbedTLS, TLS 1.2 client)"
+    depends on NET_HTTP_CLIENT
+    default y
+    help
+      https:// for the HTTP client: mbedTLS cut down to a TLS 1.2 client
+      (ECDHE with AES-GCM; RSA and ECDSA certificates; include/
+      mbedtls_config.h), verified against an embedded set of roots
+      (src/net/ca_roots.h: Google Trust Services R1-R4, GlobalSign R1,
+      ISRG X1/X2). A session takes ~35 KB of the Lua arena at its peak (a
+      16 KiB receive record buffer is unavoidable: servers ignore
+      max_fragment_length) and is freed when the request ends. Costs about
+      70 KB of flash.
+
+config NET_SNTP
+    bool "SNTP wall-clock time (sys.time)"
+    default y
+    help
+      lwIP's SNTP client polling pool.ntp.org (or cfg/ntp.json's "server")
+      hourly. Gives Lua sys.time() and lets TLS check certificate dates.
+
 config NET_WIREGUARD
     bool "WireGuard tunnel (an additional route, never the only one)"
     default n

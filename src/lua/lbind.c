@@ -31,6 +31,8 @@
 #include "net/ws.h"
 #include "lua/ljson.h"
 #include "lua/lfile.h"
+#include "lua/lhttp.h"
+#include "net/sntp_time.h"
 #include "pico/time.h"
 #include "autoconf.h"
 
@@ -163,6 +165,9 @@ int lbind_release_ops(int slot) {
     lbind_release_net(slot);
     /* Its open files, and a storage job it was waiting on. */
     lfile_release(slot);
+#if CONFIG_NET_HTTP_CLIENT
+    lhttp_release(slot);
+#endif
     for (int i = 0; i < n_lua_ops; ) {
         if (!(lua_ops[i].owners & bit)) { i++; continue; }
         lua_ops[i].owners &= ~bit;
@@ -449,6 +454,20 @@ static int l_sys_unload(lua_State *L) {
 /* sys.collect() -- full collection, returns the live heap size. */
 static int l_sys_collect(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)lrt_collect());
+    return 1;
+}
+
+/* sys.time() -> Unix seconds once SNTP has set the clock, else nil. */
+static int l_sys_time(lua_State *L) {
+    if (!sntp_time_valid()) { lua_pushnil(L); return 1; }
+    lua_pushinteger(L, (lua_Integer)sntp_time_unix());
+    return 1;
+}
+
+/* sys.hostname() -> the mDNS / DHCP host name (mdns.hostname() without the
+ * setter): a gateway's identity among several. */
+static int l_sys_hostname(lua_State *L) {
+    lua_pushstring(L, mdns_hostname());
     return 1;
 }
 
@@ -1493,6 +1512,9 @@ void lbind_open_all(lua_State *L) {
     lua_pop(L, 1);
 
     lfile_open(L);
+#if CONFIG_NET_HTTP_CLIENT
+    lhttp_open(L);
+#endif
 
     static const luaL_Reg bus[] = { { "emit", l_bus_emit }, { NULL, NULL } };
     set_table(L, "bus", bus);
@@ -1506,6 +1528,7 @@ void lbind_open_all(lua_State *L) {
 
     static const luaL_Reg sys[] = {
         { "ms", l_sys_ms }, { "sleep", l_sys_sleep },
+        { "time", l_sys_time }, { "hostname", l_sys_hostname },
         { "secret", l_sys_secret },
         { "unload", l_sys_unload }, { "collect", l_sys_collect }, { NULL, NULL } };
     set_table(L, "sys", sys);
@@ -1553,6 +1576,9 @@ void lbind_reset(void) {
     fwd_release_all_owned();
 #endif
     lfile_reset();
+#if CONFIG_NET_HTTP_CLIENT
+    lhttp_reset();       /* before the arena is reset: TLS sessions live in it */
+#endif
     memset(lua_ops, 0, sizeof lua_ops);
     n_lua_ops = 0;
 #if CONFIG_BT_LE

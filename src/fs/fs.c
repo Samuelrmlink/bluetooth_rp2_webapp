@@ -45,17 +45,27 @@ static bool ropen[FS_READS];
 static uint32_t rhash[FS_READS];
 static uint32_t whash;
 
+/* A pool handle's bulk -- the LittleFS file, its cache, its name -- lives in
+ * memory the caller supplies (fs_file_mem() bytes, the Lua arena in
+ * practice): ~480 B a handle that the SD build's static RAM could not spare.
+ * Only the bookkeeping is static. */
+typedef struct {
+    lfs_file_t f;
+    struct lfs_file_config fcfg;
+    uint8_t buf[FLASH_PAGE_SIZE];
+    char name[FS_PATH_MAX + 1];
+} pool_mem_t;
+
 typedef struct {
     bool used;
     bool wr;
     bool dirty;
     uint32_t hash;
-    char name[FS_PATH_MAX + 1];
-    lfs_file_t f;
-    struct lfs_file_config fcfg;
-    uint8_t buf[FLASH_PAGE_SIZE];
+    pool_mem_t *m;
 } pool_file_t;
 static pool_file_t pool[FS_FILES];
+
+size_t fs_file_mem(void) { return sizeof(pool_mem_t); }
 
 static uint32_t name_hash(const char *s) {
     uint32_t h = 2166136261u;
@@ -550,7 +560,10 @@ int fs_read_seek(int h, size_t pos) {
 }
 
 /* --- the handle pool ------------------------------------------------------ */
-int fs_fopen(const char *name, int mode) {
+int fs_fopen(const char *name, int mode, void *mem) {
+    if (!mem) {
+        return LFS_ERR_NOMEM;
+    }
     if (!mounted || !fs_valid_path(name)) {
         return LFS_ERR_INVAL;
     }
@@ -569,8 +582,9 @@ int fs_fopen(const char *name, int mode) {
         return FS_ERR_NOHANDLE;
     }
     pool_file_t *p = &pool[h];
-    memset(&p->fcfg, 0, sizeof p->fcfg);
-    p->fcfg.buffer = p->buf;
+    p->m = (pool_mem_t *)mem;
+    memset(p->m, 0, sizeof *p->m);
+    p->m->fcfg.buffer = p->m->buf;
     int flags = LFS_O_RDONLY;
     if (mode == FS_O_WRITE) {
         flags = LFS_O_RDWR | LFS_O_CREAT | LFS_O_TRUNC;
@@ -580,7 +594,7 @@ int fs_fopen(const char *name, int mode) {
     if (wr) {
         ensure_parent_dirs(name);
     }
-    int err = lfs_file_opencfg(&lfs, &p->f, name, flags, &p->fcfg);
+    int err = lfs_file_opencfg(&lfs, &p->m->f, name, flags, &p->m->fcfg);
     if (err < 0) {
         return err;
     }
@@ -588,7 +602,7 @@ int fs_fopen(const char *name, int mode) {
     p->wr = wr;
     p->dirty = mode == FS_O_WRITE;      /* a truncation is a change */
     p->hash = name_hash(name);
-    snprintf(p->name, sizeof p->name, "%s", name);
+    snprintf(p->m->name, sizeof p->m->name, "%s", name);
     return h;
 }
 
@@ -599,19 +613,19 @@ static pool_file_t *pool_at(int h) {
 int fs_fread(int h, void *buf, size_t n) {
     pool_file_t *p = pool_at(h);
     if (!p) { return LFS_ERR_BADF; }
-    return (int)lfs_file_read(&lfs, &p->f, buf, (lfs_size_t)n);
+    return (int)lfs_file_read(&lfs, &p->m->f, buf, (lfs_size_t)n);
 }
 
 int fs_fwrite(int h, const void *buf, size_t n) {
     pool_file_t *p = pool_at(h);
     if (!p || !p->wr) { return LFS_ERR_BADF; }
     /* Append mode writes at the end whatever the position says. */
-    lfs_soff_t at = (p->f.flags & LFS_O_APPEND) ? lfs_file_size(&lfs, &p->f) : lfs_file_tell(&lfs, &p->f);
+    lfs_soff_t at = (p->m->f.flags & LFS_O_APPEND) ? lfs_file_size(&lfs, &p->m->f) : lfs_file_tell(&lfs, &p->m->f);
     if (at < 0) { return (int)at; }
     if ((uint32_t)at + n > FS_FILE_MAX) { return FS_ERR_TOOLARGE; }
     size_t off = 0;
     while (off < n) {
-        lfs_ssize_t w = lfs_file_write(&lfs, &p->f, (const uint8_t *)buf + off, (lfs_size_t)(n - off));
+        lfs_ssize_t w = lfs_file_write(&lfs, &p->m->f, (const uint8_t *)buf + off, (lfs_size_t)(n - off));
         if (w <= 0) { return w < 0 ? (int)w : LFS_ERR_IO; }
         off += (size_t)w;
     }
@@ -622,27 +636,28 @@ int fs_fwrite(int h, const void *buf, size_t n) {
 int fs_fseek(int h, uint32_t pos) {
     pool_file_t *p = pool_at(h);
     if (!p) { return LFS_ERR_BADF; }
-    lfs_soff_t r = lfs_file_seek(&lfs, &p->f, (lfs_soff_t)pos, LFS_SEEK_SET);
+    lfs_soff_t r = lfs_file_seek(&lfs, &p->m->f, (lfs_soff_t)pos, LFS_SEEK_SET);
     return r < 0 ? (int)r : 0;
 }
 
 int32_t fs_ftell(int h) {
     pool_file_t *p = pool_at(h);
-    return p ? (int32_t)lfs_file_tell(&lfs, &p->f) : LFS_ERR_BADF;
+    return p ? (int32_t)lfs_file_tell(&lfs, &p->m->f) : LFS_ERR_BADF;
 }
 
 int32_t fs_fsize(int h) {
     pool_file_t *p = pool_at(h);
-    return p ? (int32_t)lfs_file_size(&lfs, &p->f) : LFS_ERR_BADF;
+    return p ? (int32_t)lfs_file_size(&lfs, &p->m->f) : LFS_ERR_BADF;
 }
 
 int fs_fclose(int h) {
     pool_file_t *p = pool_at(h);
     if (!p) { return LFS_ERR_BADF; }
-    int err = lfs_file_close(&lfs, &p->f);
+    int err = lfs_file_close(&lfs, &p->m->f);
     bool dirty = p->dirty;
     p->used = false;
-    if (dirty && err >= 0) { changed(p->name); }
+    if (dirty && err >= 0) { changed(p->m->name); }
+    p->m = NULL;                 /* the caller frees it now */
     return err;
 }
 

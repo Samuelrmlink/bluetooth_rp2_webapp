@@ -245,8 +245,9 @@ static void t_fuzz(void) {
                                          : (size_t)((rng >> 12) % 200u) + 1u;
 
         if (!p[i]) {
-            /* Through realloc, with a type tag in osize, as Lua does. */
-            void *q = lheap_realloc(NULL, 4, n);
+            /* Through realloc, with a type tag in osize, as Lua does --
+             * and now and then from the top, as the HTTP client does. */
+            void *q = (op == 9) ? lheap_alloc_high(n) : lheap_realloc(NULL, 4, n);
             if (q) { p[i] = q; sz[i] = n; seed[i] = (unsigned)step;
                      paint(q, n, seed[i]); }
         } else if (op < 3) {
@@ -292,6 +293,34 @@ static void t_fuzz(void) {
     CHECK(s.blocks == 1, "the arena must coalesce back to one block");
 }
 
+/* lheap_alloc_high: from the top, below nothing Lua packs at the bottom, and
+ * back to one block when it goes. */
+static void t_alloc_high(void) {
+    current = "alloc from the top";
+    lheap_init();
+    void *lo = lheap_alloc(100);
+    void *hi = lheap_alloc_high(16384);
+    void *lo2 = lheap_alloc(200);
+    CHECK(lo && hi && lo2, "allocations succeed");
+    CHECK((uint8_t *)hi > (uint8_t *)lo2 && (uint8_t *)hi + 16384 == (uint8_t *)lheap_base() + lheap_capacity(),
+          "the high block ends at the end of the arena, above the low ones");
+    ck();
+    paint(hi, 16384, 7);
+    void *hi2 = lheap_alloc_high(4096);
+    CHECK((uint8_t *)hi2 + 4096 + lheap_header_size() == (uint8_t *)hi, "the next high block sits right under it");
+    lheap_free(hi);
+    ck();
+    void *hi3 = lheap_alloc_high(8000);
+    CHECK((uint8_t *)hi3 > (uint8_t *)hi2, "a freed top block is reused from the top");
+    lheap_free(hi2); lheap_free(hi3); lheap_free(lo); lheap_free(lo2);
+    ck();
+    lheap_stats_t st;
+    lheap_check(&st, NULL);
+    CHECK(st.blocks == 1 && lheap_used() == 0, "coalesces back to one block");
+    CHECK(lheap_alloc_high(lheap_capacity()) == NULL, "too large fails");
+    ck();
+}
+
 /*
  * The headline number: peak usage while a buffer grows the way Lua grows one.
  * The old allocator needed old+new resident at once, so doubling a 32 KB
@@ -333,6 +362,7 @@ int main(void) {
     t_null_ptr_osize_is_a_tag();
     t_payload_integrity();
     t_fuzz();
+    t_alloc_high();
     t_growth_peak();
     if (failures) {
         printf("heap_test: %d failure(s)\n", failures);

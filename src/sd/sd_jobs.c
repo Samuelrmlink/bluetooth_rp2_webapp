@@ -23,7 +23,9 @@ static struct {
     uint32_t gen;
     bool close_owed;
 } s_files[SDJ_FILES];
-static uint32_t s_gen;          /* ls_mount_count() when the table was last valid */
+static uint32_t s_gen;
+/* One scratch path for every parent-of computation: a job runs alone. */
+static char s_parent[SDJ_PATH_MAX + 1];          /* ls_mount_count() when the table was last valid */
 
 uint8_t *sdj_buf(void) { return s_buf; }
 
@@ -149,8 +151,8 @@ static bool stat_cb(const char *name, bool is_dir, uint64_t size, void *ctx) {
  * list the parent and find the name. */
 static int do_stat(const char *path, bool *is_dir, uint64_t *size) {
     if (!path[0]) { *is_dir = true; *size = 0; return LS_OK; }
-    static char parent[SDJ_PATH_MAX + 1];
-    snprintf(parent, sizeof parent, "%s", path);
+    char *parent = s_parent;
+    snprintf(parent, sizeof s_parent, "%s", path);
     char *slash = strrchr(parent, '/');
     const char *name = path;
     if (slash) { *slash = 0; name = path + (slash - parent) + 1; }
@@ -195,10 +197,9 @@ static void run_job(sdj_t *j) {
         for (int i = 0; i < SDJ_FILES; i++) { if (!s_files[i].f) { slot = i; break; } }
         if (slot < 0) { j->rc = LS_ENOMEM; return; }
         if (j->mode != LS_RD) {
-            static char parent[SDJ_PATH_MAX + 1];
-            snprintf(parent, sizeof parent, "%s", j->path);
-            char *slash = strrchr(parent, '/');
-            if (slash) { *slash = 0; mkdir_p(parent); }
+            snprintf(s_parent, sizeof s_parent, "%s", j->path);
+            char *slash = strrchr(s_parent, '/');
+            if (slash) { *slash = 0; mkdir_p(s_parent); }
         }
         ls_file *f = ls_open(j->path, j->mode);
         if (!f) {
@@ -248,10 +249,9 @@ static void run_job(sdj_t *j) {
     case SDJ_RENAME: {
         bool d = false; uint64_t sz = 0;
         if (do_stat(j->path2, &d, &sz) == LS_OK) { j->rc = LS_EEXIST; return; }
-        static char parent[SDJ_PATH_MAX + 1];
-        snprintf(parent, sizeof parent, "%s", j->path2);
-        char *slash = strrchr(parent, '/');
-        if (slash) { *slash = 0; mkdir_p(parent); }
+        snprintf(s_parent, sizeof s_parent, "%s", j->path2);
+        char *slash = strrchr(s_parent, '/');
+        if (slash) { *slash = 0; mkdir_p(s_parent); }
         j->rc = ls_rename(j->path, j->path2);
         return;
     }
