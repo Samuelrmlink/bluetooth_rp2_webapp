@@ -89,6 +89,7 @@ typedef struct req {
 #if CONFIG_NET_HTTP_TLS
     mbedtls_ssl_context *ssl;
     bool roots_held;           /* this handshake holds a reference on s_roots */
+    bool clock_ok;             /* the clock was set when this handshake began */
 #endif
 } req_t;
 
@@ -272,7 +273,11 @@ static int verify_cb(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flag
     (void)crt; (void)depth;
     req_t *r = ctx;
     if (r && r->insecure) { *flags = 0; return 0; }
-    if (!sntp_time_valid()) { *flags &= ~(uint32_t)(MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE); }
+    /* Judged by the clock as it was when the handshake BEGAN: verification
+     * runs over several loop passes, and SNTP setting the clock half way
+     * through left dates checked against 1970 and then not forgiven
+     * (BADCERT_FUTURE, 0x200, seen in mcusim). */
+    if (!r || !r->clock_ok) { *flags &= ~(uint32_t)(MBEDTLS_X509_BADCERT_EXPIRED | MBEDTLS_X509_BADCERT_FUTURE); }
     return 0;
 }
 
@@ -327,9 +332,17 @@ static size_t rx_take(req_t *r, uint8_t *dst, size_t cap) {
         got += n;
         r->rx_off += n;
         if (r->rx_off >= p->len) {
+            /* Unlink the first pbuf. The chain (pbuf_cat) owns the rest's
+             * reference, which now passes to r->rx as it stands -- taking
+             * another here leaked every pbuf consumed from the middle of a
+             * chain. Chains form when segments queue faster than the sink
+             * drains (an SD download under backpressure), so that drained
+             * PBUF_POOL and with it ALL receive, Wi-Fi and USB alike, while
+             * the loop ran on (mcusim, a 237 KB download to sd:/ stopped at
+             * 36 KB). */
             r->rx = p->next;
-            if (r->rx) { pbuf_ref(r->rx); }
             p->next = NULL;
+            p->tot_len = p->len;
             pbuf_free(p);
             r->rx_off = 0;
         }
@@ -710,6 +723,7 @@ static err_t cb_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
             finish(r, HTTPC_ENOMEM, "out of memory for tls");
             return ERR_OK;
         }
+        r->clock_ok = sntp_time_valid();
         mbedtls_ssl_set_verify(r->ssl, verify_cb, r);
         mbedtls_ssl_set_bio(r->ssl, r, bio_send, bio_recv, NULL);
         r->state = HTTPC_TLS;
