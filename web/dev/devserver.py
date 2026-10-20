@@ -333,7 +333,7 @@ def _sd_status():
     f = {k: v for k, v in sd["format"].items() if k != "t0"}
     out = {"ok": True, "present": present, "mounted": st == "ok", "state": st, "fs": sd["fs"] if st == "ok" else "-",
            "total": SD_BYTES - 20 * 1024 * 1024 if st == "ok" else 0, "free": SD_BYTES - 20 * 1024 * 1024 - used if st == "ok" else 0,
-           "bus": {"type": "sdio", "width": 4, "clock_khz": 21428},
+           "bus": {"type": "sdio", "width": 4, "clock_khz": 18750},
            "format": f, "card": card,
            "options": {"fat32": [4096, 8192, 16384, 32768, 65536],
                        "exfat": [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]},

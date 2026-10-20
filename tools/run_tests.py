@@ -169,6 +169,9 @@ def t_sd_guards():
     port = open(os.path.join(ROOT, "src/sd/sd_port_pico.c")).read()
     if "pins_reserve(" not in port:
         return False, "card detect is not reserved"
+    rc, pd = sh("grep -rn 'gpio_pull_down\\|gpio_set_pulls([^,]*, *[a-z]*, *true' src/sd 2>/dev/null")
+    if pd.strip():
+        return False, f"SD code enables a pull-down (RP2350-E9 on A2): {pd.split(chr(10))[0][:60]}"
     rc, out = sh("grep -rliE 'zuluscsi|rabbit hole computing|carlk3|no-OS-FatFS' src third_party 2>/dev/null")
     if out.strip():
         return False, f"GPL SDIO source in the tree: {out.split()[0]}"

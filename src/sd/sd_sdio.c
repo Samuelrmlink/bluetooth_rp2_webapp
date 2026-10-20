@@ -52,6 +52,8 @@
 #define ST_READY_FOR_DATA (1u << 8)
 #define ST_STATE(s)       (((s) >> 9) & 0xFu)
 #define STATE_TRAN 4u
+#define STATE_DATA 5u
+#define STATE_RCV  6u
 #define STATE_PRG  7u
 
 static sd_info_t *cur;            /* the card being identified / used */
@@ -180,11 +182,40 @@ static uint64_t block_crc(const uint8_t *buf) {
     return sd_crc16x4(buf, 512);
 }
 
+/* Until the card is back in the transfer state, ready for data (CMD13).
+ * A write is legal only there: a card still programming ignores CMD24/25
+ * (SD mode answers nothing to an illegal command). The error bits in these
+ * answers may belong to an EARLIER command -- an ignored one sets
+ * ILLEGAL_COMMAND for the next response, cleared on read -- so only the
+ * state decides here, and only a silent card is an error. */
+static int wait_tran(void) {
+    uint64_t t0 = sd_port_now_us();
+    for (;;) {
+        last_status = 0;
+        int e = command(13, (uint32_t)(cur ? cur->rca : 0) << 16, '1', NULL);
+        if (e == SD_ETIMEOUT) { return e; }
+        if (last_status && (last_status & ST_READY_FOR_DATA) && ST_STATE(last_status) == STATE_TRAN) {
+            return SD_OK;
+        }
+        /* Still in a data transfer we gave up on -- a CMD24 whose response
+         * was garbled, but which the card took (bench 2026-10-19: the card sat
+         * in "rcv" and ignored every write after) -- end it. */
+        if (last_status && (ST_STATE(last_status) == STATE_RCV || ST_STATE(last_status) == STATE_DATA)) {
+            sdio_hw_abort();
+            command(12, 0, '1', NULL);
+            sdio_hw_wait_busy(SD_BUSY_TIMEOUT_US);
+        }
+        if (sd_port_now_us() - t0 > SD_BUSY_TIMEOUT_US) { return SD_ETIMEOUT; }
+        sd_port_wait_step(t0);
+    }
+}
+
 /* Stop a multi-block transfer (or whatever the card was left doing). */
 static void stop_transmission(void) {
     sdio_hw_abort();
     command(12, 0, '1', NULL);
     wait_busy(SD_BUSY_TIMEOUT_US);
+    wait_tran();
 }
 
 /* One CMD17/CMD18 of at most SDIO_MAX_BLOCKS. */
@@ -194,7 +225,9 @@ static int read_run(uint32_t addr, uint8_t *buf, uint32_t count) {
     sdio_hw_read_arm(buf, count);                   /* before the command: see sdio_hw.h */
     int e = command(multi ? 18 : 17, addr, '1', NULL);
     if (e != SD_OK) {
-        sdio_hw_abort();
+        /* The card may have taken it although its answer was lost or garbled
+         * (and be sending data): stop it, or it ignores what comes next. */
+        stop_transmission();
         return e;
     }
     e = sdio_hw_read_wait(crcs, SD_READ_TIMEOUT_US);
@@ -221,7 +254,11 @@ static int sdio_write(uint32_t addr, const uint8_t *buf, uint32_t count) {
     bool multi = count > 1;
     if (multi) { app_command(23, count, '1', NULL); }   /* pre-erase hint; may be refused */
     int e = command(multi ? 25 : 24, addr, '1', NULL);
-    if (e != SD_OK) { return e; }
+    if (e != SD_OK) {
+        /* As for reads: a garbled answer may hide a card now waiting for data. */
+        stop_transmission();
+        return e;
+    }
     for (uint32_t i = 0; i < count && e == SD_OK; i++) {
         uint8_t token = 0;
         e = sdio_hw_write_block(buf, 512, block_crc(buf), &token);
@@ -233,20 +270,14 @@ static int sdio_write(uint32_t addr, const uint8_t *buf, uint32_t count) {
         buf += 512;
     }
     if (multi || e != SD_OK) { stop_transmission(); }
+    else { e = wait_tran(); }                       /* programmed, and ready for the next */
     return e;
 }
 
 static int sdio_sync(void) {
     int e = wait_busy(SD_BUSY_TIMEOUT_US);
     if (e != SD_OK) { return e; }
-    uint64_t t0 = sd_port_now_us();
-    for (;;) {
-        e = command(13, (uint32_t)(cur ? cur->rca : 0) << 16, '1', NULL);
-        if (e != SD_OK) { return e; }
-        if ((last_status & ST_READY_FOR_DATA) && ST_STATE(last_status) == STATE_TRAN) { return SD_OK; }
-        if (sd_port_now_us() - t0 > SD_BUSY_TIMEOUT_US) { return SD_ETIMEOUT; }
-        sd_port_wait_step(t0);
-    }
+    return wait_tran();
 }
 
 static const sd_bus_t bus = {

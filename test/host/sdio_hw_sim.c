@@ -102,6 +102,9 @@ int sdio_hw_write_block(const uint8_t *buf, uint32_t len, uint64_t crc, uint8_t 
 
 int sdio_hw_wait_busy(uint32_t timeout_us) {
     uint64_t t0 = sdsim_now_us();
+    /* A card that has not been clocked since its CRC token shows D0 high:
+     * a host that believes one look goes on while it is still programming. */
+    if (card->busy_hidden) { return SD_OK; }
     while (sdsim_busy(card)) {
         if (sdsim_now_us() - t0 >= timeout_us) { return SD_ETIMEOUT; }
         sdsim_advance_us(10);

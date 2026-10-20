@@ -63,6 +63,18 @@ config SD_SDIO_PIO
     range -1 2
     default -1
 
+config SD_SDIO_PULLUPS
+    bool "Internal pull-ups on CMD and D0-D3"
+    default y
+    help
+      The SD bus needs pull-ups (10-100 kOhm) on CMD and DAT0-3. Breakouts
+      such as Adafruit's SDIO board carry their own; the RP2350's internal
+      ones (~50 kOhm) in parallel are harmless, and the only pull-ups there
+      are on a board without them. Pull-ups only: the A2 silicon's
+      RP2350-E9 pad latch-up is a pull-DOWN problem (a floating input can
+      sit near 2 V that the weak internal pull-down cannot clear), so the
+      SD code never enables a pull-down.
+
 config SD_SDIO_KHZ
     int "Data clock after identification (kHz)"
     range 400 50000

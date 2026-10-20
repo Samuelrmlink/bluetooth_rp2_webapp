@@ -7,15 +7,41 @@ same API as km003c_rp2_webapp) and shown in the web editor as a top-level
 SPI bus layer. No board has the slot yet. The feature is compiled, and
 tested in simulation, so it is ready when one does.
 
-Status: every layer above the wire is tested on the host against a
-simulated card, on both buses (tier 0). The firmware builds themselves run
-in mcusim (`tools/run_tests.py --sim`): boot, the storage worker switching on
-the M33, `/api/sd` over the simulated USB network, and, with card detect
-held low and nothing on the bus, the PIO driver and the SPI driver (on SPI1
-after the absent W5500 let go of it) identifying, failing and retrying
-cleanly. **Not yet run against a card**: real data over the PIO/DMA wire
-waits for mcusim's SD card model (then the differential test against
-carlk3's driver, "Testing"), then hardware.
+Status: **SDIO works on hardware** (2026-10-19, Pico 2 W / RP2350 A2,
+Adafruit SDIO breakout, a 32 GB SDHC card, updated and driven over the
+WireGuard tunnel):
+
+| | |
+|---|---|
+| identification | CMD0 → ACMD6, 4-bit, 18.75 MHz |
+| format (MBR + FAT32, 32 KB clusters) | 6 s, no retries |
+| 4 MB random file up and down (tunnel / USB) | byte-identical |
+| mkdir, rename, list, delete (non-empty refused) | as specified |
+| bench, 10 MB on the card | write 2.0 MB/s, read 2.7 MB/s |
+| retries / CRC errors / timeouts | 0 / 0 / 0; longest worker slice 4.3 ms |
+
+SPI mode is tested on the host and in mcusim, not yet against a card. The
+differential test against carlk3's driver waits for mcusim's SD card model.
+
+What bring-up found (each now has a host test that fails without the fix):
+
+* **Busy is only visible while clocked.** One look at D0 right after the CRC
+  status token read "not busy"; the next CMD24 met a card still
+  programming, which ignores it (illegal outside the transfer state).
+  `sdio_hw_wait_busy` now clocks first, and every write ends with CMD13
+  until the card is back in the transfer state.
+* **A garbled answer can hide a command the card took.** A CMD24 whose
+  response failed its CRC left the card waiting for data ("rcv"), ignoring
+  every write after. A failed CMD17/18/24/25 now stops the transfer (CMD12),
+  and the CMD13 wait ends any transfer it finds still open.
+* **CMD was sampled too close to the edge.** At 7 PIO cycles a clock
+  (21.4 MHz) CMD was sampled at the rising edge, ~9 ns after the card's
+  latest output change; responses occasionally failed their CRC. It is now
+  sampled one cycle later, 8 cycles a clock (18.75 MHz).
+* A short from GP17 (CMD) to ground on the board, and a DET line that does
+  not reach GP22 on this breakout wiring: the build used for the test had
+  `SD_DETECT=-1`. With the stock `pico2w_sd` (detect on GP22, low = present)
+  the card reads "none" until DET is wired.
 
 ## Build
 
@@ -28,7 +54,8 @@ carlk3's driver, "Testing"), then hardware.
 | `SD_SDIO_CLK`, `SD_SDIO_CMD` | 16, 17 | any GPIOs (CLK is not tied to D0) |
 | `SD_SDIO_D0` | 18 | D1–D3 = D0+1..D0+3 (consecutive) |
 | `SD_SDIO_PIO` | −1 | −1 = whichever PIO has room |
-| `SD_SDIO_KHZ` | 25000 | requested; the clock is sys/7 at most (21.4 MHz at 150 MHz) |
+| `SD_SDIO_PULLUPS` | y | internal pull-ups on CMD and D0-D3 (pull-ups only: RP2350-E9 on A2 silicon is a pull-down problem) |
+| `SD_SDIO_KHZ` | 25000 | requested; the clock is sys/8 at most (18.75 MHz at 150 MHz) |
 | `SD_SPI_BUS`, `_SCK`, `_MOSI`, `_MISO` | 1, 14, 15, 8 | the W5500's SPI1, shared |
 | `SD_SPI_CS` | 9 | |
 | `SD_SPI_KHZ` | 25000 | |
@@ -73,9 +100,9 @@ Bluetooth or HTTP. It never runs inside `cyw43_wait.c` (tier-0 guard).
 Our own design (carlk3's driver is ZuluSCSI's GPL-3.0 code; pico-extras'
 `pico_sd_card` is a read-only prototype):
 
-* The **command** state machine is the only clock source: 7 PIO cycles per
-  SD clock (3 low, 4 high), CMD driven after the falling edge and sampled at
-  the rising one. A command is bits out then a response window clocked in;
+* The **command** state machine is the only clock source: 8 PIO cycles per
+  SD clock (3 low, 5 high), CMD driven after the falling edge and sampled
+  one PIO cycle after the rising one. A command is bits out then a response window clocked in;
   the start bit is found in software.
 * The **data** state machine never drives CLK: it follows it with absolute
   `wait gpio` (patched to the CLK pin at load). So CLK may be any pin, and the
@@ -139,7 +166,7 @@ Errors are `{"ok":false,"error":"…","card":"<state>"}` with `Connection: close
 ```json
 {"ok":true,"present":true,"mounted":true,"state":"ok","fs":"exfat",
  "total":62400000000,"free":62300000000,
- "bus":{"type":"sdio","width":4,"clock_khz":21428},
+ "bus":{"type":"sdio","width":4,"clock_khz":18750},
  "format":{"available":true,"state":"idle","phase":"","done":0,"total":0,"fs":"","cluster":0,"error":""},
  "card":{"bytes":62537072640,"type":"SDXC",
          "cid":{"mid":3,"oem":"SD","name":"SN64G","rev":"8.0","serial":"0x1a2b3c4d","date":"2024-05"}},

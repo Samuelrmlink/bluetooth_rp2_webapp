@@ -119,6 +119,31 @@ static void scenarios(void) {
     pattern(buf, 512, 5);
     CHECK(sd_card_write(300, buf, 1) == SD_OK && !memcmp(card.img + 300 * 512, buf, 512), "a write error is retried");
 
+    if (!spi) {
+        /* A card whose busy a host can miss (one look at D0, unclocked): the
+         * next write must still wait for the transfer state (CMD13), or the
+         * card ignores it as illegal while programming. */
+        card.busy_hidden = true;
+        card.write_busy_us = 5000;
+        pattern(buf, 512, 41);
+        uint32_t wr0 = sd_card_stats()->write_retries;
+        CHECK(sd_card_write(500, buf, 1) == SD_OK && sd_card_write(501, buf, 1) == SD_OK &&
+              !memcmp(card.img + 501 * 512, buf, 512), "back-to-back writes wait out a busy D0 did not show");
+        CHECK(sd_card_stats()->write_retries == wr0, "... without needing a retry (the retry hid it)");
+        /* A CMD24 the card took but whose answer arrived garbled: the card
+         * waits for data; it must be stopped, or every later write is ignored. */
+        card.garble_resp_cmd = 24;
+        CHECK(sd_card_write(502, buf, 1) == SD_OK, "a garbled CMD24 answer is recovered (retry)");
+        pattern(buf, 512, 43);
+        CHECK(sd_card_write(503, buf, 1) == SD_OK && sd_card_write(504, buf, 1) == SD_OK &&
+              !memcmp(card.img + 504 * 512, buf, 512), "and later writes are not ignored");
+        card.garble_resp_cmd = 17;
+        CHECK(sd_card_read(503, back, 1) == SD_OK && !memcmp(back, card.img + 503 * 512, 512),
+              "a garbled CMD17 answer is recovered too");
+        card.busy_hidden = false;
+        card.write_busy_us = 300;
+    }
+
     card.write_busy_us = 1500000;                       /* a card garbage-collecting */
     other_turns = 0;
     CHECK(sd_card_write(400, buf, 1) == SD_OK && sd_card_sync() == SD_OK, "a 1.5 s write busy is waited out");

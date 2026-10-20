@@ -112,7 +112,7 @@ test('Settings › SD card: status, format with confirmation and progress, bench
   const st = page.locator('.sdc-status');
   await expect(st).toContainText('ready');
   await expect(st).toContainText('SDHC · 31.9 GB');
-  await expect(st).toContainText('SDIO 4-bit · 21.4 MHz');
+  await expect(st).toContainText('SDIO 4-bit · 18.8 MHz');
   await expect(page.locator('#sd-fs')).toHaveValue('fat32');            // the card's default
   await expect(page.locator('#sd-cluster')).toHaveValue('32768');
   await page.locator('#sd-fs').selectOption('exfat');

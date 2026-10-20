@@ -8,8 +8,11 @@
 ; (a jmp to a routine) and arguments through the TX FIFO, 16 bits per FIFO
 ; word (autopull and autopush at 16, shifting left: MSB first).
 ;
-; Clock: 7 PIO cycles per SD clock (3 low, 4 high), so f = sys / (7 * clkdiv).
-; CMD changes right after the falling edge and is sampled at the rising edge.
+; Clock: 8 PIO cycles per SD clock (3 low, 5 high), so f = sys / (8 * clkdiv).
+; CMD changes right after the falling edge; it is sampled one PIO cycle after
+; the rising edge. (Sampled AT the edge -- 7 cycles a clock -- a card that
+; drives CMD up to 14 ns after its falling edge left ~9 ns at 21.4 MHz, and
+; one response in a few thousand failed its CRC on the bench, 2026-10-19.)
 ; The data machine sees an edge 2 cycles late (input synchroniser): it SAMPLES
 ; on the cycle after it sees the rising edge (= the edge) and DRIVES on that
 ; same cycle -- a full half period before the card samples at the next rising
@@ -30,7 +33,7 @@ public xfer:
     out x, 16
 xl:
     out pins, 1         side 0 [2]
-    nop                 side 1 [1]
+    nop                 side 1 [2]
     in pins, 1
     jmp x-- xl
     jmp top
@@ -41,7 +44,7 @@ public clk:
     out x, 16
 cl:
     nop                 side 0 [2]
-    jmp x-- cl          side 1 [3]
+    jmp x-- cl          side 1 [4]
     jmp clk
 
 

@@ -35,7 +35,7 @@
 #include "io/pins.h"
 #endif
 
-#define CLK_PER_BIT 7u                  /* PIO cycles per SD clock (sdio.pio) */
+#define CLK_PER_BIT 8u                  /* PIO cycles per SD clock (sdio.pio) */
 #define BLOCK_NIBBLES (1024u + 16u)     /* 512 data bytes + 4 x CRC16, 4-bit */
 
 static sdio_pins_t P;
@@ -175,11 +175,17 @@ bool sdio_hw_init(const sdio_pins_t *pins) {
 
     pio_gpio_init(pc, (uint)P.clk);
     pio_gpio_init(pc, (uint)P.cmd);
+    for (int i = 0; i < 4; i++) { pio_gpio_init(pd, (uint)(P.d0 + i)); }
+    /* Pull-ups (CONFIG_SD_SDIO_PULLUPS) or none -- never pull-downs: the A2
+     * silicon's RP2350-E9 latch-up is what an internal pull-down cannot
+     * hold against (see src/sd/Kconfig). */
+#if CONFIG_SD_SDIO_PULLUPS
     gpio_pull_up((uint)P.cmd);
-    for (int i = 0; i < 4; i++) {
-        pio_gpio_init(pd, (uint)(P.d0 + i));
-        gpio_pull_up((uint)(P.d0 + i));
-    }
+    for (int i = 0; i < 4; i++) { gpio_pull_up((uint)(P.d0 + i)); }
+#else
+    gpio_disable_pulls((uint)P.cmd);
+    for (int i = 0; i < 4; i++) { gpio_disable_pulls((uint)(P.d0 + i)); }
+#endif
 
     pio_sm_config c = sdio_cmd_program_get_default_config(offc);
     sm_config_set_sideset_pins(&c, (uint)P.clk);
@@ -219,6 +225,7 @@ void sdio_hw_set_clock_khz(uint32_t k) {
 uint32_t sdio_hw_clock_khz(void) { return khz_now; }
 void sdio_hw_set_width(int w) { (void)w; }               /* data is always 4-bit */
 uint32_t sdio_hw_dma_blocks(void) { return dma_blocks; }
+
 
 void sdio_hw_idle_clocks(uint32_t n) {
     uint64_t t0 = sd_port_now_us();
@@ -394,6 +401,13 @@ int sdio_hw_write_block(const uint8_t *buf, uint32_t len, uint64_t crc, uint8_t 
 
 int sdio_hw_wait_busy(uint32_t timeout_us) {
     uint64_t t0 = sd_port_now_us();
+    /* The card starts busy on D0 a couple of clocks after the CRC status
+     * token, and signals it while clocked: give it clocks before believing a
+     * high D0. On the bench (2026-10-19) one look right after the token read
+     * "not busy", and the next CMD24 met a card still programming -- which
+     * ignores it (illegal outside the transfer state), so every later write
+     * timed out. */
+    clocks_exact(16);
     if (gpio_get((uint)P.d0)) { return SD_OK; }
     clk_enter(t0);
     int e = SD_OK;

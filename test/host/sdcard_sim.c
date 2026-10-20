@@ -129,6 +129,7 @@ void sdsim_init(sdsim_t *s, uint64_t sectors, bool sdhc) {
     s->present = true;
     s->crc_read_lba = s->crc_write_lba = s->werr_lba = s->pull_at_lba = -1;
     s->mute_cmd = -1;
+    s->garble_resp_cmd = -1;
     s->write_busy_us = 300;
     make_regs(s);
     power_up(s);
@@ -317,6 +318,10 @@ int sdsim_sd_command(sdsim_t *s, uint8_t cmd, uint32_t arg, uint8_t crc_ok, uint
         r[5] = (uint8_t)((crc7(r, 5) << 1) | 1);
         *bits = 48;
         break;
+    }
+    if ((int)cmd == s->garble_resp_cmd && *bits == 48) {   /* the host sees a bad CRC; the card acted */
+        r[5] ^= 0x10;
+        s->garble_resp_cmd = -1;
     }
     return 0;
 }

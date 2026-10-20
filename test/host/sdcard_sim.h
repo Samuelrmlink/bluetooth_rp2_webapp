@@ -47,6 +47,8 @@ typedef struct sdsim {
     int      mute_cmd;        /* never answer this command (sticky; -1 none) */
     uint32_t write_busy_us;   /* programming time per written block */
     int64_t  pull_at_lba;     /* the card is pulled while this block is read */
+    int      garble_resp_cmd; /* corrupt the CRC of this command's next response, but act on it (-1 none) */
+    bool     busy_hidden;     /* D0 shows no busy until clocked a while (a real card, bench 2026-10-19) */
 
     /* trace */
     sdsim_trace_t trace[4096];
