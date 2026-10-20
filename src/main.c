@@ -36,6 +36,9 @@
 #include "io/spibus.h"
 #endif
 #include "net/eth_w5500.h"
+#if CONFIG_SD
+#include "sd/sd_core.h"
+#endif
 #if CONFIG_LUA_ENABLE
 #include "lua/lrt.h"
 #endif
@@ -161,6 +164,12 @@ int main(void) {
     fwd_init();
 #endif
 
+#if CONFIG_SD
+    /* The storage worker: it identifies and mounts the card itself, from the
+     * loop (sd_poll), so a slow or absent card never delays boot. After
+     * eth_init(): on SPI the card may share the W5500's bus. */
+    sd_init();
+#endif
     http_server_start();
     ops_init_all();
 #if CONFIG_OTA
@@ -222,6 +231,13 @@ int main(void) {
 #if CONFIG_NET_ETH_W5500
         crumb(CRUMB_LOOP_ETH);
         eth_poll();
+#endif
+#if CONFIG_SD
+        /* The storage worker's turn (it yields within ~2 ms), then whatever
+         * it produced or took for the HTTP side. */
+        crumb(CRUMB_LOOP_SD);
+        sd_poll();
+        http_sd_pump();
 #endif
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
 #if CONFIG_NET_WIFI

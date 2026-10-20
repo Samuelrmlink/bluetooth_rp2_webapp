@@ -24,6 +24,22 @@ static void done_cb(void *ctx, bool ok) { (void)ok; cb_calls++; cb_ctx_seen = ct
 
 static uint8_t echo_dev(void *ctx, int ev, uint8_t mosi) { (void)ctx; return ev == FAKE_BYTE ? (uint8_t)(mosi ^ 0xFF) : 0; }
 
+/* An SD card's MISO behaviour: once it has been talked to it keeps driving
+ * DO after CS rises, until the first clock with CS high. Also records what it
+ * saw so the fill byte and CS-high segments can be checked. */
+typedef struct { bool driving; int bytes, idle; uint8_t last; } sdlike_t;
+static uint8_t sdlike_dev(void *ctx, int ev, uint8_t mosi) {
+    sdlike_t *s = ctx;
+    if (ev == FAKE_BYTE) { s->bytes++; s->last = mosi; s->driving = true; return 0x00; }
+    if (ev == FAKE_IDLE_BYTE) {
+        s->idle++; s->last = mosi;
+        bool was = s->driving;
+        s->driving = false;      /* this clock releases DO */
+        return was;
+    }
+    return 0;
+}
+
 int main(void) {
     fake_reset();
     spibus_t *b = spibus_init(1, 14, 15, 8, "test");
@@ -122,6 +138,69 @@ int main(void) {
     char js[512];
     spibus_status_json(js, sizeof js);
     CHECK(strstr(js, "\"bus\":1") && strstr(js, "\"owner\":\"test\""), "status json");
+
+    /* --- what an SD card on a shared bus needs ------------------------- */
+    sdlike_t sd = { 0 };
+    fake_attach(9, sdlike_dev, &sd);
+    c.fill = 0xFF;
+    fake_autocomplete(true);
+
+    /* fill byte: a segment with no tx clocks the device's fill */
+    CHECK(spibus_try_claim(&c), "c claims");
+    uint8_t rx2[2];
+    spiseg_t rd = { NULL, rx2, 2 };
+    CHECK(spibus_xfer_blocking(&c, &rd, 1), "read with no tx");
+    CHECK(sd.last == 0xFF, "clocked c's fill byte (0xFF), not zeros");
+    spibus_release_trailing(&c, 1);    /* an SD transaction always ends so */
+
+    /* the W5500 keeps zeros */
+    spibus_try_claim(&a);
+    CHECK(spibus_xfer_blocking(&a, &rd, 1) && rx2[0] == 0xFF && rx2[1] == 0xFF, "a's fill is still 0x00 (echo 0xFF)");
+    spibus_release(&a);
+
+    /* a cs_high segment: power-up clocks the card sees deselected */
+    int idle0 = sd.idle, bytes0 = sd.bytes;
+    spibus_try_claim(&c);
+    spiseg_t power = { NULL, NULL, 10 };
+    CHECK(spibus_xfer_blocking_cs(&c, &power, 1, 1u), "cs_high segment");
+    CHECK(sd.idle - idle0 == 10 && sd.bytes == bytes0, "80 clocks with CS high, none selected");
+    CHECK(fake_gpio(9) == 1, "CS high after it");
+
+    /* the conflict: release WITHOUT the trailing clock, then the W5500 reads */
+    uint8_t cmd[2] = { 0x40, 0x95 };
+    spiseg_t c1 = { cmd, NULL, 2 };
+    CHECK(spibus_xfer_blocking(&c, &c1, 1) && sd.driving, "card talked to, still driving DO");
+    spibus_release(&c);
+    int conf0 = fake_bus_conflicts();
+    spibus_try_claim(&a);
+    uint8_t got[1];
+    spiseg_t ar = { tx, got, 1 };
+    spibus_xfer_blocking(&a, &ar, 1);
+    spibus_release(&a);
+    CHECK(fake_bus_conflicts() == conf0 + 1 && got[0] == 0xEE, "plain release: the W5500's read is corrupted");
+
+    /* and with spibus_release_trailing(): clean */
+    spibus_try_claim(&c);
+    spibus_xfer_blocking(&c, &c1, 1);
+    CHECK(sd.driving, "driving again");
+    CHECK(spibus_release_trailing(&c, 1), "release_trailing");
+    CHECK(!sd.driving && !spibus_holds(&c), "the trailing clock freed DO, and the claim is gone");
+    conf0 = fake_bus_conflicts();
+    spibus_try_claim(&a);
+    spibus_xfer_blocking(&a, &ar, 1);
+    spibus_release(&a);
+    CHECK(fake_bus_conflicts() == conf0 && got[0] == (uint8_t)(tx[0] ^ 0xFF), "trailing clock: the W5500 reads its own answer");
+    CHECK(!spibus_release_trailing(&c, 1), "release_trailing refuses without the claim");
+    fake_autocomplete(false);
+
+    /* refcount: a second user shares the bus; the first leaving keeps it up */
+    CHECK(spibus_init(1, 14, 15, 8, "sd") == b && b->users >= 2, "second user attaches");
+    uint8_t users = b->users;
+    spibus_deinit(b);
+    CHECK(b->present && b->users == users - 1, "one user leaving keeps the bus");
+    while (b->users > 1) { spibus_deinit(b); }
+    spibus_deinit(b);
+    CHECK(!b->present, "the last user leaving closes it");
 
     printf("%d checks, %d failed\n", checks, failed);
     return failed ? 1 : 0;

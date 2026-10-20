@@ -1,0 +1,149 @@
+menu "SD card"
+
+config SD
+    bool "SD card (FatFs) with /api/sd and the editor's sd/ folder"
+    default n
+    help
+      A microSD card as a second filesystem, next to the LittleFS on flash:
+      FatFs (FAT12/16/32 and exFAT), reached over HTTP at /api/sd (the same
+      API as km003c_rp2_webapp) and shown in the web editor as a top-level
+      "sd" folder. Card I/O runs in a storage worker (a coroutine resumed
+      from the main loop in slices of about 2 ms), so a slow card never
+      stalls networking or Bluetooth.
+
+      Optional: a build without it carries none of its code, and every
+      /api/sd route answers 404, which is how the web app tells.
+
+      Costs about 40 KB of flash (FatFs with exFAT and mkfs is most of it)
+      and, with the defaults below, about 14 KB of RAM.
+
+if SD
+
+choice SD_BUS
+    prompt "Bus"
+    default SD_BUS_SDIO
+
+config SD_BUS_SDIO
+    bool "SDIO, 4-bit (PIO)"
+    help
+      Native SD bus: CLK, CMD and four data lines driven by two PIO state
+      machines with DMA (src/sd/sd_sdio.c, src/sd/sdio.pio). Four times the
+      data lines of SPI and a pin set of its own.
+
+config SD_BUS_SPI
+    bool "SPI (shared SPI bus layer)"
+    select SPI_BUS
+    help
+      SPI mode through src/io/spibus.c. The bus may be shared with other
+      SPI devices (the W5500): every command and every block claims the
+      bus semaphore and releases it again, never across a card's busy
+      wait, so the other device keeps its turn.
+
+endchoice
+
+if SD_BUS_SDIO
+
+# The default pins (GP2-GP7) suit BOTH buses on one socket: SDIO wants D0-D3
+# consecutive and lets CLK/CMD be anywhere; hardware SPI0 has SCK on GP2,
+# MOSI on GP3, MISO on GP4 -- the card's CLK, CMD and D0 -- and CS (the
+# card's D3, GP7) is any GPIO. One wiring takes either build.
+config SD_SDIO_CLK
+    int "CLK pin"
+    default 2
+
+config SD_SDIO_CMD
+    int "CMD pin"
+    default 3
+
+config SD_SDIO_D0
+    int "D0 pin (D1-D3 follow: D0+1, D0+2, D0+3)"
+    default 4
+    help
+      The four data lines must be consecutive GPIOs: the PIO program moves
+      them as one 4-bit group.
+
+config SD_SDIO_PIO
+    int "PIO block (-1 = the first with two free state machines)"
+    range -1 2
+    default -1
+
+config SD_SDIO_PULLUPS
+    bool "Internal pull-ups on CMD and D0-D3"
+    default y
+    help
+      The SD bus needs pull-ups (10-100 kOhm) on CMD and DAT0-3. Breakouts
+      such as Adafruit's SDIO board carry their own; the RP2350's internal
+      ones (~50 kOhm) in parallel are harmless, and the only pull-ups there
+      are on a board without them. Pull-ups only: the A2 silicon's
+      RP2350-E9 pad latch-up is a pull-DOWN problem (a floating input can
+      sit near 2 V that the weak internal pull-down cannot clear), so the
+      SD code never enables a pull-down.
+
+config SD_SDIO_KHZ
+    int "Data clock after identification (kHz)"
+    range 400 50000
+    default 25000
+    help
+      Default Speed is 25 MHz. Identification always runs at 400 kHz.
+
+endif
+
+if SD_BUS_SPI
+
+config SD_SPI_BUS
+    int "SPI block (0 or 1)"
+    range 0 1
+    default 0
+
+config SD_SPI_SCK
+    int "SCK pin (the card's CLK)"
+    default 2
+
+config SD_SPI_MOSI
+    int "MOSI (TX) pin (the card's CMD)"
+    default 3
+
+config SD_SPI_MISO
+    int "MISO (RX) pin (the card's D0)"
+    default 4
+
+config SD_SPI_CS
+    int "CS pin (the card's D3; driven as a plain GPIO)"
+    default 7
+
+config SD_SPI_KHZ
+    int "SPI clock after identification (kHz)"
+    range 400 50000
+    default 25000
+
+endif
+
+config SD_DETECT
+    int "Card-detect pin (-1 = none: a card is assumed present)"
+    default 22
+
+config SD_DETECT_LEVEL
+    int "Card-detect level that means 'card present'"
+    range 0 1
+    default 0
+    help
+      0: a switch to ground, closed with a card in (a bare socket, with the
+      pull-up this code enables). 1: a line driven high with a card in
+      (Adafruit's SDIO breakout drives DET both ways; measured 2026-10-19).
+
+config SD_XFER_BUF
+    int "Bytes per HTTP transfer ring (power of two, >= 1024)"
+    default 4096
+
+config SD_XFERS
+    int "HTTP transfers at once"
+    range 1 4
+    default 2
+
+config SD_WORKER_STACK
+    int "Storage worker stack (bytes)"
+    default 4096
+
+endif
+
+endmenu

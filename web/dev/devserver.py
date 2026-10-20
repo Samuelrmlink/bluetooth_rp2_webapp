@@ -305,6 +305,43 @@ def uplink_switch(name, reason="manual"):
         for x in u["uplinks"]: x["active"] = x["name"] == name
     return u
 
+SD_BYTES = 31914983424      # a "32 GB" SDHC card
+
+def _sd_state():
+    sd = STATE["sd"]
+    if sd["format"]["state"] == "running": return "formatting"
+    return sd["state"]
+
+def _sd_tick():
+    f = STATE["sd"]["format"]
+    if f["state"] == "running":
+        el = time.time() - f.get("t0", 0)
+        f["done"] = min(f["total"] - 1, int(f["total"] * el / 1.0))
+        if el >= 1.0:
+            f.update(state="done", phase="done", done=f["total"])
+            STATE["sd"].update(files={}, dirs=set(), fs=f["fs"], state="ok")
+
+def _sd_status():
+    sd = STATE["sd"]
+    _sd_tick()
+    st = _sd_state()
+    present = st != "none"
+    card = None if not present or st == "settling" else {
+        "bytes": SD_BYTES, "type": "SDHC",
+        "cid": {"mid": 3, "oem": "SD", "name": "SC32G", "rev": "8.0", "serial": "0x1a2b3c4d", "date": "2025-04"}}
+    used = sum(len(v) for v in sd["files"].values())
+    f = {k: v for k, v in sd["format"].items() if k != "t0"}
+    out = {"ok": True, "present": present, "mounted": st == "ok", "state": st, "fs": sd["fs"] if st == "ok" else "-",
+           "total": SD_BYTES - 20 * 1024 * 1024 if st == "ok" else 0, "free": SD_BYTES - 20 * 1024 * 1024 - used if st == "ok" else 0,
+           "bus": {"type": "sdio", "width": 4, "clock_khz": 18750},
+           "format": f, "card": card,
+           "options": {"fat32": [4096, 8192, 16384, 32768, 65536],
+                       "exfat": [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]},
+           "bench": sd["bench"],
+           "worker": {"stack": 4096, "stack_used": 1480, "xfers": 0, "xfer_max": 2}}
+    if card: out["defaults"] = {"fs": "fat32", "cluster": {"fat32": 32768, "exfat": 32768}, "align": 4194304}
+    return out
+
 STATE = {}
 def reset_state():
     STATE.clear()
@@ -320,6 +357,11 @@ def reset_state():
     STATE["drafts"] = {}
     STATE["eth"] = json.loads(json.dumps(ETH_BASE))
     STATE["uplink"] = json.loads(json.dumps(UPLINK_BASE))
+    STATE["sd"] = {"state": "ok", "fs": "fat32", "files": {"logs/2026-10-01.csv": b"t,v\n0,1\n", "readme.txt": b"on the card\n"},
+                   "dirs": {"logs", "empty"},
+                   "format": {"available": True, "state": "idle", "phase": "", "done": 0, "total": 0, "fs": "", "cluster": 0, "error": ""},
+                   "bench": {"state": "idle", "mb": 0, "chunk": 4096, "done_kb": 0, "write_kBps": 0, "read_kBps": 0,
+                             "card_busy_max_us": 0, "error": ""}}
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
 
@@ -379,7 +421,8 @@ class MockGateway:
         if op == "sys.info":
             return {"firmware": "bluetooth_rp2_webapp (mock)", "uptime_ms": int(time.time() * 1000) % 10**7,
                     "transports": ["le"], "clients": 1,
-                    "modules": ["sys", "bt", "lua", "io", "wifi", "wg", "ota", "eth", "uplink", "mdns", "net"]}
+                    "modules": ["sys", "bt", "lua", "io", "wifi", "wg", "ota", "eth", "uplink", "mdns", "net"]
+                    + (["sd"] if STATE["sd"].get("module", True) else [])}
         if op == "bt.state":
             return {"ready": True, "address": "2C:CF:67:C7:DB:56", "max_links": 4}
         if op == "scan.start":
@@ -559,6 +602,12 @@ class MockGateway:
             return {"rules": STATE.get("forwards", []), "udp_sessions": 0}
         if op == "mdns.groups":
             return {"groups": STATE.get("mdns_groups", [])}
+        if op == "sd.status":
+            return _sd_status()
+        if op == "test.sd":                         # mock only: pull/insert the card, drop the module
+            if "state" in p: STATE["sd"]["state"] = p["state"]
+            if "module" in p: STATE["sd"]["module"] = bool(p["module"])   # a build without CONFIG_SD
+            return {"state": _sd_state()}
         if op == "test.eth":                        # mock only: unplug the cable, pull the module
             if isinstance(p.get("set"), dict): STATE["eth"].update(p["set"])
             return STATE["eth"]
@@ -760,6 +809,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.split("?")[0] == "/ws":
             return self._ws()
+        if self.path.startswith("/api/sd"):
+            return self._sd("GET")
         if self.path.startswith("/api/fs"):
             return self._fs("GET")
         if self.path.startswith("/api/tar"):
@@ -774,9 +825,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self._reply(200, body if isinstance(body, bytes) else body.encode(), ctype)
         return super().do_GET()
 
-    def do_PUT(self): self._fs("PUT")
-    def do_DELETE(self): self._fs("DELETE")
-    def do_POST(self): self._fs("POST")
+    def do_PUT(self): self._sd("PUT") if self.path.startswith("/api/sd") else self._fs("PUT")
+    def do_DELETE(self): self._sd("DELETE") if self.path.startswith("/api/sd") else self._fs("DELETE")
+    def do_POST(self): self._sd("POST") if self.path.startswith("/api/sd") else self._fs("POST")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -861,6 +912,100 @@ class Handler(SimpleHTTPRequestHandler):
         files = [{"name": n, "dir": True} if sz is None else {"name": n, "size": sz, "alloc": alloc(sz)}
                  for n, sz in sorted(names.items())]
         return self._reply(200, {"dir": path, "block": 4096, "files": files} if path else {"block": 4096, "files": files})
+
+    # /api/sd, as src/sd/sd_api.c + http.c answer it (docs/sd.md): status,
+    # format (done ~1 s later), bench, files GET/PUT/DELETE, mkdir (PUT .../),
+    # rename. The card's state is switchable with the mock-only op test.sd.
+    def _sd(self, method):
+        from urllib.parse import unquote, urlparse
+        sd = STATE["sd"]
+        u = urlparse(self.path)
+        route = u.path
+        _sd_tick()
+        def err(code, msg, retry=0):
+            return self._reply(code, {"ok": False, "error": msg, "card": _sd_state()},
+                               extra={"Retry-After": str(retry)} if retry else None)
+        body = b""
+        if method in ("POST", "PUT"):
+            n = int(self.headers.get("Content-Length", 0))
+            if n > 64 * 1024 * 1024: return err(507, "card full")
+            body = self.rfile.read(n)
+        if route == "/api/sd":
+            return self._reply(200, _sd_status())
+        if route == "/api/sd/format":
+            if method != "POST": return err(404, "POST")
+            req = json.loads(body or b"{}")
+            if sd["format"]["state"] == "running": return err(409, "format already running")
+            if sd["state"] == "none": return err(503, "no card", 5)
+            if req.get("fs") not in ("fat32", "exfat"): return err(400, 'fs: "fat32" or "exfat"')
+            sd["format"] = {"available": True, "state": "running", "phase": "writing", "done": 0, "total": 4000,
+                            "fs": req["fs"], "cluster": req.get("cluster") or 32768, "error": "", "t0": time.time()}
+            return self._reply(202, {"ok": True})
+        if route == "/api/sd/bench":
+            if method != "POST": return err(404, "POST")
+            if _sd_state() != "ok": return err(503, "no card", 5)
+            sd["bench"] = {"state": "done", "mb": 10, "chunk": 4096, "done_kb": 10000, "write_kBps": 2100,
+                           "read_kBps": 5400, "card_busy_max_us": 41000, "error": ""}
+            return self._reply(202, {"ok": True})
+        st = _sd_state()
+        if st != "ok":
+            return err(503, {"none": "no card", "settling": "card settling", "formatting": "formatting"}.get(st, "card not mounted"),
+                       {"none": 5, "settling": 2, "formatting": 5}.get(st, 0))
+        files, dirs = sd["files"], sd["dirs"]
+        def clean(p):
+            p = unquote(p).strip("/")
+            if len(p) >= 96: return None
+            for seg in p.split("/") if p else []:
+                if seg in ("", ".", ".."): return None
+            if any(c in p for c in '\\:*?"<>|') or any(ord(c) < 32 for c in p): return None
+            return p
+        if route == "/api/sd/rename":
+            req = json.loads(body or b"{}")
+            a, b = clean(req.get("from", "")), clean(req.get("to", ""))
+            if not a or not b: return err(400, "bad path")
+            if b in files or b in dirs: return err(409, "exists")
+            if a in files: files[b] = files.pop(a)
+            elif a in dirs or any(k.startswith(a + "/") for k in list(files) + list(dirs)):
+                for k in [k for k in list(files) if k.startswith(a + "/")]: files[b + k[len(a):]] = files.pop(k)
+                for d in [d for d in list(dirs) if d == a or d.startswith(a + "/")]: dirs.discard(d); dirs.add(b + d[len(a):])
+            else: return err(404, "not found")
+            parts = b.split("/")
+            for i in range(1, len(parts)): dirs.add("/".join(parts[:i]))
+            return self._reply(200, {"ok": True})
+        if not (route == "/api/sd/files" or route.startswith("/api/sd/files/")): return err(404, "not found")
+        trailing = route.endswith("/") and route != "/api/sd/files/"
+        path = clean(route[len("/api/sd/files"):])
+        if path is None: return err(400, "bad path")
+        if method == "PUT":
+            if not path: return err(400, "bad path")
+            parts = path.split("/")
+            if trailing:
+                if path in files: return err(409, "exists")
+                for i in range(1, len(parts) + 1): dirs.add("/".join(parts[:i]))
+                return self._reply(200, {"ok": True, "dir": True})
+            if path in dirs: return err(409, "is a directory")
+            for i in range(1, len(parts)): dirs.add("/".join(parts[:i]))
+            files[path] = body
+            return self._reply(200, {"ok": True, "bytes": len(body)})
+        if method == "DELETE":
+            if not path: return err(400, "bad path")
+            if path in files: del files[path]; return self._reply(200, {"ok": True})
+            if any(k.startswith(path + "/") for k in list(files) + list(dirs)): return err(409, "directory not empty")
+            if path in dirs: dirs.discard(path); return self._reply(200, {"ok": True})
+            return err(404, "not found")
+        if path in files:
+            return self._reply(200, files[path], _mime(path))
+        if path and path not in dirs and not any(k.startswith(path + "/") for k in files): return err(404, "not found")
+        pre = path + "/" if path else ""
+        names = {}
+        for k in list(files) + [d + "/" for d in dirs]:
+            if k.startswith(pre):
+                rest = k[len(pre):]
+                if not rest: continue
+                if "/" in rest: names[rest.split("/")[0]] = None
+                else: names[rest] = len(files[k])
+        out = [{"name": n, "dir": True} if sz is None else {"name": n, "size": sz} for n, sz in names.items()]
+        return self._reply(200, {"dir": path, "files": out})
 
     # GET /api/tar/<folder> (or /api/tar/ for everything), as fw 1.95 streams
     # it: ustar, the folder's own entry first, names relative to its parent,

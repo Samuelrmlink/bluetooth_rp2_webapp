@@ -1,0 +1,4 @@
+# Command-trace differences between our SDIO driver and carlk3's that are
+# accepted (tools/sdio_diff.py drops these commands before comparing).
+# One per line: CMD<n>  <why it is fine>. Empty until mcusim's card model runs
+# the comparison; every entry needs a reason a reviewer can check.

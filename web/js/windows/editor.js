@@ -38,6 +38,7 @@ import { ConfirmDelete } from '../editor/confirmdelete.js';
 import { EditorHelp } from '../editor/help.js';
 import { SearchPanel } from '../editor/searchpanel.js';
 import { planDrop, dropDir, moveDest, treeOf, deleteTree, isVital, dropEntries, readDrop } from '../editor/dnd.js';
+import { badPath } from '../tar.js';
 
 const ARENA_POLL_MS = 3000;
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
@@ -1667,6 +1668,7 @@ export class EditorWindow {
     if (!row) return false;
     const siblings = node.dir ? [] : this._siblings(path);
     const items = fileMenuItems(node, {
+      card: node.dir && path === fs.SD_ROOT && fs.sdAvailable(),
       isOpen: this.path === path,
       script: scriptNameOf(path),
       empty: node.dir && node.children?.length === 0,
@@ -1698,7 +1700,7 @@ export class EditorWindow {
     menu?.setInfo('counting…');
     try {
       const t = await folderSize(fs.list, node.path, (p) => menu?.setInfo(`counting… ${p.files} files so far`));
-      menu?.setInfo(sizeInfo(t));
+      menu?.setInfo(sizeInfo(t, node.path));
     } catch (e) {
       menu?.setInfo(`Could not count: ${e.message}`);
     }
@@ -1717,6 +1719,8 @@ export class EditorWindow {
       case 'delete': return node.dir ? this.deleteFolder(p) : this.deleteFile(p);
       case 'size': return this.sizeFolder(node);
       case 'new': return this.newFile(p);
+      case 'mkdir': return this.newFolder(p);
+      case 'sd-settings': return this.app.settingsModal?.open('sect-sd');
       case 'upload': this._uploadDir = p; return this._upload.click();
       case 'refresh': return this.tree.refresh(node).then(() => this.tree.invalidate());
       case 'tar': return this.downloadTar(p);
@@ -1784,6 +1788,20 @@ export class EditorWindow {
     if (this.path === path) await this.open(path);
     this._say(`Restored ${path} from its .bak (reload the page to use a restored web file)`);
     return true;
+  }
+
+  // A folder, made at once (an empty one too: PUT with a trailing slash, on
+  // flash and on the SD card alike).
+  async newFolder(dir = this.tree.currentDir) {
+    const name = prompt('New folder (path on the device):', dir ? `${dir}/` : '')?.trim().replace(/\/+$/, '');
+    if (!name || name === dir) return;
+    const why = badPath(name);
+    if (why) { this._say(`Not a folder name: ${why}`, 'warn'); return; }
+    const r = await fs.mkdir(name);
+    if (!r.ok) { this._say(`Could not make ${name}: ${r.error}`, 'err'); return; }
+    this._say(`Made ${name}/`);
+    await this.tree.refresh();
+    this.tree.invalidate();
   }
 
   async newFile(dir = this.tree.currentDir) {

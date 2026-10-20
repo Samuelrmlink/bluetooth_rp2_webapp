@@ -5,7 +5,7 @@
 
 // Folders that are the gateway's own state or regenerable, never searched
 // unless asked for by name: compiled bytecode, firmware images, counters.
-const SKIP_DIRS = /^(cache|ota|var)(\/|$)/;
+const SKIP_DIRS = /^(cache|ota|var|sd)(\/|$)/;   // sd: the card (search it by starting there)
 // Files that are not text: bytecode, binaries, backups, archives, bitmaps.
 const SKIP_FILES = /\.(luac|bin|bak|tar|png|jpe?g|gif|webp|ico)(\.gz)?$/i;
 

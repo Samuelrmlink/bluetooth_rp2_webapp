@@ -27,3 +27,4 @@ CONFIG_IO_SPI=y
 # Forwarding off here: this build embeds the WiFi blob (no OTA partition) and
 # sits a few KB under its slot; it also compiles net.* without net.forward.
 # CONFIG_NET_FORWARD is not set
+# CONFIG_SD is not set

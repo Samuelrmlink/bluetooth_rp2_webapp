@@ -13,6 +13,10 @@
 
 import { badPath, FILE_MAX } from '../tar.js';
 
+// FAT32's file limit, for drops onto the SD card (sd/...). Here rather than
+// from fs.js, which needs a page: this module is pure and unit-tested.
+const SD_FILE_MAX = 4 * 1024 * 1024 * 1024 - 1;
+
 export const isTar = (name) => /\.tar$/i.test(name);
 
 // What a drop would do. items: [{ path, file?, dir? }] -- the dropped files
@@ -29,7 +33,8 @@ export function planDrop(items, target, existing = new Set()) {
     if (why) { out.skipped.push({ path: it.path, why }); continue; }
     if (dest === 'cache' || dest.startsWith('cache/')) { out.skipped.push({ path: it.path, why: 'cache/ is rebuilt by the device' }); continue; }
     if (it.dir) { out.dirs.push(dest); continue; }
-    if (it.file.size > FILE_MAX) { out.skipped.push({ path: it.path, why: `over the device's ${FILE_MAX / 1024} KB file limit` }); continue; }
+    const max = /^sd(\/|$)/.test(dest) ? SD_FILE_MAX : FILE_MAX;
+    if (it.file.size > max) { out.skipped.push({ path: it.path, why: max === FILE_MAX ? `over the device's ${FILE_MAX / 1024} KB file limit` : 'over FAT32\'s 4 GB file limit' }); continue; }
     out.uploads.push({ dest, file: it.file });
     if (existing.has(dest)) out.overwrites.push(dest);
   }
@@ -96,7 +101,7 @@ export async function deleteTree(list, remove, path, onProgress = () => {}) {
 // settings, its scripts, the web UI itself. Deleting one asks for its name
 // to be typed, not just a click.
 export function isVital(path) {
-  return /^(cfg|lua|js|css|ota|var)$/.test(path);
+  return /^(cfg|lua|js|css|ota|var|sd)$/.test(path);
 }
 
 // --- the browser side of a drop -------------------------------------------------

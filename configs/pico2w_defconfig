@@ -21,3 +21,4 @@ CONFIG_NET_WIREGUARD=y
 CONFIG_OTA=y
 # The W5500 Ethernet uplink is opt-in: see pico2w_eth_defconfig.
 # CONFIG_NET_ETH_W5500 is not set
+# CONFIG_SD is not set

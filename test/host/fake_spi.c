@@ -34,6 +34,9 @@ static uint32_t now_ms;
 static bool cs_glitch;
 static bool autocomplete;
 static uint32_t now_us;
+static int bus_conflicts;
+static int cs_overlaps;
+void (*fake_bytes_hook)(spibus_t *b, uint16_t n);
 
 void fake_reset(void) {
     for (int i = 0; i < NPINS; i++) {
@@ -41,11 +44,14 @@ void fake_reset(void) {
         reserved[i] = false; dev_at[i].fn = NULL;
     }
     dma_starts = 0; inflight = NULL; now_ms = 1000; cs_glitch = false; autocomplete = false; now_us = 0;
+    bus_conflicts = 0; cs_overlaps = 0;
 }
 
 void fake_autocomplete(bool on) { autocomplete = on; }
 void fake_attach(int cs, fake_dev_fn fn, void *ctx) { dev_at[cs].fn = fn; dev_at[cs].ctx = ctx; }
 int fake_dma_starts(void) { return dma_starts; }
+int fake_bus_conflicts(void) { return bus_conflicts; }
+int fake_cs_overlaps(void) { return cs_overlaps; }
 bool fake_dma_pending(void) { return inflight != NULL; }
 void fake_dma_complete(void) {
     spibus_t *b = inflight;
@@ -91,9 +97,23 @@ void spibus_port_dma_start(spibus_t *b, const uint8_t *tx, uint8_t *rx, uint16_t
     dma_starts++;
     inflight = b;
     int cs = low_cs();
+    int nlow = 0;
+    for (int p = 0; p < NPINS; p++) { nlow += !gpio_is_input[p] && gpio_level[p] == 0 && dev_at[p].fn; }
+    if (nlow > 1 && len) { cs_overlaps++; }      /* two devices selected at once */
+    if (fake_bytes_hook) { fake_bytes_hook(b, len); }
     for (uint16_t i = 0; i < len; i++) {
-        uint8_t out = tx ? tx[i] : 0;
-        uint8_t in = cs >= 0 ? dev_at[cs].fn(dev_at[cs].ctx, FAKE_BYTE, out) : 0;
+        uint8_t out = tx ? tx[i] : b->zero_tx;
+        uint8_t in = cs >= 0 ? dev_at[cs].fn(dev_at[cs].ctx, FAKE_BYTE, out) : 0xFF;
+        /* Every deselected device sees the clock too. One that still drives
+         * MISO (an SD card before its release clock) fights the selected
+         * one: the byte is garbage and the conflict is counted. */
+        for (int p = 0; p < NPINS; p++) {
+            if (p == cs || !dev_at[p].fn || gpio_level[p] == 0) { continue; }
+            if (dev_at[p].fn(dev_at[p].ctx, FAKE_IDLE_BYTE, out) && cs >= 0) {
+                bus_conflicts++;         /* only a fight if someone is selected */
+                in = 0xEE;
+            }
+        }
         if (rx) { rx[i] = in; }
     }
     if (autocomplete) { fake_dma_complete(); }
@@ -199,7 +219,7 @@ static void sock_cmd(w5500_sim_t *s, uint8_t cmd) {
 static uint8_t sim_byte(void *ctx, int event, uint8_t mosi) {
     w5500_sim_t *s = (w5500_sim_t *)ctx;
     if (event == FAKE_CS_LOW) { s->phase = 0; return 0; }
-    if (event == FAKE_CS_HIGH) { return 0; }
+    if (event != FAKE_BYTE) { return 0; }   /* idle clocks: the W5500 lets go at CS high */
     if (s->phase == 0) { s->addr = (uint16_t)(mosi << 8); s->phase = 1; return 0; }
     if (s->phase == 1) { s->addr |= mosi; s->phase = 2; return 0; }
     if (s->phase == 2) { s->ctrl = mosi; s->phase = 3; return 0; }

@@ -1,0 +1,96 @@
+;
+; SDIO (SD mode, 4-bit) on two PIO state machines. Our own design (see
+; src/sd/sdio_hw.h for why): the COMMAND machine is the only clock source; the
+; DATA machine follows CLK with absolute GPIO waits, so CLK may be any pin and
+; the two programs may sit in different PIO blocks.
+;
+; Both machines idle on `out exec, 16`: the C side feeds them instructions
+; (a jmp to a routine) and arguments through the TX FIFO, 16 bits per FIFO
+; word (autopull and autopush at 16, shifting left: MSB first).
+;
+; Clock: 8 PIO cycles per SD clock (3 low, 5 high), so f = sys / (8 * clkdiv).
+; CMD changes right after the falling edge; it is sampled one PIO cycle after
+; the rising edge. (Sampled AT the edge -- 7 cycles a clock -- a card that
+; drives CMD up to 14 ns after its falling edge left ~9 ns at 21.4 MHz, and
+; one response in a few thousand failed its CRC on the bench, 2026-10-19.)
+; The data machine sees an edge 2 cycles late (input synchroniser): it SAMPLES
+; on the cycle after it sees the rising edge (= the edge) and DRIVES on that
+; same cycle -- a full half period before the card samples at the next rising
+; edge, and a half period after the one it just sampled.
+;
+
+.program sdio_cmd
+.side_set 1 opt                 ; CLK
+.wrap_target
+top:
+    out exec, 16                ; a jmp from the C side
+.wrap
+
+; Clock x+1 cycles, shifting a bit out on CMD and a bit in from CMD on each:
+; the command (CMD driven), then its response (CMD released -- the out bits
+; then go nowhere). The C side finds the response's start bit in what came in.
+public xfer:
+    out x, 16
+xl:
+    out pins, 1         side 0 [2]
+    nop                 side 1 [2]
+    in pins, 1
+    jmp x-- xl
+    jmp top
+
+; Free-running clock bursts for the data machine: x+1 cycles per FIFO entry,
+; then wait for the next one. Left with an exec'd jmp to top.
+public clk:
+    out x, 16
+cl:
+    nop                 side 0 [2]
+    jmp x-- cl          side 1 [4]
+    jmp clk
+
+
+.program sdio_data
+; Every `wait gpio 0` below is patched at load time to the real CLK pin.
+.wrap_target
+top:
+    out exec, 16
+.wrap
+
+; Receive blocks: y+1 nibbles after each start bit, again and again (a
+; multi-block read never pauses on our side: the clock does). Left with an
+; exec'd jmp to top.
+public rxd:
+    out y, 16
+blk:
+    mov x, y
+ws:
+    wait 0 gpio 0
+    wait 1 gpio 0
+    jmp pin ws                  ; D0 still high: no start bit yet
+dl:
+    wait 0 gpio 0
+    wait 1 gpio 0
+    in pins, 4
+    jmp x-- dl
+    jmp blk
+
+; Send one block: start bit, x+1 nibbles (data then CRC), end bit, release.
+; The CRC status token that follows is read with rxd (y = 3).
+public txd:
+    out x, 16
+    set pins, 15
+    set pindirs, 15
+    wait 0 gpio 0
+    wait 1 gpio 0
+    set pins, 0                 ; start bit
+tl:
+    wait 0 gpio 0
+    wait 1 gpio 0
+    out pins, 4
+    jmp x-- tl
+    wait 0 gpio 0
+    wait 1 gpio 0
+    set pins, 15                ; end bit
+    wait 0 gpio 0
+    wait 1 gpio 0
+    set pindirs, 0
+    jmp top

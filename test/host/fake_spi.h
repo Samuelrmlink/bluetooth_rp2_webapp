@@ -10,13 +10,20 @@
 
 /* --- the port ------------------------------------------------------------ */
 typedef uint8_t (*fake_dev_fn)(void *ctx, int event, uint8_t mosi);
-enum { FAKE_CS_LOW = 1, FAKE_CS_HIGH = 2, FAKE_BYTE = 3 };
+/* FAKE_IDLE_BYTE: a clock while this device's CS is high; return nonzero if
+ * the device is still driving MISO then (a bus conflict). */
+enum { FAKE_CS_LOW = 1, FAKE_CS_HIGH = 2, FAKE_BYTE = 3, FAKE_IDLE_BYTE = 4 };
 
 void     fake_reset(void);
 void     fake_attach(int cs, fake_dev_fn fn, void *ctx);
 /* Complete every DMA segment the moment it starts (init-time blocking paths). */
 void     fake_autocomplete(bool on);
 int      fake_dma_starts(void);           /* segments started since reset */
+int      fake_bus_conflicts(void);        /* bytes where a deselected device drove MISO */
+int      fake_cs_overlaps(void);          /* segments clocked with two chip selects low */
+/* Called as each segment starts, with its length: a test advances its clock
+ * by the bytes' time on the wire. */
+extern void (*fake_bytes_hook)(spibus_t *b, uint16_t n);
 bool     fake_dma_pending(void);
 void     fake_dma_complete(void);         /* the IRQ, for the bus in flight */
 int      fake_gpio(int pin);              /* -1 never driven */
