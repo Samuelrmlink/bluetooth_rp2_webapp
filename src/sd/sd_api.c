@@ -328,7 +328,7 @@ int sd_api_status_json(char *buf, size_t cap) {
                  "\"slices\":%lu,\"slice_max_us\":%lu,\"slices_over_2ms\":%lu,\"slices_over_10ms\":%lu,"
                  "\"slices_over_50ms\":%lu,"
                  "\"card_busy_max_us\":%lu,\"card_busy_timeouts\":%lu,\"card_write_retries\":%lu,\"card_dma_blocks\":%lu,"
-                 "\"card_read_retries\":%lu,\"card_crc_errors\":%lu,\"card_inits\":%lu,"
+                 "\"card_read_retries\":%lu,\"card_crc_errors\":%lu,\"card_inits\":%lu,\"card_recoveries\":%lu,"
                  "\"xfer_bytes\":%llu,"
                  "\"last_fail\":{\"op\":%d,\"status\":%d,\"error\":\"%s\",\"bytes\":%llu},"
                  "\"last_conn_end\":{\"op\":%d,\"why\":\"%s\",\"code\":%d,\"bytes\":%llu,\"count\":%lu}}}",
@@ -338,6 +338,7 @@ int sd_api_status_json(char *buf, size_t cap) {
                  (unsigned long)ls_busy_max_us(false),
                  (unsigned long)cto, (unsigned long)cre, (unsigned long)cdma,
                  (unsigned long)cs->read_retries, (unsigned long)cs->crc_errors, (unsigned long)cs->inits,
+                 (unsigned long)cs->recoveries,
                  (unsigned long long)s_xfer_bytes, s_last_fail.op, s_last_fail.status, s_last_fail.error,
                  (unsigned long long)s_last_fail.bytes, s_last_end.op, s_last_end.why, s_last_end.code,
                  (unsigned long long)s_last_end.bytes, (unsigned long)s_last_end.count);

@@ -107,6 +107,7 @@ static void make_regs(sdsim_t *s) {
 }
 
 static void power_up(sdsim_t *s) {
+    s->crc_until_reset = false;
     s->state = S_IDLE;
     s->spi = false;
     s->app = false;
@@ -336,6 +337,7 @@ int sdsim_sd_read_block(sdsim_t *s, uint8_t *buf, uint64_t *crc) {
     if (s->xfer_lba >= s->sectors) { s->pending_err |= ST_OUT_OF_RANGE; s->xfer = 0; s->state = S_TRAN; return -1; }
     memcpy(buf, s->img + s->xfer_lba * 512, 512);
     *crc = wire_crc(buf, s->width);
+    if (s->crc_until_reset) { *crc ^= 0x100; }
     if ((int64_t)s->xfer_lba == s->crc_read_lba) {
         s->crc_read_lba = -1;
         *crc ^= 0x10;                                   /* one bit off */

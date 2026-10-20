@@ -173,7 +173,8 @@ static int identify(sd_info_t *info) {
     if (!info->block_addr && (e = command(16, 512, '1', NULL)) != SD_OK) { return e; }
 
     info->bus_width = width;
-    sdio_hw_set_clock_khz(CONFIG_SD_SDIO_KHZ);
+    uint32_t lim = sd_card_clock_limit_khz();      /* lowered by recovery */
+    sdio_hw_set_clock_khz(lim && lim < CONFIG_SD_SDIO_KHZ ? lim : CONFIG_SD_SDIO_KHZ);
     info->clock_khz = sdio_hw_clock_khz();
     return SD_OK;
 }

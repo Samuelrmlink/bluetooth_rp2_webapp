@@ -66,6 +66,7 @@ typedef struct {
     uint32_t sectors_read;
     uint32_t sectors_written;
     uint32_t inits;
+    uint32_t recoveries;     /* re-identifications after a failure that survived its retry */
 } sd_stats_t;
 
 /* The bus this build uses (CONFIG_SD_BUS_*); tests may pick another. */
@@ -81,6 +82,11 @@ int   sd_card_read(uint64_t sector, uint8_t *buf, uint32_t count);
 int   sd_card_write(uint64_t sector, const uint8_t *buf, uint32_t count);
 int   sd_card_sync(void);
 sd_stats_t *sd_card_stats(void);            /* the buses add to it too */
+
+/* The data clock a bus may use after identification, in kHz: 0 = its
+ * configured maximum. Lowered step by step by recovery (sd_card.c), back to
+ * 0 when the card is removed. The buses read it in identify(). */
+uint32_t sd_card_clock_limit_khz(void);
 
 /* CSD -> 512-byte sector count (CSD v1 and v2; 0 for one we cannot read). */
 uint64_t sd_csd_sectors(const uint8_t csd[16]);

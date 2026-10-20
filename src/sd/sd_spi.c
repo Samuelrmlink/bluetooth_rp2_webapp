@@ -271,8 +271,10 @@ static int identify(sd_info_t *info) {
     release();
     info->block_addr = block_addr;
     info->bus_width = 1;
-    info->clock_khz = CONFIG_SD_SPI_KHZ;
-    if (result == SD_OK) { set_baud((uint32_t)CONFIG_SD_SPI_KHZ * 1000u); }
+    uint32_t lim = sd_card_clock_limit_khz();      /* lowered by recovery */
+    uint32_t khz = lim && lim < CONFIG_SD_SPI_KHZ ? lim : CONFIG_SD_SPI_KHZ;
+    info->clock_khz = khz;
+    if (result == SD_OK) { set_baud(khz * 1000u); }
     return result;
 }
 

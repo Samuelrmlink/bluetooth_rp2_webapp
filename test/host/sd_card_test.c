@@ -144,6 +144,36 @@ static void scenarios(void) {
         card.write_busy_us = 300;
     }
 
+    if (!spi) {
+        /* Recovery (the hardware case of 2026-10-19: every read failing its
+         * CRC until the card was reseated). A wedged card: the read that
+         * hits it re-identifies the card and succeeds, at full speed. */
+        uint32_t rec0 = sd_card_stats()->recoveries, full = sd_card_info()->clock_khz;
+        card.crc_until_reset = true;
+        CHECK(sd_card_read(600, back, 4) == SD_OK && !memcmp(back, card.img + 600 * 512, 2048),
+              "a wedged card is re-identified and the same read succeeds");
+        CHECK(sd_card_stats()->recoveries == rec0 + 1 && sd_card_info()->clock_khz == full,
+              "one recovery, no slowdown");
+        /* A marginal contact above 10 MHz: recoveries step the clock down
+         * until the data comes through, and the data is right. */
+        card.marginal_khz = 10000;
+        int ok_at = -1;
+        for (int i = 0; i < 6 && ok_at < 0; i++) {
+            if (sd_card_read(610, back, 2) == SD_OK) { ok_at = i; }
+        }
+        CHECK(ok_at >= 0 && !memcmp(back, card.img + 610 * 512, 1024), "a marginal contact ends up readable");
+        CHECK(sd_card_info()->clock_khz <= 10000 && sd_card_info()->clock_khz >= 3000,
+              "... at a lower clock, but not lower than needed");
+        pattern(buf, 1024, 77);
+        CHECK(sd_card_write(612, buf, 2) == SD_OK && !memcmp(card.img + 612 * 512, buf, 1024), "and writes work there");
+        /* Taking the card out puts the speed back. */
+        card.marginal_khz = 0;
+        card.present = false;
+        sd_card_present();
+        sdsim_insert(&card);
+        CHECK(sd_card_init() == SD_OK && sd_card_info()->clock_khz == full, "a reinserted card gets full speed again");
+    }
+
     card.write_busy_us = 1500000;                       /* a card garbage-collecting */
     other_turns = 0;
     CHECK(sd_card_write(400, buf, 1) == SD_OK && sd_card_sync() == SD_OK, "a 1.5 s write busy is waited out");

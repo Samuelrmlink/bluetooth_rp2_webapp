@@ -45,9 +45,19 @@ What bring-up found (each now has a host test that fails without the fix):
   `pico2w_sdspi` now set `SD_DETECT_LEVEL=1`; on hardware the state goes
   `none` → `settling` (2 s) → `ok` on a pull and reinsert.
 * A card seated badly after a hot reinsert gave CRC errors on every read
-  (all caught: retried, then failed -- never wrong data -- but listings came
-  back empty and free space 0); reseating cured it. A `card_crc_errors`
-  counter climbing at idle is the sign.
+  (all caught -- never wrong data -- but listings came back empty and free
+  space 0) until it was reseated: nothing ever re-identified the card.
+  **Recovery** (`sd_card.c`): a read or write that still fails after its
+  retry with a CRC error or timeout re-identifies the card (CMD0 onwards:
+  clears a card left mid-transfer or on another bus width) and tries the
+  operation again; if failures go on, each further recovery steps the data
+  clock down (18.75 → 12 → 6 → 3 → 1 MHz) for a marginal contact. Removing
+  the card restores full speed. The card's own error answers never trigger
+  it. Status: `worker.card_recoveries`, `bus.clock_khz`. Host tests: a wedged
+  card (recovered within the same read, no slowdown) and a contact that fails
+  above 10 MHz (readable and writable at 6 MHz). On hardware, repeated hot
+  pulls and reinserts during continuous 4 MB reads came back to correct
+  reads at full speed every time with no manual step.
 
 ## Build
 

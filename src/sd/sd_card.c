@@ -29,6 +29,27 @@ static sd_info_t info;
 static sd_stats_t stats;
 static bool detect_ready;
 
+/* Recovery (2026-10-19, on hardware: after a hot reinsert every read failed
+ * its CRC, retried and failed again, for as long as the card stayed in --
+ * nothing ever re-identified it; reseating the card cured it). A failure
+ * that survives its retry now re-identifies the card (CMD0 onwards: clears a
+ * card left mid-transfer or on another bus width than ours) and tries the
+ * operation once more; if failures go on after that, each further recovery
+ * steps the data clock down (a marginal contact). Removing the card puts the
+ * clock back. Only failures of the wire count -- CRC and timeouts -- never
+ * the card's own error answers. */
+static const uint32_t LADDER_KHZ[] = { 0, 12000, 6000, 3000, 1000 };
+#define LADDER_N (sizeof LADDER_KHZ / sizeof LADDER_KHZ[0])
+static unsigned speed_step;      /* index into LADDER_KHZ */
+static unsigned recover_tries;   /* recoveries since the last operation that worked */
+
+uint32_t sd_card_clock_limit_khz(void) { return LADDER_KHZ[speed_step]; }
+
+static void card_gone(void) {
+    speed_step = 0;
+    recover_tries = 0;
+}
+
 const char *sd_strerror(int err) {
     switch (err) {
     case SD_OK:       return "ok";
@@ -67,7 +88,9 @@ bool sd_card_present(void) {
         sd_port_detect_init(CONFIG_SD_DETECT);
         detect_ready = true;
     }
-    return sd_port_detect_level(CONFIG_SD_DETECT) == (CONFIG_SD_DETECT_LEVEL != 0);
+    bool in = sd_port_detect_level(CONFIG_SD_DETECT) == (CONFIG_SD_DETECT_LEVEL != 0);
+    if (!in) { card_gone(); }
+    return in;
 #else
     (void)detect_ready;
     return true;   /* no detect switch: find out by talking to it */
@@ -108,6 +131,19 @@ static bool in_range(uint64_t sector, uint32_t count) {
            (info.block_addr || (sector + count) * 512u <= 0xFFFFFFFFull);
 }
 
+static bool wire_failure(int r) { return r == SD_ECRC || r == SD_ETIMEOUT; }
+
+/* Re-identify the card; from the second recovery without a success in
+ * between, at the next lower clock. SD_OK when it is back. */
+static int recover(void) {
+    stats.recoveries++;
+    if (recover_tries++ > 0 && speed_step + 1 < LADDER_N) { speed_step++; }
+    sd_card_forget();
+    return sd_card_init();
+}
+
+static void note_ok(void) { recover_tries = 0; }
+
 int sd_card_read(uint64_t sector, uint8_t *buf, uint32_t count) {
     if (!info.valid) { return SD_ENOCARD; }
     if (!in_range(sector, count)) { return SD_EPARAM; }
@@ -118,8 +154,12 @@ int sd_card_read(uint64_t sector, uint8_t *buf, uint32_t count) {
         if (r == SD_ECRC) { stats.crc_errors++; }
         r = bus->read(addr_of(sector), buf, count);
     }
+    if (wire_failure(r) && sd_card_present()) {
+        if (r == SD_ECRC) { stats.crc_errors++; }
+        if (recover() == SD_OK) { r = bus->read(addr_of(sector), buf, count); }
+    }
     if (r == SD_ECRC) { stats.crc_errors++; }
-    if (r == SD_OK) { stats.sectors_read += count; }
+    if (r == SD_OK) { stats.sectors_read += count; note_ok(); }
     if (r == SD_ENOCARD || !sd_card_present()) { sd_card_forget(); }
     return r;
 }
@@ -137,8 +177,13 @@ int sd_card_write(uint64_t sector, const uint8_t *buf, uint32_t count) {
         bus->sync();
         r = bus->write(addr_of(sector), buf, count);
     }
+    if (wire_failure(r) && sd_card_present()) {
+        /* Same data, same sectors: safe to write again on a fresh card state. */
+        if (r == SD_ECRC) { stats.crc_errors++; }
+        if (recover() == SD_OK) { r = bus->write(addr_of(sector), buf, count); }
+    }
     if (r == SD_ECRC) { stats.crc_errors++; }
-    if (r == SD_OK) { stats.sectors_written += count; }
+    if (r == SD_OK) { stats.sectors_written += count; note_ok(); }
     if (r == SD_ENOCARD || !sd_card_present()) { sd_card_forget(); }
     return r;
 }

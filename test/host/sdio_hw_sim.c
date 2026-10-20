@@ -80,6 +80,7 @@ int sdio_hw_read_wait(uint64_t *crcs, uint32_t timeout_us) {
         if (card->width != width) {                     /* the host samples the wrong lines */
             for (int k = 0; k < 512; k++) { blk[k] ^= 0x5A; }
         }
+        if (card->marginal_khz && khz > card->marginal_khz) { blk[7] ^= 0x04; }   /* a bit lost on the wire */
         memcpy(armed_buf + 512 * i, blk, 512);
         crcs[i] = c;
         clocks(1024 + 16 + 2);
@@ -94,6 +95,7 @@ int sdio_hw_write_block(const uint8_t *buf, uint32_t len, uint64_t crc, uint8_t 
     uint8_t blk[512];
     memcpy(blk, buf, 512);
     if (card->width != width) { for (int i = 0; i < 512; i++) { blk[i] ^= 0x5A; } }
+    if (card->marginal_khz && khz > card->marginal_khz) { blk[7] ^= 0x04; }
     clocks(width == 4 ? 1024 + 16 + 2 : 4096 + 16 + 2);
     if (sdsim_sd_write_block(card, blk, crc, token) != 0) { return SD_ETIMEOUT; }
     dma_blocks++;
