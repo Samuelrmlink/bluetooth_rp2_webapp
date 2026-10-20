@@ -639,6 +639,13 @@ l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
     checkstackp(L, 0, func);  /* free any use of EXTRA_STACK */
     luaE_checkcstack(L);
   }
+#if defined(LUAI_CSTACK_SOFT)
+  if (l_unlikely((size_t)__builtin_frame_address(0) < LUAI_CSTACK_SOFT)) {
+    checkstackp(L, 0, func);
+    luaE_checkcbytes(L);
+  }
+  else luaE_cstackovf = 0;
+#endif
   if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
     ci->callstatus = CIST_FRESH;  /* mark that it is a "fresh" execute */
     luaV_execute(L, ci);  /* call it */

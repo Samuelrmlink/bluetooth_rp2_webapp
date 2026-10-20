@@ -399,6 +399,13 @@ LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L);
 LUAI_FUNC void luaE_shrinkCI (lua_State *L);
 LUAI_FUNC void luaE_checkcstack (lua_State *L);
 LUAI_FUNC void luaE_incCstack (lua_State *L);
+#if defined(LUAI_CSTACK_SOFT)
+LUAI_FUNC void luaE_checkcbytes (lua_State *L);
+LUAI_DDEC(int luaE_cstackovf);
+#define luai_checkcbytes(L)	luaE_checkcbytes(L)
+#else
+#define luai_checkcbytes(L)	((void)0)
+#endif
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
 LUAI_FUNC int luaE_resetthread (lua_State *L, int status);

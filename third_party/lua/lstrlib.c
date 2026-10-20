@@ -568,6 +568,10 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 
 
 static const char *match (MatchState *ms, const char *s, const char *p) {
+#if defined(LUAI_CSTACK_SOFT)
+  if (l_unlikely((size_t)__builtin_frame_address(0) < LUAI_CSTACK_SOFT))
+    luaL_error(ms->L, "pattern too complex");
+#endif
   if (l_unlikely(ms->matchdepth-- == 0))
     luaL_error(ms->L, "pattern too complex");
   init: /* using goto to optimize tail recursion */

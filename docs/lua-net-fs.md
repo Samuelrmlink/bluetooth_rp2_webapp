@@ -218,7 +218,7 @@ collection and tries once more. A handshake that still runs out says
 (measured with the firmware's mbedTLS configuration by `test/host/tls_mem_test.c`
 on a 64-bit host, which slightly overstates the device; `http.stats()` reports
 the device's own figures). Two HTTPS requests at once therefore want ~75 KB of
-the 160 KB arena at their peaks. Static RAM for all of `http` is the slot table,
+the 176 KB arena at their peaks. Static RAM for all of `http` is the slot table,
 one shared TLS configuration and a 512-byte scratch.
 
 ## 3. `json`
@@ -304,10 +304,12 @@ the file's new contents.
   | | flash used | free in the 864 KiB slot | static RAM | C heap left |
   |---|---|---|---|---|
   | pico2w, before | 729 504 | 155 232 | 493 108 | 31 180 |
-  | pico2w, after | 782 020 | 102 716 | 497 216 | 27 072 |
-  | pico2w_sd, before | 806 496 | 78 240 | 512 084 | 12 204 |
-  | pico2w_sd, after | 859 764 | 24 972 | 517 272 | 7 016 |
-  | pico2w_sdspi, after | 853 372 | 31 364 | — | — |
+  | pico2w, after | 783 936 | 100 800 | 480 876 | 43 412 |
+  | pico2w_sd, after | 862 168 | 22 568 | 500 980 | 23 308 |
+  | pico2w_sdspi, after | 855 784 | 28 952 | 499 812 | 24 476 |
+  | pico2w_eth, after | 800 704 | 84 032 | 481 928 | 42 360 |
+
+  ("after" is with the 176 KB arena below; static RAM includes the arena.)
 
   The feature itself is ~105 KB (mbedTLS ~60 KB at `-Os`, the client ~17 KB
   with the 7 KB of roots, `file`/`json` ~12 KB, DNS + SNTP ~5 KB); two
@@ -320,7 +322,34 @@ the file's new contents.
 * **C heap.** Everything that could live in the Lua arena does (TLS sessions,
   HTTP requests and bodies, LittleFS handle storage, the `/api/op` body, SD job
   requests); the static cost is the slot tables, one TLS configuration, the DNS
-  table and the extra FatFs file objects. The SD build's C heap is now ~7.0 KB.
+  table and the extra FatFs file objects.
+* **Keep the C heap above ~16 KB.** The pico-sdk `malloc` panics when it fails
+  (`PICO_MALLOC_PANIC`), and the CYW43 driver, lwIP's DHCP/mDNS and BTstack
+  still allocate there at boot -- the CYW43 driver alone asks for 4 KB in one
+  piece. An early build of this branch had grown static RAM until the SD
+  build's heap was 6.9 KB: it panicked "Out of memory" on every boot, which on
+  a try-before-you-buy update reads as a revert to the old image (found by
+  replaying the update in mcusim from slot B). The script loader's source
+  buffer (`src_buf` in `lrt.c`, up to 32 KB) used to be a static array; it is
+  now reserved from the top of the Lua arena only while a source is read and
+  compiled, and the arena is 176 KB in the shipped configs (was 160 KB), which
+  leaves ~23 KB of C heap on the SD build and ~43 KB on pico2w.
+* **Stack.** `sys.info` reports `stack_max`, the deepest core-0 stack use since
+  boot (the stack region is painted at start-up, `src/util/stackmark.c`);
+  measured ~3.9 KB at boot and through a 5-minute file/json/http soak, ~4.9 KB
+  after an HTTPS request with certificate verification. core0 has 8 KB
+  (0x20080000-0x20082000, the crumb record at its foot, the C heap right
+  below), and Lua's own limit (200 nested C calls or parser levels) assumes a
+  desktop stack: a `script.eval` of 40 nested parentheses ran off the end of
+  it. Lua now also checks the stack pointer (`LUAI_CSTACK_SOFT`/`_HARD` in
+  `third_party/lua/lua_pico_conf.h`, checked in `ldo.c` `ccall`, the parser's
+  `enterlevel` and `lstrlib.c` `match`): below 0x20080900 a nested call raises
+  "C stack overflow" (patterns: "pattern too complex"), below 0x20080500 it is
+  "error in error handling". The worst case measured with it (deep
+  `string.gsub` / `table.sort` / `__index` / `pcall` recursion, 300 nested
+  parentheses) is 6.7 KB. About 18 nested parentheses still compile in a
+  `script.eval`; ordinary code is nowhere near. `script.eval` builds its reply
+  in the shared API scratch instead of 3 KB of stack.
 
 ## Tests
 

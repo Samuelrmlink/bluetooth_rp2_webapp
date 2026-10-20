@@ -23,4 +23,16 @@
  * through lua_pcall; a genuine panic is a firmware bug and is logged. */
 #define LUAI_MAXSTACK 15000
 
+/* A C-stack guard in bytes (lstate.c luaE_checkcbytes, lstrlib.c match).
+ * LUAI_MAXCCALLS (200 nested C calls / parser levels) assumes a desktop
+ * stack; core0 has 8 KB (SCRATCH_X+Y, 0x20080000-0x20082000) with the crumb
+ * record at its foot (util/crumb.h) and the C heap right below it, and a REPL
+ * chunk of 40 nested parentheses already ran off the end of it. Below SOFT a
+ * nested call or parser level raises "C stack overflow" (once, so the error's
+ * own handling can run); below HARD it is "error in error handling". */
+#if defined(__arm__)
+#define LUAI_CSTACK_SOFT 0x20080900u
+#define LUAI_CSTACK_HARD 0x20080500u
+#endif
+
 #endif

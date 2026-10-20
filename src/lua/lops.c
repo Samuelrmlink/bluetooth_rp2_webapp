@@ -270,10 +270,16 @@ static void op_eval(const char *params, api_reply_fn reply, void *ctx, long id) 
     (void)name_of(params, nm, sizeof(nm));
     char out[800];
     bool ok = lrt_eval(nm, chunk, out, sizeof(out));
-    char esc[1600];
-    api_json_escape(esc, sizeof(esc), out);
-    char r[1700];
-    snprintf(r, sizeof(r), "{\"ok\":%s,\"value\":\"%s\"}", ok ? "true" : "false", esc);
+    /* The reply is built in the shared scratch, not on the stack: this runs
+     * the Lua compiler and the chunk on core0's 8 KB stack, and 3 KB of reply
+     * buffers here took the deepest use to 7.5 KB, 0.4 KB from the crumb
+     * record and the C heap below it. The chunk is done with by now, so
+     * nothing else holds the scratch. */
+    char *r = api_scratch();
+    size_t cap = api_scratch_size();
+    int n = snprintf(r, cap, "{\"ok\":%s,\"value\":\"", ok ? "true" : "false");
+    api_json_escape(r + n, cap - (size_t)n - 3, out);
+    strcat(r, "\"}");
     api_reply_ok(reply, ctx, id, r);
 }
 

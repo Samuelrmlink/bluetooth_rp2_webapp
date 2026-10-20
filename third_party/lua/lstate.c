@@ -170,8 +170,24 @@ void luaE_checkcstack (lua_State *L) {
 }
 
 
+#if defined(LUAI_CSTACK_SOFT)
+int luaE_cstackovf;  /* one C stack, however many threads */
+
+void luaE_checkcbytes (lua_State *L) {
+  size_t sp = (size_t)__builtin_frame_address(0);
+  if (l_likely(sp >= LUAI_CSTACK_SOFT)) { luaE_cstackovf = 0; return; }
+  if (sp < LUAI_CSTACK_HARD) luaD_errerr(L);
+  if (!luaE_cstackovf) {
+    luaE_cstackovf = 1;
+    luaG_runerror(L, "C stack overflow");
+  }
+}
+#endif
+
+
 LUAI_FUNC void luaE_incCstack (lua_State *L) {
   L->nCcalls++;
+  luai_checkcbytes(L);
   if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS))
     luaE_checkcstack(L);
 }
