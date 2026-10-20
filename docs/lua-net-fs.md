@@ -271,16 +271,28 @@ the file's new contents.
   `third_party/lua/luaconf.h` redefines it to 0 after `lua_pico_conf.h` has set
   it (the build warns), so Lua runs with 64-bit integers and doubles. Everything
   above works with either width; scripts relying on 32-bit wrap-around would not.
-* **Flash.** The SD build's 864 KiB slot had 76 KB free before this work.
-  mbedTLS is ~63 KB at `-Os`, the rest of this feature ~40 KB. To make room:
-  newlib's `iswspace` (pulled in by `sscanf`, dragging 28 KB of JIS/Unicode
-  tables) is replaced by an ASCII one (`src/util/libc_slim.c`), and BTstack
-  (except micro-ecc and rijndael, which Lua's `crypto` uses) and FatFs are built
-  `-Os`. Building micro-ecc `-Os` too would free another ~19 KB at some cost to
-  `crypto.ecdh` speed.
-* **C heap.** The SD build leaves ~7.6 KB of C heap (was ~12 KB): everything
-  that could live in the Lua arena does (TLS, HTTP requests, LittleFS handle
-  storage, the `/api/op` body, SD job requests).
+* **Flash and RAM**, Release builds, before (6cda1b8) and after this work:
+
+  | | flash used | free in the 864 KiB slot | static RAM | C heap left |
+  |---|---|---|---|---|
+  | pico2w, before | 729 504 | 155 232 | 493 108 | 31 180 |
+  | pico2w, after | 777 012 | 107 724 | 496 664 | 27 624 |
+  | pico2w_sd, before | 806 496 | 78 240 | 512 084 | 12 204 |
+  | pico2w_sd, after | 854 748 | 29 988 | 516 720 | 7 568 |
+  | pico2w_sdspi, after | 848 356 | 36 380 | 515 552 | 8 736 |
+
+  The feature itself is ~105 KB (mbedTLS ~60 KB at `-Os`, the client ~17 KB
+  with the 7 KB of roots, `file`/`json` ~12 KB, DNS + SNTP ~5 KB); two
+  unrelated savings pay for half of it: newlib's `iswspace` (pulled in by
+  `sscanf`, dragging 28 KB of JIS/Unicode tables) is replaced by an ASCII one
+  (`src/util/libc_slim.c`), and BTstack (except micro-ecc and rijndael, which
+  Lua's `crypto` uses) and FatFs are built `-Os` (~30-45 KB). Building
+  micro-ecc `-Os` too would free another ~19 KB at some cost to `crypto.ecdh`.
+  `pico2w_noanker`, which embeds the Wi-Fi blob, builds the client without TLS.
+* **C heap.** Everything that could live in the Lua arena does (TLS sessions,
+  HTTP requests and bodies, LittleFS handle storage, the `/api/op` body, SD job
+  requests); the static cost is the slot tables, one TLS configuration, the DNS
+  table and the extra FatFs file objects. The SD build's C heap is now ~7.6 KB.
 
 ## Tests
 
