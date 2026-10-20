@@ -1135,6 +1135,29 @@ def _kb(v):
     return int(v[:-1]) * 1024 if v.endswith("K") else int(v)
 
 
+def t_lua_net_fs_sim(radio):
+    """test/sim/lua_net_fs.py: the Lua file/json/http/sys APIs and POST
+    /api/op on the real firmware in mcusim (USB-NCM, local servers only), or
+    with --radio the Wi-Fi uplink (SNTP, DNS, HTTP against mcusim's offline
+    virtual AP) and a BLE advertiser (uuids128, age_ms)."""
+    def fn():
+        elf = f"{BUILD_PREFIX}pico2w/btgw.elf"
+        if not os.path.exists(os.path.expanduser("~/Work/mcusim/target/release/mcusim")):
+            return True, "skipped: no mcusim"
+        if not os.path.exists(elf):
+            return False, "pico2w not built (run with --tier 1)"
+        rel = os.path.relpath(os.path.dirname(elf), ROOT)
+        rc, out = sh(f"python3 test/sim/lua_net_fs.py {'--radio ' if radio else ''}{rel}")
+        m = re.search(r"(\d+) checks, (\d+) failed", out)
+        if rc == 77:
+            return True, "skipped"
+        if not m:
+            return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return rc == 0, f"{m.group(1)} checks" + (f", {m.group(2)} failed: {first[:60]}" if rc else "")
+    return fn
+
+
 def t_ota_partition_layout():
     """partitions.json, fs.h and the linker script agree on the flash map.
 
@@ -1287,6 +1310,8 @@ def main():
     if a.sim:
         step(3, "SDIO differential test in mcusim (ours vs carlk3)", t_sdio_diff)
         step(3, "SD builds in mcusim: identify/fail/retry, slices, /api/sd", t_sd_gateway_sim)
+        step(3, "Lua file/json/http/sys + /api/op in mcusim (USB-NCM)", t_lua_net_fs_sim(False))
+        step(3, "Lua over Wi-Fi + BLE in mcusim: SNTP, DNS, uuids128", t_lua_net_fs_sim(True))
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)

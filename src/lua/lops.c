@@ -315,8 +315,8 @@ static void op_autostart(const char *params, api_reply_fn reply, void *ctx, long
     bool enabled = true;
     (void)api_json_bool(params, "enabled", &enabled);
     const char *err = "unknown error";
-    static char file[1024];
-    if (!lrt_autostart_set(nm, enabled, file, sizeof file, &err)) {
+    char *file = api_scratch();          /* shared, consumed within this call */
+    if (!lrt_autostart_set(nm, enabled, file, 1024, &err)) {
         api_reply_err(reply, ctx, id, "autostart_failed", err);
         return;
     }
