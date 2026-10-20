@@ -155,7 +155,7 @@ static void on_status(void *u, int status) {
             h->lfs_mem = NULL;
             h->file_err = true;
             h->file_errc = HTTPC_EIO;
-            snprintf(h->msg, sizeof h->msg, "cannot open %s (%d)", h->fpath, h->lfs_h);
+            snprintf(h->msg, sizeof h->msg, "cannot open the file (%d)", h->lfs_h);
         }
     }
 #if CONFIG_SD
@@ -285,7 +285,7 @@ static void sd_step(hreq_t *h) {
             case SDW_OPENING:
                 if (rc < 0) {
                     h->file_err = true; h->file_errc = HTTPC_EIO;
-                    snprintf(h->msg, sizeof h->msg, "cannot open sd:/%s (%d)", h->fpath, rc);
+                    snprintf(h->msg, sizeof h->msg, "cannot open the file on the card (%d)", rc);
                     h->sd_state = SDW_FAILED;
                 } else {
                     h->sd_file = rc;
@@ -306,7 +306,7 @@ static void sd_step(hreq_t *h) {
             case SDW_CLOSING:
                 h->sd_file = -1;
                 if (rc < 0 && h->err == HTTPC_OK) { h->err = HTTPC_EIO; snprintf(h->msg, sizeof h->msg, "close failed"); }
-                if (h->err != HTTPC_OK) { h->sd_state = SDW_REMOVING; break; }
+                if (h->err != HTTPC_OK) { h->sd_state = SDW_FAILED; break; }   /* closed; now remove it, below */
                 mark_done(h);
                 return;
             case SDW_REMOVING:

@@ -773,6 +773,28 @@ def t_lfile_sd():
         return False, first[:100]
     return True, f"{m.group(1)} checks"
 
+def t_lhttp_sd():
+    """http.start{to_file="sd:/..."} on a host: lhttp.c's sink and SD state
+    machine against the real jobs/worker/FatFs/card, a fake transport playing
+    the server at the pace room() allows. Downloads byte for byte, a 404 not
+    written, a failed transfer leaving no partial file, a stopped script."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_lhttp_sd")
+    srcs = [s for s in SD_STACK_SRCS] + ["src/lua/lhttp.c", "src/lua/lfile.c", "src/lua/lfile_path.c",
+                                          "src/lua/lheap.c", "src/lua/lwait.c", "third_party/lua/onelua.c"]
+    rc, out = sh(f"gcc -O1 -g -w -no-pie -DSPIBUS_HOST -DCONFIG_SD=1 -DCONFIG_SD_DETECT=22 "
+                 f"-DCONFIG_NET_HTTP_CLIENT=1 -DMAKE_LIB=1 -DLHEAP_KB=96 -DFS_FLASH_OFF=0 -Isrc -Isrc/fs "
+                 f"-Ithird_party/fatfs -Ithird_party/lua -Itest/host -Itest/host/stub -o {binp} "
+                 f"test/host/lhttp_sd_test.c {' '.join(srcs)} -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error" in l]
+        return False, errs[0][:100] if errs else "lhttp_sd build failed"
+    rc, out = sh(binp)
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m or rc:
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), out.strip()[-90:])
+        return False, first[:100]
+    return True, f"{m.group(1)} checks"
+
 def t_ca_roots():
     """The HTTP client's embedded roots match the pinned SHA-256 fingerprints
     and src/net/ca_roots.h is what the PEMs generate."""
@@ -1277,6 +1299,7 @@ def main():
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
     step(0, "file module on the SD card: binding -> jobs -> worker -> FatFs", t_lfile_sd)
     step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)
+    step(0, "http to_file onto the SD card: stage, write, close, remove", t_lhttp_sd)
     step(0, "HTTPS roots match their pinned fingerprints", t_ca_roots)
     step(0, "TLS config: real handshakes on 127.0.0.1, session memory", t_tls_mem)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
