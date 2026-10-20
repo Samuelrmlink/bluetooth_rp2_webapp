@@ -62,6 +62,7 @@ add_executable(btgw
     src/config/config.c
     src/util/crumb.c
     src/util/libc_slim.c
+    src/util/stackmark.c
 )
 
 target_include_directories(btgw PRIVATE

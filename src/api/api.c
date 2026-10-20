@@ -22,6 +22,7 @@
 
 #include "api/api.h"
 #include "util/crumb.h"
+#include "util/stackmark.h"
 #include "api/ops.h"
 #include "fs/fs.h"
 #include "net/http.h"
@@ -247,7 +248,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
-             "\"last_crumb\":%lu,\"last_fault_pc\":%lu}",
+             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
               * because a device reached over WireGuard has no RTT, and a
@@ -269,7 +270,9 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              http_client_count(), mods,
              /* Where the previous boot's loop was when it stopped, and the PC
               * of a HardFault if that is what stopped it (src/util/crumb.h). */
-             (unsigned long)crumb_last, (unsigned long)crumb_last_fault_pc);
+             (unsigned long)crumb_last, (unsigned long)crumb_last_fault_pc,
+             /* core0's deepest stack use since boot (util/stackmark.h). */
+             (unsigned long)stackmark_max_used());
     api_reply_ok(reply, ctx, id, result);
 }
 

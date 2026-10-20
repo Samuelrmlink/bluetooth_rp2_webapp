@@ -285,8 +285,45 @@ static bool read_fs(const char *path, char *buf, size_t cap, size_t *out_len) {
 
 /* Shared by script loading and by require(). Safe because luaL_loadbuffer
  * compiles out of it immediately: by the time a chunk RUNS and can require
- * something else, its own source is no longer needed. */
-static char src_buf[DRAFT_MAX + 1];
+ * something else, its own source is no longer needed.
+ *
+ * Not a static array any more: 32 KB of bss for the instant of a load left
+ * the SD build ~7 KB of C heap, and the CYW43 driver's 4 KB malloc at boot
+ * (its partition-pick work area) then panicked "Out of memory" -- a TBYB
+ * image that never came up (found from the field, reproduced in mcusim).
+ * It is reserved from the top of the Lua arena, sized to the file, by
+ * src_reserve(), and let go on the next reservation or the next tick. */
+static char *src_buf;
+static size_t src_cap;
+static uint32_t src_gen;
+static bool s_src_nomem;          /* the last reservation failed for memory */
+
+static void src_release(void) {
+    if (src_buf && src_gen == lheap_generation()) { lheap_free(src_buf); }
+    src_buf = NULL;
+    src_cap = 0;
+}
+
+static bool src_reserve(size_t n) {
+    src_release();
+    s_src_nomem = false;
+    if (n == 0 || n > DRAFT_MAX + 1) { return false; }
+    char *p = lheap_alloc_high(n);
+    if (!p) { lrt_collect(); p = lheap_alloc_high(n); }
+    if (!p) { s_src_nomem = true; return false; }
+    src_buf = p;
+    src_cap = n;
+    src_gen = lheap_generation();
+    return true;
+}
+
+/* A whole file into src_buf. */
+static bool read_src(const char *path, size_t *len) {
+    size_t sz = 0;
+    if (!fs_stat(path, &sz) || sz > DRAFT_MAX) { return false; }
+    if (!src_reserve(sz + 1)) { return false; }
+    return read_fs(path, src_buf, src_cap, len);
+}
 
 /* --- sources, plain or compressed -------------------------------------------
  * A source is <base>.lua, or <base>.lua.gz: compressed by the BROWSER when it
@@ -333,10 +370,24 @@ static int fs_piece(void *ctx, uint8_t *buf, size_t cap) {
 
 /* The text into src_buf: read a plain file, inflate a .gz one. */
 static bool load_source(const char *path, bool gz, size_t *len) {
-    if (!gz) { return read_fs(path, src_buf, sizeof(src_buf), len); }
-    int h = fs_begin_read(path, NULL);
+    if (!gz) { return read_src(path, len); }
+    size_t sz = 0;
+    int h = fs_begin_read(path, &sz);
     if (h < 0) { return false; }
-    long n = gz_inflate(fs_piece, &h, (uint8_t *)src_buf, sizeof(src_buf) - 1);
+    /* gzip's trailer: the inflated size mod 2^32 -- what to reserve. */
+    uint8_t isz[4] = {0};
+    if (sz < 18 || fs_read_seek(h, sz - 4) < 0 || fs_read(h, isz, 4) != 4 || fs_read_seek(h, 0) < 0) {
+        fs_end_read(h);
+        return false;
+    }
+    uint32_t want = (uint32_t)isz[0] | ((uint32_t)isz[1] << 8) | ((uint32_t)isz[2] << 16) | ((uint32_t)isz[3] << 24);
+    if (want > DRAFT_MAX) {
+        fs_end_read(h);
+        printf("lua: %s is over 32 KB uncompressed\n", path);
+        return false;
+    }
+    if (!src_reserve(want + 1)) { fs_end_read(h); return false; }
+    long n = gz_inflate(fs_piece, &h, (uint8_t *)src_buf, src_cap - 1);
     fs_end_read(h);
     if (n < 0) {
         printf("lua: %s did not inflate (error %ld%s)\n", path, n,
@@ -628,7 +679,10 @@ static bool cache_load(lua_State *Ls, const char *rel, const char *chunkname,
     cache_path(rel, path, sizeof path);
     if (!cache_matches(path, hash, srclen)) { return false; }
     size_t len = 0;
-    if (!read_fs(path, src_buf, sizeof(src_buf), &len) || len <= CACHE_HDR) { return false; }
+    if (!read_src(path, &len) || len <= CACHE_HDR) {
+        if (s_src_nomem) { luaL_error(Ls, "module '%s': not enough memory to load it", rel); }
+        return false;
+    }
     int rc = luaL_loadbufferx(Ls, src_buf + CACHE_HDR, len - CACHE_HDR, chunkname, "b");
     if (rc == LUA_ERRMEM) {
         /* Out of memory, not a bad cache: compiling the source instead needs
@@ -822,6 +876,7 @@ static int l_require(lua_State *Ls) {
         size_t len = 0;
         uint32_t h2 = 0;
         if (!read_module_src(name, &src, &len, &tier, &h2)) {
+            if (s_src_nomem) { return luaL_error(Ls, "module '%s': not enough memory to load it", name); }
             return luaL_error(Ls, "module '%s' could not be read (a .gz that does not inflate, or over 32 KB)", name);
         }
         if (luaL_loadbufferx(Ls, src, len, chunkname, "t") != LUA_OK) {
@@ -1030,7 +1085,11 @@ bool lrt_start(const char *name, const char **err) {
     const char *src = NULL; size_t len = 0;
     uint32_t hash = 0;
     const char *tier = resolve_src(s, name, &src, &len, &hash);
-    if (!tier) { *err = "no draft, staged or committed source for that name"; return false; }
+    if (!tier) {
+        *err = s_src_nomem ? "not enough memory to load the source"
+                           : "no draft, staged or committed source for that name";
+        return false;
+    }
 
     if (load_tier(s, src, len, tier, hash, err)) {
         printf("lua: %s started from %s (%u bytes)\n", name, tier, (unsigned)len);
@@ -1218,7 +1277,7 @@ bool lrt_commit(const char *name, const char **err) {
     else {
         char path[80];
         snprintf(path, sizeof(path), "staged/%s.lua", name);
-        if (!read_fs(path, src_buf, sizeof(src_buf), &len)) { *err = "nothing staged"; return false; }
+        if (!read_src(path, &len)) { *err = s_src_nomem ? "not enough memory" : "nothing staged"; return false; }
         src = src_buf;
     }
     char dst[80];
@@ -1368,6 +1427,7 @@ bool lrt_autostart_set(const char *name, bool enabled, char *out, size_t cap, co
 
 void lrt_tick(void) {
     if (!s_ready) { return; }
+    src_release();                 /* whatever the last load read is compiled by now */
     if (s_autostart_at && (int32_t)(to_ms_since_boot(get_absolute_time()) - s_autostart_at) >= 0) {
         s_autostart_at = 0;
         autostart_run();

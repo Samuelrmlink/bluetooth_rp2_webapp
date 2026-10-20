@@ -32,6 +32,7 @@
 #include "net/mdns.h"
 #include "api/ops.h"
 #include "util/crumb.h"
+#include "util/stackmark.h"
 #if CONFIG_SPI_BUS
 #include "io/spibus.h"
 #endif
@@ -68,6 +69,7 @@ bool boot_after_watchdog;
 
 int main(void) {
     crumb_boot();
+    stackmark_paint();
     stdio_init_all();
     /* busy_wait_ms(): this runs BEFORE watchdog_enable() below, so a hang here
      * has nothing to recover it, and sleep_ms()'s __wfe() depends on an alarm
