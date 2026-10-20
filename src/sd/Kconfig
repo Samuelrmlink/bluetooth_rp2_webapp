@@ -43,17 +43,21 @@ endchoice
 
 if SD_BUS_SDIO
 
+# The default pins (GP2-GP7) suit BOTH buses on one socket: SDIO wants D0-D3
+# consecutive and lets CLK/CMD be anywhere; hardware SPI0 has SCK on GP2,
+# MOSI on GP3, MISO on GP4 -- the card's CLK, CMD and D0 -- and CS (the
+# card's D3, GP7) is any GPIO. One wiring takes either build.
 config SD_SDIO_CLK
     int "CLK pin"
-    default 16
+    default 2
 
 config SD_SDIO_CMD
     int "CMD pin"
-    default 17
+    default 3
 
 config SD_SDIO_D0
     int "D0 pin (D1-D3 follow: D0+1, D0+2, D0+3)"
-    default 18
+    default 4
     help
       The four data lines must be consecutive GPIOs: the PIO program moves
       them as one 4-bit group.
@@ -89,23 +93,23 @@ if SD_BUS_SPI
 config SD_SPI_BUS
     int "SPI block (0 or 1)"
     range 0 1
-    default 1
+    default 0
 
 config SD_SPI_SCK
-    int "SCK pin"
-    default 14
+    int "SCK pin (the card's CLK)"
+    default 2
 
 config SD_SPI_MOSI
-    int "MOSI (TX) pin"
-    default 15
+    int "MOSI (TX) pin (the card's CMD)"
+    default 3
 
 config SD_SPI_MISO
-    int "MISO (RX) pin"
-    default 8
+    int "MISO (RX) pin (the card's D0)"
+    default 4
 
 config SD_SPI_CS
-    int "CS pin (driven as a plain GPIO)"
-    default 9
+    int "CS pin (the card's D3; driven as a plain GPIO)"
+    default 7
 
 config SD_SPI_KHZ
     int "SPI clock after identification (kHz)"

@@ -42,11 +42,11 @@ CARD_TOML = """
 [[device]]
 type = "sdcard"
 mode = "sdio"
-clk = 16
-cmd = 17
-d0 = 18                     # D1-D3 = 19-21
-detect = 22
-detect_active_low = true
+clk = 2
+cmd = 3
+d0 = 4                      # D1-D3 = 5-7
+detect = 9
+detect_active_low = false   # Adafruit's breakout: high = card in
 image = "{image}"
 writeback = true
 trace = "{trace}"           # JSONL: one {{"cmd","arg","resp","t_us"}} per command

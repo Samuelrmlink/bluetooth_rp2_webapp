@@ -176,6 +176,7 @@ static int identify(sd_info_t *info) {
     uint32_t lim = sd_card_clock_limit_khz();      /* lowered by recovery */
     sdio_hw_set_clock_khz(lim && lim < CONFIG_SD_SDIO_KHZ ? lim : CONFIG_SD_SDIO_KHZ);
     info->clock_khz = sdio_hw_clock_khz();
+    info->crc = true;
     return SD_OK;
 }
 

@@ -299,11 +299,12 @@ int sd_api_status_json(char *buf, size_t cap) {
     const sd_info_t *ci = sd_card_info();
     int n = snprintf(buf, cap,
                      "{\"ok\":true,\"present\":%s,\"mounted\":%s,\"state\":\"%s\",\"fs\":\"%s\","
-                     "\"total\":%llu,\"free\":%llu,\"bus\":{\"type\":\"%s\",\"width\":%u,\"clock_khz\":%lu},",
+                     "\"total\":%llu,\"free\":%llu,\"bus\":{\"type\":\"%s\",\"width\":%u,\"clock_khz\":%lu,\"crc\":%s},",
                      p->present ? "true" : "false", p->media == LS_MEDIA_OK ? "true" : "false", sd_card_state(),
                      p->fs ? p->fs : "-", (unsigned long long)p->total_bytes,
                      (unsigned long long)p->free_bytes, sd_card_bus() ? sd_card_bus()->name : "-",
-                     ci->valid ? ci->bus_width : 0, (unsigned long)(ci->valid ? ci->clock_khz : 0));
+                     ci->valid ? ci->bus_width : 0, (unsigned long)(ci->valid ? ci->clock_khz : 0),
+                     ci->valid && ci->crc ? "true" : "false");
     if (n < 0 || (size_t)n >= cap) {
         return -1;
     }

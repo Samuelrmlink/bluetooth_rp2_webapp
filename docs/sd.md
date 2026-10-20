@@ -67,28 +67,44 @@ What bring-up found (each now has a host test that fails without the fix):
 | Option | Default | |
 |---|---|---|
 | `SD_BUS_SDIO` / `SD_BUS_SPI` | SDIO | the bus |
-| `SD_SDIO_CLK`, `SD_SDIO_CMD` | 16, 17 | any GPIOs (CLK is not tied to D0) |
-| `SD_SDIO_D0` | 18 | D1–D3 = D0+1..D0+3 (consecutive) |
+| `SD_SDIO_CLK`, `SD_SDIO_CMD` | 2, 3 | any GPIOs (CLK is not tied to D0) |
+| `SD_SDIO_D0` | 4 | D1–D3 = D0+1..D0+3 (consecutive) |
 | `SD_SDIO_PIO` | −1 | −1 = whichever PIO has room |
 | `SD_SDIO_PULLUPS` | y | internal pull-ups on CMD and D0-D3 (pull-ups only: RP2350-E9 on A2 silicon is a pull-down problem) |
 | `SD_SDIO_KHZ` | 25000 | requested; the clock is sys/8 at most (18.75 MHz at 150 MHz) |
-| `SD_SPI_BUS`, `_SCK`, `_MOSI`, `_MISO` | 1, 14, 15, 8 | the W5500's SPI1, shared |
-| `SD_SPI_CS` | 9 | |
+| `SD_SPI_BUS`, `_SCK`, `_MOSI`, `_MISO` | 0, 2, 3, 4 | SPI0, on the SDIO wiring (card CLK, CMD, D0) |
+| `SD_SPI_CS` | 7 | the card's D3 |
 | `SD_SPI_KHZ` | 25000 | |
-| `SD_DETECT`, `SD_DETECT_LEVEL` | 22, 0 | −1 = no switch (a card is assumed present) |
+| `SD_DETECT`, `SD_DETECT_LEVEL` | 22, 0 (9, 1 in the SD defconfigs) | −1 = no switch (a card is assumed present); 1 = high means present (Adafruit's breakout) |
 | `SD_XFER_BUF`, `SD_XFERS` | 4096, 2 | HTTP transfer rings |
 | `SD_WORKER_STACK` | 4096 | |
 
 Builds: `configs/pico2w_sd_defconfig` (pico2w_eth + SDIO) and
-`configs/pico2w_sdspi_defconfig` (pico2w_eth + SPI sharing SPI1 with the
-W5500). Cost over pico2w_eth: SDIO +59 KB flash, +17.8 KB RAM; SPI +52 KB,
+`configs/pico2w_sdspi_defconfig` (pico2w_eth + SPI on SPI0), on the same
+wiring. Cost over pico2w_eth: SDIO +59 KB flash, +17.8 KB RAM; SPI +52 KB,
 +16.7 KB (most of the flash is FatFs with exFAT and mkfs).
 
-Wiring (SDIO): CLK GP16, CMD GP17, D0–D3 GP18–21, card detect GP22 (switch
-to GND), 3.3 V, pull-ups on CMD and D0–D3 (internal ones are enabled; a
-socket with 10–50 kΩ externals is better). The radio's GP23/24/25/29 and the
-W5500's GP8/10/11/13/14/15 are untouched. Every SD pin is reserved in the
-pin broker, so a script can never claim one.
+Wiring, the same for **both** buses:
+
+| card | GPIO (pin) | SDIO | hardware SPI0 |
+|---|---|---|---|
+| CLK | GP2 (4) | CLK | SCK |
+| CMD | GP3 (5) | CMD | MOSI (TX) |
+| D0 | GP4 (6) | D0 | MISO (RX) |
+| D1 | GP5 (7) | D1 | pulled up |
+| D2 | GP6 (9) | D2 | pulled up |
+| D3 | GP7 (10) | D3 | CS |
+| DET | GP9 (12) | card detect | card detect |
+
+SDIO only needs D0–D3 consecutive (CLK and CMD may be any pins). The RP2350's
+SPI pins have fixed roles -- GPIO n is SPI(n/8 mod 2), RX/CSn/SCK/TX for
+n mod 4 = 0/1/2/3 -- and GP2/3/4 are SPI0's SCK/TX/RX: the card's CLK/CMD/D0.
+3.3 V; pull-ups on CMD and D0–D3 (the breakout's, or the internal ones,
+`SD_SDIO_PULLUPS`). The radio's GP23/24/25/29 and the W5500's
+GP8/10/11/13/14/15 are untouched; in SPI mode the card is alone on SPI0. Every
+SD pin is reserved in the pin broker, so a script can never claim one. (The
+first hardware runs used CLK 16 / CMD 17 / D0–D3 18–21, which suits SDIO
+only: GP16 is an SPI RX pin and cannot clock a card.)
 
 ## Layers (`src/sd/`)
 
@@ -134,8 +150,16 @@ Our own design (carlk3's driver is ZuluSCSI's GPL-3.0 code; pico-extras'
 
 ### SPI, on a shared bus
 
-The card may share SPI1 with the W5500. The bus semaphore makes every
-transaction exclusive. What an SD card needs on top (`src/io/spibus.c`):
+CRC is **on** in SPI mode: CMD59 right after CMD0 turns the card's checking
+on, every command carries its CRC7, every block written its CRC16, and every
+block read (CSD and CID too) is checked -- so a bad contact shows up as CRC
+errors and drives recovery, as on SDIO. (km003c's driver left it off; then
+bad data passes silently.) A card that refuses CMD59 runs without it;
+`bus.crc` in the status says which.
+
+The default wiring puts the card alone on SPI0, but it may also share a bus
+(e.g. SPI1 with the W5500: GP14/15/8 and a CS of its own). The bus semaphore
+makes every transaction exclusive. What an SD card needs on top (`src/io/spibus.c`):
 
 * fill byte 0xFF for reads (`spidev_t.fill`);
 * power-up clocks with CS high (`spibus_xfer_*_cs`);

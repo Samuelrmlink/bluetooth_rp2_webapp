@@ -71,6 +71,7 @@ static void scenarios(void) {
     CHECK(in->valid && in->v2 && in->block_addr, "v2, block addressed");
     CHECK(in->sectors == 131072, "sector count from the CSD");
     CHECK(in->bus_width == (spi ? 1 : 4), "4-bit on SDIO, 1 on SPI");
+    CHECK(in->crc, "data CRCs checked (SPI: CMD59 accepted)");
     sd_cid_t cid;
     sd_cid_decode(in->cid, &cid);
     CHECK(in->cid_ok && !strncmp(cid.name, "SIM01", 5) && cid.oem[0] == 'S' && cid.serial == 0x12345678 &&
@@ -104,9 +105,7 @@ static void scenarios(void) {
     sd_card_stats()->read_retries = 0;
     CHECK(sd_card_read(99, back, 4) == SD_OK && !memcmp(back + 512, card.img + 100 * 512, 512),
           "a CRC error on a read block is retried and the data is right");
-    if (!spi) {
-        CHECK(sd_card_stats()->read_retries == 1 && sd_card_stats()->crc_errors >= 1, "counted as a CRC retry");
-    }   /* SPI mode runs with CRC off (CMD59 default): the bad CRC goes unseen, the data is right */
+    CHECK(sd_card_stats()->read_retries == 1 && sd_card_stats()->crc_errors >= 1, "counted as a CRC retry");
 
     card.crc_write_lba = 200;
     sd_card_stats()->write_retries = 0;
@@ -144,16 +143,21 @@ static void scenarios(void) {
         card.write_busy_us = 300;
     }
 
-    if (!spi) {
+    {
         /* Recovery (the hardware case of 2026-10-19: every read failing its
          * CRC until the card was reseated). A wedged card: the read that
-         * hits it re-identifies the card and succeeds, at full speed. */
+         * hits it re-identifies the card and succeeds, at full speed. On SPI
+         * this is what CRC being on buys: with it off the bad data went
+         * through unseen. */
         uint32_t rec0 = sd_card_stats()->recoveries, full = sd_card_info()->clock_khz;
         card.crc_until_reset = true;
         CHECK(sd_card_read(600, back, 4) == SD_OK && !memcmp(back, card.img + 600 * 512, 2048),
               "a wedged card is re-identified and the same read succeeds");
         CHECK(sd_card_stats()->recoveries == rec0 + 1 && sd_card_info()->clock_khz == full,
               "one recovery, no slowdown");
+    }
+    if (!spi) {
+        uint32_t full = sd_card_info()->clock_khz;
         /* A marginal contact above 10 MHz: recoveries step the clock down
          * until the data comes through, and the data is right. */
         card.marginal_khz = 10000;
@@ -216,6 +220,13 @@ static void scenarios(void) {
     card.v1 = true;
     CHECK(sd_card_init() == SD_OK && !sd_card_info()->v2, "v1 card (no CMD8 answer) identifies");
     CHECK(sd_card_read(8, back, 1) == SD_OK && back[0] == 1, "and reads");
+
+    if (spi) {
+        fresh(131072, true);
+        card.refuse_cmd59 = true;
+        CHECK(sd_card_init() == SD_OK && !sd_card_info()->crc, "an old card that refuses CMD59 runs without CRC");
+        CHECK(sd_card_read(8, back, 1) == SD_OK && back[0] == 1, "and reads");
+    }
 
     fresh(131072, true);
     card.present = false;

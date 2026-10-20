@@ -17,7 +17,7 @@ static sd_card_t card = {
     .sdio_if_p = &sdio_if,
     .use_card_detect = true,
     .card_detect_gpio = SDDIFF_DETECT,
-    .card_detected_true = 0,
+    .card_detected_true = 1,             /* Adafruit SDIO breakout: high = card in */
     .card_detect_use_pull = true,
     .card_detect_pull_hi = true,
 };

@@ -28,6 +28,9 @@ typedef struct sdsim {
     /* state */
     int      state;           /* SD state machine (idle, ready, ident, stby, tran, data, rcv, prg) */
     bool     spi;             /* entered SPI mode (CMD0 with CS low) */
+    bool     spi_crc;         /* CMD59 turned CRC checking on (SPI mode) */
+    bool     refuse_cmd59;    /* an old card: CMD59 is illegal */
+    uint8_t  wcrc[2];         /* SPI write: the CRC16 the host sent */
     bool     app;             /* next command is an ACMD */
     uint16_t rca;
     int      width;           /* 1 or 4 */
@@ -48,9 +51,9 @@ typedef struct sdsim {
     uint32_t write_busy_us;   /* programming time per written block */
     int64_t  pull_at_lba;     /* the card is pulled while this block is read */
     int      garble_resp_cmd; /* corrupt the CRC of this command's next response, but act on it (-1 none) */
-    bool     busy_hidden;
+    bool     busy_hidden;     /* D0 shows no busy until clocked a while (a real card, bench 2026-10-19) */
     bool     crc_until_reset; /* every block it sends has a bad CRC until CMD0 / power-up (a wedged card) */
-    uint32_t marginal_khz;    /* data above this clock arrives corrupted (a marginal contact); 0 = none */     /* D0 shows no busy until clocked a while (a real card, bench 2026-10-19) */
+    uint32_t marginal_khz;    /* data above this clock arrives corrupted (a marginal contact); 0 = none */
 
     /* trace */
     sdsim_trace_t trace[4096];

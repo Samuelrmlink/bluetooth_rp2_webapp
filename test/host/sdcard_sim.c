@@ -110,6 +110,7 @@ static void power_up(sdsim_t *s) {
     s->crc_until_reset = false;
     s->state = S_IDLE;
     s->spi = false;
+    s->spi_crc = false;
     s->app = false;
     s->rca = 0;
     s->width = 1;
@@ -409,7 +410,9 @@ static void spi_command(sdsim_t *s) {
         return;
     }
     if (!s->spi) { return; }
-    if (cmd == 8 && !crc_ok) { q(s, 0xFF); q(s, 0x09); trace(s, cmd, arg, -1); return; }
+    if ((cmd == 8 || s->spi_crc) && !crc_ok) {     /* CMD8 is always checked; the rest once CRC is on */
+        q(s, 0xFF); q(s, (uint8_t)((s->state == S_IDLE ? 0x01 : 0x00) | 0x08)); trace(s, cmd, arg, -1); return;
+    }
     if (cmd == 12) {
         /* stop a multi-block read: R1 after the stuff byte, then ready */
         bool app = s->app;
@@ -452,7 +455,19 @@ static void spi_command(sdsim_t *s) {
         q(s, (uint8_t)(ocr >> 24)); q(s, (uint8_t)(ocr >> 16)); q(s, (uint8_t)(ocr >> 8)); q(s, (uint8_t)ocr);
         return;
     }
-    if (cmd == 59) { s->app = false; trace(s, cmd, arg, 0); q(s, 0xFF); q(s, 0x00); return; }
+    if (cmd == 59 && s->refuse_cmd59) {
+        s->app = false;
+        trace(s, cmd, arg, -1);
+        q(s, 0xFF); q(s, 0x05);                    /* idle + illegal command */
+        return;
+    }
+    if (cmd == 59) {
+        s->app = false;
+        s->spi_crc = (arg & 1) != 0;
+        trace(s, cmd, arg, 0);
+        q(s, 0xFF); q(s, s->state == S_IDLE || s->state == S_READY ? 0x01 : 0x00);
+        return;
+    }
     if (core(s, cmd, arg, &rt, &st) != 0) { return; }
     bool idle = s->state == S_IDLE || s->state == S_READY;
     q(s, 0xFF);
@@ -489,9 +504,12 @@ static uint8_t spi_byte(sdsim_t *s, uint8_t mosi) {
             if (s->wn == 512) { s->wphase = 2; s->wn = 0; }
             return 0xFF;
         } else {
+            s->wcrc[s->wn] = mosi;
             if (++s->wn < 2) { return 0xFF; }
             uint8_t token;
-            sdsim_sd_write_block(s, s->wbuf, wire_crc(s->wbuf, 1), &token);
+            /* With CRC on, the card checks what the host sent; off, it trusts the data. */
+            uint64_t crc = s->spi_crc ? (uint64_t)(s->wcrc[0] << 8 | s->wcrc[1]) : wire_crc(s->wbuf, 1);
+            sdsim_sd_write_block(s, s->wbuf, crc, &token);
             s->wphase = 0;
             s->outn = s->outi = 0;
             q(s, token == 0x2 ? 0x05 : token == 0x5 ? 0x0B : 0x0D);

@@ -955,7 +955,7 @@ def t_sd_gateway_sim():
     with card detect held low and no card on the bus (mcusim has no SD model
     yet) the worker must identify, fail and retry without a slice over 10 ms,
     report state "error", and keep /api/sd answering. Runs the PIO driver
-    (pico2w_sd) and the SPI one on the shared bus (pico2w_sdspi) for real."""
+    (pico2w_sd) and the SPI one on SPI0 (pico2w_sdspi) for real."""
     import json as _j, signal, urllib.request
     mc = os.path.expanduser("~/Work/mcusim/target/release/mcusim")
     rom = os.path.expanduser("~/Work/mcusim/third_party/bootrom/rp2350-A2/bootrom-combined.bin")
@@ -963,7 +963,7 @@ def t_sd_gateway_sim():
         return True, "skipped: no mcusim"
     cfg = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_sd_present.toml")
     with open(cfg, "w") as f:
-        f.write('chip = "rp2350"\n[[device]]\ntype = "button"\nname = "sd_detect"\npin = 22\n'
+        f.write('chip = "rp2350"\n[[device]]\ntype = "button"\nname = "sd_detect"\npin = 9\n'
                 'released = "low"\nstdin = false\n')
     notes = []
     for cfgname in ("pico2w_sd", "pico2w_sdspi"):
@@ -1146,7 +1146,7 @@ def main():
         # The SD card is opt-in and no board has the slot yet: these two
         # builds are what keep both buses compiling.
         step(1, "build pico2w_sd (pico2w_eth + SD card on SDIO)", build("pico2w_sd"))
-        step(1, "build pico2w_sdspi (pico2w_eth + SD card on SPI, shared bus)", build("pico2w_sdspi"))
+        step(1, "build pico2w_sdspi (pico2w_eth + SD card on SPI0, same pins)", build("pico2w_sdspi"))
         step(1, "SD off means none of its code is linked", t_sd_symbols)
 
     if a.sim:

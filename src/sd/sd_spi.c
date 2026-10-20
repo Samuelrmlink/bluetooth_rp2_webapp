@@ -15,6 +15,12 @@
  *  - data blocks move by the bus layer's DMA while the worker yields.
  * The claim is held across a read's wait for its data token (the card is
  * mid-command then; at most SD_READ_TIMEOUT_US, typically under 1 ms).
+ *
+ * CRC is ON (CMD59 right after CMD0): every command carries its CRC7, every
+ * block written its CRC16, and every block read -- CSD and CID included --
+ * is checked against its CRC16, as on SDIO. km003c's driver left it off; with
+ * it off a bad contact returns wrong data silently and recovery never sees an
+ * error. A card that refuses CMD59 (only the oldest do) runs without it.
  */
 #include "sd/sd_card.h"
 
@@ -22,6 +28,7 @@
 
 #include "autoconf.h"
 #include "io/spibus.h"
+#include "sd/sd_crc.h"
 #include "sd/sd_port.h"
 
 #ifndef CONFIG_SD_SPI_BUS
@@ -39,6 +46,7 @@
 
 static spidev_t dev;
 static bool block_addr;
+static bool crc_on;              /* CMD59 accepted: data CRC16s are checked and sent */
 
 /* --- bus access ---------------------------------------------------------- */
 
@@ -129,8 +137,8 @@ static uint8_t send_cmd(uint8_t cmd, uint32_t arg) {
         if (!select_card()) { return 0xFF; }
     }
     uint8_t b[6] = { (uint8_t)(0x40 | cmd), (uint8_t)(arg >> 24), (uint8_t)(arg >> 16),
-                     (uint8_t)(arg >> 8), (uint8_t)arg, 0x01 };
-    if (cmd == 0) { b[5] = 0x95; } else if (cmd == 8) { b[5] = 0x87; }
+                     (uint8_t)(arg >> 8), (uint8_t)arg, 0 };
+    b[5] = (uint8_t)((sd_crc7(b, 5) << 1) | 1u);   /* every command: CRC is on (CMD59) */
     xfer(b, NULL, 6);
     if (cmd == 12) { xchg(0xFF); }           /* stuff byte */
     uint8_t r;
@@ -149,8 +157,9 @@ static int rx_block(uint8_t *buf, uint16_t len) {
     if (tok == 0xFF) { return SD_ETIMEOUT; }
     if (tok != 0xFE) { return SD_EIO; }      /* a data error token */
     if (len >= 64 ? !block(NULL, buf, len) : (xfer(NULL, buf, len), false)) { return SD_EIO; }
-    xchg(0xFF);                              /* CRC (off in SPI mode) */
-    xchg(0xFF);
+    uint8_t c[2];
+    xfer(NULL, c, 2);                        /* the block's CRC16 */
+    if (crc_on && (uint16_t)(c[0] << 8 | c[1]) != sd_crc16(buf, len)) { return SD_ECRC; }
     return SD_OK;
 }
 
@@ -159,8 +168,9 @@ static int tx_block(const uint8_t *buf, uint8_t token) {
     xchg(token);
     if (token == 0xFD) { return SD_OK; }     /* stop-tran: no data */
     if (!block(buf, NULL, 512)) { return SD_EIO; }
-    xchg(0xFF);
-    xchg(0xFF);
+    uint16_t crc = sd_crc16(buf, 512);
+    uint8_t c[2] = { (uint8_t)(crc >> 8), (uint8_t)crc };
+    xfer(c, NULL, 2);
     uint8_t resp = xchg(0xFF) & 0x1F;
     if (resp == 0x05) { return SD_OK; }      /* accepted */
     return resp == 0x0B ? SD_ECRC : SD_EIO;
@@ -233,7 +243,9 @@ static int identify(sd_info_t *info) {
         idle = go_idle();
     }
     block_addr = false;
+    crc_on = false;
     if (idle) {
+        crc_on = send_cmd(59, 1) == 0x01;    /* CRC on; a card that refuses runs without */
         uint64_t t0 = sd_port_now_us();
         if (send_cmd(8, 0x1AA) == 1) {                     /* v2 */
             uint8_t r7[4];
@@ -270,6 +282,7 @@ static int identify(sd_info_t *info) {
     deselect();
     release();
     info->block_addr = block_addr;
+    info->crc = crc_on;
     info->bus_width = 1;
     uint32_t lim = sd_card_clock_limit_khz();      /* lowered by recovery */
     uint32_t khz = lim && lim < CONFIG_SD_SPI_KHZ ? lim : CONFIG_SD_SPI_KHZ;

@@ -34,6 +34,7 @@ typedef struct {
     bool     block_addr;     /* SDHC/SDXC: block addresses; SDSC: byte addresses */
     uint8_t  bus_width;      /* 1 or 4 (SDIO); 1 for SPI */
     uint32_t clock_khz;      /* data clock in use */
+    bool     crc;            /* data CRCs checked (SDIO always; SPI once CMD59 is accepted) */
     uint32_t ocr;
     uint16_t rca;            /* SDIO only */
     uint64_t sectors;        /* 512-byte sectors, from the CSD */

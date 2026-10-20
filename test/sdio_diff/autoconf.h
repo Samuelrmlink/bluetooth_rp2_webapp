@@ -9,6 +9,6 @@
 #define CONFIG_SD_SDIO_PIO -1
 #define CONFIG_SD_SDIO_KHZ 25000
 #define CONFIG_SD_DETECT SDDIFF_DETECT
-#define CONFIG_SD_DETECT_LEVEL 0
+#define CONFIG_SD_DETECT_LEVEL 1   /* Adafruit SDIO breakout: high = card in */
 #define CONFIG_IO_PINS 0
 #endif

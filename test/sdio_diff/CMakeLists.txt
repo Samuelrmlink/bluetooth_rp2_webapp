@@ -20,7 +20,7 @@ pico_sdk_init()
 
 set(BTGW ${CMAKE_CURRENT_LIST_DIR}/../..)
 # The pins both drivers get (carlk3's rule CLK = D0 - 2 holds).
-set(SDDIFF_DEFS SDDIFF_CLK=16 SDDIFF_CMD=17 SDDIFF_D0=18 SDDIFF_DETECT=22)
+set(SDDIFF_DEFS SDDIFF_CLK=2 SDDIFF_CMD=3 SDDIFF_D0=4 SDDIFF_DETECT=9)
 
 include(FetchContent)
 FetchContent_Declare(carlk3
