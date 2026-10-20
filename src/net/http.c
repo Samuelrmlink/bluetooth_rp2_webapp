@@ -26,6 +26,9 @@
 #include "config/config.h"
 #endif
 #include "pico/time.h"
+#if CONFIG_LUA_ENABLE
+#include "lua/lheap.h"
+#endif
 
 #include "net/usb_ncm.h"
 
@@ -70,6 +73,11 @@ typedef struct {
      * and credentials in one body, and the WiFi PUTs were already close to
      * the old limit with a 63-character PSK. */
     char post_body[512];
+    /* POST /api/op's body (up to OP_BODY_MAX): too big for post_body, and
+     * eight connections' worth of static buffer is RAM this part does not
+     * have, so it comes from the top of the Lua arena per request. */
+    char *op_body;
+    uint32_t op_gen;
     int file_h;
     size_t file_left;
     bool closing;
@@ -100,6 +108,30 @@ typedef struct {
 } http_conn_t;
 
 static http_conn_t conns[HTTP_CONNS];
+
+#define OP_BODY_MAX 4096
+
+static char *op_alloc(size_t n, uint32_t *gen) {
+#if CONFIG_LUA_ENABLE
+    *gen = lheap_generation();
+    return (char *)lheap_alloc_high(n);
+#else
+    *gen = 0;
+    return (char *)malloc(n);
+#endif
+}
+
+static void op_free(char *p, uint32_t gen) {
+    if (!p) { return; }
+#if CONFIG_LUA_ENABLE
+    /* An op can restart the Lua VM (script.vm_restart), which resets the
+     * arena this came from: then it is already gone. */
+    if (gen == lheap_generation()) { lheap_free(p); }
+#else
+    (void)gen;
+    free(p);
+#endif
+}
 
 static bool path_is(const char *path, const char *want) {
     size_t n = strlen(want);
@@ -162,6 +194,8 @@ static http_conn_t *conn_find(struct tcp_pcb *tpcb) {
 }
 
 static void conn_cleanup(http_conn_t *c) {
+    op_free(c->op_body, c->op_gen);
+    c->op_body = NULL;
     if (c->taking_fs_body) {
         fs_abort_write();
         if (c->fs_name[0]) {
@@ -1350,11 +1384,40 @@ void http_sd_pump(void) {
 }
 #endif
 
+/* POST /api/op {"op":..,"params":{..}} -> the WebSocket's reply, as 200.
+ * The same dispatcher (built-ins, then Lua-registered ops); the reply is
+ * captured instead of framed. Op handlers that look at their connection
+ * (http_send_line, http_conn_dropped) get NULL, which they treat as "not a
+ * WebSocket" already. */
+static bool s_op_replied;
+static void op_capture(const char *line, void *ctx) {
+    (void)ctx;
+    if (s_op_replied) { return; }      /* one reply per request */
+    snprintf(json_buf, sizeof(json_buf), "%s", line);
+    s_op_replied = true;
+}
+
+static err_t op_bridge(struct tcp_pcb *tpcb, const char *body) {
+    s_op_replied = false;
+    api_handle_text(body ? body : "", op_capture, NULL);
+    if (!s_op_replied) {
+        return http_reply(tpcb, 500, "application/json",
+                          "{\"ok\":false,\"error\":{\"code\":\"no_reply\",\"message\":\"the op did not answer\"}}");
+    }
+    return http_reply(tpcb, 200, "application/json", json_buf);
+}
+
 static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, const char *path,
                     const char *body, size_t body_len) {
     (void)body_len;
     if (strcmp(method, "OPTIONS") == 0) {
         return http_reply(tpcb, 204, "text/plain", "");
+    }
+    if (path_is(path, "/api/op")) {
+        if (strcmp(method, "POST") != 0) {
+            return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"POST\"}");
+        }
+        return op_bridge(tpcb, body);
     }
 #if CONFIG_SD
     if (strncmp(path, "/api/sd", 7) == 0 && (path[7] == 0 || path[7] == '/' || path[7] == '?')) {
@@ -1505,6 +1568,7 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
                               "bluetooth_rp2_webapp\n"
                               "GET /api/fs  GET/PUT/DELETE /api/fs/<path>  POST /api/fs/rename\n"
                               "GET /api/tar/<folder>  (a folder as tar)  PUT /api/fs/<folder>/  (mkdir)\n"
+                              "POST /api/op  {\"op\":..,\"params\":{..}} -> the WebSocket reply\n"
 #if CONFIG_SD
                               "GET /api/sd  GET/PUT/DELETE /api/sd/files/<path>  POST /api/sd/rename|format|bench\n"
 #endif
@@ -1754,6 +1818,24 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
             }
             c->taking_fs_body = true;
             c->body_got = 0;
+        } else if (want_post_body && strcmp(method, "POST") == 0 && path_is(path, "/api/op")) {
+            if (c->content_len > OP_BODY_MAX) {
+                pbuf_free(p);
+                conn_drop(tpcb);
+                return http_reply(tpcb, 413, "application/json",
+                                  "{\"ok\":false,\"error\":{\"code\":\"too_large\",\"message\":\"body over 4096 bytes\"}}");
+            }
+            c->op_body = op_alloc(c->content_len + 1, &c->op_gen);
+            if (!c->op_body) {
+                pbuf_free(p);
+                conn_drop(tpcb);
+                return http_reply(tpcb, 503, "application/json",
+                                  "{\"ok\":false,\"error\":{\"code\":\"busy\",\"message\":\"no memory for the body\"}}");
+            }
+            snprintf(c->method, sizeof(c->method), "%s", method);
+            snprintf(c->path, sizeof(c->path), "%s", path);
+            c->taking_post_body = true;
+            c->body_got = 0;
         } else if (want_post_body) {
             if (c->content_len >= sizeof(c->post_body)) {
                 pbuf_free(p);
@@ -1820,9 +1902,10 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
     }
 
     if (c->taking_post_body) {
+        char *dst = c->op_body ? c->op_body : c->post_body;
         while (offset < p->tot_len && c->body_got < c->content_len) {
             size_t room = c->content_len - c->body_got;
-            uint16_t chunk = pbuf_copy_partial(p, c->post_body + c->body_got, (uint16_t)room, (uint16_t)offset);
+            uint16_t chunk = pbuf_copy_partial(p, dst + c->body_got, (uint16_t)room, (uint16_t)offset);
             if (!chunk) {
                 break;
             }
@@ -1831,9 +1914,9 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         }
         pbuf_free(p);
         if (c->body_got >= c->content_len) {
-            c->post_body[c->content_len] = 0;
+            dst[c->content_len] = 0;
             c->taking_post_body = false;
-            err_t derr = dispatch(tpcb, c, c->method, c->path, c->post_body, c->content_len);
+            err_t derr = dispatch(tpcb, c, c->method, c->path, dst, c->content_len);
             if (derr == ERR_ABRT) {
                 return ERR_ABRT;
             }

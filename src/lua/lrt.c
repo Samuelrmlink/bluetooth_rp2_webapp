@@ -22,6 +22,7 @@
 
 #include "lua/lheap.h"
 #include "lua/lwait.h"
+#include "lua/ljson.h"
 
 #if CONFIG_LUA_ENABLE
 
@@ -1242,8 +1243,117 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
 }
 
 /* --- the scheduler -------------------------------------------------------- */
+/* --- autostart ------------------------------------------------------------
+ * cfg/autostart.json = {"scripts":["name", ...]}: started once per boot,
+ * AUTOSTART_DELAY_MS after the runtime came up (the network and Bluetooth
+ * are still settling before that), in order. Not again after a VM restart:
+ * script.vm_restart {resume=true} is what brings scripts back then. A name
+ * that fails to start is logged and the rest still start. */
+#define AUTOSTART_PATH "cfg/autostart.json"
+#define AUTOSTART_DELAY_MS 3000
+#define AUTOSTART_MAX 2048
+static uint32_t s_autostart_at;       /* 0 = done, or not scheduled */
+static bool s_autostart_scheduled;
+
+/* Push the "scripts" array of cfg/autostart.json (a new table if the file is
+ * missing or unreadable). */
+static void autostart_load(lua_State *Ls) {
+    int top = lua_gettop(Ls);
+    size_t sz = 0;
+    if (fs_stat(AUTOSTART_PATH, &sz) && sz > 0 && sz <= AUTOSTART_MAX) {
+        char *buf = (char *)lua_newuserdatauv(Ls, sz, 0);
+        int h = fs_begin_read(AUTOSTART_PATH, NULL);
+        int n = h >= 0 ? fs_read(h, (uint8_t *)buf, sz) : -1;
+        if (h >= 0) { fs_end_read(h); }
+        const char *err = NULL;
+        if (n > 0 && ljson_decode(Ls, buf, (size_t)n, &err)) {
+            if (lua_istable(Ls, -1)) {
+                lua_getfield(Ls, -1, "scripts");
+                if (lua_istable(Ls, -1)) {
+                    lua_replace(Ls, top + 1);      /* over the userdata */
+                    lua_settop(Ls, top + 1);
+                    return;
+                }
+            }
+            printf("lua: %s has no \"scripts\" array; ignored\n", AUTOSTART_PATH);
+        } else if (n > 0) {
+            printf("lua: %s is not valid JSON (%s); ignored\n", AUTOSTART_PATH, err ? err : "?");
+        }
+    }
+    lua_settop(Ls, top);
+    lua_newtable(Ls);
+}
+
+static void autostart_run(void) {
+    int top = lua_gettop(L);
+    autostart_load(L);
+    lua_Integer n = luaL_len(L, -1);
+    for (lua_Integer i = 1; i <= n; i++) {
+        lua_rawgeti(L, -1, i);
+        char name[NAME_MAX_LEN + 1];
+        const char *v = lua_tostring(L, -1);
+        snprintf(name, sizeof name, "%s", v ? v : "");
+        lua_pop(L, 1);
+        if (!name[0]) { continue; }
+        const char *err = NULL;
+        if (lrt_start(name, &err)) {
+            printf("lua: autostart %s\n", name);
+        } else {
+            printf("lua: autostart %s failed: %s\n", name, err ? err : "?");
+            char msg[200];
+            size_t k = (size_t)snprintf(msg, sizeof msg, "{\"script\":\"%s\",\"autostart\":true,\"error\":\"", name);
+            k += api_json_escape(msg + k, sizeof msg - k - 4, err ? err : "?");
+            snprintf(msg + k, sizeof msg - k, "\"}");
+            api_emit("script.error", msg);
+        }
+    }
+    lua_settop(L, top);
+}
+
+/* script.autostart {name, enabled}: add or remove a name, keep the order,
+ * write the file back. Reply: the list now. */
+bool lrt_autostart_set(const char *name, bool enabled, char *out, size_t cap, const char **err) {
+    if (!s_ready) { *err = "lua runtime is not up"; return false; }
+    if (!name[0] || strlen(name) > NAME_MAX_LEN) { *err = "bad script name"; return false; }
+    int top = lua_gettop(L);
+    autostart_load(L);                                  /* top: the list */
+    int list = lua_gettop(L);
+    lua_newtable(L);                                    /* the new list */
+    int nl = lua_gettop(L);
+    lua_Integer k = 0;
+    bool had = false;
+    lua_Integer len = luaL_len(L, list);
+    for (lua_Integer i = 1; i <= len; i++) {
+        lua_rawgeti(L, list, i);
+        const char *v = lua_type(L, -1) == LUA_TSTRING ? lua_tostring(L, -1) : NULL;
+        bool keep = v != NULL;
+        if (v && strcmp(v, name) == 0) {
+            keep = enabled && !had;       /* once, and only while enabled */
+            had = true;
+        }
+        if (keep) { lua_rawseti(L, nl, ++k); } else { lua_pop(L, 1); }
+    }
+    if (enabled && !had) { lua_pushstring(L, name); lua_rawseti(L, nl, ++k); }
+    lua_createtable(L, 0, 1);
+    lua_pushvalue(L, nl);
+    lua_setfield(L, -2, "scripts");
+    bool trunc = false;
+    size_t n = ljson_encode(L, -1, out, cap, &trunc);
+    /* An empty list encodes as {} (no length); say [] in the file. */
+    if (k == 0) { n = (size_t)snprintf(out, cap, "{\"scripts\":[]}"); }
+    lua_settop(L, top);
+    if (trunc) { *err = "list too long"; return false; }
+    if (fs_begin_write(AUTOSTART_PATH) < 0) { *err = "filesystem busy"; return false; }
+    if (fs_write((const uint8_t *)out, n) < 0 || fs_end_write() < 0) { *err = "write failed"; return false; }
+    return true;
+}
+
 void lrt_tick(void) {
     if (!s_ready) { return; }
+    if (s_autostart_at && (int32_t)(to_ms_since_boot(get_absolute_time()) - s_autostart_at) >= 0) {
+        s_autostart_at = 0;
+        autostart_run();
+    }
     if (s_defrag_due) {
         s_defrag_due = false;
         if (!any_running(NULL)) {
@@ -1868,6 +1978,11 @@ void lrt_init(void) {
     s_cache_scan = true;
 
     s_ready = true;
+    if (!s_autostart_scheduled) {
+        s_autostart_scheduled = true;     /* once per boot, not per VM */
+        s_autostart_at = to_ms_since_boot(get_absolute_time()) + AUTOSTART_DELAY_MS;
+        if (!s_autostart_at) { s_autostart_at = 1; }
+    }
     printf("lua: 5.4.8 up, %u KB arena, %d-instruction slice\n",
            CONFIG_LUA_HEAP_KB, CONFIG_LUA_HOOK_BUDGET);
 }

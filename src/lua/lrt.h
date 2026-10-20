@@ -74,6 +74,11 @@ bool lrt_revert(const char *name);                    /* drop draft, else staged
 bool lrt_eval(const char *name, const char *chunk, char *out, size_t cap);
 
 size_t lrt_list_json(char *dst, size_t cap);
+
+/* cfg/autostart.json ({"scripts":[...]}, started once per boot a few
+ * seconds after the runtime): add (enabled) or remove a name. `out` gets the
+ * file's new JSON. */
+bool lrt_autostart_set(const char *name, bool enabled, char *out, size_t cap, const char **err);
 size_t lrt_stats_json(char *dst, size_t cap);
 /* script.loaded: every running script and resident module, with the tier and
  * hash it was compiled from and the hash of its file now. */

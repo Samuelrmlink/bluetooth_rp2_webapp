@@ -308,7 +308,23 @@ static void op_source(const char *params, api_reply_fn reply, void *ctx, long id
     api_reply_ok(reply, ctx, id, out);
 }
 
+/* script.autostart {name, enabled=true}: cfg/autostart.json, started at boot. */
+static void op_autostart(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char nm[40];
+    if (!name_of(params, nm, sizeof nm)) { api_reply_err(reply, ctx, id, "bad_request", "need \"name\""); return; }
+    bool enabled = true;
+    (void)api_json_bool(params, "enabled", &enabled);
+    const char *err = "unknown error";
+    static char file[1024];
+    if (!lrt_autostart_set(nm, enabled, file, sizeof file, &err)) {
+        api_reply_err(reply, ctx, id, "autostart_failed", err);
+        return;
+    }
+    api_reply_ok(reply, ctx, id, file);
+}
+
 static const op_def_t lua_ops_tbl[] = {
+    { "script.autostart", op_autostart },
     { "script.source", op_source },
     { "script.list",   op_list },
     { "script.loaded", op_loaded },

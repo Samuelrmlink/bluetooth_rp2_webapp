@@ -36,6 +36,10 @@ void  lheap_free(void *p);
 /* The same, but from the top of the arena (see lheap.c): for long-lived C
  * allocations made on Lua's behalf. Freed with lheap_free. Not zeroed. */
 void *lheap_alloc_high(size_t want);
+/* Bumped by every lheap_init (a Lua VM restart). A block from an older
+ * generation is gone -- the arena was reset under it -- and must not be
+ * passed to lheap_free. */
+uint32_t lheap_generation(void);
 
 /*
  * The allocator Lua sees, minus the unused `ud`. Three rules from Lua's

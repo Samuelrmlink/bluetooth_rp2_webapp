@@ -38,7 +38,11 @@ static size_t heap_used, heap_peak;
  * "no bytes": these say which, without a debugger. */
 static size_t fail_last, fail_count;
 
+static uint32_t heap_gen;
+uint32_t lheap_generation(void) { return heap_gen; }
+
 void lheap_init(void) {
+    heap_gen++;
     heap_head = (blk_t *)arena;
     heap_head->size = ARENA_BYTES - HDR;
     heap_head->next = NULL;
