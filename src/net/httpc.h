@@ -38,7 +38,10 @@ typedef struct {
     void   (*on_status)(void *user, int status);
     void   (*on_header)(void *user, const char *name, const char *value);
     /* How many body bytes the sink can take right now. 0 stops reading (TCP
-     * flow control pushes back on the server) until the next httpc_tick. */
+     * flow control pushes back on the server) until the next httpc_tick.
+     * NOT consulted for the piece that ends the headers: up to 512 bytes of
+     * body may arrive with them, before room() has been asked -- a sink must
+     * be able to take that much as soon as on_status has run. */
     size_t (*room)(void *user);
     void   (*on_body)(void *user, const uint8_t *data, size_t n);
     /* Exactly once: done (err HTTPC_OK) or failed. */

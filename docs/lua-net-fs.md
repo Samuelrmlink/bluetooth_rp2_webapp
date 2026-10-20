@@ -140,9 +140,20 @@ one of `dns`, `connect`, `tls`, `timeout`, `toolarge`, `io`, `cancelled`, `nomem
 ### HTTPS
 
 mbedTLS 3.6 cut to a TLS 1.2 client (`include/mbedtls_config.h`): ECDHE-ECDSA
-and ECDHE-RSA with AES-128/256-GCM; P-256, P-384 and X25519; RSA (to 4096 bits)
-and ECDSA certificates. TLS 1.3 is not built (about 25 KB more flash); every
-server that matters here speaks 1.2.
+(offered first) and ECDHE-RSA with AES-128/256-GCM; P-256 and P-384; RSA (to
+4096 bits) and ECDSA certificates. TLS 1.3 is not built (about 25 KB more
+flash); every server that matters here speaks 1.2.
+
+**The handshake and the main loop.** Elliptic-curve arithmetic is slow on this
+part, and a TLS call runs inside the cooperative loop. mbedTLS's *restartable*
+ECC is on (`mbedtls_ecp_set_max_ops`), so with an ECDHE-ECDSA suite the key
+generation, ECDH and ECDSA verification run in bounded steps across loop
+passes. Measured in mcusim: without it one handshake call held the loop ~1 s;
+with it no pass exceeded the 250 ms stall warning. mbedTLS does not restart the
+ECDHE-RSA flow, so a server with an RSA certificate still costs one ~0.5 s
+pass (USB, Wi-Fi and Bluetooth wait through it). X25519 is not offered at all:
+its Montgomery ladder cannot be restarted and servers prefer it. Google's
+front ends hold ECDSA certificates and pick ECDHE-ECDSA when it is offered first.
 
 The server is verified -- chain, signature, host name (SNI is sent) -- against
 the roots in `third_party/ca_roots/` (generated into `src/net/ca_roots.h` by
@@ -176,6 +187,7 @@ receive record buffer (servers -- Google's included -- ignore
 |---|---|
 | a session, after setup / steady after the handshake | 22.5 K / 22.7 K |
 | a session at its handshake peak (RSA-4096 root, RSA-2048 intermediate, ECDSA or RSA leaf) | ~37 K |
+| the same, on the device (mcusim, `http.stats().tls_peak_bytes`, a 2-certificate chain) | ~28.6 K |
 | an in-memory body | up to `max_body` (2 KiB chunks) |
 | response headers kept | at most 8 KiB |
 
@@ -246,6 +258,15 @@ the file's new contents.
 
 ## Notes for whoever changes this
 
+* **USB-NCM drops frames with ERR_USE.** `usb_ncm.c`'s `ncm_linkoutput`
+  returns `ERR_USE` when its single transmit buffer is busy and the frame is
+  gone. lwIP then leaves the TCP segment on `unsent` with no timer to retry it:
+  an outgoing SYN dropped that way was a connect that never completed (found in
+  mcusim, when a reply to the host went out at the same moment). `httpc_tick`
+  now calls `tcp_output()` for any request with something unsent. The HTTP
+  server and anything else on that interface have the same exposure; returning
+  `ERR_OK` on a drop (and letting TCP's retransmission recover) is the usual
+  netif convention and probably the right upstream fix.
 * **Integers are 64-bit.** The firmware asks for `LUA_32BITS`, but
   `third_party/lua/luaconf.h` redefines it to 0 after `lua_pico_conf.h` has set
   it (the build warns), so Lua runs with 64-bit integers and doubles. Everything
@@ -269,5 +290,14 @@ the file's new contents.
 * `test/host/sd_stack_test.c` (jobs section) -- the SD jobs through the real FatFs on both buses.
 * `test/host/tls_mem_test.c` -- the mbedTLS configuration against a local `openssl s_server`.
 * `test/host/heap_test.c` (alloc from the top) -- `lheap_alloc_high`.
+* `test/host/lfile_sd_test.c` -- `lfile.c` on the SD card end to end (binding, yields, jobs, worker, FatFs).
+* `test/host/lhttp_sd_test.c` -- `to_file` onto the SD card through `lhttp.c`'s state machine.
 * `test/sim/lua_net_fs.py` -- the firmware in mcusim over USB-NCM: `file`, `json`,
-  `http` (plain and TLS against local servers), `sys`, `POST /api/op`.
+  `http` (plain and TLS against local servers), `sys`, `POST /api/op` (48 checks);
+  `--radio`: SNTP, DNS and HTTP over the Wi-Fi uplink against mcusim's offline
+  virtual AP, and `uuids128` / `age_ms` from a simulated BLE advertiser (11 checks).
+  Both run from `tools/run_tests.py --sim`.
+
+Not covered anywhere yet: `bt.mtu`, `want_done` and `too_long` with a real link
+(mcusim has no LE connection model), and HTTPS against the real
+`firebasestorage.googleapis.com` (needs hardware and the network).

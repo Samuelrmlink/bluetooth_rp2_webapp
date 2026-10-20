@@ -152,6 +152,12 @@ static void serve(lua_State *L, int status, size_t n, size_t fail_at) {
     s_fake.sink.on_header(s_fake.user, "content-type", "application/octet-stream");
     size_t sent = 0;
     uint8_t buf[1500];
+    /* As the real client does: the piece that ends the headers carries up
+     * to 512 bytes of body, delivered before room() is asked. */
+    size_t first = n < 512 ? n : 512;
+    if (fail_at && first > fail_at) { first = fail_at; }
+    for (size_t k = 0; k < first; k++) { buf[k] = pat(k); }
+    if (first) { s_fake.sink.on_body(s_fake.user, buf, first); sent = first; }
     unsigned rnd = 12345;
     for (int guard = 0; guard < 200000 && sent < n; guard++) {
         size_t room = s_fake.sink.room(s_fake.user);

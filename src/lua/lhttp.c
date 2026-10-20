@@ -160,6 +160,17 @@ static void on_status(void *u, int status) {
     }
 #if CONFIG_SD
     else {
+        /* The stage now, not when the file is open: the piece that ends the
+         * headers can carry the start of the body (httpc.h), and it has to
+         * land somewhere while the card is still opening the file. */
+        h->stage = lheap_alloc_high(SDJ_BUF);
+        h->stage_len = 0;
+        if (!h->stage) {
+            h->file_err = true; h->file_errc = HTTPC_ENOMEM;
+            snprintf(h->msg, sizeof h->msg, "out of memory for the stage");
+            h->sd_state = SDW_FAILED;
+            return;
+        }
         h->sd_state = SDW_OPENING;       /* posted by lhttp_tick */
     }
 #endif
@@ -184,7 +195,7 @@ static size_t room(void *u) {
     if (!h->to_file) { return (size_t)-1; }
     if (h->fvol == F_LFS) { return (size_t)-1; }
 #if CONFIG_SD
-    if (h->sd_state != SDW_READY || !h->stage) { return 0; }
+    if ((h->sd_state != SDW_READY && h->sd_state != SDW_OPENING) || !h->stage) { return 0; }
     return SDJ_BUF - h->stage_len;
 #else
     return 0;
@@ -207,10 +218,18 @@ static void on_body(void *u, const uint8_t *d, size_t n) {
             return;
         }
 #if CONFIG_SD
-        /* room() never offered more than the stage has free. */
+        /* room() never offers more than the stage has free; only the first
+         * piece after the headers is not bounded by it, and the stage is
+         * empty then. Anything that still does not fit is a failure, never a
+         * silently shorter file. */
+        if (!h->stage) { h->file_err = true; h->file_errc = HTTPC_ENOMEM; return; }
         size_t take = n <= SDJ_BUF - h->stage_len ? n : SDJ_BUF - h->stage_len;
         memcpy(h->stage + h->stage_len, d, take);
         h->stage_len += take;
+        if (take < n) {
+            h->file_err = true; h->file_errc = HTTPC_EIO;
+            snprintf(h->msg, sizeof h->msg, "stage overrun");
+        }
 #endif
         return;
     }
@@ -317,15 +336,6 @@ static void sd_step(hreq_t *h) {
     sdj_t q;
     memset(&q, 0, sizeof q);
     if (h->sd_state == SDW_OPENING) {
-        if (!h->stage) {
-            h->stage = lheap_alloc_high(SDJ_BUF);
-            if (!h->stage) {
-                h->file_err = true; h->file_errc = HTTPC_ENOMEM;
-                snprintf(h->msg, sizeof h->msg, "out of memory for the stage");
-                h->sd_state = SDW_FAILED;
-                return;
-            }
-        }
         q.op = SDJ_OPEN; q.mode = LS_WR;
         snprintf(q.path, sizeof q.path, "%s", h->fpath);
         sdj_post(&q, &h->sd_token);
