@@ -751,6 +751,28 @@ def t_tls_mem():
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
+def t_lfile_sd():
+    """The Lua file module's SD side end to end on a host: lfile.c's yields
+    and continuations -> sd_jobs -> the storage worker -> FatFs -> SDIO -> a
+    simulated card. Every call and error code, writes and listings larger
+    than the job buffer, four handles, <close>, a script stopped mid-job,
+    the card pulled under an open handle, SD from a handler refused."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_lfile_sd")
+    srcs = [s for s in SD_STACK_SRCS] + ["src/lua/lfile.c", "src/lua/lfile_path.c", "src/lua/lheap.c",
+                                          "third_party/lua/onelua.c"]
+    rc, out = sh(f"gcc -O1 -g -w -no-pie -DSPIBUS_HOST -DCONFIG_SD=1 -DCONFIG_SD_DETECT=22 -DMAKE_LIB=1 "
+                 f"-DLHEAP_KB=64 -DFS_FLASH_OFF=0 -Isrc -Isrc/fs -Ithird_party/fatfs -Ithird_party/lua "
+                 f"-Itest/host -Itest/host/stub -o {binp} test/host/lfile_sd_test.c {' '.join(srcs)} -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error" in l]
+        return False, errs[0][:100] if errs else "lfile_sd build failed"
+    rc, out = sh(binp)
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m or rc:
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), out.strip()[-90:])
+        return False, first[:100]
+    return True, f"{m.group(1)} checks"
+
 def t_ca_roots():
     """The HTTP client's embedded roots match the pinned SHA-256 fingerprints
     and src/net/ca_roots.h is what the PEMs generate."""
@@ -1253,6 +1275,7 @@ def main():
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "json.decode: types, escapes, depth, malformed, bounds", t_lua_json_decode)
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
+    step(0, "file module on the SD card: binding -> jobs -> worker -> FatFs", t_lfile_sd)
     step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)
     step(0, "HTTPS roots match their pinned fingerprints", t_ca_roots)
     step(0, "TLS config: real handshakes on 127.0.0.1, session memory", t_tls_mem)

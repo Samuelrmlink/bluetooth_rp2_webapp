@@ -322,6 +322,10 @@ static int sd_done(lua_State *L, pend_t *p, const sdj_t *r) {
             p->token = 0;                  /* the next piece */
             return resume_k(L, LUA_YIELD, 0);
         }
+        case P_SD_SEEK:
+            sdj_finish(p->token);
+            lua_pushinteger(L, (lua_Integer)r->tell);     /* the new position, as on LittleFS */
+            return 1;
         case P_SD_CLOSE:
             sdj_finish(p->token);
             if (f) { f->used = false; }
