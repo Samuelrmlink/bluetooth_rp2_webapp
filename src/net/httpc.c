@@ -767,6 +767,14 @@ void httpc_tick(void) {
             start_connection(r);
             continue;
         }
+        /* A frame the interface refused is gone, and lwIP leaves the
+         * segment on `unsent` with nothing to retry it -- for a SYN that is
+         * a connect that never completes. USB-NCM refuses (ERR_USE) whenever
+         * its one transmit buffer is busy, which a reply to the host going
+         * out at the same moment is enough for (found in mcusim). Asking
+         * again each pass is cheap: tcp_output() is a no-op with nothing
+         * queued. */
+        if (r->pcb && r->pcb->unsent) { tcp_output(r->pcb); }
         pump(r);                   /* sink room may have opened */
     }
 }

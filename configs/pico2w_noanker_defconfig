@@ -28,3 +28,6 @@ CONFIG_IO_SPI=y
 # sits a few KB under its slot; it also compiles net.* without net.forward.
 # CONFIG_NET_FORWARD is not set
 # CONFIG_SD is not set
+# The HTTP client without TLS: mbedTLS (~63 KB) does not fit beside the
+# embedded WiFi blob, and this keeps the no-TLS build of httpc compiling.
+# CONFIG_NET_HTTP_TLS is not set
