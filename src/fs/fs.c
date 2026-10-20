@@ -39,6 +39,45 @@ static lfs_file_t wfile;
 static bool wopen;
 static lfs_file_t rfiles[FS_READS];
 static bool ropen[FS_READS];
+/* What each reader and the write slot have open, as a hash, so a pool handle
+ * can tell it would share a file (fs_fopen). A collision only refuses an open
+ * that would have been safe. */
+static uint32_t rhash[FS_READS];
+static uint32_t whash;
+
+typedef struct {
+    bool used;
+    bool wr;
+    bool dirty;
+    uint32_t hash;
+    char name[FS_PATH_MAX + 1];
+    lfs_file_t f;
+    struct lfs_file_config fcfg;
+    uint8_t buf[FLASH_PAGE_SIZE];
+} pool_file_t;
+static pool_file_t pool[FS_FILES];
+
+static uint32_t name_hash(const char *s) {
+    uint32_t h = 2166136261u;
+    for (; *s; s++) { h ^= (uint8_t)*s; h *= 16777619u; }
+    return h ? h : 1;
+}
+
+/* Is `name` open anywhere: the pool (writers only when only_writers), the
+ * write slot, or (unless only_writers) a reader. */
+static bool open_elsewhere(const char *name, bool only_writers) {
+    uint32_t h = name_hash(name);
+    for (int i = 0; i < FS_FILES; i++) {
+        if (pool[i].used && pool[i].hash == h && (!only_writers || pool[i].wr)) { return true; }
+    }
+    if (wopen && whash == h) { return true; }
+    if (!only_writers) {
+        for (int i = 0; i < FS_READS; i++) {
+            if (ropen[i] && rhash[i] == h) { return true; }
+        }
+    }
+    return false;
+}
 
 typedef struct {
     uint32_t off;
@@ -369,6 +408,9 @@ int fs_delete(const char *name) {
     if (!mounted || !fs_valid_path(name)) {
         return -1;
     }
+    if (open_elsewhere(name, false)) {
+        return FS_ERR_BUSY;
+    }
     int err = lfs_remove(&lfs, name);
     if (err == LFS_ERR_NOTEMPTY) { return FS_ERR_NOTEMPTY; }
     if (err >= 0) { changed(name); }
@@ -385,6 +427,9 @@ int fs_rename(const char *from, const char *to) {
     if (fs_stat(to, NULL)) {
         return 1;
     }
+    if (open_elsewhere(from, false)) {
+        return FS_ERR_BUSY;
+    }
     ensure_parent_dirs(to);
     int err = lfs_rename(&lfs, from, to);
     if (err == LFS_ERR_EXIST) {
@@ -398,6 +443,11 @@ int fs_begin_write(const char *name) {
     if (!mounted || !fs_valid_path(name) || fs_is_dir(name) || wopen) {
         return -1;
     }
+    /* A script has it open: replacing it underneath would hand the script a
+     * handle onto metadata that no longer exists. */
+    for (int i = 0; i < FS_FILES; i++) {
+        if (pool[i].used && pool[i].hash == name_hash(name)) { return FS_ERR_BUSY; }
+    }
     snprintf(wname, sizeof wname, "%s", name);
     ensure_parent_dirs(name);
     int err = lfs_file_open(&lfs, &wfile, name, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
@@ -406,6 +456,7 @@ int fs_begin_write(const char *name) {
         return err;
     }
     wopen = true;
+    whash = name_hash(name);
     return 0;
 }
 
@@ -455,11 +506,15 @@ int fs_begin_read(const char *name, size_t *size) {
     if (h < 0) {
         return -1;
     }
+    for (int i = 0; i < FS_FILES; i++) {
+        if (pool[i].used && pool[i].wr && pool[i].hash == name_hash(name)) { return FS_ERR_BUSY; }
+    }
     int err = lfs_file_open(&lfs, &rfiles[h], name, LFS_O_RDONLY);
     if (err < 0) {
         return err;
     }
     ropen[h] = true;
+    rhash[h] = name_hash(name);
     if (size) {
         *size = (size_t)lfs_file_size(&lfs, &rfiles[h]);
     }
@@ -485,6 +540,119 @@ int fs_rewind(int h, size_t n) {
         return -1;
     }
     return 0;
+}
+
+int fs_read_seek(int h, size_t pos) {
+    if (h < 0 || h >= FS_READS || !ropen[h]) {
+        return -1;
+    }
+    return lfs_file_seek(&lfs, &rfiles[h], (lfs_soff_t)pos, LFS_SEEK_SET) < 0 ? -1 : 0;
+}
+
+/* --- the handle pool ------------------------------------------------------ */
+int fs_fopen(const char *name, int mode) {
+    if (!mounted || !fs_valid_path(name)) {
+        return LFS_ERR_INVAL;
+    }
+    if (fs_is_dir(name)) {
+        return LFS_ERR_ISDIR;
+    }
+    bool wr = mode != FS_O_READ;
+    if (open_elsewhere(name, !wr)) {
+        return FS_ERR_BUSY;
+    }
+    int h = -1;
+    for (int i = 0; i < FS_FILES; i++) {
+        if (!pool[i].used) { h = i; break; }
+    }
+    if (h < 0) {
+        return FS_ERR_NOHANDLE;
+    }
+    pool_file_t *p = &pool[h];
+    memset(&p->fcfg, 0, sizeof p->fcfg);
+    p->fcfg.buffer = p->buf;
+    int flags = LFS_O_RDONLY;
+    if (mode == FS_O_WRITE) {
+        flags = LFS_O_RDWR | LFS_O_CREAT | LFS_O_TRUNC;
+    } else if (mode == FS_O_APPEND) {
+        flags = LFS_O_RDWR | LFS_O_CREAT | LFS_O_APPEND;
+    }
+    if (wr) {
+        ensure_parent_dirs(name);
+    }
+    int err = lfs_file_opencfg(&lfs, &p->f, name, flags, &p->fcfg);
+    if (err < 0) {
+        return err;
+    }
+    p->used = true;
+    p->wr = wr;
+    p->dirty = mode == FS_O_WRITE;      /* a truncation is a change */
+    p->hash = name_hash(name);
+    snprintf(p->name, sizeof p->name, "%s", name);
+    return h;
+}
+
+static pool_file_t *pool_at(int h) {
+    return (h >= 0 && h < FS_FILES && pool[h].used) ? &pool[h] : NULL;
+}
+
+int fs_fread(int h, void *buf, size_t n) {
+    pool_file_t *p = pool_at(h);
+    if (!p) { return LFS_ERR_BADF; }
+    return (int)lfs_file_read(&lfs, &p->f, buf, (lfs_size_t)n);
+}
+
+int fs_fwrite(int h, const void *buf, size_t n) {
+    pool_file_t *p = pool_at(h);
+    if (!p || !p->wr) { return LFS_ERR_BADF; }
+    /* Append mode writes at the end whatever the position says. */
+    lfs_soff_t at = (p->f.flags & LFS_O_APPEND) ? lfs_file_size(&lfs, &p->f) : lfs_file_tell(&lfs, &p->f);
+    if (at < 0) { return (int)at; }
+    if ((uint32_t)at + n > FS_FILE_MAX) { return FS_ERR_TOOLARGE; }
+    size_t off = 0;
+    while (off < n) {
+        lfs_ssize_t w = lfs_file_write(&lfs, &p->f, (const uint8_t *)buf + off, (lfs_size_t)(n - off));
+        if (w <= 0) { return w < 0 ? (int)w : LFS_ERR_IO; }
+        off += (size_t)w;
+    }
+    p->dirty = true;
+    return (int)off;
+}
+
+int fs_fseek(int h, uint32_t pos) {
+    pool_file_t *p = pool_at(h);
+    if (!p) { return LFS_ERR_BADF; }
+    lfs_soff_t r = lfs_file_seek(&lfs, &p->f, (lfs_soff_t)pos, LFS_SEEK_SET);
+    return r < 0 ? (int)r : 0;
+}
+
+int32_t fs_ftell(int h) {
+    pool_file_t *p = pool_at(h);
+    return p ? (int32_t)lfs_file_tell(&lfs, &p->f) : LFS_ERR_BADF;
+}
+
+int32_t fs_fsize(int h) {
+    pool_file_t *p = pool_at(h);
+    return p ? (int32_t)lfs_file_size(&lfs, &p->f) : LFS_ERR_BADF;
+}
+
+int fs_fclose(int h) {
+    pool_file_t *p = pool_at(h);
+    if (!p) { return LFS_ERR_BADF; }
+    int err = lfs_file_close(&lfs, &p->f);
+    bool dirty = p->dirty;
+    p->used = false;
+    if (dirty && err >= 0) { changed(p->name); }
+    return err;
+}
+
+bool fs_usage(uint32_t *used, uint32_t *total) {
+    if (!mounted) { return false; }
+    lfs_ssize_t blocks = lfs_fs_size(&lfs);
+    if (blocks < 0) { return false; }
+    if (used) { *used = (uint32_t)blocks * FS_BLOCK; }
+    if (total) { *total = FS_SIZE; }
+    return true;
 }
 
 void fs_end_read(int h) {

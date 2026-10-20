@@ -41,7 +41,12 @@
 
 #define FS_NAME_MAX 64   /* per path segment */
 #define FS_PATH_MAX 128  /* full "a/b/c.ext" path */
-#define FS_FILE_MAX (128u * 1024u)
+/* The largest file PUT /api/fs, SMP fs upload and a Lua `file` handle may
+ * write. 128 KiB until the Lua file API arrived; 1 MiB lets a browser drop a
+ * firmware image for a peripheral into LittleFS. Nothing in LittleFS or in
+ * the streaming paths cares (a 1 MiB file is a CTZ skip-list of 257 blocks);
+ * the limit only keeps one file from eating the 2 MiB volume by accident. */
+#define FS_FILE_MAX (1024u * 1024u)
 #define FS_READS 8
 
 bool fs_init(void);
@@ -95,6 +100,39 @@ void fs_abort_write(void);
  * whatever context did the write, so it must only take a note. */
 typedef void (*fs_change_fn)(const char *name);
 void fs_on_change(fs_change_fn fn);
+
+/* --- a pool of general-purpose handles (the Lua `file` module) -------------
+ * Separate from the single write slot above, which PUT /api/fs, SMP, the
+ * bytecode cache and sys.secret_put share: a script holding a file open must
+ * never make an upload fail, and the other way round.
+ *
+ * Each handle has its own static cache buffer (lfs_file_opencfg), so opening
+ * one never touches the C heap. Opening a file for writing that anything else
+ * has open (a pool handle, the write slot, a reader), or opening for reading a
+ * file a pool handle is writing, is refused with FS_ERR_BUSY: LittleFS keeps
+ * two handles on one file coherent only in narrow cases, and an upload that
+ * replaces a file a script is reading is exactly the case where it does not.
+ * fs_delete/fs_rename refuse an open file the same way.
+ *
+ * Returns >= 0 (a handle) or a negative LFS_ERR_* / FS_ERR_* code. */
+#define FS_FILES 4
+#define FS_ERR_BUSY    (-16)
+#define FS_ERR_NOHANDLE (-1000)
+#define FS_ERR_TOOLARGE (-1001)
+enum { FS_O_READ = 0, FS_O_WRITE = 1, FS_O_APPEND = 2 };
+int fs_fopen(const char *name, int mode);
+int fs_fread(int h, void *buf, size_t n);
+/* Refuses (FS_ERR_TOOLARGE) a write that would take the file past
+ * FS_FILE_MAX; nothing is written then. */
+int fs_fwrite(int h, const void *buf, size_t n);
+int fs_fseek(int h, uint32_t pos);
+int32_t fs_ftell(int h);
+int32_t fs_fsize(int h);
+int fs_fclose(int h);
+/* Used and total bytes of the volume (used = allocated blocks). */
+bool fs_usage(uint32_t *used, uint32_t *total);
+/* Seek a reader (fs_begin_read) to an absolute offset. */
+int fs_read_seek(int h, size_t pos);
 
 int fs_begin_read(const char *name, size_t *size);
 int fs_read(int h, uint8_t *buf, size_t cap);

@@ -20,6 +20,7 @@
 #include "sd/sd_api.h"
 #include "sd/sd_card.h"
 #include "sd/sd_core.h"
+#include "sd/sd_jobs.h"
 #include "sd/sd_store.h"
 #include "sd/sd_worker.h"
 #include "sdcard_sim.h"
@@ -107,6 +108,133 @@ static enum sd_xstate settle(int x) {
         pass();
     }
     return sd_xfer_state(x);
+}
+
+static uint8_t big[300000], back[300000];
+
+/* One job (sd_jobs.h), run to completion; returns its result. The data
+ * buffer is filled by `fill` right after posting, as lfile.c does. */
+static sdj_t job(int op, const char *path, const char *path2, int file, int mode, uint32_t len,
+                 uint64_t pos, const uint8_t *fill, uint8_t *out) {
+    sdj_t q;
+    memset(&q, 0, sizeof q);
+    q.op = op; q.file = file; q.mode = mode; q.len = len; q.pos = pos;
+    if (path) { snprintf(q.path, sizeof q.path, "%s", path); }
+    if (path2) { snprintf(q.path2, sizeof q.path2, "%s", path2); }
+    uint32_t tok = 0;
+    int tries = 0;
+    while (!sdj_post(&q, &tok) && tries++ < 1000) { pass(); }
+    if (fill) { memcpy(sdj_buf(), fill, len); }
+    sdj_t r;
+    memset(&r, 0, sizeof r);
+    r.rc = -99;
+    for (int i = 0; i < 20000; i++) {
+        if (sdj_poll(tok, &r) == SDJ_DONE) { break; }
+        pass();
+    }
+    if (out && r.rc > 0) { memcpy(out, sdj_buf(), (size_t)r.rc > SDJ_BUF ? SDJ_BUF : (size_t)r.rc); }
+    sdj_finish(tok);
+    return r;
+}
+
+/* The Lua file module's path: jobs through the worker. */
+static int s_stale_file = -1;
+static void jobs(void) {
+    static uint8_t rd[SDJ_BUF];
+    sdj_t r = job(SDJ_OPEN, "lua/sub/f.bin", NULL, 0, LS_WR, 0, 0, NULL, NULL);
+    CHECK(r.rc >= 0, "job: open for write, parents made");
+    int f = r.rc;
+    size_t total = 0;
+    for (int i = 0; i < 10; i++) {
+        r = job(SDJ_WRITE, NULL, NULL, f, 0, SDJ_BUF, 0, big + total, NULL);
+        if (r.rc != SDJ_BUF) { CHECK(false, "job: write a buffer"); break; }
+        total += SDJ_BUF;
+    }
+    CHECK(r.size == total && r.tell == total, "job: size and position follow the writes");
+    CHECK(job(SDJ_CLOSE, NULL, NULL, f, 0, 0, 0, NULL, NULL).rc == LS_OK, "job: close");
+    r = job(SDJ_STAT, "lua/sub/f.bin", NULL, 0, 0, 0, 0, NULL, NULL);
+    CHECK(r.rc == LS_OK && !r.is_dir && r.size == total, "job: stat a file");
+    r = job(SDJ_STAT, "lua/sub", NULL, 0, 0, 0, 0, NULL, NULL);
+    CHECK(r.rc == LS_OK && r.is_dir, "job: stat a folder");
+    CHECK(job(SDJ_STAT, "lua/nope", NULL, 0, 0, 0, 0, NULL, NULL).rc == LS_ENOENT, "job: stat missing");
+    CHECK(job(SDJ_STAT, "", NULL, 0, 0, 0, 0, NULL, NULL).is_dir, "job: the root is a folder");
+
+    r = job(SDJ_OPEN, "lua/sub/f.bin", NULL, 0, LS_RD, 0, 0, NULL, NULL);
+    CHECK(r.rc >= 0 && r.size == total, "job: open for read reports the size");
+    f = r.rc;
+    r = job(SDJ_SEEK, NULL, NULL, f, 0, 0, 12345, NULL, NULL);
+    CHECK(r.rc == LS_OK && r.tell == 12345, "job: seek");
+    r = job(SDJ_READ, NULL, NULL, f, 0, 1000, 0, NULL, rd);
+    CHECK(r.rc == 1000 && !memcmp(rd, big + 12345, 1000) && r.tell == 13345, "job: read after a seek");
+    r = job(SDJ_SEEK, NULL, NULL, f, 0, 0, total - 10, NULL, NULL);
+    r = job(SDJ_READ, NULL, NULL, f, 0, SDJ_BUF, 0, NULL, rd);
+    CHECK(r.rc == 10, "job: a read at the end is short");
+    r = job(SDJ_READ, NULL, NULL, f, 0, SDJ_BUF, 0, NULL, rd);
+    CHECK(r.rc == 0, "job: then empty");
+    s_stale_file = f;          /* left open: the pull below must make it stale */
+
+    r = job(SDJ_OPEN, "lua/missing.bin", NULL, 0, LS_RD, 0, 0, NULL, NULL);
+    CHECK(r.rc == LS_ENOENT, "job: opening a missing file for read: ENOENT");
+    r = job(SDJ_OPEN, "lua/sub/f.bin", NULL, 0, LS_APPEND, 0, 0, NULL, NULL);
+    CHECK(r.rc >= 0 && r.tell == total, "job: append starts at the end");
+    int a = r.rc;
+    r = job(SDJ_WRITE, NULL, NULL, a, 0, 5, 0, (const uint8_t *)"tail!", NULL);
+    CHECK(r.rc == 5 && r.size == total + 5, "job: append grows the file");
+    job(SDJ_CLOSE, NULL, NULL, a, 0, 0, 0, NULL, NULL);
+
+    /* Listing, paged through the 4 KiB buffer. */
+    CHECK(job(SDJ_MKDIR, "lua/many", NULL, 0, 0, 0, 0, NULL, NULL).rc == LS_OK, "job: mkdir");
+    CHECK(job(SDJ_MKDIR, "lua/many", NULL, 0, 0, 0, 0, NULL, NULL).rc == LS_OK, "job: mkdir of an existing folder");
+    for (int i = 0; i < 120; i++) {
+        char fn[64];
+        snprintf(fn, sizeof fn, "lua/many/a_rather_long_file_name_number_%03d.txt", i);
+        r = job(SDJ_OPEN, fn, NULL, 0, LS_WR, 0, 0, NULL, NULL);
+        if (r.rc < 0) { CHECK(false, "job: create in a folder"); break; }
+        job(SDJ_CLOSE, NULL, NULL, r.rc, 0, 0, 0, NULL, NULL);
+    }
+    int seen = 0, pages = 0;
+    bool more = true;
+    while (more && pages < 20) {
+        r = job(SDJ_LIST, "lua/many", NULL, 0, 0, 0, (uint64_t)seen, NULL, NULL);
+        if (r.rc < 0) { break; }
+        seen += r.rc;
+        more = r.more;
+        pages++;
+    }
+    CHECK(seen == 120 && pages > 1, "job: a listing larger than the buffer pages");
+    CHECK(job(SDJ_REMOVE, "lua/many", NULL, 0, 0, 0, 0, NULL, NULL).rc == SDJ_ENOTEMPTY,
+          "job: removing a folder with files in it: ENOTEMPTY");
+    CHECK(job(SDJ_RENAME, "lua/sub/f.bin", "lua/many/a_rather_long_file_name_number_000.txt", 0, 0, 0, 0, NULL, NULL).rc
+          == LS_EEXIST, "job: rename onto an existing name: EEXIST");
+    CHECK(job(SDJ_RENAME, "lua/sub/f.bin", "lua/moved/g.bin", 0, 0, 0, 0, NULL, NULL).rc == LS_OK,
+          "job: rename (target parents made)");
+    CHECK(job(SDJ_STAT, "lua/moved/g.bin", NULL, 0, 0, 0, 0, NULL, NULL).size == total + 5, "job: the renamed file");
+    r = job(SDJ_STATFS, NULL, NULL, 0, 0, 0, 0, NULL, NULL);
+    CHECK(r.rc == LS_OK && r.total_bytes > r.free_bytes && r.free_bytes > 0, "job: statfs");
+
+    /* An abandoned open closes its file; a second post while busy fails. */
+    sdj_t q;
+    memset(&q, 0, sizeof q);
+    q.op = SDJ_OPEN; q.mode = LS_RD;
+    snprintf(q.path, sizeof q.path, "lua/moved/g.bin");
+    uint32_t t1 = 0, t2 = 0;
+    CHECK(sdj_post(&q, &t1), "job: post");
+    CHECK(!sdj_post(&q, &t2), "job: a second post while one is in flight fails");
+    sdj_abandon(t1);
+    passes(50);
+    CHECK(sdj_poll(t1, NULL) == SDJ_IDLE, "job: an abandoned job frees itself");
+    /* Every file closed again: SDJ_FILES opens must all succeed now (one is
+     * still held by the stale read handle). */
+    int got = 0, fh[SDJ_FILES];
+    for (int i = 0; i < SDJ_FILES; i++) {
+        r = job(SDJ_OPEN, "lua/moved/g.bin", NULL, 0, LS_RD, 0, 0, NULL, NULL);
+        fh[i] = r.rc;
+        got += r.rc >= 0;
+    }
+    CHECK(got == SDJ_FILES - 1, "job: the abandoned open did not leak a file");
+    for (int i = 0; i < SDJ_FILES; i++) { if (fh[i] >= 0) { sdj_close_async(fh[i]); } }
+    passes(20);
+    CHECK(sd_xfer_active() == 0, "job: the borrowed transfer ring went back");
 }
 
 /* PUT `n` bytes; returns the HTTP status the transfer ended with. */
@@ -217,7 +345,6 @@ static void dump_image(const char *name) {
     printf("IMAGE %s\n", path);
 }
 
-static uint8_t big[300000], back[300000];
 
 static void stack(const char *fs) {
     sdsim_free(&card);
@@ -301,6 +428,9 @@ static void stack(const char *fs) {
     CHECK(get("BTGW-BENCH.bin", back, sizeof back, &n) == 404, "and removes its file");
     meter("bench");
 
+    jobs();
+    meter("jobs");
+
     /* pulled, then back */
     sdsim_pull(&card);
     passes(20);
@@ -313,6 +443,12 @@ static void stack(const char *fs) {
     CHECK(get("logs/2026/big.bin", back, sizeof back, &n) == 200 && n == sizeof big && !memcmp(back, big, n),
           "the file survived the pull");
     meter("remount");
+    {
+        static uint8_t rd[64];
+        sdj_t r = job(SDJ_READ, NULL, NULL, s_stale_file, 0, 64, 0, NULL, rd);
+        CHECK(r.rc == LS_EIO, "job: a handle from before the pull is stale (EIO), not someone else's file");
+        CHECK(job(SDJ_STAT, "lua/moved/g.bin", NULL, 0, 0, 0, 0, NULL, NULL).rc == LS_OK, "job: works after the remount");
+    }
     CHECK(sdw_stack_ok(), "worker stack intact");
 
     char name[32];

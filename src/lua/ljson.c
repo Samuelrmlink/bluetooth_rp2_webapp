@@ -18,8 +18,10 @@
  * half an object on the wire is a parse error in the browser with nothing
  * pointing at the cause.
  */
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "lauxlib.h"
@@ -143,4 +145,274 @@ size_t ljson_encode(lua_State *L, int idx, char *dst, size_t cap, bool *truncate
     enc(L, idx, &e, 0);
     if (truncated) { *truncated = e.trunc; }
     return e.n;
+}
+
+/* --- decode ----------------------------------------------------------------
+ * Recursive descent over a length-bounded buffer: the input may be a Lua
+ * string with embedded NULs or a body that is not NUL-terminated, so nothing
+ * here may rely on a terminator. Every access goes through peek()/eof().
+ *
+ * The recursion is bounded (LJSON_DECODE_DEPTH): this runs on core0's 4 KB
+ * stack, under a Lua coroutine, and a body of 10 000 '[' is something a
+ * server can send. Each level holds a few words; string bodies are built in
+ * a luaL_Buffer, which spills into the Lua heap rather than onto the stack. */
+typedef struct {
+    lua_State  *L;
+    const char *s;
+    size_t      len, i;
+    const char *err;
+    char        msg[64];
+} dec_ctx;
+
+static bool dec_fail(dec_ctx *d, const char *what) {
+    if (!d->err) {
+        snprintf(d->msg, sizeof d->msg, "%s at byte %u", what, (unsigned)d->i);
+        d->err = d->msg;
+    }
+    return false;
+}
+
+static void dec_ws(dec_ctx *d) {
+    while (d->i < d->len) {
+        char c = d->s[d->i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') { break; }
+        d->i++;
+    }
+}
+
+static int dec_hex4(dec_ctx *d) {
+    if (d->len - d->i < 4) { return -1; }
+    int v = 0;
+    for (int k = 0; k < 4; k++) {
+        char c = d->s[d->i + k];
+        int h = (c >= '0' && c <= '9') ? c - '0'
+              : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+              : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+        if (h < 0) { return -1; }
+        v = (v << 4) | h;
+    }
+    d->i += 4;
+    return v;
+}
+
+static void add_utf8(luaL_Buffer *b, unsigned long cp) {
+    char u[4];
+    int n;
+    if (cp < 0x80)         { u[0] = (char)cp; n = 1; }
+    else if (cp < 0x800)   { u[0] = (char)(0xC0 | (cp >> 6)); u[1] = (char)(0x80 | (cp & 0x3F)); n = 2; }
+    else if (cp < 0x10000) { u[0] = (char)(0xE0 | (cp >> 12)); u[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                             u[2] = (char)(0x80 | (cp & 0x3F)); n = 3; }
+    else                   { u[0] = (char)(0xF0 | (cp >> 18)); u[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                             u[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); u[3] = (char)(0x80 | (cp & 0x3F)); n = 4; }
+    luaL_addlstring(b, u, (size_t)n);
+}
+
+/* At the opening quote. Pushes the string. */
+static bool dec_string(dec_ctx *d) {
+    d->i++;                                   /* the quote */
+    /* Fast path: no escapes, so the string is a slice of the input. */
+    size_t start = d->i;
+    while (d->i < d->len) {
+        unsigned char c = (unsigned char)d->s[d->i];
+        if (c == '"') {
+            lua_pushlstring(d->L, d->s + start, d->i - start);
+            d->i++;
+            return true;
+        }
+        if (c == '\\') { break; }
+        if (c < 0x20) { return dec_fail(d, "control character in string"); }
+        d->i++;
+    }
+    if (d->i >= d->len) { return dec_fail(d, "unterminated string"); }
+
+    luaL_Buffer b;
+    luaL_buffinit(d->L, &b);
+    luaL_addlstring(&b, d->s + start, d->i - start);
+    while (d->i < d->len) {
+        unsigned char c = (unsigned char)d->s[d->i];
+        if (c == '"') {
+            d->i++;
+            luaL_pushresult(&b);
+            return true;
+        }
+        if (c < 0x20) { return dec_fail(d, "control character in string"); }
+        if (c != '\\') {
+            luaL_addchar(&b, (char)c);
+            d->i++;
+            continue;
+        }
+        d->i++;
+        if (d->i >= d->len) { break; }
+        char e = d->s[d->i++];
+        switch (e) {
+            case '"':  luaL_addchar(&b, '"');  break;
+            case '\\': luaL_addchar(&b, '\\'); break;
+            case '/':  luaL_addchar(&b, '/');  break;
+            case 'b':  luaL_addchar(&b, '\b'); break;
+            case 'f':  luaL_addchar(&b, '\f'); break;
+            case 'n':  luaL_addchar(&b, '\n'); break;
+            case 'r':  luaL_addchar(&b, '\r'); break;
+            case 't':  luaL_addchar(&b, '\t'); break;
+            case 'u': {
+                int hi = dec_hex4(d);
+                if (hi < 0) { return dec_fail(d, "bad \\u escape"); }
+                unsigned long cp = (unsigned long)hi;
+                if (hi >= 0xD800 && hi <= 0xDBFF) {
+                    /* A high surrogate must be followed by a low one. */
+                    if (d->len - d->i < 6 || d->s[d->i] != '\\' || d->s[d->i + 1] != 'u') {
+                        return dec_fail(d, "lone surrogate");
+                    }
+                    d->i += 2;
+                    int lo = dec_hex4(d);
+                    if (lo < 0xDC00 || lo > 0xDFFF) { return dec_fail(d, "bad surrogate pair"); }
+                    cp = 0x10000ul + (((unsigned long)hi - 0xD800ul) << 10) + ((unsigned long)lo - 0xDC00ul);
+                } else if (hi >= 0xDC00 && hi <= 0xDFFF) {
+                    return dec_fail(d, "lone surrogate");
+                }
+                add_utf8(&b, cp);
+                break;
+            }
+            default:
+                return dec_fail(d, "bad escape");
+        }
+    }
+    return dec_fail(d, "unterminated string");
+}
+
+static bool dec_number(dec_ctx *d) {
+    size_t st = d->i;
+    bool is_float = false;
+    if (d->i < d->len && d->s[d->i] == '-') { d->i++; }
+    if (d->i >= d->len || d->s[d->i] < '0' || d->s[d->i] > '9') { return dec_fail(d, "bad number"); }
+    if (d->s[d->i] == '0') {
+        d->i++;
+    } else {
+        while (d->i < d->len && d->s[d->i] >= '0' && d->s[d->i] <= '9') { d->i++; }
+    }
+    if (d->i < d->len && d->s[d->i] == '.') {
+        is_float = true;
+        d->i++;
+        if (d->i >= d->len || d->s[d->i] < '0' || d->s[d->i] > '9') { return dec_fail(d, "bad number"); }
+        while (d->i < d->len && d->s[d->i] >= '0' && d->s[d->i] <= '9') { d->i++; }
+    }
+    if (d->i < d->len && (d->s[d->i] == 'e' || d->s[d->i] == 'E')) {
+        is_float = true;
+        d->i++;
+        if (d->i < d->len && (d->s[d->i] == '+' || d->s[d->i] == '-')) { d->i++; }
+        if (d->i >= d->len || d->s[d->i] < '0' || d->s[d->i] > '9') { return dec_fail(d, "bad number"); }
+        while (d->i < d->len && d->s[d->i] >= '0' && d->s[d->i] <= '9') { d->i++; }
+    }
+    char tmp[40];
+    size_t n = d->i - st;
+    if (n >= sizeof tmp) {
+        /* A 40-digit integer is not a lua_Integer on any build; keep the
+         * magnitude as a float rather than refusing a valid document. */
+        is_float = true;
+        n = sizeof tmp - 1;
+    }
+    memcpy(tmp, d->s + st, n);
+    tmp[n] = 0;
+    if (!is_float) {
+        char *end = NULL;
+        long long v = strtoll(tmp, &end, 10);
+        if ((lua_Integer)v == v && v != LLONG_MAX && v != LLONG_MIN) {
+            lua_pushinteger(d->L, (lua_Integer)v);
+            return true;
+        }
+    }
+    lua_pushnumber(d->L, (lua_Number)strtod(tmp, NULL));
+    return true;
+}
+
+static bool dec_lit(dec_ctx *d, const char *word) {
+    size_t n = strlen(word);
+    if (d->len - d->i < n || memcmp(d->s + d->i, word, n) != 0) { return dec_fail(d, "unexpected character"); }
+    d->i += n;
+    return true;
+}
+
+static bool dec_value(dec_ctx *d, int depth);
+
+static bool dec_array(dec_ctx *d, int depth) {
+    d->i++;                                   /* [ */
+    lua_newtable(d->L);
+    dec_ws(d);
+    if (d->i < d->len && d->s[d->i] == ']') { d->i++; return true; }
+    lua_Integer n = 0;
+    for (;;) {
+        if (!dec_value(d, depth + 1)) { return false; }
+        lua_rawseti(d->L, -2, ++n);
+        dec_ws(d);
+        if (d->i >= d->len) { return dec_fail(d, "unterminated array"); }
+        char c = d->s[d->i++];
+        if (c == ']') { return true; }
+        if (c != ',') { d->i--; return dec_fail(d, "expected ',' or ']'"); }
+        dec_ws(d);
+    }
+}
+
+static bool dec_object(dec_ctx *d, int depth) {
+    d->i++;                                   /* { */
+    lua_newtable(d->L);
+    dec_ws(d);
+    if (d->i < d->len && d->s[d->i] == '}') { d->i++; return true; }
+    for (;;) {
+        if (d->i >= d->len || d->s[d->i] != '"') { return dec_fail(d, "expected a string key"); }
+        if (!dec_string(d)) { return false; }
+        dec_ws(d);
+        if (d->i >= d->len || d->s[d->i] != ':') { return dec_fail(d, "expected ':'"); }
+        d->i++;
+        dec_ws(d);
+        if (!dec_value(d, depth + 1)) { return false; }
+        lua_rawset(d->L, -3);
+        dec_ws(d);
+        if (d->i >= d->len) { return dec_fail(d, "unterminated object"); }
+        char c = d->s[d->i++];
+        if (c == '}') { return true; }
+        if (c != ',') { d->i--; return dec_fail(d, "expected ',' or '}'"); }
+        dec_ws(d);
+    }
+}
+
+static bool dec_value(dec_ctx *d, int depth) {
+    if (depth >= LJSON_DECODE_DEPTH) { return dec_fail(d, "nested too deeply"); }
+    /* Each level keeps a table and a key on the Lua stack. */
+    if (!lua_checkstack(d->L, 4)) { return dec_fail(d, "stack overflow"); }
+    dec_ws(d);
+    if (d->i >= d->len) { return dec_fail(d, "unexpected end"); }
+    char c = d->s[d->i];
+    switch (c) {
+        case '{': return dec_object(d, depth);
+        case '[': return dec_array(d, depth);
+        case '"': return dec_string(d);
+        case 't': if (!dec_lit(d, "true"))  { return false; } lua_pushboolean(d->L, 1); return true;
+        case 'f': if (!dec_lit(d, "false")) { return false; } lua_pushboolean(d->L, 0); return true;
+        case 'n': if (!dec_lit(d, "null"))  { return false; } ljson_push_null(d->L);    return true;
+        default:
+            if (c == '-' || (c >= '0' && c <= '9')) { return dec_number(d); }
+            return dec_fail(d, "unexpected character");
+    }
+}
+
+void ljson_push_null(lua_State *L) {
+    lua_pushlightuserdata(L, NULL);
+}
+
+bool ljson_decode(lua_State *L, const char *s, size_t len, const char **err) {
+    static dec_ctx d;      /* static: the message outlives the call, and core0's stack is small */
+    memset(&d, 0, sizeof d);
+    d.L = L; d.s = s; d.len = len;
+    int top = lua_gettop(L);
+    bool ok = dec_value(&d, 0);
+    if (ok) {
+        dec_ws(&d);
+        if (d.i != d.len) { ok = dec_fail(&d, "trailing characters"); }
+    }
+    if (!ok) {
+        lua_settop(L, top);
+        if (err) { *err = d.err ? d.err : "bad JSON"; }
+        return false;
+    }
+    if (err) { *err = NULL; }
+    return true;
 }

@@ -23,4 +23,24 @@
  * write it used to contain is kept fixed. */
 size_t ljson_encode(lua_State *L, int idx, char *dst, size_t cap, bool *truncated);
 
+/* JSON text -> one Lua value, pushed on the stack.
+ *
+ * Objects become tables with string keys, arrays tables with 1..n, JSON null
+ * json.null (a light userdata NULL, which ljson_encode writes back as null --
+ * a nil would silently drop the key or end the array). Numbers that are
+ * integral and fit lua_Integer stay integers; anything else is a float, which
+ * on the firmware (LUA_32BITS) means single precision. \uXXXX escapes,
+ * surrogate pairs included, become UTF-8.
+ *
+ * Nesting is bounded (LJSON_DECODE_DEPTH) because the parser recurses on
+ * core0's 4 KB stack. Returns true with the value pushed, or false with
+ * nothing pushed and *err pointing at a static message that names the byte
+ * offset ("expected ':' at byte 17"). Trailing whitespace is allowed,
+ * trailing anything else is an error. */
+#define LJSON_DECODE_DEPTH 32
+bool ljson_decode(lua_State *L, const char *s, size_t len, const char **err);
+
+/* Push the json.null sentinel. */
+void ljson_push_null(lua_State *L);
+
 #endif

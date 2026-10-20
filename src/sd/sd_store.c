@@ -19,8 +19,9 @@
 #ifndef CONFIG_SD_DETECT
 #define CONFIG_SD_DETECT -1
 #endif
-/* One per transfer, one for the bench, one spare (rename/delete probes). */
-#define LS_FATFS_FILES (CONFIG_SD_XFERS + 2)
+/* One per transfer, one for the bench, one spare (rename/delete probes), and
+ * the Lua / HTTP-client job table's (sd_jobs.h). */
+#define LS_FATFS_FILES (CONFIG_SD_XFERS + 2 + 4)
 
 /* How long a newly inserted card must read present on card detect before it
    is talked to: contacts bounce as it slides in, and a card is not ready the
@@ -101,7 +102,11 @@ int ls_mount(void) {
     return LS_OK;
 }
 
+static uint32_t s_unmounts;
+uint32_t ls_mount_count(void) { return s_unmounts; }
+
 void ls_unmount(void) {
+    s_unmounts++;
     for (int i = 0; i < LS_FATFS_FILES; i++) {
         memset(&s_files[i], 0, sizeof s_files[i]);   /* abandoned: the card is gone or going */
     }

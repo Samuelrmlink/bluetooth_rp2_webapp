@@ -34,7 +34,7 @@ DIST = ROOT / "web-dist"
 
 DEFAULT_BASE = "http://192.168.8.1"
 NAME_MAX = 64      # must match src/fs/fs.h FS_NAME_MAX (per path segment)
-FILE_MAX = 128 * 1024  # must match src/fs/fs.h FS_FILE_MAX
+FILE_MAX = 1024 * 1024  # must match src/fs/fs.h FS_FILE_MAX
 
 
 def valid_segment(seg: str) -> bool:

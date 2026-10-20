@@ -14,9 +14,9 @@
 const BLOCK = 512;
 
 // The device's limits (src/fs/fs.h): FS_PATH_MAX 128 is the whole path,
-// terminator included; FS_FILE_MAX 128 KB.
+// terminator included; FS_FILE_MAX 1 MiB.
 export const PATH_MAX = 127;
-export const FILE_MAX = 128 * 1024;
+export const FILE_MAX = 1024 * 1024;
 
 const dec = new TextDecoder();
 

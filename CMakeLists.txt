@@ -134,7 +134,7 @@ if(CONFIG_SD)
     target_sources(btgw PRIVATE
         src/sd/sd_card.c src/sd/sd_crc.c src/sd/sd_diskio.c src/sd/sd_store.c
         src/sd/sd_api.c src/sd/sd_core.c src/sd/sd_ops.c src/sd/sd_worker_coro.c
-        src/sd/sd_port_pico.c
+        src/sd/sd_port_pico.c src/sd/sd_jobs.c
         third_party/fatfs/ff.c third_party/fatfs/ffunicode.c)
     target_include_directories(btgw PRIVATE third_party/fatfs)
     if(CONFIG_SD_BUS_SDIO)
@@ -171,7 +171,8 @@ endif()
 
 if(CONFIG_LUA_ENABLE)
     add_subdirectory(third_party/lua)
-    target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lheap.c src/lua/lwait.c src/lua/ljson.c src/lua/lbind.c src/lua/lops.c)
+    target_sources(btgw PRIVATE src/lua/lrt.c src/lua/lheap.c src/lua/lwait.c src/lua/ljson.c src/lua/lbind.c src/lua/lops.c
+        src/lua/lfile.c src/lua/lfile_path.c)
     if(CONFIG_PROTO_ANKER)
         target_sources(btgw PRIVATE src/lua/lbind_proto.c)
     endif()

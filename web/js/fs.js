@@ -6,7 +6,7 @@
 //
 // HTTP rather than the WebSocket because files are the one thing too big for
 // it: a WS frame caps at 4 KB and an op reply at less, while a file may be
-// 128 KB. The editor, the sidebar and upload/download all go through here.
+// 1 MiB. The editor, the sidebar and upload/download all go through here.
 //
 // Two rules carried over from the km003c app's api.js:
 //
@@ -29,10 +29,10 @@ export function apiUrl(path) {
   return SAME_ORIGIN ? path : `${location.protocol}//${HOST}:${PORT}${path}`;
 }
 
-// The device serves at most 128 KB per file (FS_FILE_MAX in src/fs/fs.h) and
+// The device serves at most 1 MiB per file (FS_FILE_MAX in src/fs/fs.h) and
 // refuses a larger PUT with 413. Checked here too, so the editor can say so
 // before sending rather than after.
-export const FILE_MAX = 128 * 1024;
+export const FILE_MAX = 1024 * 1024;
 
 // --- the SD card's place in the tree -------------------------------------
 // Off until the app has seen "sd" in sys.info's modules (setSd), so a build
@@ -46,7 +46,7 @@ export function isSd(path) {
   return sdOn && (p === SD_ROOT || p.startsWith(SD_ROOT + '/'));
 }
 const sdRel = (path) => String(path).slice(SD_ROOT.length + 1);   // 'sd/a/b' -> 'a/b', 'sd' -> ''
-// The largest file each side takes: LittleFS's 128 KB; FAT32's 4 GiB - 1.
+// The largest file each side takes: LittleFS's 1 MiB; FAT32's 4 GiB - 1.
 export const SD_FILE_MAX = 4 * 1024 * 1024 * 1024 - 1;
 export const fileMax = (path) => (isSd(path) ? SD_FILE_MAX : FILE_MAX);
 

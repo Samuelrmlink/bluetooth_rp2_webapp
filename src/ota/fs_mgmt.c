@@ -71,15 +71,9 @@ static int h_download(const smp_req_t *req, cbor_enc_t *e) {
     if (h < 0) return SMP_GERR(FS_ERR_NOT_FOUND);
     if (off > size) { fs_end_read(h); return SMP_GERR(FS_ERR_OFFSET_LARGER_THAN_FILE); }
     static uint8_t buf[DL_CHUNK];
-    /* Files are small (FS_FILE_MAX) and fs_read is a memcpy from XIP, so
-     * seeking by reading forward is cheaper than a seek API would be. */
-    size_t skip = (size_t)off;
-    while (skip) {
-        size_t take = skip > sizeof buf ? sizeof buf : skip;
-        int n = fs_read(h, buf, take);
-        if (n <= 0) break;
-        skip -= (size_t)n;
-    }
+    /* A seek, not a read-forward: with FS_FILE_MAX at 1 MiB, skipping by
+     * reading made a whole download quadratic in the file size. */
+    if (fs_read_seek(h, (size_t)off) < 0) { fs_end_read(h); return SMP_GERR(FS_ERR_READ_FAILED); }
     int n = fs_read(h, buf, sizeof buf);
     fs_end_read(h);
     if (n < 0) return SMP_GERR(FS_ERR_READ_FAILED);

@@ -98,6 +98,13 @@ void sd_xfer_consume(int x, size_t n);
 size_t sd_xfer_put(int x, const uint8_t *p, size_t n);
 void sd_xfer_end_input(int x);
 void sd_xfer_release(int x);
+/* Borrow an idle transfer's ring as a scratch buffer (sd_jobs.c's data
+ * buffer), so the Lua file jobs cost no RAM of their own. -1 when every slot
+ * is in use. A borrowed slot counts as active (a format waits for it) and no
+ * HTTP transfer can take it until it is returned. */
+int sd_xfer_borrow(void);
+uint8_t *sd_xfer_buf(int x);
+void sd_xfer_return(int x);
 /* Transfers in flight (for the status). */
 int sd_xfer_active(void);
 /* Diagnostics: how the HTTP side saw a transfer's connection end

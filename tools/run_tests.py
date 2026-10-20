@@ -653,6 +653,38 @@ def t_lua_json():
         return False, first[:100] or f"json_test exited {rc}"
     return True, "bounded under a guard page; truncation always reported"
 
+def t_lua_json_decode():
+    """json.decode against the real vendored Lua: every value type, json.null,
+    escapes and surrogate pairs, integer/float, bounded nesting (it recurses
+    on core0's 4 KB stack), malformed input of every kind -- each read from a
+    buffer that ends on a PROT_NONE page, so a decoder that looks one byte past
+    the input faults -- and round trips through the encoder."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_json_decode")
+    rc, out = sh(f"gcc -O1 -w -DMAKE_LIB=1 -Isrc -Ithird_party/lua -o {binp} "
+                 f"test/host/json_decode_test.c src/lua/ljson.c src/api/json_escape.c "
+                 f"third_party/lua/onelua.c -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:100] if errs else "json_decode harness build failed"
+    rc, out = sh(binp)
+    if rc != 0:
+        first = next((l.strip() for l in out.splitlines() if "FAIL" in l), "")
+        return False, first[:100] or f"json_decode_test exited {rc}"
+    return True, out.strip().splitlines()[-1]
+
+def t_lfile_path():
+    """The Lua file module's volume-qualified paths: lfs:/ and sd:/, slash
+    normalisation, each volume's character set, the 64/128 limits, '.'/'..',
+    empty segments and an embedded NUL."""
+    return _host_c("lfile_path", ["test/host/lfile_path_test.c", "src/lua/lfile_path.c"],
+                   "btgw_lfile_path", defs="")
+
+def t_ca_roots():
+    """The HTTP client's embedded roots match the pinned SHA-256 fingerprints
+    and src/net/ca_roots.h is what the PEMs generate."""
+    rc, out = sh("python3 tools/gen_ca_roots.py --check")
+    return rc == 0, out.strip().splitlines()[-1] if out.strip() else ""
+
 def t_lua_proto():
     """The profile's Lua, on a host, against the REAL C bindings and the REAL
     vendored Lua -- no board, no flash cycle, no charger. This is the dividend
@@ -797,6 +829,7 @@ def t_spibus_share():
 
 SD_STACK_SRCS = ["src/sd/sd_card.c", "src/sd/sd_sdio.c", "src/sd/sd_spi.c", "src/sd/sd_crc.c",
                  "src/sd/sd_store.c", "src/sd/sd_api.c", "src/sd/sd_core.c", "src/sd/sd_diskio.c",
+                 "src/sd/sd_jobs.c",
                  "third_party/fatfs/ff.c", "third_party/fatfs/ffunicode.c", "src/io/spibus.c",
                  "test/host/fake_spi.c", "test/host/sdcard_sim.c", "test/host/sdio_hw_sim.c",
                  "test/host/sd_port_host.c", "test/host/sd_worker_uc.c"]
@@ -1123,6 +1156,9 @@ def main():
     step(0, "flash_safe_execute is never nested (interrupts stay on)", t_no_nested_flash_safe)
     step(0, "the wait/wake contract and its races", t_lua_wait)
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
+    step(0, "json.decode: types, escapes, depth, malformed, bounds", t_lua_json_decode)
+    step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
+    step(0, "HTTPS roots match their pinned fingerprints", t_ca_roots)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)

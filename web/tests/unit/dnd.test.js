@@ -23,7 +23,7 @@ test('planDrop: files land in the target, a lone .tar is extracted, a .tar in a 
 test('planDrop: bad names, cache/ and oversize files are skipped with a reason', () => {
   const p = planDrop([
     { path: 'x'.repeat(130), file: f() },
-    { path: 'big.bin', file: f(200 * 1024) },
+    { path: 'big.bin', file: f(1024 * 1024 + 1) },   // one byte over FS_FILE_MAX
     { path: 'cache', dir: true },
     { path: 'cache/y.luac', file: f() },
   ], '');

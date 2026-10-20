@@ -30,6 +30,7 @@
 #include "net/fwd.h"
 #include "net/ws.h"
 #include "lua/ljson.h"
+#include "lua/lfile.h"
 #include "pico/time.h"
 #include "autoconf.h"
 
@@ -160,6 +161,8 @@ int lbind_release_ops(int slot) {
     /* What it declared on the network goes with it: mDNS services and
      * record groups, and (CONFIG_NET_FORWARD) its forwarding rules. */
     lbind_release_net(slot);
+    /* Its open files, and a storage job it was waiting on. */
+    lfile_release(slot);
     for (int i = 0; i < n_lua_ops; ) {
         if (!(lua_ops[i].owners & bit)) { i++; continue; }
         lua_ops[i].owners &= ~bit;
@@ -1402,6 +1405,52 @@ static int l_net_forwards(lua_State *L) {
 }
 #endif
 
+/* --- json ------------------------------------------------------------------
+ *   json.decode(s)  -> value | nil, "<what> at byte N"   (null -> json.null)
+ *   json.encode(v)  -> string | nil, err
+ *   json.null       -- the value JSON null decodes to, and encodes back as null
+ * Both are C (ljson.c). encode shares the event encoder: arrays are tables
+ * with 1..n, other tables objects with their string keys, nesting at most 6. */
+static int l_json_decode(lua_State *L) {
+    size_t len = 0;
+    const char *s = luaL_checklstring(L, 1, &len);
+    const char *err = NULL;
+    lua_settop(L, 1);
+    bool ok = ljson_decode(L, s, len, &err);
+    if (len > 4096) { lrt_yield_soon(); }
+    if (!ok) {
+        lua_pushnil(L);
+        lua_pushstring(L, err ? err : "bad JSON");
+        return 2;
+    }
+    return 1;
+}
+
+static int l_json_encode(lua_State *L) {
+    luaL_checkany(L, 1);
+    lua_settop(L, 1);
+    bool trunc = false;
+    size_t n = ljson_encode(L, 1, enc_buf, sizeof enc_buf, &trunc);
+    if (!trunc) {
+        lua_pushlstring(L, enc_buf, n);
+        return 1;
+    }
+    /* Larger than an event: retry in a buffer on the Lua heap. */
+    for (size_t cap = 16384; cap <= 65536; cap *= 4) {
+        char *big = (char *)lua_newuserdatauv(L, cap, 0);
+        n = ljson_encode(L, 1, big, cap, &trunc);
+        if (!trunc) {
+            lua_pushlstring(L, big, n);
+            lrt_yield_soon();
+            return 1;
+        }
+        lua_pop(L, 1);
+    }
+    lua_pushnil(L);
+    lua_pushstring(L, "toolarge");      /* over 64 KiB, or nested deeper than 6 */
+    return 2;
+}
+
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
     /* Not luaL_newlib: its size hint is sizeof(l)/sizeof(l[0]), which on a
      * POINTER argument computes 8/32 - 1 = -1 rather than the entry count.
@@ -1434,6 +1483,16 @@ void lbind_open_all(lua_State *L) {
         { NULL, NULL } };
     set_table(L, "net", net_fns);
 #endif
+
+    static const luaL_Reg json_fns[] = {
+        { "decode", l_json_decode }, { "encode", l_json_encode }, { NULL, NULL } };
+    set_table(L, "json", json_fns);
+    lua_getglobal(L, "json");
+    ljson_push_null(L);
+    lua_setfield(L, -2, "null");
+    lua_pop(L, 1);
+
+    lfile_open(L);
 
     static const luaL_Reg bus[] = { { "emit", l_bus_emit }, { NULL, NULL } };
     set_table(L, "bus", bus);
@@ -1493,6 +1552,7 @@ void lbind_reset(void) {
 #if CONFIG_NET_FORWARD
     fwd_release_all_owned();
 #endif
+    lfile_reset();
     memset(lua_ops, 0, sizeof lua_ops);
     n_lua_ops = 0;
 #if CONFIG_BT_LE

@@ -7,6 +7,7 @@
 #include "sd/sd_core.h"
 
 #include "sd/sd_api.h"
+#include "sd/sd_jobs.h"
 #include "sd/sd_port.h"
 #include "sd/sd_store.h"
 #include "sd/sd_worker.h"
@@ -80,6 +81,11 @@ void sd_core_worker_body(void) {
                 worked = true;
                 next_free_us = 0;                    /* a write may have changed it */
             }
+        }
+        /* The Lua file module's and the HTTP client's jobs, after the
+         * transfers: a browser upload is not held up by a script. */
+        if (sdj_run()) {
+            worked = true;          /* free space: the 5 s refresh catches up */
         }
         if (!worked) {
             sdw_set_phase("idle");

@@ -7,6 +7,7 @@
  * here: SD_OP_MKDIR. */
 #include "sd/sd_api.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -280,6 +281,33 @@ void sd_xfer_release(int x) {
     }
     sdw_unlock();
     sdw_kick();
+}
+
+int sd_xfer_borrow(void) {
+    sdw_lock();
+    /* From the top: a format's work buffer is slot 0's ring. */
+    for (int i = SD_XFERS - 1; i >= 0; i--) {
+        if (s_x[i].state == SDX_FREE) {
+            memset(&s_x[i], 0, offsetof(struct xfer, buf));
+            s_x[i].state = SDX_DONE;
+            s_x[i].res.status = 200;
+            sdw_unlock();
+            return i;
+        }
+    }
+    sdw_unlock();
+    return -1;
+}
+
+uint8_t *sd_xfer_buf(int x) {
+    return (x >= 0 && x < SD_XFERS) ? s_x[x].buf : NULL;
+}
+
+void sd_xfer_return(int x) {
+    if (x < 0 || x >= SD_XFERS) { return; }
+    sdw_lock();
+    s_x[x].state = SDX_FREE;
+    sdw_unlock();
 }
 
 int sd_xfer_active(void) {

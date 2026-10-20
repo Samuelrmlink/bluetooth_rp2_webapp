@@ -42,6 +42,8 @@ int ls_mount(void);
    without talking to it (always true with no detect switch). */
 bool ls_present(void);
 void ls_unmount(void);
+/* Incremented by every unmount: an ls_file from an older count is gone. */
+uint32_t ls_mount_count(void);
 enum ls_media ls_media(void);
 /* "fat12/fat16/fat32/exfat", "-" when not mounted */
 const char *ls_fs_name(void);
