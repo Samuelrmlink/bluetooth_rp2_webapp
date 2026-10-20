@@ -108,5 +108,6 @@ void sd_cid_decode(const uint8_t cid[16], sd_cid_t *out);
 #define SD_READ_TIMEOUT_US    200000u   /* command to first data (spec: 100 ms) */
 #define SD_BUSY_TIMEOUT_US   2000000u   /* write busy (spec 250/500 ms; cards exceed it) */
 #define SD_SPIN_US               200u   /* spin this long before yielding to the loop */
+#define SD_SLICE_US             2000u   /* the most a worker slice should keep the main loop */
 
 #endif

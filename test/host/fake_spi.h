@@ -20,6 +20,10 @@ void     fake_attach(int cs, fake_dev_fn fn, void *ctx);
 void     fake_autocomplete(bool on);
 int      fake_dma_starts(void);           /* segments started since reset */
 int      fake_bus_conflicts(void);        /* bytes where a deselected device drove MISO */
+int      fake_cs_overlaps(void);          /* segments clocked with two chip selects low */
+/* Called as each segment starts, with its length: a test advances its clock
+ * by the bytes' time on the wire. */
+extern void (*fake_bytes_hook)(spibus_t *b, uint16_t n);
 bool     fake_dma_pending(void);
 void     fake_dma_complete(void);         /* the IRQ, for the bus in flight */
 int      fake_gpio(int pin);              /* -1 never driven */

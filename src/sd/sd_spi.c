@@ -16,6 +16,13 @@
  * The claim is held across a read's wait for its data token (the card is
  * mid-command then; at most SD_READ_TIMEOUT_US, typically under 1 ms).
  *
+ * Fair to the other device (docs/spi-bus-sharing.md): at every safe point
+ * -- between commands, between the blocks of a multi-block transfer, during
+ * a card's busy -- a device waiting for the bus (spibus_contended) gets it
+ * before the next block: a multi-block write lets go while the card
+ * programs, a multi-block read is stopped (CMD12) and resumed with a new
+ * CMD18. So a format's long zero-fill holds the bus one block at a time.
+ *
  * CRC is ON (CMD59 right after CMD0): every command carries its CRC7, every
  * block written its CRC16, and every block read -- CSD and CID included --
  * is checked against its CRC16, as on SDIO. km003c's driver left it off; with
@@ -56,6 +63,27 @@ static void claim(void) {
 
 static void release(void) {
     spibus_release_trailing(&dev, 1);
+}
+
+/* Give the main loop its turn with the bus let go (CS high, the trailing
+ * clock sent): the bus may be shared, and a turn spent holding it is a turn
+ * the other device cannot have. Only where the card is between commands. */
+static void breathe(void) {
+    release();
+    sd_port_yield();
+    claim();
+}
+
+/* The same in the middle of a transfer, where the card stays selected: CS
+ * low again once the bus is back (a card ignores CS while it programs). */
+static void breathe_selected(void) {
+    breathe();
+    spibus_port_gpio_put(dev.cs, false);
+}
+
+/* A safe point: someone else is waiting, or this slice is spent. */
+static bool give_way(void) {
+    return spibus_contended(&dev) || sd_port_slice_spent();
 }
 
 /* Short exchanges: a blocking transfer of a few bytes (microseconds). */
@@ -99,11 +127,8 @@ static bool wait_ready(uint32_t timeout_us) {
         }
         uint64_t dt = sd_port_now_us() - t0;
         if (dt >= timeout_us) { break; }
-        if (dt > SD_SPIN_US) {
-            release();                       /* the W5500's turn */
-            sd_port_yield();
-            claim();
-            spibus_port_gpio_put(dev.cs, false);
+        if (dt > SD_SPIN_US || spibus_contended(&dev)) {
+            breathe_selected();              /* the other device's turn */
         }
     }
     if (timeout_us > st->busy_max_us) { st->busy_max_us = timeout_us; }
@@ -134,6 +159,9 @@ static uint8_t send_cmd(uint8_t cmd, uint32_t arg) {
     }
     if (cmd != 12) {
         deselect();
+        /* Commands at 400 kHz are ~0.4 ms of blocking bytes each:
+         * identification would run a dozen back to back. */
+        if (give_way()) { breathe(); }
         if (!select_card()) { return 0xFF; }
     }
     uint8_t b[6] = { (uint8_t)(0x40 | cmd), (uint8_t)(arg >> 24), (uint8_t)(arg >> 16),
@@ -208,8 +236,9 @@ static bool go_idle(void) {
         if (r == 0x01) { return true; }
         /* At 400 kHz each try is ~0.4 ms of blocking bytes; ten of them
          * (and recovery) in one slice made a 12 ms worker slice in mcusim
-         * with no card answering. The card is mid-nothing here: yield. */
-        sd_port_yield();
+         * with no card answering. The card is mid-nothing here: yield,
+         * with the bus let go. */
+        breathe();
     }
     return false;
 }
@@ -227,6 +256,13 @@ static bool hw_init(void) {
 
 static void set_baud(uint32_t hz) {
     dev.baud = hz;                           /* applied by the next claim */
+}
+
+/* Between ACMD41 polls: the card powers up for up to a second, and a
+ * shared bus must not be held all that time. */
+static void acmd41_pause(uint64_t t0) {
+    deselect();
+    if (sd_port_now_us() - t0 > SD_SPIN_US || sd_port_slice_spent()) { breathe(); }
 }
 
 static int identify(sd_info_t *info) {
@@ -253,7 +289,7 @@ static int identify(sd_info_t *info) {
             info->v2 = true;
             if (r7[2] == 0x01 && r7[3] == 0xAA) {
                 while (sd_port_now_us() - t0 < SD_INIT_TIMEOUT_US && send_cmd(ACMD(41), 1u << 30)) {
-                    sd_port_wait_step(t0);
+                    acmd41_pause(t0);
                 }
                 result = SD_ETIMEOUT;
                 if (sd_port_now_us() - t0 < SD_INIT_TIMEOUT_US && send_cmd(58, 0) == 0) {
@@ -269,7 +305,7 @@ static int identify(sd_info_t *info) {
             }
         } else {                                           /* v1: byte addressed */
             while (sd_port_now_us() - t0 < SD_INIT_TIMEOUT_US && send_cmd(ACMD(41), 0)) {
-                sd_port_wait_step(t0);
+                acmd41_pause(t0);
             }
             result = SD_ETIMEOUT;
             if (sd_port_now_us() - t0 < SD_INIT_TIMEOUT_US && send_cmd(16, 512) == 0) { result = SD_OK; }
@@ -301,6 +337,15 @@ static int sdspi_read(uint32_t addr, uint8_t *buf, uint32_t count) {
         while (e == SD_OK && count--) {
             e = rx_block(buf, 512);
             buf += 512;
+            addr += block_addr ? 1u : 512u;
+            if (e == SD_OK && count && spibus_contended(&dev)) {
+                /* Another device waits: stop here and resume after its
+                 * turn (the card streams blocks for as long as CS is low). */
+                send_cmd(12, 0);
+                deselect();
+                breathe();
+                e = send_cmd(18, addr) == 0 ? SD_OK : SD_EIO;
+            }
         }
         send_cmd(12, 0);
     }
@@ -320,6 +365,9 @@ static int sdspi_write(uint32_t addr, const uint8_t *buf, uint32_t count) {
         while (e == SD_OK && count--) {
             e = tx_block(buf, 0xFC);
             buf += 512;
+            /* The block is in; the card programs it with or without CS.
+             * Another device waiting gets the bus now, not 63 blocks on. */
+            if (e == SD_OK && count && spibus_contended(&dev)) { breathe_selected(); }
         }
         int s = tx_block(NULL, 0xFD);
         if (e == SD_OK) { e = s; }

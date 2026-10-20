@@ -27,6 +27,8 @@ void sd_port_detect_init(int pin) {
 
 bool sd_port_detect_level(int pin) { return gpio_get((uint)pin); }
 
+bool sd_port_slice_spent(void) { return sdw_slice_us() >= SD_SLICE_US; }
+
 void sd_port_wait_step(uint64_t t0) {
-    if (time_us_64() - t0 > SD_SPIN_US) { sdw_yield(); }
+    if (time_us_64() - t0 > SD_SPIN_US || sd_port_slice_spent()) { sdw_yield(); }
 }

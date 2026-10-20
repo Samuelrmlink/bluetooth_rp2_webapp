@@ -24,6 +24,14 @@
  *   NON-BLOCKING. spibus_try_claim() and spibus_xfer_async() return at once;
  *   drivers are state machines stepped from the loop. The blocking variants
  *   exist for init and chip probing only.
+ *
+ *   FAIR. A device whose claim was refused is WAITING (it holds a ticket),
+ *   and so is one that announced it will need the bus (spibus_want, or
+ *   spibus_want_isr from its interrupt). The bus is granted in ticket order:
+ *   once someone waits, the holder can release and the next claim by anyone
+ *   else -- the releaser included -- is refused until the oldest waiter has
+ *   had its turn. A holder checks spibus_contended() at its safe points and
+ *   lets go there. docs/spi-bus-sharing.md has the rules and the bounds.
  */
 #include <stdbool.h>
 #include <stddef.h>
@@ -33,6 +41,10 @@
 
 #define SPIBUS_COUNT    2        /* hardware SPI blocks on the RP2350 */
 #define SPIBUS_MAX_SEGS 6
+#define SPIBUS_MAX_DEVS 6        /* devices per bus with a fairness slot */
+/* A want lapses when its device has not tried to claim for this long (a
+ * driver that gave up must not stall the bus). */
+#define SPIBUS_WANT_TTL_MS 10
 
 typedef void (*spibus_done_fn)(void *ctx, bool ok);
 
@@ -54,6 +66,7 @@ typedef struct spidev {
     uint8_t        mode;         /* SPI mode 0..3 */
     uint32_t       baud;
     uint8_t        fill;         /* clocked when a segment has no tx (default 0x00) */
+    uint8_t        slot;         /* its fairness slot on the bus (0xFF: none) */
     const char    *name;
 } spidev_t;
 
@@ -83,7 +96,17 @@ typedef struct spibus {
     uint8_t        zero_tx;      /* source when a segment has no tx */
     uint8_t        sink_rx;      /* destination when it has no rx */
 
+    /* Fairness: per slot, the ticket of a waiting device (0: not waiting)
+     * and when it last asked; want_irq is set from interrupts and turned
+     * into a ticket by the loop (a byte store is atomic, a ticket is not). */
+    spidev_t      *devs[SPIBUS_MAX_DEVS];
+    uint32_t       ticket[SPIBUS_MAX_DEVS];
+    uint32_t       want_ms[SPIBUS_MAX_DEVS];
+    volatile uint8_t want_irq[SPIBUS_MAX_DEVS];
+    uint32_t       next_ticket;
+
     uint32_t       xfers, bytes, claim_busy;
+    uint32_t       claim_yield;  /* claims refused because another device waited longer */
 } spibus_t;
 
 /* Bring a hardware SPI block up on the given pins (reserving them in the pin
@@ -102,7 +125,9 @@ void spibus_dev_deinit(spidev_t *dev);
 bool spibus_dev_init(spidev_t *dev, spibus_t *bus, int cs, uint32_t baud,
                      uint8_t mode, const char *name);
 
-bool spibus_try_claim(spidev_t *dev);                      /* never waits */
+/* Never waits. A refusal makes the device a waiter (it keeps its place in
+ * line while it keeps trying); a grant ends its wait. */
+bool spibus_try_claim(spidev_t *dev);
 bool spibus_claim_blocking(spidev_t *dev, uint32_t timeout_ms);   /* init only */
 void spibus_release(spidev_t *dev);
 /* Release after clocking `n` fill bytes with this device's CS high, still
@@ -111,6 +136,17 @@ void spibus_release(spidev_t *dev);
  * first read on a shared bus. False (claim kept) if not held or busy. */
 bool spibus_release_trailing(spidev_t *dev, uint16_t n);
 bool spibus_holds(const spidev_t *dev);
+
+/* Announce that `dev` will need the bus soon (a W5500 with INT asserted, an
+ * MCP2515 with a frame waiting): it gets a place in line before its first
+ * claim, so a holder sees spibus_contended() and lets go. _isr is safe from
+ * an interrupt handler. spibus_unwant() withdraws it. */
+void spibus_want(spidev_t *dev);
+void spibus_want_isr(spidev_t *dev);
+void spibus_unwant(spidev_t *dev);
+/* Another device is waiting for this bus: a holder lets go at its next safe
+ * point (between SD blocks, during a card's busy). */
+bool spibus_contended(const spidev_t *dev);
 
 /* Start a chained transfer; only while claimed and not already busy. The
  * segments are COPIED (the descriptors, not the data: the buffers must stay

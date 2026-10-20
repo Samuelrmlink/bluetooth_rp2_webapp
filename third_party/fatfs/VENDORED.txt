@@ -1,8 +1,16 @@
 FatFs R0.15 (revision 80286) by ChaN — http://elm-chan.org/fsw/ff/
 
-Copied unmodified (ff.c, ff.h, diskio.h, ffunicode.c) from km003c_rp2_webapp's
-third_party/fatfs, which took them from tinyusb's lib/fatfs; only ffconf.h is
-ours (the same file as km003c's). Used by the optional SD card (CONFIG_SD,
+Copied from km003c_rp2_webapp's third_party/fatfs, which took them from
+tinyusb's lib/fatfs: ff.h, diskio.h and ffunicode.c unmodified; ffconf.h is
+ours (km003c's, plus FF_YIELD below); ff.c has one local change:
+
+  FF_YIELD()  called in f_mkfs's exFAT up-case table loops (both: the
+              per-character loop and its run-length scan), defaulting to
+              nothing. They make 65536+ ff_wtoupper() calls without a disk
+              access, so the storage worker never got to yield: one 227 ms
+              main-loop stall per exFAT format (bench 2026-10-20).
+              ffconf.h maps it to ff_yield() (src/sd/sd_diskio.c).
+              diff against the stock file: 6 lines. Used by the optional SD card (CONFIG_SD,
 src/sd/). License: LICENSE.txt (1-clause BSD style).
 
 ffconf.h changes from the stock file:

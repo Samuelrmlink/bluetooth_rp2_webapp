@@ -150,7 +150,8 @@ def _fn_body(src, name):
 def t_sd_guards():
     """The SD card's standing rules, as greps:
     - its code runs only in the storage worker, resumed from the main loop:
-      never from cyw43_wait.c (the radio's wait hook pumps USB only);
+      never from cyw43_wait.c (the radio's wait hook pumps USB only), and
+      nothing outside src/sd calls FatFs, the card driver or the store;
     - the SPI transport ends every transaction with spibus_release_trailing
       (the card drives MISO until a clock with CS high) and never releases
       the bus any other way;
@@ -160,6 +161,13 @@ def t_sd_guards():
     w = open(os.path.join(ROOT, "src/net/cyw43_wait.c")).read()
     if re.search(r"\bsd_(poll|core|card|api)|sdw_|sdio_", w):
         return False, "cyw43_wait.c reaches SD code"
+    # ... and the main context (HTTP, ops, main.c) only posts jobs: no FatFs,
+    # card driver or store call outside src/sd, where it could run long.
+    rc, mc = sh("grep -rnE '\\b(f_(open|close|read|write|lseek|sync|mount|mkfs|getfree|opendir|readdir|"
+                "closedir|stat|unlink|rename|mkdir|expand)|sd_card_(init|read|write|sync)|ls_[a-z_]+)\\(' "
+                "src --include=*.c | grep -v '^src/sd/'")
+    if mc.strip():
+        return False, f"card or FatFs call outside the worker: {mc.splitlines()[0][:70]}"
     spi = open(os.path.join(ROOT, "src/sd/sd_spi.c")).read()
     if "spibus_release_trailing(" not in spi or re.search(r"spibus_release\(", spi):
         return False, "sd_spi.c releases the bus without the trailing clock"
@@ -775,6 +783,18 @@ def t_sd_card():
     return _host_c("sd_card", ["test/host/sd_card_test.c"] + SD_SIM_SRCS, "btgw_sd_card",
                    defs="-DSPIBUS_HOST -DCONFIG_SD_DETECT=22")
 
+def t_spibus_share():
+    """Sharing an SPI bus (docs/spi-bus-sharing.md): the bus layer's
+    fairness (a refused device is in line, the releaser cannot reclaim
+    ahead of it, interrupt wants, TTL), then a format-shaped SD workload
+    with a W5500-like and an MCP2515-like device on the same bus -- every
+    request granted within the bound, every job done, no CS overlap, no MISO
+    fight, the card byte-exact."""
+    if "spibus_contended" not in open(os.path.join(ROOT, "src/sd/sd_spi.c")).read():
+        return True, "skipped: src/sd/sd_spi.c lacks the fairness points (docs/spi-bus-sharing.md, Gaps)"
+    return _host_c("spibus_share", ["test/host/spibus_share_test.c"] + SD_SIM_SRCS, "btgw_spibus_share",
+                   defs="-DSPIBUS_HOST -DCONFIG_SD_DETECT=22")
+
 SD_STACK_SRCS = ["src/sd/sd_card.c", "src/sd/sd_sdio.c", "src/sd/sd_spi.c", "src/sd/sd_crc.c",
                  "src/sd/sd_store.c", "src/sd/sd_api.c", "src/sd/sd_core.c", "src/sd/sd_diskio.c",
                  "third_party/fatfs/ff.c", "third_party/fatfs/ffunicode.c", "src/io/spibus.c",
@@ -797,7 +817,11 @@ def t_sd_stack():
 
 def _sd_stack_in(d):
     binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_sd_stack")
-    rc, out = sh(f"gcc -O1 -Wall -Wextra -DSPIBUS_HOST -DCONFIG_SD_DETECT=22 -Isrc -Ithird_party/fatfs "
+    # -finstrument-functions on the firmware sources only: the worker's work
+    # meter (test/host/sd_worker_uc.c) counts their calls between yields.
+    rc, out = sh(f"gcc -O1 -g -Wall -Wextra -no-pie -finstrument-functions "
+                 f"-finstrument-functions-exclude-file-list=test/host,/usr/ "
+                 f"-DSPIBUS_HOST -DCONFIG_SD_DETECT=22 -Isrc -Ithird_party/fatfs "
                  f"-Itest/host -o {binp} test/host/sd_stack_test.c {' '.join(SD_STACK_SRCS)}")
     if rc:
         errs = [l for l in out.splitlines() if "error:" in l]
@@ -1122,6 +1146,7 @@ def main():
     step(0, "SPI bus: claims, chains, completes from the loop", t_spibus)
     step(0, "SD CRCs (CRC7, CRC16, 4-line CRC16 as one CRC64)", t_sd_crc)
     step(0, "SD card on SDIO and on SPI vs a simulated card", t_sd_card)
+    step(0, "SPI bus shared fairly: a format beside a W5500 and an MCP2515", t_spibus_share)
     step(0, "SD stack (worker, API, FatFs) on both buses + fsck", t_sd_stack)
     step(0, "SD rules: worker-only, trailing-clock releases, pins, no GPL", t_sd_guards)
     step(0, "W5500 MACRAW state machine vs a simulated chip", t_w5500)

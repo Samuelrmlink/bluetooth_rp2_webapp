@@ -326,7 +326,7 @@ int sd_api_status_json(char *buf, size_t cap) {
     m = snprintf(buf + n, cap - (size_t)n,
                  ",\"worker\":{\"stack\":%lu,\"stack_used\":%lu,\"xfers\":%d,\"xfer_max\":%d,"
                  "\"store_errors\":%lu,"
-                 "\"slices\":%lu,\"slice_max_us\":%lu,\"slices_over_2ms\":%lu,\"slices_over_10ms\":%lu,"
+                 "\"slices\":%lu,\"slice_max_us\":%lu,\"slice_max_phase\":\"%s\",\"slices_over_2ms\":%lu,\"slices_over_10ms\":%lu,"
                  "\"slices_over_50ms\":%lu,"
                  "\"card_busy_max_us\":%lu,\"card_busy_timeouts\":%lu,\"card_write_retries\":%lu,\"card_dma_blocks\":%lu,"
                  "\"card_read_retries\":%lu,\"card_crc_errors\":%lu,\"card_inits\":%lu,\"card_recoveries\":%lu,"
@@ -335,6 +335,7 @@ int sd_api_status_json(char *buf, size_t cap) {
                  "\"last_conn_end\":{\"op\":%d,\"why\":\"%s\",\"code\":%d,\"bytes\":%llu,\"count\":%lu}}}",
                  (unsigned long)sdw_stack_size(), (unsigned long)sdw_stack_used(), sd_xfer_active(), SD_XFERS,
                  (unsigned long)p->errors, (unsigned long)w.slices, (unsigned long)w.slice_max_us,
+                 w.slice_max_phase ? w.slice_max_phase : "",
                  (unsigned long)w.over_2ms, (unsigned long)w.over_10ms, (unsigned long)w.over_50ms,
                  (unsigned long)ls_busy_max_us(false),
                  (unsigned long)cto, (unsigned long)cre, (unsigned long)cdma,
@@ -911,6 +912,9 @@ void sd_xfer_run(int x) {
         fail_ls(t, LS_ENOMEDIA);
         return;
     }
+    static const char *const phase[] = { [SD_OP_GET] = "get", [SD_OP_PUT] = "put", [SD_OP_DELETE] = "delete",
+                                         [SD_OP_RENAME] = "rename", [SD_OP_BENCH] = "bench", [SD_OP_MKDIR] = "mkdir" };
+    if ((unsigned)t->op < sizeof phase / sizeof phase[0] && phase[t->op]) { sdw_set_phase(phase[t->op]); }
     switch (t->op) {
     case SD_OP_GET:
         run_get(t);

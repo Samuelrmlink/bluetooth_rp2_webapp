@@ -74,6 +74,10 @@ static void pack_cmd(uint8_t out[6], uint8_t cmd, uint32_t arg) {
  * bits become the result. */
 static int command(uint8_t cmd, uint32_t arg, char rtype, uint8_t *resp) {
     uint8_t c[6], r[17];
+    /* A command at 400 kHz is ~0.3 ms of wire time, each under the waits'
+     * spin, so identification would otherwise run its dozen back to back.
+     * The bus is ours alone: yielding between commands only pauses CLK. */
+    sd_port_maybe_yield(SD_SLICE_US);
     pack_cmd(c, cmd, arg);
     int bits = rtype == 'n' ? R_NONE : rtype == '2' ? R_136 : R_48;
     int e = sdio_hw_command(c, bits, r);
@@ -263,6 +267,7 @@ static int sdio_write(uint32_t addr, const uint8_t *buf, uint32_t count) {
     }
     for (uint32_t i = 0; i < count && e == SD_OK; i++) {
         uint8_t token = 0;
+        sd_port_maybe_yield(SD_SLICE_US);           /* between blocks CLK may stop */
         e = sdio_hw_write_block(buf, 512, block_crc(buf), &token);
         if (e == SD_OK) {
             if (token == 0x5) { e = SD_ECRC; }           /* 101: CRC error */

@@ -20,7 +20,8 @@ WireGuard tunnel):
 | bench, 10 MB on the card | write 2.0 MB/s, read 2.7 MB/s |
 | retries / CRC errors / timeouts | 0 / 0 / 0; longest worker slice 4.3 ms |
 
-SPI mode is tested on the host and in mcusim, not yet against a card. The
+SPI mode (SPI0, 25 MHz, CRC on) passed the same card tests on the same
+wiring on 2026-10-20: W 1020 / R 1194 kB/s, 0 errors. The
 differential test against carlk3's driver waits for mcusim's SD card model.
 
 What bring-up found (each now has a host test that fails without the fix):
@@ -123,9 +124,38 @@ sd_card.c  addressing, retries, counters, CSD/CID
 ```
 
 All card I/O runs in the **storage worker**, km003c's stackful coroutine
-(`sd_worker_coro.c`), resumed once per main-loop pass (`sd_poll()`); it
-yields every ~2 ms and on every wait, so a slow card never stalls USB, WiFi,
-Bluetooth or HTTP. It never runs inside `cyw43_wait.c` (tier-0 guard).
+(`sd_worker_coro.c`), resumed once per main-loop pass (`sd_poll()`), so a
+slow card never stalls USB, WiFi, Bluetooth or HTTP. It never runs inside
+`cyw43_wait.c` (tier-0 guard). A slice ends -- the worker yields -- at the
+first of these once it has run `SD_SLICE_US` (2 ms):
+
+* before every block read or write (`sd_card.c`), every SDIO command and
+  every block of a multi-block SDIO write;
+* in every wait (`sd_port_wait_step()`: after a 200 µs spin, or once the
+  budget is spent -- so a run of short waits, e.g. a 400 kHz command
+  sequence, still yields);
+* SPI: only between commands, with the bus released first (`breathe()` in
+  `sd_spi.c`), never holding a bus another device may share -- including
+  between ACMD41 polls while a card powers up (up to 1 s);
+* FatFs's CPU-only loops: `FF_YIELD()` (a local addition, see
+  `third_party/fatfs/VENDORED.txt`) in f_mkfs's exFAT up-case table, which
+  made 65536 `ff_wtoupper()` calls without a disk access: a **227 ms** main
+  loop stall per exFAT format until 2026-10-20.
+
+Measured on the board (SDIO, 2026-10-20): longest slice 2.2 ms through boot
++ mount, an exFAT format, a 10 MB bench and a 4 MB round trip (it was 227 ms
+in the format). The status reports the longest slice and what the worker
+was doing in it (`slice_max_us`, `slice_max_phase`: `media` = detect, mount,
+free space; `format`; `get`, `put`, `bench`, ...).
+
+What still runs without a yield, by design (each bounded):
+
+| | worst case |
+|---|---|
+| one SPI command at 400 kHz (identification only) | ~0.4 ms of blocking bytes |
+| one block of FatFs work between two disk accesses | ~0.1 ms |
+| SDIO: stopping the PIO clock (`clk_leave`: queued bursts drain, `sm_idle`) | normally µs; bounded at 2 ms by `sm_idle`, the drain wait by 100 ms (a stuck PIO) |
+| SPI: a blocking few-byte transfer (`spibus_xfer_blocking`) | µs; 50 ms timeout |
 
 ### SDIO
 
@@ -213,7 +243,7 @@ Errors are `{"ok":false,"error":"…","card":"<state>"}` with `Connection: close
  "defaults":{"fs":"exfat","cluster":{"fat32":32768,"exfat":131072},"align":16777216},
  "options":{"fat32":[4096,…,65536],"exfat":[4096,…,1048576]},
  "bench":{"state":"idle","mb":0,"chunk":4096,"done_kb":0,"write_kBps":0,"read_kBps":0,"card_busy_max_us":0,"error":""},
- "worker":{"stack":4096,"stack_used":1480,"xfers":0,"xfer_max":2,"slices":…,"slice_max_us":…,
+ "worker":{"stack":4096,"stack_used":1480,"xfers":0,"xfer_max":2,"slices":…,"slice_max_us":…,"slice_max_phase":"put",
            "card_busy_max_us":…,"card_busy_timeouts":0,"card_write_retries":0,"card_dma_blocks":…,
            "card_read_retries":0,"card_crc_errors":0,"card_inits":1,"xfer_bytes":…,
            "last_fail":{…},"last_conn_end":{…}}}
@@ -241,10 +271,17 @@ Tier 0 (host, `tools/run_tests.py`):
   1–64 block I/O at the edges, CRC and write errors retried, long busy
   (and the W5500 getting the bus meanwhile), a dead command, a pulled and
   reinserted card, no MISO conflict on the shared bus.
-* `sd_stack_test` (125 checks): worker → API → store → FatFs → driver →
+* `sd_stack_test` (213 checks): worker → API → store → FatFs → driver →
   card, both buses, FAT32 and exFAT on a 300 MiB card: upload, download,
-  listing, mkdir, rename, delete, the error map, bench, pull + settle +
-  remount. The resulting images pass `fsck.fat` / `fsck.exfat`.
+  listing, a 300-file folder (made, listed, emptied), mkdir, rename,
+  delete, the error map, bench, pull + settle + remount. The resulting
+  images pass `fsck.fat` / `fsck.exfat`. A **work meter** checks that the
+  worker never goes long without a chance to yield: the firmware sources
+  are built with `-finstrument-functions`, and `test/host/sd_worker_uc.c`
+  counts the calls (CPU work) and simulated microseconds (waits, wire time)
+  between yield opportunities, per operation, against bounds (4000 calls,
+  1 ms). It names the call site when one is exceeded -- that is how the
+  up-case loop was found (69977 calls); emptying `ff_yield()` fails it.
 * guards: worker-only, trailing-clock releases, pins reserved, no GPL
   SDIO source in the tree.
 

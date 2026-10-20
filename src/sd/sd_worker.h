@@ -40,6 +40,15 @@ bool sdw_in_worker(void);
  * places that are called often and usually quick (each card read/write),
  * so a long run of them still gives the main loop a turn every few ms. */
 void sdw_maybe_yield(uint32_t budget_us);
+/* Worker context: how long this slice has run (0 outside the worker, and
+ * where the worker is a thread). For code that must tidy up before it
+ * yields -- the SPI transport lets go of a shared bus first. */
+uint32_t sdw_slice_us(void);
+
+/* What the worker is doing ("mount", "format", "put", ...), for the stats:
+ * the longest slice is reported with the phase it ran in. A string
+ * literal; returns the previous one so a nested step can restore it. */
+const char *sdw_set_phase(const char *phase);
 
 /* Shared-state lock: a no-op on the cooperative backends. Never held across
  * storage I/O or a yield. */
@@ -59,6 +68,7 @@ bool sdw_stack_ok(void);
 struct sdw_stats {
     uint32_t slices;
     uint32_t slice_max_us;
+    const char *slice_max_phase;   /* what the worker was doing in the longest slice */
     uint32_t over_2ms, over_10ms, over_50ms;
 };
 void sdw_get_stats(struct sdw_stats *out, bool reset);

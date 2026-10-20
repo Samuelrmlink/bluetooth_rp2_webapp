@@ -35,6 +35,7 @@ static bool s_in_worker;
 static bool s_started;
 static struct sdw_stats s_stats;
 static uint32_t s_slice_t0; /* when the worker last got the CPU */
+static const char *s_phase = "idle";
 
 /* void sdw_switch(uint32_t **save_sp, uint32_t *load_sp) */
 __attribute__((naked, noinline)) static void sdw_switch(uint32_t **save_sp __attribute__((unused)), uint32_t *load_sp __attribute__((unused))) {
@@ -115,6 +116,7 @@ void sdw_service(void) {
     s_stats.slices++;
     if (dt > s_stats.slice_max_us) {
         s_stats.slice_max_us = dt;
+        s_stats.slice_max_phase = s_phase;
     }
     s_stats.over_2ms += dt > 2000u;
     s_stats.over_10ms += dt > 10000u;
@@ -139,6 +141,16 @@ void sdw_maybe_yield(uint32_t budget_us) {
     if (s_in_worker && time_us_32() - s_slice_t0 >= budget_us) {
         sdw_switch(&s_worker_sp, s_main_sp);
     }
+}
+
+uint32_t sdw_slice_us(void) {
+    return s_in_worker ? time_us_32() - s_slice_t0 : 0;
+}
+
+const char *sdw_set_phase(const char *phase) {
+    const char *was = s_phase;
+    s_phase = phase;
+    return was;
 }
 
 void sdw_idle(uint32_t max_us) {

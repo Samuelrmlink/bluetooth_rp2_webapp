@@ -2,6 +2,12 @@
 #include "ff.h"
 #include "diskio.h"
 #include "sd/sd_card.h"
+#include "sd/sd_port.h"
+
+/* FF_YIELD (ffconf.h): FatFs's long CPU-only loops yield here. */
+void ff_yield(void) {
+    sd_port_maybe_yield(SD_SLICE_US);
+}
 
 DSTATUS disk_initialize(BYTE pdrv) {
     if (pdrv != 0) { return STA_NOINIT; }

@@ -28,6 +28,7 @@ static void publish_free(void) {
 }
 
 void sd_core_media_tick(void) {
+    sdw_set_phase("media");                          /* detect, mount, free space */
     uint64_t now = sd_port_now_us();
     pub.present = ls_present();
     if (ls_media() == LS_MEDIA_OK) {
@@ -65,6 +66,7 @@ void sd_core_worker_body(void) {
     for (;;) {
         sd_core_media_tick();
         if (sd_format_running()) {
+            sdw_set_phase("format");
             sd_format_run();
             pub.formatting = false;
             next_mount_us = 0;
@@ -79,7 +81,10 @@ void sd_core_worker_body(void) {
                 next_free_us = 0;                    /* a write may have changed it */
             }
         }
-        if (!worked) { sdw_idle(20000); }
+        if (!worked) {
+            sdw_set_phase("idle");
+            sdw_idle(20000);
+        }
     }
 }
 

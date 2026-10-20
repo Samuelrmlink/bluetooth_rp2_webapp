@@ -22,7 +22,6 @@
 
 /* Keep a worker slice to about this long: FatFs can issue many card
  * operations in one call (a mount's free-space scan, a format's tables). */
-#define SLICE_US 2000u
 
 static const sd_bus_t *bus;
 static sd_info_t info;
@@ -147,7 +146,7 @@ static void note_ok(void) { recover_tries = 0; }
 int sd_card_read(uint64_t sector, uint8_t *buf, uint32_t count) {
     if (!info.valid) { return SD_ENOCARD; }
     if (!in_range(sector, count)) { return SD_EPARAM; }
-    sd_port_maybe_yield(SLICE_US);
+    sd_port_maybe_yield(SD_SLICE_US);
     int r = bus->read(addr_of(sector), buf, count);
     if (r != SD_OK && r != SD_ENOCARD && sd_card_present()) {
         stats.read_retries++;              /* a read is always safe to repeat */
@@ -167,7 +166,7 @@ int sd_card_read(uint64_t sector, uint8_t *buf, uint32_t count) {
 int sd_card_write(uint64_t sector, const uint8_t *buf, uint32_t count) {
     if (!info.valid) { return SD_ENOCARD; }
     if (!in_range(sector, count)) { return SD_EPARAM; }
-    sd_port_maybe_yield(SLICE_US);
+    sd_port_maybe_yield(SD_SLICE_US);
     int r = bus->write(addr_of(sector), buf, count);
     if (r != SD_OK && r != SD_ENOCARD && sd_card_present()) {
         /* Once more, after the card has had its time: one slow garbage

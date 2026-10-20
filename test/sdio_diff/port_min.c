@@ -9,6 +9,7 @@
 uint64_t sd_port_now_us(void) { return time_us_64(); }
 void sd_port_yield(void) {}
 void sd_port_maybe_yield(uint32_t budget_us) { (void)budget_us; }
+bool sd_port_slice_spent(void) { return false; }   /* no main loop to share with */
 void sd_port_delay_us(uint32_t us) { busy_wait_us_32(us); }
 void sd_port_detect_init(int pin) { gpio_init((uint)pin); gpio_set_dir((uint)pin, GPIO_IN); gpio_pull_up((uint)pin); }
 bool sd_port_detect_level(int pin) { return gpio_get((uint)pin); }

@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fake_spi.h"
 #include "io/spibus.h"
@@ -28,12 +29,60 @@ static const char *tag = "";
 #define CHECK(c, msg) do { checks++; if (!(c)) { failed++; printf("FAIL [%s] %s:%d %s\n", tag, __FILE__, __LINE__, msg); } } while (0)
 
 extern void (*sd_host_yield_hook)(void);
+extern void (*sd_host_maybe_yield_hook)(uint32_t budget_us);
+void sdw_host_meter(uint64_t *calls_max, void **calls_site, uint64_t *us_max, void **us_site, bool reset);
 extern sdsim_t *sd_host_detect_card;
 
 static sdsim_t card;
 static bool spi;
 
 static void worker_yield(void) { sdw_yield(); }
+
+/* The worker must never keep the main loop for long: between two yield
+ * opportunities (a yield, or a check where the board yields once its slice
+ * has used SD_SLICE_US) it may do only so much. The meter (sd_worker_uc.c)
+ * counts firmware function calls (CPU work) and simulated microseconds
+ * (waits, wire time) per stretch.
+ *
+ * Seen here (2026-10-20): at most ~2050 calls (an SPI block: its bytes go
+ * through the bus layer) and ~470 us (one 400 kHz command and its response).
+ * Before the fixes: 69977 calls in f_mkfs's exFAT up-case table (227 ms of
+ * main-loop stall on the board) and ~3 ms of back-to-back commands in
+ * identification and multi-block writes. */
+#define METER_CALLS_MAX 4000u
+#define METER_US_MAX    1000u
+
+static const char *site_name(void *site) {
+    static char buf[160];
+    char cmd[128];
+    snprintf(cmd, sizeof cmd, "addr2line -f -s -e /proc/%d/exe %p", (int)getpid(), site);
+    FILE *f = popen(cmd, "r");
+    buf[0] = 0;
+    if (f) {
+        char fn[64] = "", line[64] = "";
+        if (fgets(fn, sizeof fn, f) && fgets(line, sizeof line, f)) {
+            fn[strcspn(fn, "\n")] = 0;
+            line[strcspn(line, "\n")] = 0;
+            snprintf(buf, sizeof buf, "%s (%s)", fn, line);
+        }
+        pclose(f);
+    }
+    return buf;
+}
+
+static void meter(const char *what) {
+    uint64_t calls, us;
+    void *cs, *us_site;
+    sdw_host_meter(&calls, &cs, &us, &us_site, true);
+    printf("METER [%s] %-10s calls %6llu  us %6llu\n", tag, what, (unsigned long long)calls, (unsigned long long)us);
+    char msg[256];
+    snprintf(msg, sizeof msg, "%s: %llu calls without a chance to yield, in %s", what,
+             (unsigned long long)calls, calls > METER_CALLS_MAX ? site_name(cs) : "");
+    CHECK(calls <= METER_CALLS_MAX, msg);
+    snprintf(msg, sizeof msg, "%s: %llu us without a chance to yield, ending at %s", what,
+             (unsigned long long)us, us > METER_US_MAX ? site_name(us_site) : "");
+    CHECK(us <= METER_US_MAX, msg);
+}
 
 /* One pass of the main loop. */
 static void pass(void) {
@@ -179,14 +228,17 @@ static void stack(const char *fs) {
     ls_unmount();                                        /* the previous card's mount */
 
     /* A blank card: present, but no filesystem. */
+    meter("(before)");
     passes(2600);                                        /* past the 2 s settle */
     CHECK(strcmp(sd_card_state(), "error") == 0, "a blank card is 'error' (present, not mountable)");
     char js[4096];
     CHECK(sd_api_status_json(js, sizeof js) > 0 && strstr(js, "\"card\":{\"bytes\":314572800") &&
           strstr(js, "\"type\":\"SDHC\""), "status names the card even before it is formatted");
 
+    meter("identify");
     CHECK(format(fs), "format");
     CHECK(until_state("ok", 5000), "mounted after the format");
+    meter("format");
     sd_api_status_json(js, sizeof js);
     char want[32];
     snprintf(want, sizeof want, "\"fs\":\"%s\"", fs);
@@ -199,6 +251,7 @@ static void stack(const char *fs) {
     CHECK(put("logs/2026/big.bin", big, sizeof big) == 200, "PUT 300 KB, parents made");
     CHECK(get("logs/2026/big.bin", back, sizeof back, &n) == 200 && n == sizeof big && !memcmp(back, big, n),
           "GET it back, byte for byte");
+    meter("put+get");
     CHECK(put("hello.txt", (const uint8_t *)"hi there\n", 9) == 200, "PUT a small file");
     CHECK(get("", back, sizeof back, &n) == 200 && n < sizeof back, "list the root");
     back[n < sizeof back ? n : sizeof back - 1] = 0;
@@ -215,6 +268,26 @@ static void stack(const char *fs) {
     CHECK(put("../etc/passwd", big, 10) == 400, "a path out of the tree: 400");
     CHECK(put("logs", big, 10) == 409, "PUT onto a folder: 409");
     CHECK(put("bad:name.txt", big, 10) == 400, "a name FAT cannot hold: 400");
+    meter("file ops");
+
+    /* a big folder: listed, then emptied */
+    for (int i = 0; i < 300; i++) {
+        char fn[48];
+        snprintf(fn, sizeof fn, "many/file-with-a-long-name-%03d.txt", i);
+        if (put(fn, big, 1 + i % 3) != 200) { CHECK(false, "PUT into a big folder"); break; }
+    }
+    meter("300 files");
+    CHECK(get("many", back, sizeof back, &n) == 200 && n < sizeof back &&
+          memmem(back, n, "file-with-a-long-name-299.txt", 29), "list a 300-file folder");
+    meter("list 300");
+    int gone = 0;
+    for (int i = 0; i < 300; i++) {
+        char fn[48];
+        snprintf(fn, sizeof fn, "many/file-with-a-long-name-%03d.txt", i);
+        gone += simple(SD_OP_DELETE, fn, NULL) == 200;
+    }
+    CHECK(gone == 300 && simple(SD_OP_DELETE, "many", NULL) == 200, "empty it and remove it");
+    meter("delete 300");
 
     /* bench */
     struct sd_reply r;
@@ -226,6 +299,7 @@ static void stack(const char *fs) {
     }
     CHECK(strstr(js, "\"bench\":{\"state\":\"done\"") != NULL, "bench finishes");
     CHECK(get("BTGW-BENCH.bin", back, sizeof back, &n) == 404, "and removes its file");
+    meter("bench");
 
     /* pulled, then back */
     sdsim_pull(&card);
@@ -238,6 +312,7 @@ static void stack(const char *fs) {
     CHECK(until_state("ok", 5000), "then mounted again");
     CHECK(get("logs/2026/big.bin", back, sizeof back, &n) == 200 && n == sizeof big && !memcmp(back, big, n),
           "the file survived the pull");
+    meter("remount");
     CHECK(sdw_stack_ok(), "worker stack intact");
 
     char name[32];
@@ -249,6 +324,7 @@ int main(void) {
     fake_reset();
     fake_autocomplete(true);
     sd_host_yield_hook = worker_yield;
+    sd_host_maybe_yield_hook = sdw_maybe_yield;
     sd_init();
 
     tag = "sdio fat32"; spi = false; stack("fat32");

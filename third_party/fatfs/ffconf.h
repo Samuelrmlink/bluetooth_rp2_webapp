@@ -293,4 +293,14 @@
 
 
 
+/*--- Local addition (not a stock option) ---*/
+
+void ff_yield(void);
+#define FF_YIELD()	ff_yield()
+/* Called by ff.c in loops that run long without touching the disk (the
+/  exFAT up-case table in f_mkfs: 65536 ff_wtoupper() calls, 227 ms on the
+/  RP2350). src/sd/sd_diskio.c lets the storage worker yield there once its
+/  slice has used its budget. */
+
+
 /*--- End of configuration options ---*/

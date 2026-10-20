@@ -17,13 +17,27 @@ void sd_port_yield(void) {
     sdsim_advance_us(50);
     if (sd_host_yield_hook) { sd_host_yield_hook(); }
 }
-void sd_port_maybe_yield(uint32_t budget_us) { (void)budget_us; }
+/* A yield opportunity: the board yields here once the slice has run its
+ * budget. The host doesn't (tests stay deterministic), but the stack test's
+ * work meter counts the stretches between these (sd_worker_uc.c). */
+void (*sd_host_maybe_yield_hook)(uint32_t budget_us);
+void sd_port_maybe_yield(uint32_t budget_us) {
+    if (sd_host_maybe_yield_hook) { sd_host_maybe_yield_hook(budget_us); }
+}
 void sd_port_delay_us(uint32_t us) { sdsim_advance_us(us); }
 void sd_port_detect_init(int pin) { (void)pin; }
 bool sd_port_detect_level(int pin) {
     (void)pin;
     return !(sd_host_detect_card && sd_host_detect_card->present);   /* low = present */
 }
+/* Never spent here (deterministic), but each check is a point where the
+ * board would yield: the meter's checkpoint. */
+bool sd_port_slice_spent(void) {
+    if (sd_host_maybe_yield_hook) { sd_host_maybe_yield_hook(SD_SLICE_US); }
+    return false;
+}
+
 void sd_port_wait_step(uint64_t t0) {
+    (void)sd_port_slice_spent();
     if (sd_port_now_us() - t0 > SD_SPIN_US) { sd_port_yield(); }
 }

@@ -35,6 +35,8 @@ static bool cs_glitch;
 static bool autocomplete;
 static uint32_t now_us;
 static int bus_conflicts;
+static int cs_overlaps;
+void (*fake_bytes_hook)(spibus_t *b, uint16_t n);
 
 void fake_reset(void) {
     for (int i = 0; i < NPINS; i++) {
@@ -42,13 +44,14 @@ void fake_reset(void) {
         reserved[i] = false; dev_at[i].fn = NULL;
     }
     dma_starts = 0; inflight = NULL; now_ms = 1000; cs_glitch = false; autocomplete = false; now_us = 0;
-    bus_conflicts = 0;
+    bus_conflicts = 0; cs_overlaps = 0;
 }
 
 void fake_autocomplete(bool on) { autocomplete = on; }
 void fake_attach(int cs, fake_dev_fn fn, void *ctx) { dev_at[cs].fn = fn; dev_at[cs].ctx = ctx; }
 int fake_dma_starts(void) { return dma_starts; }
 int fake_bus_conflicts(void) { return bus_conflicts; }
+int fake_cs_overlaps(void) { return cs_overlaps; }
 bool fake_dma_pending(void) { return inflight != NULL; }
 void fake_dma_complete(void) {
     spibus_t *b = inflight;
@@ -94,6 +97,10 @@ void spibus_port_dma_start(spibus_t *b, const uint8_t *tx, uint8_t *rx, uint16_t
     dma_starts++;
     inflight = b;
     int cs = low_cs();
+    int nlow = 0;
+    for (int p = 0; p < NPINS; p++) { nlow += !gpio_is_input[p] && gpio_level[p] == 0 && dev_at[p].fn; }
+    if (nlow > 1 && len) { cs_overlaps++; }      /* two devices selected at once */
+    if (fake_bytes_hook) { fake_bytes_hook(b, len); }
     for (uint16_t i = 0; i < len; i++) {
         uint8_t out = tx ? tx[i] : b->zero_tx;
         uint8_t in = cs >= 0 ? dev_at[cs].fn(dev_at[cs].ctx, FAKE_BYTE, out) : 0xFF;

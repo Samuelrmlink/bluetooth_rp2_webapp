@@ -23,6 +23,10 @@
 #include "ff.h"			/* Declarations of FatFs API */
 #include "diskio.h"		/* Declarations of device I/O functions */
 
+#ifndef FF_YIELD
+#define FF_YIELD()		/* Local addition: a chance to yield in long CPU-only loops (ffconf.h) */
+#endif
+
 
 /*--------------------------------------------------------------------------
 
@@ -6054,13 +6058,14 @@ FRESULT f_mkfs (
 		sum = 0;							/* Table checksum to be stored in the 82 entry */
 		st = 0; si = 0; i = 0; j = 0; szb_case = 0;
 		do {
+			FF_YIELD();
 			switch (st) {
 			case 0:
 				ch = (WCHAR)ff_wtoupper(si);	/* Get an up-case char */
 				if (ch != si) {
 					si++; break;		/* Store the up-case char if exist */
 				}
-				for (j = 1; (WCHAR)(si + j) && (WCHAR)(si + j) == ff_wtoupper((WCHAR)(si + j)); j++) ;	/* Get run length of no-case block */
+				for (j = 1; (WCHAR)(si + j) && (WCHAR)(si + j) == ff_wtoupper((WCHAR)(si + j)); j++) FF_YIELD();	/* Get run length of no-case block */
 				if (j >= 128) {
 					ch = 0xFFFF; st = 2; break;	/* Compress the no-case block if run is >= 128 chars */
 				}
