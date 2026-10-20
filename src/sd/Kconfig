@@ -122,6 +122,10 @@ config SD_DETECT_LEVEL
     int "Card-detect level that means 'card present'"
     range 0 1
     default 0
+    help
+      0: a switch to ground, closed with a card in (a bare socket, with the
+      pull-up this code enables). 1: a line driven high with a card in
+      (Adafruit's SDIO breakout drives DET both ways; measured 2026-10-19).
 
 config SD_XFER_BUF
     int "Bytes per HTTP transfer ring (power of two, >= 1024)"

@@ -33,7 +33,7 @@ CONFIG_ETH_W5500_RST=11
 CONFIG_ETH_W5500_BAUD=30000000
 
 # pico2w_eth plus an SD card on SDIO (4-bit, PIO): CLK GP16, CMD GP17,
-# D0-D3 GP18-21, card detect GP22 (low = present). No board has the slot yet:
+# D0-D3 GP18-21, card detect GP22 (high = present: Adafruit SDIO breakout). No board has the slot yet:
 # this build exists so the feature keeps compiling and its tests keep running.
 CONFIG_SD=y
 CONFIG_SD_BUS_SDIO=y
@@ -41,4 +41,5 @@ CONFIG_SD_SDIO_CLK=16
 CONFIG_SD_SDIO_CMD=17
 CONFIG_SD_SDIO_D0=18
 CONFIG_SD_DETECT=22
-CONFIG_SD_DETECT_LEVEL=0
+# Adafruit's SDIO breakout drives DET high with a card in (measured 2026-10-19).
+CONFIG_SD_DETECT_LEVEL=1

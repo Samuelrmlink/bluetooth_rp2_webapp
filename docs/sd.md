@@ -38,10 +38,16 @@ What bring-up found (each now has a host test that fails without the fix):
   (21.4 MHz) CMD was sampled at the rising edge, ~9 ns after the card's
   latest output change; responses occasionally failed their CRC. It is now
   sampled one cycle later, 8 cycles a clock (18.75 MHz).
-* A short from GP17 (CMD) to ground on the board, and a DET line that does
-  not reach GP22 on this breakout wiring: the build used for the test had
-  `SD_DETECT=-1`. With the stock `pico2w_sd` (detect on GP22, low = present)
-  the card reads "none" until DET is wired.
+* A short from GP17 (CMD) to ground on the board (fixed on the board).
+* **Card detect is active-high on Adafruit's SDIO breakout**: it drives DET
+  high with a card in and low without (both ways, not a switch to ground), so
+  the default "low = present" read the card as absent. `pico2w_sd` and
+  `pico2w_sdspi` now set `SD_DETECT_LEVEL=1`; on hardware the state goes
+  `none` → `settling` (2 s) → `ok` on a pull and reinsert.
+* A card seated badly after a hot reinsert gave CRC errors on every read
+  (all caught: retried, then failed -- never wrong data -- but listings came
+  back empty and free space 0); reseating cured it. A `card_crc_errors`
+  counter climbing at idle is the sign.
 
 ## Build
 
