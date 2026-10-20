@@ -687,6 +687,70 @@ def t_httpc_parse():
     return _host_c("httpc_parse", ["test/host/httpc_parse_test.c", "src/net/httpc_parse.c"],
                    "btgw_httpc_parse", defs="")
 
+def t_tls_mem():
+    """The firmware's mbedTLS configuration against a local `openssl s_server`
+    (127.0.0.1 only): chains shaped like Google's (RSA-4096 root signed with
+    SHA-384 -> RSA-2048 intermediate -> ECDSA or RSA leaf) and like GTS R4
+    (ECDSA P-384 root -> P-256 leaf), found through the trusted-CA callback,
+    a 200 KB body in 16 KiB records, an untrusted root refused, `insecure`
+    accepted; and the session's memory, which is what the Lua arena must
+    have free on the device."""
+    import tempfile, signal, socket
+    if sh("command -v openssl")[0]:
+        return True, "skipped: no openssl"
+    m = os.path.expanduser("~/.pico-sdk/sdk/2.3.0/lib/mbedtls")
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_tls_mem")
+    rc, out = sh(f"gcc -O1 -w -DMBEDTLS_CONFIG_FILE='\"{ROOT}/include/mbedtls_config.h\"' "
+                 f"-I{m}/include -I{m}/library -o {binp} test/host/tls_mem_test.c {m}/library/*.c")
+    if rc:
+        return False, "tls harness build failed"
+    d = tempfile.mkdtemp(prefix="btgw_tls_")
+    o = lambda c: sh(c, cwd=d)
+    try:
+        o("openssl req -x509 -newkey rsa:4096 -sha384 -days 3650 -nodes -keyout r.key -out r.pem "
+          "-subj '/CN=Test Root R1' -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign")
+        o("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -sha384 -days 3650 -nodes "
+          "-keyout r4.key -out r4.pem -subj '/CN=Test Root R4' -addext basicConstraints=critical,CA:TRUE "
+          "-addext keyUsage=critical,keyCertSign")
+        o("printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,digitalSignature\n' > ca.ext")
+        o("printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > leaf.ext")
+        o("openssl req -newkey rsa:2048 -nodes -keyout i.key -out i.csr -subj '/CN=Test WR2'")
+        o("openssl x509 -req -in i.csr -CA r.pem -CAkey r.key -CAcreateserial -days 900 -sha256 -extfile ca.ext -out i.pem")
+        o("openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout le.key -out le.csr -subj /CN=localhost")
+        o("openssl x509 -req -in le.csr -CA i.pem -CAkey i.key -CAcreateserial -days 90 -sha256 -extfile leaf.ext -out le.pem")
+        o("openssl req -newkey rsa:2048 -nodes -keyout lr.key -out lr.csr -subj /CN=localhost")
+        o("openssl x509 -req -in lr.csr -CA i.pem -CAkey i.key -CAcreateserial -days 90 -sha256 -extfile leaf.ext -out lr.pem")
+        o("openssl x509 -req -in le.csr -CA r4.pem -CAkey r4.key -CAcreateserial -days 90 -sha384 -extfile leaf.ext -out l4.pem")
+        o("openssl req -x509 -newkey rsa:2048 -nodes -keyout x.key -out x.pem -subj /CN=Other -days 30")
+        for n in ("r", "r4", "x"):
+            o(f"openssl x509 -in {n}.pem -outform der -out {n}.der")
+        o("head -c 200000 /dev/urandom > big.bin")
+        cases = [("RSA chain, ECDSA leaf", "le.pem", "le.key", "i.pem", "r.der", "", 0),
+                 ("RSA chain, RSA leaf", "lr.pem", "lr.key", "i.pem", "r.der", "", 0),
+                 ("P-384 root, P-256 leaf", "l4.pem", "le.key", None, "r4.der", "", 0),
+                 ("untrusted root refused", "le.pem", "le.key", "i.pem", "x.der", "", 1),
+                 ("untrusted root, insecure", "le.pem", "le.key", "i.pem", "x.der", "insecure", 0)]
+        peaks = []
+        for i, (what, cert, key, chain, root, extra, want) in enumerate(cases):
+            s0 = socket.socket(); s0.bind(("127.0.0.1", 0)); port = s0.getsockname()[1]; s0.close()
+            args = ["openssl", "s_server", "-accept", f"127.0.0.1:{port}", "-cert", cert, "-key", key,
+                    "-WWW", "-tls1_2", "-quiet"] + (["-cert_chain", chain] if chain else [])
+            srv = subprocess.Popen(args, cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                time.sleep(0.6)
+                p = subprocess.run([binp, str(port), root, "big.bin"] + ([extra] if extra else []),
+                                   cwd=d, capture_output=True, text=True, timeout=60)
+            finally:
+                srv.send_signal(signal.SIGTERM); srv.wait()
+            if (p.returncode != 0) != bool(want):
+                return False, f"{what}: {(p.stdout.strip().splitlines() or ['?'])[-1][:70]}"
+            mm = re.search(r"(\d+) B handshake peak", p.stdout)
+            if mm and not want:
+                peaks.append(int(mm.group(1)))
+        return True, f"5 cases; session peak {max(peaks)} B (64-bit host)"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
 def t_ca_roots():
     """The HTTP client's embedded roots match the pinned SHA-256 fingerprints
     and src/net/ca_roots.h is what the PEMs generate."""
@@ -1168,6 +1232,7 @@ def main():
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
     step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)
     step(0, "HTTPS roots match their pinned fingerprints", t_ca_roots)
+    step(0, "TLS config: real handshakes on 127.0.0.1, session memory", t_tls_mem)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
