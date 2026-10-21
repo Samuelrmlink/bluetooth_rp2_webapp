@@ -27,6 +27,12 @@
 #ifndef LHEAP_KB
 #include "autoconf.h"
 #define LHEAP_KB CONFIG_LUA_HEAP_KB
+#if defined(CONFIG_NET_HTTP_TLS) && CONFIG_NET_HTTP_TLS && defined(CONFIG_NET_TLS_POOL_KB)
+#define LHEAP_POOL_KB CONFIG_NET_TLS_POOL_KB
+#endif
+#endif
+#ifndef LHEAP_POOL_KB
+#define LHEAP_POOL_KB 0
 #endif
 
 void  lheap_init(void);
@@ -114,6 +120,27 @@ bool lheap_check(lheap_stats_t *out, const char **why);
 /* The same figures without the checks (and the two sides): one walk, for a
  * script that wants to watch its own fragmentation (sys.heap). */
 void lheap_stats(lheap_stats_t *out);
+
+/*
+ * The pool: a second region with the same allocator, in memory of its own
+ * (LHEAP_POOL_KB; 0 = none, and every call fails). Not the Lua arena: Lua
+ * never allocates from it and lheap_init (a VM restart) leaves it alone.
+ * The HTTP client keeps its TLS session and its requests' bookkeeping here
+ * (src/net/httpc.c), so HTTPS costs the scripts nothing and cannot be
+ * starved by them. Not zeroed. lheap_pool_owns says whether a block is the
+ * pool's (for a free that may be given either kind).
+ */
+void *lheap_pool_alloc(size_t want);
+void  lheap_pool_free(void *p);
+bool  lheap_pool_owns(const void *p);
+typedef struct {
+    size_t capacity, used, peak, largest_free;
+    size_t blocks, free_blocks;
+    uint32_t fails;              /* requests that found no room */
+    size_t fail_last;
+} lheap_pool_stats_t;
+void  lheap_pool_stats(lheap_pool_stats_t *out);
+void  lheap_pool_reset_peak(void);
 
 /*
  * Scratch: short-lived C memory, grouped and freed whole (lheap.c). Memory is

@@ -70,10 +70,29 @@ config NET_HTTP_TLS
       (ECDHE with AES-GCM; RSA and ECDSA certificates; include/
       mbedtls_config.h), verified against an embedded set of roots
       (src/net/ca_roots.h: Google Trust Services R1-R4, GlobalSign R1,
-      ISRG X1/X2). A session takes ~35 KB of the Lua arena at its peak (a
-      16 KiB receive record buffer is unavoidable: servers ignore
-      max_fragment_length) and is freed when the request ends. Costs about
-      70 KB of flash.
+      ISRG X1/X2). A session lives in the TLS pool below, never in the Lua
+      arena. Costs about 70 KB of flash.
+
+config NET_TLS_POOL_KB
+    int "TLS pool (KB)"
+    depends on NET_HTTP_TLS
+    default 40
+    help
+      Static memory of its own, apart from the Lua arena, for the HTTP
+      client's one TLS session at a time -- mbedTLS's record buffers
+      (16 KiB in: servers ignore max_fragment_length; 2 KiB out), the
+      handshake state, the server's chain and the trusted roots while it is
+      verified -- and every request's bookkeeping (URL, header and request
+      text copies). An https:// request that finds the session taken waits
+      for it before it connects.
+
+      Sized from measurement (mcusim, the iTi backend against Firebase and
+      Supabase, both verified): a session peaks at about 31-33 KB. Before
+      this pool the session came from the Lua arena, where a long-running
+      script's objects left no 17 KB hole for the receive buffer and HTTPS
+      failed "out of memory" with plenty of bytes free. In the shipped
+      configs the arena went from 176 to 164 KB: 40 KB to this pool, 28 KB
+      back from lwIP (include/lwipopts.h, MEASURED).
 
 config NET_SNTP
     bool "SNTP wall-clock time (sys.time)"

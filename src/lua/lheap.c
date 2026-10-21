@@ -423,6 +423,69 @@ void lheap_stats(lheap_stats_t *out) {
     out->gap_offset = gap ? (size_t)(gap - G->base) : 0;
 }
 
+/* --- the pool: a second region, apart from the arena ----------------------
+ * The same blocks and free list, over memory of its own (LHEAP_POOL_KB, the
+ * HTTP client's TLS sessions: CONFIG_NET_TLS_POOL_KB). lheap_init does not
+ * touch it -- a Lua VM restart leaves it alone -- and nothing Lua allocates
+ * ever lands in it, so a TLS session can neither cut the scripts' space
+ * into pieces nor be refused because the scripts already did. */
+#if LHEAP_POOL_KB > 0
+static uint8_t pool_mem[(size_t)LHEAP_POOL_KB * 1024u] __attribute__((aligned(8)));
+static rg_t g_pool;
+static bool pool_ready;
+static size_t pool_fail_last;
+static uint32_t pool_fails;
+
+static void pool_on(void) {
+    if (!pool_ready) { rg_init(&g_pool, pool_mem, sizeof pool_mem); pool_ready = true; }
+    G = &g_pool;
+}
+
+void *lheap_pool_alloc(size_t want) {
+    pool_on();
+    void *p = try_low(want);
+    G = &g_main;
+    if (!p) { pool_fail_last = want; pool_fails++; }
+    return p;
+}
+
+void lheap_pool_free(void *p) {
+    if (!p) { return; }
+    pool_on();
+    rg_free(p);
+    G = &g_main;
+}
+
+bool lheap_pool_owns(const void *p) {
+    return (const uint8_t *)p >= pool_mem && (const uint8_t *)p < pool_mem + sizeof pool_mem;
+}
+
+void lheap_pool_stats(lheap_pool_stats_t *out) {
+    memset(out, 0, sizeof *out);
+    pool_on();
+    out->capacity = sizeof pool_mem;
+    out->used = g_pool.used;
+    out->peak = g_pool.peak;
+    for (fblk_t *f = G->head; f; f = f->next) {
+        size_t pay = bsize(f) - HDR;
+        out->free_blocks++;
+        if (pay > out->largest_free) { out->largest_free = pay; }
+    }
+    for (uint8_t *b = G->base; b < G->end; b = after(b)) { if (!is_free(b)) { out->blocks++; } }
+    out->fails = pool_fails;
+    out->fail_last = pool_fail_last;
+    G = &g_main;
+}
+
+void lheap_pool_reset_peak(void) { pool_on(); g_pool.peak = g_pool.used; G = &g_main; }
+#else
+void *lheap_pool_alloc(size_t want) { (void)want; return NULL; }
+void  lheap_pool_free(void *p) { (void)p; }
+bool  lheap_pool_owns(const void *p) { (void)p; return false; }
+void  lheap_pool_stats(lheap_pool_stats_t *out) { memset(out, 0, sizeof *out); }
+void  lheap_pool_reset_peak(void) { }
+#endif
+
 bool lheap_check(lheap_stats_t *out, const char **why) {
     G = &g_main;
     lheap_stats_t s;

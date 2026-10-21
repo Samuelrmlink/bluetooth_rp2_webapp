@@ -609,7 +609,7 @@ def t_lua_heap():
     A small arena is used so the fuzz reaches exhaustion and the refused-grow
     paths actually run."""
     binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_heap")
-    rc, out = sh(f"gcc -O1 -Wall -Wextra -Isrc -DLHEAP_KB=64 -o {binp} "
+    rc, out = sh(f"gcc -O1 -Wall -Wextra -Isrc -DLHEAP_KB=64 -DLHEAP_POOL_KB=40 -o {binp} "
                  f"test/host/heap_test.c src/lua/lheap.c")
     if rc:
         errs = [l for l in out.splitlines() if "error:" in l]

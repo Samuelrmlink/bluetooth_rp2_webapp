@@ -14,13 +14,14 @@
  * into plain blocks of the Lua arena and only become Lua values in
  * http.await, inside the script's own call.
  *
- * Everything one request allocates -- the client's copy of the URL and
- * headers, the TLS session and mbedTLS's handshake temporaries, the response
- * headers and body, a LittleFS file buffer -- goes into the request's own
- * scratch (lheap_scratch_*: pages from the top of the arena, all given back
- * when the request is released), never between blocks that outlive it. Only
- * the TLS record buffers (reserved for the VM's life) and the trusted roots
- * (shared by concurrent handshakes) stay outside.
+ * The client's own memory -- the request, its URL and header copies, the
+ * TLS session with mbedTLS's record buffers, handshake state and the trusted
+ * roots -- is the TLS pool (httpc.c), not the Lua arena. What becomes or
+ * comes from a Lua value -- a request body, the response headers and an
+ * in-memory body (up to 64 KB), a LittleFS file buffer -- goes into the
+ * request's own scratch (lheap_scratch_*: pages from the top of the arena,
+ * all given back when the request is released), never between blocks that
+ * outlive it.
  *
  * to_file: a 2xx body streams into the file (LittleFS through the fs pool,
  * the SD card through storage-worker jobs with a 4 KiB staging block, the
@@ -127,7 +128,6 @@ static void *arena_alloc(size_t n) {
         lrt_collect();
         p = place(n);
     }
-    if (!p && httpc_release_reserve()) { p = place(n); }   /* an idle TLS reservation */
     if (!p) {
         printf("lhttp: %u B not available: arena %u B used, largest free %u B\n",
                (unsigned)n, (unsigned)lheap_used(), (unsigned)lheap_largest_free());
@@ -147,7 +147,6 @@ static void *scope_use(void *scope) { return lheap_scratch_use(scope); }
 static void lhttp_mem_init(void) {
     static const httpc_alloc_fns fns = { arena_alloc, lheap_free_any, arena_stat, scope_use };
     httpc_set_alloc(&fns);
-    lrt_set_oom_hook(httpc_release_reserve);
 }
 
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
@@ -732,29 +731,29 @@ static int l_cancel(lua_State *L) {
     return 1;
 }
 
-/* http.reserve(on) -> bool
- *   false: give the reserved TLS record buffers (22.5 KB) back to the arena,
- *          if no HTTPS session is using them; false if one is.
- *   true:  reserve them now (normally the first HTTPS request does); false
- *          if the arena has no room for them.
- * Either way the next HTTPS request reserves them again if they are not. */
+/* http.reserve(on) -> true. Kept for scripts written when the TLS record
+ * buffers lived in the Lua arena and could be reserved and given back; they
+ * are in the TLS pool now (httpc.c), which is never the scripts', so there
+ * is nothing to reserve. */
 static int l_reserve(lua_State *L) {
-    bool on = lua_toboolean(L, 1);
-    lhttp_mem_init();
-    lua_pushboolean(L, on ? httpc_reserve() : httpc_unreserve());
+    lua_pushboolean(L, 1);
     return 1;
 }
 
 static int l_stats(lua_State *L) {
     httpc_stats_t s;
     httpc_stats(&s);
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 10);
     lua_pushinteger(L, s.requests);       lua_setfield(L, -2, "requests");
     lua_pushinteger(L, s.failures);       lua_setfield(L, -2, "failures");
     lua_pushinteger(L, s.tls_now);        lua_setfield(L, -2, "tls_sessions");
-    lua_pushinteger(L, s.tls_bytes_now);  lua_setfield(L, -2, "tls_bytes");
-    lua_pushinteger(L, s.tls_peak_bytes); lua_setfield(L, -2, "tls_peak_bytes");
-    lua_pushinteger(L, s.tls_reserved);   lua_setfield(L, -2, "tls_reserved");
+    /* The pool the TLS session and the requests' bookkeeping live in. */
+    lua_pushinteger(L, s.pool_used);      lua_setfield(L, -2, "tls_bytes");
+    lua_pushinteger(L, s.pool_peak);      lua_setfield(L, -2, "tls_peak_bytes");
+    lua_pushinteger(L, s.pool_size);      lua_setfield(L, -2, "tls_pool");
+    lua_pushinteger(L, s.pool_largest_free); lua_setfield(L, -2, "tls_pool_largest_free");
+    lua_pushinteger(L, s.pool_fails);     lua_setfield(L, -2, "tls_pool_fails");
+    lua_pushinteger(L, s.tls_waits);      lua_setfield(L, -2, "tls_waits");
     return 1;
 }
 
@@ -765,15 +764,7 @@ void lhttp_open(lua_State *L) {
     lua_newtable(L);
     luaL_setfuncs(L, fns, 0);
     lua_setglobal(L, "http");
-#if CONFIG_NET_HTTP_TLS
-    /* The TLS record buffers (22.5 KB) live as long as the VM: reserved now,
-     * at the very top of the still empty arena -- the long-term side --
-     * where nothing made later can cut them off from the rest. They still
-     * give way when a script's allocation finds no room (the OOM hook), and
-     * the next HTTPS request takes them back. */
     lhttp_mem_init();
-    httpc_reserve();
-#endif
 }
 
 void lhttp_release(int slot) {

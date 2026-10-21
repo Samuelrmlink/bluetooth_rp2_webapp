@@ -498,6 +498,42 @@ static void t_growth_peak(void) {
     lheap_free(p);
 }
 
+/* The pool: its own memory, untouched by the arena and by lheap_init, and
+ * whole again once everything in it is freed (one TLS session at a time). */
+static void t_pool(void) {
+    current = "pool";
+#if LHEAP_POOL_KB > 0
+    lheap_init();
+    lheap_pool_stats_t ps;
+    lheap_pool_stats(&ps);
+    size_t whole = ps.largest_free;
+    CHECK(ps.capacity == (size_t)LHEAP_POOL_KB * 1024u && ps.used == 0, "an empty pool");
+    void *a = lheap_pool_alloc(16384 + 64), *b = lheap_pool_alloc(2100), *c[40];
+    CHECK(a && b && lheap_pool_owns(a) && lheap_pool_owns(b), "record buffers from the pool");
+    void *l = lheap_alloc(100);
+    CHECK(l && !lheap_pool_owns(l), "the arena is not the pool");
+    size_t used = lheap_used();
+    for (int i = 0; i < 40; i++) { c[i] = lheap_pool_alloc((size_t)(i * 37) % 400 + 8); CHECK(c[i] != NULL, "small pool blocks"); }
+    CHECK(lheap_used() == used, "pool blocks are not counted in the arena");
+    lheap_init();                                    /* a VM restart */
+    lheap_pool_stats(&ps);
+    CHECK(ps.used > 16384 + 2100, "the pool survives lheap_init");
+    for (int i = 0; i < 40; i += 2) { lheap_pool_free(c[i]); }
+    lheap_pool_free(a);
+    for (int i = 1; i < 40; i += 2) { lheap_pool_free(c[i]); }
+    lheap_pool_free(b);
+    lheap_pool_stats(&ps);
+    CHECK(ps.used == 0 && ps.largest_free == whole && ps.free_blocks == 1, "the pool is one piece again");
+    CHECK(ps.peak > 16384 + 2100, "the pool's peak");
+    CHECK(lheap_pool_alloc((size_t)LHEAP_POOL_KB * 1024u) == NULL, "too big for the pool");
+    lheap_pool_stats(&ps);
+    CHECK(ps.fails == 1, "a refused pool request is counted");
+    CHECK(lheap_check(NULL, NULL), "the arena is sane");
+#else
+    CHECK(lheap_pool_alloc(8) == NULL, "no pool");
+#endif
+}
+
 int main(void) {
     /* Line-buffered: ck() aborts on a structural failure, and an abort
      * discards a buffered explanation -- which is the one line worth having. */
@@ -517,6 +553,7 @@ int main(void) {
     t_overhead_and_stats();
     t_scratch();
     t_growth_peak();
+    t_pool();
     if (failures) {
         printf("heap_test: %d failure(s)\n", failures);
         return 1;

@@ -137,8 +137,19 @@ end
 r = get{ url = "https://" .. PC .. ":" .. TP .. "/small.json", insecure = true, timeout_ms = 120000 }
 ok("https (insecure, local test cert)", r and r.status == 200 and r.body and r.body:find("world"),
    r and (r.error and (r.error .. ": " .. tostring(r.message)) or r.status))
+do -- two HTTPS requests at once: one TLS session at a time, the second waits its turn
+  local w0 = http.stats().tls_waits or 0
+  local a = http.start{ url = "https://" .. PC .. ":" .. TP .. "/small.json", insecure = true, timeout_ms = 120000 }
+  local b = http.start{ url = "https://" .. PC .. ":" .. TP .. "/small.json", insecure = true, timeout_ms = 120000 }
+  local ra, rb = wait(a), wait(b)
+  local st = http.stats()
+  ok("two https at once take the TLS session in turn", ra and rb and ra.status == 200 and rb.status == 200
+     and (st.tls_waits or 0) > w0 and st.tls_pool_fails == 0,
+     json.encode{ a = ra and (ra.error or ra.status), b = rb and (rb.error or rb.status), waits = st.tls_waits })
+end
 local s = http.stats()
-ok("tls memory", true, json.encode(s))
+ok("tls memory: the pool, not the arena", s.tls_pool and s.tls_pool > 0 and s.tls_bytes == 0 and s.tls_peak_bytes > 16384
+   and s.tls_peak_bytes <= s.tls_pool, json.encode(s))
 r = get{ url = "https://" .. PC .. ":" .. TP .. "/small.json", timeout_ms = 120000 }
 ok("https verified: a test root is refused", r and r.error == "tls", r and (r.error and (r.error .. ": " .. tostring(r.message)) or r.status))
 -- POST /api/op from a script, to this gateway itself.

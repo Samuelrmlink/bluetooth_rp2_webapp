@@ -23,7 +23,7 @@
 #define MEMP_NUM_TCP_PCB            40
 #define MEMP_NUM_TCP_PCB_LISTEN     8   /* + forwarding rules (src/net/fwd.c) */
 #define MEMP_NUM_ARP_QUEUE          10
-#define PBUF_POOL_SIZE              24
+#define PBUF_POOL_SIZE              16   /* see MEASURED below: peak 6 */
 #define LWIP_ARP                    1
 #define LWIP_ETHERNET               1
 #define LWIP_ICMP                   1
@@ -151,7 +151,18 @@ void sntp_time_set_us(uint32_t sec, uint32_t us);
    (1.5x the measured peak; CONFIG_LWIP_MEM_SIZE_KB, chosen in CMakeLists.txt)
    so that it can drive more than three meters, and the CONFIG_NET_WIFI=OFF build
    keeps 48KB because it has the room. Both figures appear on the budget
-   line every build prints. */
+   line every build prints.
+
+   The defconfigs had drifted back to 48KB, and the Lua scripts then needed
+   the room: the HTTP client's TLS session moved out of the Lua arena into a
+   40KB pool of its own (CONFIG_NET_TLS_POOL_KB), and the arena could not
+   lose all of that -- the iTi updater backend peaks at ~150KB of arena
+   during an OTAP transfer. Measured in mcusim over an hour of that backend
+   (HTTPS catalog refreshes and 237KB downloads to SD, OTAP, the web API
+   polled every few seconds): MEM_SIZE peaks at 16.8KB and pbuf_pool at 6
+   of 24. So the shipped configs take 32KB of MEM_SIZE (still above the
+   20.6KB worst case above) and PBUF_POOL_SIZE is 16 (2.7x that peak, and
+   four full TCP windows), and the 28KB they give up goes to the Lua arena. */
 #define LWIP_NETIF_EXT_STATUS_CALLBACK 1
 
 /* Source routing for uplink selection (src/net/uplink.c): a connection keeps
