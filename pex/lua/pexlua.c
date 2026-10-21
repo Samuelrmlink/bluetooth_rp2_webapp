@@ -164,6 +164,7 @@ static void push_info(lua_State *L, pex_mod_t *m) {
     lua_pushstring(L, bid); lua_setfield(L, -2, "build_id");
     lua_pushstring(L, (in.flags & PEX_F_PIC) ? "pic" : "reloc"); lua_setfield(L, -2, "model");
     lua_pushboolean(L, (in.flags & PEX_F_APP) != 0); lua_setfield(L, -2, "app");
+    lua_pushboolean(L, in.xip); lua_setfield(L, -2, "xip");
     lua_pushinteger(L, in.code_size); lua_setfield(L, -2, "code");
     lua_pushinteger(L, in.rw_size); lua_setfield(L, -2, "rw");
     lua_pushboolean(L, in.code_shared); lua_setfield(L, -2, "shared");
@@ -283,6 +284,54 @@ static int l_call(lua_State *L) {
     return 1;
 }
 
+/* ---- XIP: the flash partition (0.7) -------------------------------------- */
+static void push_installed(lua_State *L, const pex_installed_t *in) {
+    lua_createtable(L, 0, 12);
+    lua_pushstring(L, in->name); lua_setfield(L, -2, "name");
+    char v[24];
+    snprintf(v, sizeof v, "%lu.%lu.%lu", (unsigned long)(in->version >> 24), (unsigned long)((in->version >> 16) & 0xFF),
+             (unsigned long)(in->version & 0xFFFF));
+    lua_pushstring(L, v); lua_setfield(L, -2, "version");
+    char bid[33];
+    for (int i = 0; i < 16; i++) { snprintf(bid + 2 * i, 3, "%02x", in->build_id[i]); }
+    lua_pushstring(L, bid); lua_setfield(L, -2, "build_id");
+    lua_pushstring(L, (in->flags & PEX_F_PIC) ? "pic" : "reloc"); lua_setfield(L, -2, "model");
+    lua_pushinteger(L, in->offset); lua_setfield(L, -2, "offset");
+    lua_pushinteger(L, in->file_size); lua_setfield(L, -2, "size");
+    lua_pushinteger(L, in->code_size); lua_setfield(L, -2, "code");
+    lua_pushinteger(L, in->rw_size); lua_setfield(L, -2, "rw");
+    lua_pushboolean(L, in->signed_); lua_setfield(L, -2, "signed");
+    lua_pushboolean(L, in->loaded); lua_setfield(L, -2, "loaded");
+    lua_pushboolean(L, in->xip_ready); lua_setfield(L, -2, "xip_ready");
+}
+
+static int l_install(lua_State *L) {
+    const char *what = luaL_checkstring(L, 1);
+    if (!s_host || !s_host->install) { lua_pushnil(L); lua_pushstring(L, "this host cannot install modules"); return 2; }
+    int slot = s_host->install(what);
+    pex_installed_t in;
+    if (slot < 0 || pex_installed(slot, &in) != PEX_OK) { return fail(L, what); }
+    push_installed(L, &in);
+    return 1;
+}
+
+static int l_installed(lua_State *L) {
+    lua_newtable(L);
+    pex_installed_t in;
+    for (int i = 0; pex_installed(i, &in) == PEX_OK; i++) {
+        push_installed(L, &in);
+        lua_rawseti(L, -2, i + 1);
+    }
+    return 1;
+}
+
+static int l_uninstall(lua_State *L) {
+    const char *nm = luaL_checkstring(L, 1);
+    if (pex_uninstall(nm) != PEX_OK) { return fail(L, nm); }
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 /* ---- require: x.<arch>.pex before the Lua source (spec 9) -------------------
  * pex_require(name) returns the module's value, or nothing when there is no
  * loadable PEX for this target. The global require becomes a small LUA
@@ -345,7 +394,8 @@ void pexlua_open(lua_State *L, const pexlua_host_t *host) {
 
     static const luaL_Reg fns[] = {
         { "load", l_load }, { "start", l_start }, { "stop", l_stop }, { "unload", l_unload },
-        { "list", l_list }, { "info", l_info }, { "call", l_call }, { NULL, NULL } };
+        { "list", l_list }, { "info", l_info }, { "call", l_call }, { "install", l_install },
+        { "installed", l_installed }, { "uninstall", l_uninstall }, { NULL, NULL } };
     luaL_newlib(L, fns);
     lua_setglobal(L, "pex");
 

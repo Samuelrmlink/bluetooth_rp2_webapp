@@ -12,6 +12,10 @@
  *       pex.list()                     -> { info, ... }
  *       pex.info(name)                 -> info | nil, err
  *       pex.call(name, export, ...)    -> integer             (up to 4 integer arguments)
+ *       pex.install(name | path)       -> info | nil, err     (into the flash partition: XIP)
+ *       pex.installed()                -> { info, ... }       (what is installed)
+ *       pex.uninstall(name)            -> true | nil, err
+ *     pex.load(name) and require prefer an installed copy (the host's find).
  *     A module loaded this way belongs to the firmware, not to the Lua VM: an
  *     app keeps running when the script that started it ends.
  *
@@ -34,8 +38,11 @@ typedef struct {
     /* Locate a module: fill path for <name> (search order is the host's);
      * return 1 if found. */
     int (*find)(const char *name, char *path, size_t cap);
-    /* Load from a path the host understands (lfs:/..., sd:/...). */
+    /* Load from a path the host understands (lfs:/..., xip:<name>, ...). */
     pex_mod_t *(*load)(const char *path, const char *as_name, int *err);
+    /* Optional (0.7): install a module (a name or a path) into the host's
+     * flash partition; the slot or a PEX_E* code. NULL: pex.install refuses. */
+    int (*install)(const char *name_or_path);
 } pexlua_host_t;
 
 extern const pex_group_t pex_group_lua;

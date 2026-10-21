@@ -22,6 +22,12 @@ mcusim's virtual network and an iti-otap BLE peer.
   fault  cfg/pex_autostart.json starts crashapp: the fault is attributed, the
          board reboots into the SAME image, the next boot skips the module.
   hang   the same with hangapp: a watchdog reset, the module named next boot.
+  xip    power cuts (SIGKILL of the simulator: every flash operation is already
+         in the flash file) during installs and during an overlapping
+         compaction: after each restart the index is the old or the new one
+         and every installed module verifies and runs in place; a resumed move.
+  --via R   first OTA release R (the board's current one, 1.212) into slot B,
+            then the new one into slot A -- the order the real board takes.
 Nothing leaves 127.0.0.1. Exit status 0 when everything passed.
 """
 import argparse, base64, http.server, random, json, os, re, shutil, signal, socketserver, subprocess, sys, threading, time
@@ -31,7 +37,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PEX = os.path.dirname(HERE)
 ROOT = os.path.dirname(PEX)
 PC_IP = "192.168.8.16"              # the PC on the USB network (the firmware's DHCP hands it out)
-HTTP_PORT, FWD = 18091, 18782
+HTTP_PORT, FWD = 18391, 18782
+BIND = "127.0.0.77"                 # the board's forwards listen here: a loopback address of our own (SMP is udp 1337)
 OTAP = "49646561-7346-6c6f-6174-40882af10000"
 FS_OFF, FS_BLOCKS = 0x200000, 444
 
@@ -112,7 +119,7 @@ detect = 9
 image = "{card}"
 writeback = true
 [chip]
-usb_host = {{ kind = "net", forward = ["{fwd}:80", "udp:1337:1337"], net = {{ nat = true }} }}
+usb_host = {{ kind = "net", forward = ["{fwd}:80", "udp:1337:1337"], net = {{ nat = true, bind = "{bind}" }} }}
 [run]
 time = "{time}"
 rtt = "stdio"
@@ -123,6 +130,7 @@ class Sim:
     def __init__(self, exe, toml, log):
         self.lines = []
         self.log = open(log, "a")
+        self.log.write(f"\n===== mcusim started {time.strftime('%H:%M:%S')} =====\n")
         self.p = subprocess.Popen([exe, "-p", toml], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                   errors="replace")
         self.t = threading.Thread(target=self._read, daemon=True)
@@ -148,6 +156,14 @@ class Sim:
             time.sleep(0.1)
         return -1
 
+    def kill(self):
+        """A power cut: SIGKILL (mcusim writes every flash program/erase through to the file at once)."""
+        if self.p.poll() is None:
+            self.p.kill()
+            self.p.wait()
+        self.t.join(5)
+        self.log.flush()
+
     def stop(self):
         if self.p.poll() is None:
             self.p.send_signal(signal.SIGTERM)
@@ -162,7 +178,7 @@ class Sim:
 
 def op(name, params=None, timeout=20):
     body = json.dumps({"op": name, "params": params or {}}).encode()
-    req = urllib.request.Request(f"http://127.0.0.1:{FWD}/api/op", data=body, method="POST")
+    req = urllib.request.Request(f"http://{BIND}:{FWD}/api/op", data=body, method="POST")
     try:
         j = json.load(urllib.request.urlopen(req, timeout=timeout))
     except Exception as e:
@@ -171,7 +187,7 @@ def op(name, params=None, timeout=20):
 
 
 def put(path, data):
-    req = urllib.request.Request(f"http://127.0.0.1:{FWD}/api/fs/{path}", data=data, method="PUT")
+    req = urllib.request.Request(f"http://{BIND}:{FWD}/api/fs/{path}", data=data, method="PUT")
     return urllib.request.urlopen(req, timeout=30).status == 200
 
 
@@ -179,7 +195,7 @@ def wait_http(timeout):
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{FWD}/api/fs/", timeout=4).read()
+            urllib.request.urlopen(f"http://{BIND}:{FWD}/api/fs/", timeout=4).read()
             return True
         except Exception:
             time.sleep(1)
@@ -187,7 +203,141 @@ def wait_http(timeout):
 
 
 def smp(*args, timeout=600):
-    return run(["smpmgr", "--ip", "127.0.0.1", "--mtu", "1200", "--timeout", "30", *args], timeout=timeout)
+    return run(["smpmgr", "--ip", BIND, "--mtu", "1200", "--timeout", "30", *args], timeout=timeout)
+
+
+def ota(s, rel, slot, label):
+    """smpmgr upload into the other slot, test it, reset: the TBYB image must boot
+    from that slot; 'state-write --confirm' buys it. Returns the boot's first line."""
+    r = smp("image", "state-read")
+    before = {int(sl): hx.lower() for sl, hx in re.findall(r"slot=(\d+).*?HashBytes\(\s*'([0-9A-Fa-f]{64})'", r.stdout, re.S)}
+    for attempt in range(3):     # an SMP upload can stall mid-way (seen over WireGuard too): retry
+        t0 = time.time()
+        r = smp("image", "upload", "--format", "any", rel, timeout=1800)
+        if r.returncode == 0:
+            break
+        print(f"  (upload attempt {attempt + 1} failed after {time.time() - t0:.0f} s, retrying)", flush=True)
+    check(f"[{label}] smpmgr image upload into slot {slot}", r.returncode == 0,
+          f"{time.time() - t0:.0f} s, attempt {attempt + 1} {r.stdout[-120:]} {r.stderr[-120:]}")
+    r = smp("image", "state-read")
+    slots = {int(sl): hx.lower() for sl, hx in re.findall(r"slot=(\d+).*?HashBytes\(\s*'([0-9A-Fa-f]{64})'", r.stdout, re.S)}
+    check(f"[{label}] state-read lists both slots", 0 in slots and 1 in slots, r.stdout[-300:])
+    idx = 0 if slot == "A" else 1
+    new_hash = slots.get(idx, "")
+    check(f"[{label}] the upload landed in slot {slot}", new_hash and new_hash != before.get(idx), f"{before.get(idx)} -> {new_hash}")
+    r = smp("image", "state-write", new_hash) if new_hash else None
+    check(f"[{label}] state-write <hash> (test slot {slot})", r is not None and r.returncode == 0, r and (r.stdout + r.stderr)[-200:])
+    mark = len(s.lines)
+    smp("os", "reset", timeout=60)
+    i = s.wait(r"^ota: slot A .* booted %d" % idx, 300, mark)
+    check(f"[{label}] the TBYB image boots from slot {slot}", i >= 0, s.lines[i] if i >= 0 else "")
+    i = s.wait(r"running a try-before-you-buy image \(slot %s\)" % slot, 120, mark)
+    check(f"[{label}] ...as a try-before-you-buy image", i >= 0)
+    check(f"[{label}] ...and initialises", s.wait(r"^main: init done", 300, mark) >= 0)
+    check(f"[{label}] HTTP up on the new image", wait_http(180))
+    r = smp("image", "state-write", "--confirm")
+    i = s.wait(r"^ota: explicit_buy -> 0", 60, mark)
+    check(f"[{label}] state-write --confirm buys it", r.returncode == 0 and i >= 0, (r.stdout + r.stderr)[-200:])
+    return mark
+
+
+def boot(exe, toml, log, label, timeout=300):
+    s = Sim(exe, toml, log)
+    ok = s.wait(r"^main: init done", timeout) >= 0 and wait_http(180)
+    check(label, ok)
+    return s
+
+
+def put_mods(a):
+    for model, d in (("pic", "pex"), ("reloc", "pex/a")):
+        for n in ("big", "hello", "counter"):
+            put(f"{d}/{n}.m33.pex", open(os.path.join(a.mods, "pexmods", model, f"{n}.m33.pex"), "rb").read())
+
+
+def installed():
+    ok, r = op("pex.installed")
+    return {m["name"]: m for m in r.get("modules", [])} if ok else None
+
+
+def consistent(label, expect_any):
+    """After a power cut: the index is one of the expected sets, and everything in it verifies and runs."""
+    inst = installed()
+    names = set(inst or {})
+    good = inst is not None and any(names == e for e in expect_any)
+    bad = []
+    for n in names:
+        ok, v = op("pex.verify", {"name": n})
+        if not ok:
+            bad.append(f"{n}: verify {v}")
+            continue
+        ok, r = op("pex.load", {"name": n})
+        if not ok:
+            bad.append(f"{n}: load {r}")
+            continue
+        if n == "big":
+            _, c = op("pex.call", {"name": "big", "fn": "big_check"})
+            if c.get("result") != 0 or not r.get("xip"):
+                bad.append(f"big: check {c} xip {r.get('xip')}")
+        op("pex.unload", {"name": n})
+    check(label, good and not bad, f"installed {sorted(names)} {bad}")
+    return names
+
+
+def xip_power_cuts(a, exe, toml, log, s):
+    """Power cuts (SIGKILL of the simulator) during installs and during an
+    overlapping compaction; after each restart the index is the old or the new
+    one and every installed module verifies and runs in place."""
+    put_mods(a)
+    for n in list(installed() or {}):
+        op("pex.unload", {"name": n})
+        op("pex.uninstall", {"name": n})
+    ok, r = op("pex.install", {"name": "hello"})
+    t0 = time.time()
+    ok2, r2 = op("pex.install", {"name": "big"}, timeout=120)
+    t_inst = time.time() - t0
+    check("xip: clean install of big (simulated time, wall clock)", ok and ok2, f"{t_inst:.1f} s wall {r2}")
+    op("pex.uninstall", {"name": "big"})
+    resumed = 0
+    for i, frac in enumerate((0.1, 0.35, 0.6, 0.85, 1.1)):
+        th = threading.Thread(target=op, args=("pex.install", {"name": "big"}, 120), daemon=True)
+        th.start()
+        time.sleep(max(0.05, frac * t_inst))
+        s.kill()
+        s = boot(exe, toml, log, f"xip: power cut {i + 1} during install ({frac:.0%}): reboots")
+        consistent(f"xip: power cut {i + 1} during install: old or new index, all verify/run", [{"hello"}, {"hello", "big"}])
+        put_mods(a)
+        op("pex.uninstall", {"name": "big"})
+    # an overlapping compaction: big (11 sectors) slides down over itself by one sector
+    t_comp = None
+    for i, frac in enumerate((None, 0.15, 0.4, 0.65, 0.9)):
+        for n in ("hello", "big", "counter"):
+            op("pex.uninstall", {"name": n})
+        op("pex.install", {"name": "hello"})
+        op("pex.install", {"name": "big"}, timeout=120)
+        op("pex.install", {"name": "counter"})
+        op("pex.uninstall", {"name": "hello"})
+        if frac is None:
+            t0 = time.time()
+            ok, c = op("pex.compact", timeout=180)
+            t_comp = time.time() - t0
+            check("xip: clean compaction (big slides over itself)", ok and c.get("moved", 0) >= 1, f"{t_comp:.1f} s wall {c}")
+            consistent("xip: after the clean compaction", [{"big", "counter"}])
+            continue
+        mark = len(s.lines)
+        th = threading.Thread(target=op, args=("pex.compact", None, 180), daemon=True)
+        th.start()
+        time.sleep(max(0.05, frac * t_comp))
+        s.kill()
+        s = boot(exe, toml, log, f"xip: power cut {i} during compaction ({frac:.0%}): reboots")
+        mark = len(s.lines)
+        consistent(f"xip: power cut {i} during compaction: both still verify/run", [{"big", "counter"}])
+        if any("resuming the move" in l for l in s.lines[mark:]):
+            resumed += 1
+        put_mods(a)
+    check("xip: an interrupted move was resumed after a power cut", resumed >= 1, f"{resumed} of 4")
+    for n in ("hello", "big", "counter"):
+        op("pex.uninstall", {"name": n})
+    return s
 
 
 def main():
@@ -198,11 +348,12 @@ def main():
     ap.add_argument("--release", help="the signed release (default: deploy/btgw-*.smp.bin)")
     ap.add_argument("--mcusim", default=os.path.expanduser("~/Work/mcusim-agents/blegatt/target/release/mcusim"))
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/gwsim"))
-    ap.add_argument("--scenarios", default="ota,quiet,suite,fault,hang")
+    ap.add_argument("--scenarios", default="ota,quiet,suite,xip,fault,hang")
+    ap.add_argument("--via", help="first OTA this release (the board's current one) into slot B, then ours into slot A")
     ap.add_argument("--direct", help="development: boot this (non-TBYB) build's btgw.elf from slot A instead of "
                                      "the old firmware, and skip 'ota'")
     a = ap.parse_args()
-    for k in ("deploy", "old", "mods", "release", "mcusim", "direct"):
+    for k in ("deploy", "old", "mods", "release", "mcusim", "direct", "via"):
         if getattr(a, k):
             setattr(a, k, os.path.abspath(getattr(a, k)))
     sc = set(a.scenarios.split(","))
@@ -251,7 +402,8 @@ def main():
     flash = os.path.join(w, "board.flash")
     toml = os.path.join(w, "board.toml")
     open(toml, "w").write(TOML.format(pt=pt, wifi=os.path.join(a.deploy, "btgw_wifi_firmware.bin"), lfs=lfs, flash=flash,
-                                      old=os.path.join(a.direct or a.old, "btgw.elf"), card=card, fwd=FWD, time="3000s"))
+                                      old=os.path.join(a.direct or a.old, "btgw.elf"), card=card, fwd=FWD, bind=BIND,
+                                      time="3000s"))
     if a.direct:
         sc.discard("ota")
     srv = TS(("127.0.0.1", HTTP_PORT), H)
@@ -266,33 +418,10 @@ def main():
 
         if "ota" in sc:
             time.sleep(20)               # let Wi-Fi/WireGuard/BT finish coming up first
-            for attempt in range(3):     # an SMP upload can stall mid-way (seen over WireGuard too): retry
-                t0 = time.time()
-                r = smp("image", "upload", "--format", "any", rel, timeout=1800)
-                if r.returncode == 0:
-                    break
-                print(f"  (upload attempt {attempt + 1} failed after {time.time() - t0:.0f} s, retrying)", flush=True)
-            check("smpmgr image upload into slot B", r.returncode == 0,
-                  f"{time.time() - t0:.0f} s, attempt {attempt + 1} {r.stdout[-120:]} {r.stderr[-120:]}")
-            r = smp("image", "state-read")
-            slots = {int(sl): hx.lower() for sl, hx in
-                     re.findall(r"slot=(\d+).*?HashBytes\(\s*'([0-9A-Fa-f]{64})'", r.stdout, re.S)}
-            check("state-read lists both slots", 0 in slots and 1 in slots, r.stdout[-300:])
-            new_hash = slots.get(1, "")
-            r = smp("image", "state-write", new_hash) if new_hash else None
-            check("state-write <hash> (test slot B)", r is not None and r.returncode == 0, r and (r.stdout + r.stderr)[-200:])
-            mark = len(s.lines)
-            smp("os", "reset", timeout=60)
-            i = s.wait(r"^ota: slot A .* booted 1", 300, mark)
-            check("the TBYB image boots from slot B", i >= 0, s.lines[i] if i >= 0 else "")
-            i = s.wait(r"running a try-before-you-buy image \(slot B\)", 120, mark)
-            check("...as a try-before-you-buy image", i >= 0)
-            check("...and initialises", s.wait(r"^main: init done", 300, mark) >= 0)
-            check("HTTP up on the new image", wait_http(180))
-            r = smp("image", "state-write", "--confirm")
-            i = s.wait(r"^ota: explicit_buy -> 0", 60, mark)
-            check("state-write --confirm buys it", r.returncode == 0 and i >= 0, (r.stdout + r.stderr)[-200:])
-            boot1 = mark
+            if a.via:                    # the board as it is now: the previous release in slot B
+                ota(s, a.via, "B", "via " + os.path.basename(a.via))
+                time.sleep(20)
+            boot1 = ota(s, rel, "A" if a.via else "B", os.path.basename(rel))
         ok, info = op("sys.info")
         fsj = info.get("fs", {}) if ok else {}
         check("sys.info has the fs object (1776 KB + PEX partition)", fsj.get("kb") == 1776 and fsj.get("pex", {}).get("size") == 262144,
@@ -302,7 +431,7 @@ def main():
         st = {}
         for _ in range(60):
             try:
-                st = json.load(urllib.request.urlopen(f"http://127.0.0.1:{FWD}/api/wifi", timeout=10))
+                st = json.load(urllib.request.urlopen(f"http://{BIND}:{FWD}/api/wifi", timeout=10))
             except Exception:
                 st = {}
             if st.get("ip") not in (None, "", "0.0.0.0"):
@@ -314,7 +443,7 @@ def main():
         sd = {}
         for _ in range(30):
             try:
-                sd = json.load(urllib.request.urlopen(f"http://127.0.0.1:{FWD}/api/sd", timeout=10))
+                sd = json.load(urllib.request.urlopen(f"http://{BIND}:{FWD}/api/sd", timeout=10))
             except Exception:
                 sd = {}
             if sd.get("state") == "ok" and sd.get("mounted"):
@@ -330,15 +459,18 @@ def main():
                   f"up={lst.get('up') if ok else '?'} lines={pexlines[:2]}")
 
         if "suite" in sc:
-            r = run([sys.executable, os.path.join(PEX, "tools", "pex_remote_test.py"), "--base", f"http://127.0.0.1:{FWD}",
+            r = run([sys.executable, os.path.join(PEX, "tools", "pex_remote_test.py"), "--base", f"http://{BIND}:{FWD}",
                      "--files", files, "--sd", "--http-url", f"http://{PC_IP}:{HTTP_PORT}/small.json",
-                     "--http-file-url", f"http://{PC_IP}:{HTTP_PORT}/big", "--bt", OTAP], timeout=1800)
+                     "--http-file-url", f"http://{PC_IP}:{HTTP_PORT}/big", "--bt", OTAP, "--allow-reboot"], timeout=2400)
             open(os.path.join(w, "remote_test.log"), "w").write(r.stdout + r.stderr)
             for line in r.stdout.splitlines():
                 m = re.match(r"\s+(PASS|FAIL|skip) (.{34}) ?(.*)", line)
                 if m and m.group(1) != "skip":
                     check("remote: " + m.group(2).strip(), m.group(1) == "PASS", m.group(3))
             check("pex_remote_test.py exit status 0", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else r.stderr[-200:])
+
+        if "xip" in sc:
+            s = xip_power_cuts(a, exe, toml, log, s)
 
         for name, mod in (("fault", "crashapp"), ("hang", "hangapp")):
             if name not in sc:
@@ -376,7 +508,7 @@ def main():
             ok, lst = op("pex.list")
             check(f"{name}: the module is not running", ok and not any(m["name"] == mod for m in lst.get("modules", [])))
             # leave the board clean for the next scenario
-            urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{FWD}/api/fs/cfg/pex_autostart.json",
+            urllib.request.urlopen(urllib.request.Request(f"http://{BIND}:{FWD}/api/fs/cfg/pex_autostart.json",
                                                           method="DELETE"), timeout=10).read()
             op("pex.faults_clear")
     finally:

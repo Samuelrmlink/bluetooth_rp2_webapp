@@ -28,6 +28,12 @@ extern const pex_group_t pex_group_lua;
 #define ALLOW_UNSIGNED 0
 #endif
 
+#if CONFIG_PEX_POOL_KB > 0
+#define POOL_KB_CONF CONFIG_PEX_POOL_KB
+#else
+#define POOL_KB_CONF CONFIG_PEX_HEAP_POOL_KB
+#endif
+
 #define AUTOSTART_PATH "cfg/pex_autostart.json"
 #define FAULTS_PATH "var/pex_faults.json"
 #define AUTOSTART_DELAY_MS 3000u
@@ -53,6 +59,13 @@ static pex_boot_rec_t s_prev;       /* the previous boot's record */
 static bool s_prev_valid, s_prev_logged;
 static bool s_up, s_failed;
 static uint8_t *s_pool;
+static uint32_t s_pool_size;
+#if CONFIG_PEX_POOL_KB > 0
+/* The pool (spec 7.2, Q10): static, apart from the Lua arena and the C heap,
+ * so a Lua VM restart never touches it. Taken from the arena's budget
+ * (CONFIG_LUA_HEAP_KB) now that native modules do the work. */
+static uint8_t s_static_pool[CONFIG_PEX_POOL_KB * 1024u] __attribute__((aligned(8)));
+#endif
 static uint32_t s_boot_ms;
 static bool s_autostart_done;
 
@@ -114,6 +127,7 @@ static size_t heap_room(void) {
  * __real_malloc is newlib's own, behind pico_malloc's --wrap: it returns NULL.
  * Try the configured size, then smaller, never below 6 KB, always leaving the
  * reserve free afterwards. */
+#if CONFIG_PEX_POOL_KB == 0
 extern void *__real_malloc(size_t n);
 static uint8_t *take_pool(size_t want, size_t keep, size_t *got) {
     for (size_t n = want & ~(size_t)1023; n >= 6 * 1024u; n -= 2048u) {
@@ -126,21 +140,28 @@ static uint8_t *take_pool(size_t want, size_t keep, size_t *got) {
     }
     return NULL;
 }
+#endif
 
 static void record_prev_fault(void);
 
 bool pex_gw_ensure(void) {
     if (s_up) { return true; }
     boot_record();
-    size_t want = (size_t)CONFIG_PEX_POOL_KB * 1024u, keep = (size_t)CONFIG_PEX_HEAP_RESERVE_KB * 1024u;
     if (s_failed) { return false; }
     size_t need = 0;
+#if CONFIG_PEX_POOL_KB > 0
+    s_pool = s_static_pool;
+    need = sizeof s_static_pool;
+#else
+    size_t want = (size_t)CONFIG_PEX_HEAP_POOL_KB * 1024u, keep = (size_t)CONFIG_PEX_HEAP_RESERVE_KB * 1024u;
     s_pool = take_pool(want, keep, &need);
     if (!s_pool) {
         printf("pex: not starting: no %u KB block in the C heap (%u KB free in all, %u KB must stay free)\n",
                6u, (unsigned)(heap_room() / 1024), (unsigned)(keep / 1024));
         return false;
     }
+#endif
+    s_pool_size = (uint32_t)need;
 #if CONFIG_OTA
     pex_sig_uecc_set_keys(&OTA_PUBKEY, 1);
 #endif
@@ -154,10 +175,22 @@ bool pex_gw_ensure(void) {
         .trace = &PEX_REC->trace,
         .on_unload = on_unload,
         .max_stack = 2048,
+        .flash = pex_gw_flash(),
     };
-    if (pex_init(&cfg) != PEX_OK) { free(s_pool); s_pool = NULL; s_failed = true; return false; }
+    if (pex_init(&cfg) != PEX_OK) {
+#if CONFIG_PEX_POOL_KB == 0
+        free(s_pool);
+#endif
+        s_pool = NULL;
+        s_failed = true;
+        return false;
+    }
+#if CONFIG_PEX_POOL_KB > 0
+    printf("pex: pool %u KB (static, apart from the Lua arena)\n", (unsigned)(need / 1024));
+#else
     printf("pex: pool %u KB from the C heap (%u KB left free, %u KB of it at the top)\n", (unsigned)(need / 1024),
            (unsigned)(heap_room() / 1024), (unsigned)(heap_top_gap() / 1024));
+#endif
     pex_register_group(&pex_group_sys);
     pex_register_group(&pex_group_board);
     pex_register_group(&pex_group_bus);
@@ -189,10 +222,10 @@ static int lfs_read_at(void *ctx, uint32_t off, void *dst, uint32_t n) {
     return (int)done;
 }
 
-/* "lfs:/a/b", "/a/b", "a/b" -> "a/b"; sd:/ is not a load source in this version. */
+/* "lfs:/a/b", "/a/b", "a/b" -> "a/b"; sd:/ is read asynchronously (pex_gw_sd_begin). */
 static const char *lfs_rel(const char *path, int *err) {
     if (strncmp(path, "sd:", 3) == 0) {
-        pex_seterr(PEX_ENOTSUP, "loading from sd:/ is the next version: copy the file to lfs:/pex/");
+        pex_seterr(PEX_ENOTSUP, "sd:/ is read asynchronously: the pex.load/pex.install ops take it (or copy the file to lfs:/pex/)");
         *err = PEX_ENOTSUP;
         return NULL;
     }
@@ -201,30 +234,52 @@ static const char *lfs_rel(const char *path, int *err) {
     return path;
 }
 
+/* Open lfs file `rel` and load it into RAM (out) or install it into flash. */
+int pex_gw_with_file(const char *rel, const char *as, pex_mod_t **out, bool install) {
+    size_t size = 0;
+    if (!fs_stat(rel, &size)) { pex_seterr(PEX_ENOENT, "lfs:/%s not found", rel); return PEX_ENOENT; }
+    pex_arena_t *a = pex_scratch_begin(fs_file_mem());
+    void *mem = a ? pex_scratch_alloc(a, fs_file_mem()) : NULL;
+    if (!mem) { if (a) { pex_scratch_end(a); } pex_seterr(PEX_ENOMEM, "PEX pool full"); return PEX_ENOMEM; }
+    lfsrd_t r = { fs_fopen(rel, FS_O_READ, mem) };
+    if (r.h < 0) { pex_scratch_end(a); pex_seterr(PEX_EIO, "cannot open lfs:/%s", rel); return PEX_EIO; }
+    pex_reader_t rd = { lfs_read_at, &r, (uint32_t)size };
+    crumb(CRUMB_LOOP_PEX);
+    int rc;
+    if (install) {
+        rc = pex_install(&rd, 0);
+    } else {
+        pex_load_opts_t o = { .name = as };
+        *out = pex_load(&rd, &o, &rc);
+    }
+    fs_fclose(r.h);
+    pex_scratch_end(a);
+    return rc;
+}
+
 pex_mod_t *pex_gw_load_path(const char *path, const char *as, int *err) {
     int e = 0;
     if (!err) { err = &e; }
     if (!pex_gw_ensure()) { *err = PEX_ENOMEM; return NULL; }
+    if (strncmp(path, "xip:", 4) == 0) {        /* an installed module, run in place */
+        pex_load_opts_t o = { .name = as };
+        crumb(CRUMB_LOOP_PEX);
+        return pex_load_installed(path + 4, &o, err);
+    }
     const char *rel = lfs_rel(path, err);
     if (!rel) { return NULL; }
-    size_t size = 0;
-    if (!fs_stat(rel, &size)) { *err = PEX_ENOENT; return NULL; }
-    pex_arena_t *a = pex_scratch_begin(fs_file_mem());
-    void *mem = a ? pex_scratch_alloc(a, fs_file_mem()) : NULL;
-    if (!mem) { if (a) { pex_scratch_end(a); } *err = PEX_ENOMEM; return NULL; }
-    lfsrd_t r = { fs_fopen(rel, FS_O_READ, mem) };
-    if (r.h < 0) { pex_scratch_end(a); *err = PEX_EIO; return NULL; }
-    pex_reader_t rd = { lfs_read_at, &r, (uint32_t)size };
-    pex_load_opts_t o = { .name = as };
-    crumb(CRUMB_LOOP_PEX);
-    pex_mod_t *m = pex_load(&rd, &o, err);
-    fs_fclose(r.h);
-    pex_scratch_end(a);
+    pex_mod_t *m = NULL;
+    *err = pex_gw_with_file(rel, as, &m, false);
     return m;
 }
 
+/* The installed copy first (xip:<name>), else lfs:/pex/<name>.<arch>.pex. */
 int pex_gw_find(const char *name, char *path, size_t cap) {
     size_t sz;
+    if (pex_gw_ensure() && pex_installed_find(name, NULL) >= 0) {
+        snprintf(path, cap, "xip:%s", name);
+        return 1;
+    }
     snprintf(path, cap, "pex/%s.%s.pex", name, pex_gw_arch());
     return fs_stat(path, &sz) ? 1 : 0;
 }
@@ -318,8 +373,11 @@ static void autostart(void) {
         if (!pex_json_str(buf, key, path, 128)) { pex_gw_find(name, path, 128); }
         uint8_t bid[16];
         int ign = 0;
-        const char *rel = lfs_rel(path, &ign);
-        if (!rel || !file_build_id(rel, bid)) {
+        pex_installed_t xin;
+        bool xip = strncmp(path, "xip:", 4) == 0 && pex_installed_find(path + 4, &xin) >= 0;
+        if (xip) { memcpy(bid, xin.build_id, 16); }
+        const char *rel = xip ? path : lfs_rel(path, &ign);
+        if (!xip && (!rel || !file_build_id(rel, bid))) {
             printf("pex: autostart %s: %s not found\n", name, path);
             continue;
         }
@@ -372,6 +430,7 @@ void pex_gw_poll(void) {
     if (!s_up) { return; }
     pex_poll();
     pex_gw_fs_poll();
+    pex_gw_sd_poll();
 #if CONFIG_NET_HTTP_CLIENT
     pex_gw_net_poll();
 #endif
@@ -426,15 +485,22 @@ static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) 
     size_t cap = api_scratch_size(), n = 0;
     pex_mem_stats_t ps = { 0 };
     if (s_up) { pex_pool_stats(&ps); }
-    char pf[200];
+    char pf[200], xs[160] = "null";
     prev_fault_json(pf, sizeof pf);
+    pex_xip_stats_t st;
+    if (s_up && pex_xip_stats(&st) == PEX_OK) {
+        snprintf(xs, sizeof xs, "{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"modules\":%lu,\"rw_area\":%lu,\"flash_ops\":%lu}",
+                 (unsigned long)st.size, (unsigned long)st.free, (unsigned long)st.largest, (unsigned long)st.entries,
+                 (unsigned long)st.rw_area, (unsigned long)pex_gw_xip_flash_ops());
+    }
     n += (size_t)snprintf(b + n, cap - n, "{\"runtime\":\"%s\",\"api\":\"%d.%d\",\"arch\":\"%s\",\"up\":%s,\"policy\":\"%s\","
-                          "\"pool\":{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"configured_kb\":%d},\"c_heap_free\":%lu,\"c_heap_top\":%lu,\"prev_fault\":%s,\"modules\":",
+                          "\"pool\":{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"configured_kb\":%d,\"static\":%s},\"xip\":%s,\"c_heap_free\":%lu,\"c_heap_top\":%lu,\"prev_fault\":%s,\"modules\":",
                           PEX_RT_VERSION, PEX_API_MAJOR, PEX_API_MINOR, pex_gw_arch(), s_up ? "true" : "false",
                           (s_up ? pex_get_policy() : (ALLOW_UNSIGNED ? 1u : 0u)) & PEX_POLICY_ALLOW_UNSIGNED
                               ? "UNSIGNED ALLOWED (development)" : "signed-only",
                           (unsigned long)ps.pool_size, (unsigned long)ps.pool_free, (unsigned long)ps.pool_largest,
-                          CONFIG_PEX_POOL_KB, (unsigned long)heap_room(), (unsigned long)heap_top_gap(), pf);
+                          POOL_KB_CONF, CONFIG_PEX_POOL_KB > 0 ? "true" : "false", xs, (unsigned long)heap_room(),
+                          (unsigned long)heap_top_gap(), pf);
     if (s_up) {
         int k = pex_list_json(b + n, cap - n - 2);
         n += k > 0 ? (size_t)k : 0;
@@ -455,25 +521,128 @@ static void op_info(const char *params, api_reply_fn reply, void *ctx, long id) 
 
 static void op_load(const char *params, api_reply_fn reply, void *ctx, long id) {
     char nm[24] = "", path[128] = "", as[24] = "";
+    int ram = 0;
     param_str(params, "name", nm, sizeof nm);
     param_str(params, "as", as, sizeof as);
+    pex_json_bool(params, "ram", &ram);
     if (!param_str(params, "path", path, sizeof path)) {
         if (!nm[0]) { api_reply_err(reply, ctx, id, "bad_request", "need \"name\" or \"path\""); return; }
-        if (!pex_gw_find(nm, path, sizeof path)) {
-            api_reply_err(reply, ctx, id, "not_found", "no lfs:/pex/<name>.<arch>.pex");
+        if (ram) {
+            size_t sz;
+            snprintf(path, sizeof path, "pex/%s.%s.pex", nm, pex_gw_arch());
+            if (!fs_stat(path, &sz)) { api_reply_err(reply, ctx, id, "not_found", path); return; }
+        } else if (!pex_gw_find(nm, path, sizeof path)) {
+            api_reply_err(reply, ctx, id, "not_found", "not installed, and no lfs:/pex/<name>.<arch>.pex");
             return;
         }
+    }
+    if (strncmp(path, "sd:", 3) == 0) {
+        int rc = pex_gw_sd_begin(path, as[0] ? as : (nm[0] ? nm : NULL), false);
+        if (rc != PEX_EPENDING) { reply_err_pex(reply, ctx, id, rc); return; }
+        api_reply_ok(reply, ctx, id, "{\"pending\":true,\"event\":\"pex.sd_done\"}");
+        return;
     }
     int err = 0;
     pex_mod_t *m = pex_gw_load_path(path, as[0] ? as : (nm[0] ? nm : NULL), &err);
     if (!m) {
         if (err == PEX_ENOENT) { api_reply_err(reply, ctx, id, "not_found", path); return; }
-        if (err == PEX_ENOMEM && !s_up) { api_reply_err(reply, ctx, id, "no_memory", "the PEX pool could not be taken from the C heap"); return; }
+        if (err == PEX_ENOMEM && !s_up) { api_reply_err(reply, ctx, id, "no_memory", "the PEX pool could not be taken"); return; }
         reply_err_pex(reply, ctx, id, err);
         return;
     }
     char *b = api_scratch();
     pex_info_json(m, b, api_scratch_size());
+    api_reply_ok(reply, ctx, id, b);
+}
+
+/* ---- XIP: the PEX flash partition ------------------------------------------------------ */
+static bool xip_up(api_reply_fn reply, void *ctx, long id) {
+    if (!pex_gw_ensure()) { api_reply_err(reply, ctx, id, "no_memory", "the PEX runtime could not start"); return false; }
+    pex_xip_stats_t st;
+    if (pex_xip_stats(&st) != PEX_OK) { api_reply_err(reply, ctx, id, "not_supported", "this build has no PEX flash partition"); return false; }
+    return true;
+}
+
+static void reply_installed(api_reply_fn reply, void *ctx, long id, int slot) {
+    pex_installed_t in;
+    char *b = api_scratch();
+    if (pex_installed(slot, &in) != PEX_OK) { api_reply_ok(reply, ctx, id, "{}"); return; }
+    char bid[33];
+    for (int i = 0; i < 16; i++) { snprintf(bid + 2 * i, 3, "%02x", in.build_id[i]); }
+    pex_xip_stats_t st;
+    pex_xip_stats(&st);
+    snprintf(b, api_scratch_size(), "{\"name\":\"%s\",\"version\":\"%lu.%lu.%lu\",\"build_id\":\"%s\",\"model\":\"%s\","
+             "\"offset\":%lu,\"size\":%lu,\"signed\":%s,\"xip_ready\":%s,\"free\":%lu,\"largest\":%lu,\"moves\":%lu}",
+             in.name, (unsigned long)(in.version >> 24), (unsigned long)((in.version >> 16) & 0xFF),
+             (unsigned long)(in.version & 0xFFFF), bid, (in.flags & PEX_F_PIC) ? "pic" : "reloc", (unsigned long)in.offset,
+             (unsigned long)in.file_size, in.signed_ ? "true" : "false", in.xip_ready ? "true" : "false",
+             (unsigned long)st.free, (unsigned long)st.largest, (unsigned long)st.moves);
+    api_reply_ok(reply, ctx, id, b);
+}
+
+static void op_install(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char nm[24] = "", path[128] = "";
+    param_str(params, "name", nm, sizeof nm);
+    if (!param_str(params, "path", path, sizeof path)) {
+        if (!nm[0]) { api_reply_err(reply, ctx, id, "bad_request", "need \"name\" or \"path\""); return; }
+        snprintf(path, sizeof path, "%s", nm);
+    }
+    if (!xip_up(reply, ctx, id)) { return; }
+    if (strncmp(path, "sd:", 3) == 0) {
+        int rc = pex_gw_sd_begin(path, NULL, true);
+        if (rc != PEX_EPENDING) { reply_err_pex(reply, ctx, id, rc); return; }
+        api_reply_ok(reply, ctx, id, "{\"pending\":true,\"event\":\"pex.sd_done\"}");
+        return;
+    }
+    int slot = pex_gw_install_path(path);
+    if (slot < 0) {
+        if (slot == PEX_ENOENT) { api_reply_err(reply, ctx, id, "not_found", pex_errmsg()); return; }
+        reply_err_pex(reply, ctx, id, slot);
+        return;
+    }
+    reply_installed(reply, ctx, id, slot);
+}
+
+static void op_installed(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    if (!xip_up(reply, ctx, id)) { return; }
+    char *b = api_scratch();
+    if (pex_installed_json(b, api_scratch_size()) < 0) { api_reply_err(reply, ctx, id, "too_large", "installed"); return; }
+    api_reply_ok(reply, ctx, id, b);
+}
+
+static void op_uninstall(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char nm[24];
+    if (!param_str(params, "name", nm, sizeof nm)) { api_reply_err(reply, ctx, id, "bad_request", "need \"name\""); return; }
+    if (!xip_up(reply, ctx, id)) { return; }
+    int rc = pex_uninstall(nm);
+    if (rc == PEX_ENOENT) { api_reply_err(reply, ctx, id, "not_found", nm); return; }
+    if (rc != PEX_OK) { reply_err_pex(reply, ctx, id, rc); return; }
+    api_reply_ok(reply, ctx, id, "{\"uninstalled\":true}");
+}
+
+static void op_compact(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    if (!xip_up(reply, ctx, id)) { return; }
+    int rc = pex_xip_compact();
+    if (rc < 0) { reply_err_pex(reply, ctx, id, rc); return; }
+    pex_xip_stats_t st;
+    pex_xip_stats(&st);
+    char b[96];
+    snprintf(b, sizeof b, "{\"moved\":%d,\"free\":%lu,\"largest\":%lu}", rc, (unsigned long)st.free, (unsigned long)st.largest);
+    api_reply_ok(reply, ctx, id, b);
+}
+
+static void op_verify(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char nm[24];
+    if (!param_str(params, "name", nm, sizeof nm)) { api_reply_err(reply, ctx, id, "bad_request", "need \"name\""); return; }
+    if (!xip_up(reply, ctx, id)) { return; }
+    uint64_t t0 = time_us_64();
+    int rc = pex_xip_verify(nm);
+    if (rc == PEX_ENOENT) { api_reply_err(reply, ctx, id, "not_found", nm); return; }
+    if (rc != PEX_OK) { reply_err_pex(reply, ctx, id, rc); return; }
+    char b[64];
+    snprintf(b, sizeof b, "{\"verified\":true,\"ms\":%lu}", (unsigned long)((time_us_64() - t0) / 1000));
     api_reply_ok(reply, ctx, id, b);
 }
 
@@ -594,7 +763,9 @@ static const op_def_t pex_ops_tbl[] = {
     { "pex.start", op_start },   { "pex.run", op_start },     { "pex.stop", op_stop },
     { "pex.unload", op_unload }, { "pex.call", op_call },     { "pex.files", op_files },
     { "pex.autostart", op_autostart }, { "pex.faults", op_faults }, { "pex.faults_clear", op_faults_clear },
-    { "pex.ops", op_ops },       { NULL, NULL }
+    { "pex.ops", op_ops },       { "pex.install", op_install }, { "pex.installed", op_installed },
+    { "pex.uninstall", op_uninstall }, { "pex.compact", op_compact }, { "pex.verify", op_verify },
+    { NULL, NULL }
 };
 static const char *const pex_topics[] = { "pex.*", NULL };
 

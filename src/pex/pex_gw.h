@@ -15,7 +15,7 @@
  *
  * Safety for a board reachable only remotely:
  *   - nothing PEX runs at boot unless cfg/pex_autostart.json lists it, and the
- *     pool (RAM) is only taken when a module is first loaded;
+ *     runtime (pool, flash index) only starts when a module is first used;
  *   - a module that faults is attributed (name, build id, offset), the board
  *     reboots into the same firmware through the normal fault path, and the
  *     next boot records the build id in var/pex_faults.json: autostart skips
@@ -33,10 +33,23 @@ void pex_gw_poll(void);             /* main loop, once per pass */
 bool pex_gw_dispatch(const char *name, const char *params, api_reply_fn reply, void *ctx, long id);
 void crumb_fault_hook(const uint32_t *frame);
 
-/* "pex/x.m33.pex", "lfs:/pex/x.m33.pex" */
+/* "pex/x.m33.pex", "lfs:/pex/x.m33.pex", "xip:<name>" (installed, run in place) */
 pex_mod_t *pex_gw_load_path(const char *path, const char *as, int *err);
-/* lfs:/pex/<name>.<arch>.pex if it exists */
+/* "xip:<name>" when installed, else lfs:/pex/<name>.<arch>.pex if it exists */
 int pex_gw_find(const char *name, char *path, size_t cap);
+/* lfs file rel: load into RAM (*out) or install (returns the slot) */
+int pex_gw_with_file(const char *rel, const char *as, pex_mod_t **out, bool install);
+
+/* XIP (pex_gw_xip.c): the PEX flash partition */
+const pex_flash_t *pex_gw_flash(void);         /* NULL when the build has none */
+void pex_gw_xip_window(void);                  /* ATRANS1 -> the partition (RP2350) */
+uint32_t pex_gw_xip_flash_ops(void);
+int pex_gw_install_path(const char *name_or_path);   /* a name, lfs:/... ; slot or PEX_E* */
+/* sd:/ : read the file into the pool asynchronously, then install or load it;
+ * PEX_EPENDING, then the event pex.sd_done */
+int pex_gw_sd_begin(const char *path, const char *as, bool install);
+void pex_gw_sd_poll(void);
+bool pex_gw_sd_busy(void);
 const char *pex_gw_arch(void);
 
 /* groups (pex_gw_*.c) */

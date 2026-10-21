@@ -8,15 +8,26 @@ pass/fail table, and clean up after itself.
 
 DIR is made by pex/test/remote/mkremote.py (the modules signed with the OTA
 key). What it does to the board: PUTs files under lfs:/pex/, lfs:/pextest_bad/
-and lfs:/lua/pex_lua_test.lua, loads/starts/unloads modules, starts and stops
-one Lua script, and deletes all of it at the end (unless --keep). It never
-loads a module that faults or hangs (those exist only in the simulator), never
-writes cfg/pex_autostart.json, never reboots, OTAs or touches SMP.
+and lfs:/lua/pex_lua_test.lua (and with --sd sd:/pextest/), loads/starts/
+unloads modules, installs/uninstalls its own modules in the PEX partition,
+starts and stops one Lua script, and deletes all of it at the end (unless
+--keep). It never loads a module that faults or hangs (those exist only in
+the simulator), never writes cfg/pex_autostart.json, never OTAs or touches
+SMP, and reboots only with --allow-reboot.
 
   --sd        also the card part of the fs test (writes and removes sd:/pextest.txt)
   --http-url  a URL the gateway can fetch (net group test; skipped without it)
   --bt        scan for a device advertising UUID (default: the iTi OTAP service),
               connect, read, subscribe, write one ignored byte, disconnect
+
+The PEX flash partition (0.7): installs hello, arith, big and counter (and,
+from Lua, hello), runs them in place, compacts, replaces big with its model A
+build, and uninstalls everything it installed at the end. Modules installed
+by anyone else are never replaced or removed; if one has one of those names
+the XIP part is skipped, and compaction (which would MOVE them, safely) needs
+--allow-compact.
+  --allow-reboot   one sys.reboot: installed modules persist, model A runs in place
+  --allow-compact  compact although other modules are installed
 Exit status 0 when everything run passed.
 """
 import argparse, json, os, sys, time, urllib.error, urllib.request
@@ -101,6 +112,161 @@ def wait_op(gw, op, pred, secs):
     return r
 
 
+XIP_WINDOW = (0x10400000, 0x10400000 + 256 * 1024)     # ATRANS1 -> the PEX partition (RP2350)
+
+
+def wait_http(gw, secs):
+    t0 = time.time()
+    while time.time() - t0 < secs:
+        try:
+            ok, _ = gw.op("pex.list")
+            if ok:
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
+def xip_test(gw, R, a, arch, installed):
+    ok, inst = gw.op("pex.installed")
+    if not R.add("xip.installed", ok and "modules" in inst, err_text(inst) if not ok else
+                 f"{len(inst['modules'])} installed before, {inst['free'] // 1024} of {inst['size'] // 1024} KB free"):
+        return
+    foreign = [m["name"] for m in inst["modules"]]
+    clash = [n for n in ("hello", "arith", "big", "counter") if n in foreign]
+    if clash:
+        R.add("xip (names already installed by someone else: skipped)", None, clash)
+        return
+
+    def install(params, label, check=None):
+        t0 = time.time()
+        ok, r = gw.op("pex.install", params)
+        if ok and r.get("name") and r["name"] not in installed:
+            installed.append(r["name"])
+        good = ok and (check(r) if check else True)
+        R.add(label, good, err_text(r) if not ok else f"{r.get('model')} {r.get('size')} B @0x{r.get('offset', 0):x} "
+              f"in {time.time() - t0:.1f} s, signed={r.get('signed')}")
+        return r if ok else None
+
+    def run_big(label, want_xip):
+        ok, r = gw.op("pex.load", {"name": "big"})
+        if not ok:
+            R.add(label, False, err_text(r))
+            return
+        _, c = gw.op("pex.call", {"name": "big", "fn": "big_check"})
+        _, ca = gw.op("pex.call", {"name": "big", "fn": "big_code_addr"})
+        addr = (ca or {}).get("result", 0) & 0xFFFFFFFF
+        inwin = XIP_WINDOW[0] <= addr < XIP_WINDOW[1]
+        R.add(label, c.get("result") == 0 and r.get("xip") == want_xip and inwin == want_xip,
+              f"xip={r.get('xip')} code @0x{addr:08x} check={c.get('result')}")
+        gw.op("pex.unload", {"name": "big"})
+
+    # four modules in a row: hello, arith, big (model B, 41 KB), counter
+    install({"name": "hello"}, "xip.install hello")
+    install({"name": "arith"}, "xip.install arith")
+    b = install({"name": "big"}, "xip.install big (41 KB, signed, model B)",
+                lambda r: r.get("signed") and r.get("model") == "pic" and r.get("size", 0) > 40000)
+    install({"name": "counter"}, "xip.install counter")
+    if not b:
+        return
+    ok, r = gw.op("pex.install", {"name": "big"})
+    R.add("xip.same build again: nothing written", ok and r.get("offset") == b.get("offset"), err_text(r) if not ok else "")
+    ok, v = gw.op("pex.verify", {"name": "big"})
+    R.add("xip.verify in place (CRC + signature)", ok and v.get("verified"), err_text(v) if not ok else f"{v.get('ms')} ms")
+    _, l0 = gw.op("pex.list")
+    ok, r = gw.op("pex.load", {"name": "big"})
+    if R.add("xip.load big in place", ok and r.get("xip"), err_text(r) if not ok else f"code_addr 0x{r.get('code_addr', 0):08x}"):
+        _, c = gw.op("pex.call", {"name": "big", "fn": "big_check"})
+        _, ca = gw.op("pex.call", {"name": "big", "fn": "big_code_addr"})
+        addr = (ca or {}).get("result", 0) & 0xFFFFFFFF
+        R.add("xip.big runs from flash (ATRANS1 window)", c.get("result") == 0 and XIP_WINDOW[0] <= addr < XIP_WINDOW[1],
+              f"check {c.get('result')} code @0x{addr:08x}")
+        _, l1 = gw.op("pex.list")
+        used = l0["pool"]["free"] - l1["pool"]["free"]
+        R.add("xip.costs RW only", used < 2048, f"{used} B of pool for 41 KB of code")
+        ok2, u = gw.op("pex.uninstall", {"name": "big"})
+        R.add("xip.uninstall refused while loaded", not ok2, err_text(u))
+        gw.op("pex.unload", {"name": "big"})
+    ok1, r1 = gw.op("pex.load", {"name": "counter"})
+    ok2, r2 = gw.op("pex.load", {"name": "counter", "as": "counter2"})
+    if ok1 and ok2:
+        gw.op("pex.call", {"name": "counter", "fn": "counter_add", "args": [5]})
+        _, c2 = gw.op("pex.call", {"name": "counter2", "fn": "counter_add", "args": [7]})
+        R.add("xip.two instances share the flash copy", r1.get("xip") and r2.get("xip") and
+              r1.get("code_addr") == r2.get("code_addr") and c2.get("result") == 7, f"code 0x{r1.get('code_addr', 0):08x}")
+    else:
+        R.add("xip.two instances", False, err_text(r2 if ok1 else r1))
+    gw.op("pex.unload", {"name": "counter"})
+    gw.op("pex.unload", {"name": "counter2"})
+    ok, r = gw.op("pex.load", {"name": "arith"})
+    if ok:
+        _, c = gw.op("pex.call", {"name": "arith", "fn": "arith_selftest"})
+        R.add("xip.arith in place (every relocation kind)", r.get("xip") and c.get("result") == 0, c)
+        gw.op("pex.unload", {"name": "arith"})
+    else:
+        R.add("xip.arith load", False, err_text(r))
+
+    # a hole below big, then compaction (big slides down over itself, journalled)
+    gw.op("pex.uninstall", {"name": "hello"})
+    gw.op("pex.uninstall", {"name": "arith"})
+    if foreign and not a.allow_compact:
+        R.add("xip.compact (other modules installed: --allow-compact)", None, foreign)
+    else:
+        t0 = time.time()
+        ok, c = gw.op("pex.compact")
+        R.add("xip.compact", ok and c.get("moved", 0) >= 1 and (foreign or c.get("largest") == c.get("free")),
+              err_text(c) if not ok else f"moved {c.get('moved')} in {time.time() - t0:.1f} s, {c.get('free', 0) // 1024} KB free")
+        run_big("xip.big after compaction", True)
+
+    # model A replaces model B: relocated to its flash address; its RW address is reserved from the next boot
+    install({"path": "pex/a/big." + arch + ".pex"}, "xip.replace big with model A",
+            lambda r: r.get("model") == "reloc" and r.get("xip_ready") is False)
+    run_big("xip.model A before a reboot: RAM copy", False)
+
+    # sd:/ (Q12): read asynchronously, then installed / loaded
+    if a.sd:
+        ok1 = gw._req("PUT", "/api/sd/files/pextest/big." + arch + ".pex",
+                      open(os.path.join(a.files, "pex", "big." + arch + ".pex"), "rb").read())[0] == 200
+        ok2 = gw._req("PUT", "/api/sd/files/pextest/hello." + arch + ".pex",
+                      open(os.path.join(a.files, "pex", "hello." + arch + ".pex"), "rb").read())[0] == 200
+        ok, r = gw.op("pex.install", {"path": "sd:/pextest/big." + arch + ".pex"})
+        pend = ok and r.get("pending")
+        got = None
+        for _ in range(60):
+            okx, inst = gw.op("pex.installed")
+            m = [x for x in (inst or {}).get("modules", []) if x["name"] == "big"] if okx else []
+            if m and m[0]["model"] == "pic":
+                got = m[0]
+                break
+            time.sleep(1)
+        R.add("xip.install from sd:/ (asynchronous)", ok1 and pend and got, err_text(r) if not ok else got)
+        run_big("xip.big from the sd:/ install", True)
+        ok, r = gw.op("pex.load", {"path": "sd:/pextest/hello." + arch + ".pex", "as": "hellosd"})
+        info = wait_info(gw, "hellosd", lambda x: x.get("state") == "loaded", 30) if ok else None
+        _, c = gw.op("pex.call", {"name": "hellosd", "fn": "hello_answer"}) if info else (None, {})
+        R.add("pex.load from sd:/ (into RAM)", ok2 and ok and r.get("pending") and info and c.get("result") == 42,
+              err_text(r) if not ok else c)
+        gw.op("pex.unload", {"name": "hellosd"})
+        install({"path": "pex/a/big." + arch + ".pex"}, "xip.model A again")
+    else:
+        R.add("xip.sd:/ (needs --sd)", None)
+
+    if a.allow_reboot:
+        ok, _ = gw.op("sys.reboot")
+        time.sleep(8)
+        up = wait_http(gw, 240)
+        R.add("xip.reboot", ok and up)
+        if up:
+            ok, inst = gw.op("pex.installed")
+            names = {m["name"]: m for m in (inst or {}).get("modules", [])}
+            R.add("xip.installed modules persist", ok and "big" in names and "counter" in names, list(names))
+            R.add("xip.model A RW reserved after the boot", names.get("big", {}).get("xip_ready") is True, names.get("big"))
+            run_big("xip.model A in place after the reboot", True)
+    else:
+        R.add("xip.persist across a reboot (needs --allow-reboot)", None)
+
+
 def main():
     ap = argparse.ArgumentParser(description="PEX remote test", formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__)
@@ -111,10 +277,15 @@ def main():
     ap.add_argument("--http-file-url")
     ap.add_argument("--bt", nargs="?", const=OTAP)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--allow-reboot", action="store_true",
+                    help="reboot once (sys.reboot) to check that installed modules persist and model A runs in place")
+    ap.add_argument("--allow-compact", action="store_true",
+                    help="compact even when modules other than ours are installed (they are moved, never removed)")
     a = ap.parse_args()
     gw = GW(a.base)
     R = Run()
     uploaded = []
+    installed = []          # what we installed into the PEX partition (removed at the end)
 
     print(f"PEX remote test against {gw.base}")
     ok, lst = gw.op("pex.list")
@@ -245,10 +416,22 @@ def main():
         other = "m0p" if arch == "m33" else "m33"
         ok, r = gw.op("pex.load", {"path": f"pextest_bad/hello.{other}.pex", "as": "bad"})
         R.add("wrong architecture refused", not ok and "architecture" in err_text(r), err_text(r))
-        ok, r = gw.op("pex.load", {"path": "sd:/pex/hello.m33.pex"})
-        R.add("sd:/ load refused (next version)", not ok, err_text(r))
         ok, r = gw.op("pex.unload", {"name": "nothing_loaded"})
         R.add("unload of an unknown module", not ok and r.get("code") == "not_loaded", err_text(r))
+
+        # ---- the pool (0.7): static, apart from the Lua arena; a module larger than the whole v1 pool
+        _, lst = gw.op("pex.list")
+        pool = (lst or {}).get("pool", {})
+        R.add("pool.static, apart from Lua", pool.get("static") and pool.get("size", 0) >= 32 * 1024, json.dumps(pool))
+        ok, r = gw.op("pex.load", {"name": "big", "ram": True, "as": "bigram"})
+        if R.add("big.load into RAM (41 KB > the v1 pool)", ok and not r.get("xip"), err_text(r) if not ok else
+                 f"code {r.get('code')} B"):
+            _, c = gw.op("pex.call", {"name": "bigram", "fn": "big_check"})
+            R.add("big.check in RAM", c.get("result") == 0, c)
+            gw.op("pex.unload", {"name": "bigram"})
+
+        # ---- XIP (0.7): install into the PEX flash partition, run in place
+        xip_test(gw, R, a, arch, installed)
 
         # ---- bus + json + sys: a module serving ops
         ok, r = gw.op("pex.load", {"name": "gwbus"})
@@ -330,7 +513,7 @@ def main():
     finally:
         # ---- clean up: our modules, our files
         ours = {"hello", "arith", "arith_a", "counter", "counter2", "imports", "needboard", "app", "memtest", "bad",
-                "gwbus", "gwfs", "gwnet", "gwbt"}
+                "gwbus", "gwfs", "gwnet", "gwbt", "big", "bigram", "hellosd"}
         _, lst = gw.op("pex.list")
         for m in (lst or {}).get("modules", []):
             if m["name"] in ours:
@@ -339,9 +522,19 @@ def main():
         _, lst = gw.op("pex.list")
         left = [m["name"] for m in (lst or {}).get("modules", []) if m["name"] in ours]
         R.add("cleanup: none of ours loaded", not left, left)
+        for n in installed:
+            gw.op("pex.uninstall", {"name": n})
+        ok, inst = gw.op("pex.installed")
+        if ok:
+            still = [m["name"] for m in inst.get("modules", []) if m["name"] in installed]
+            R.add("cleanup: none of ours installed", not still, f"{still} ({inst.get('free', 0) // 1024} KB free)")
         if not a.keep:
             for p in uploaded + ["pex_lua_result.json"]:
                 gw.delete(p)
+            if a.sd:
+                gw._req("DELETE", "/api/sd/files/pextest/big.m33.pex")
+                gw._req("DELETE", "/api/sd/files/pextest/hello.m33.pex")
+                gw._req("DELETE", "/api/sd/files/pextest")
             gw.delete("pex/a")
             gw.delete("pextest_bad")
         R.add("pool after the run", True, json.dumps((lst or {}).get("pool")))

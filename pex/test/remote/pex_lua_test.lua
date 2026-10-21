@@ -46,5 +46,22 @@ ok("require.not_active_after_error", hi and hi.active == 0 and hi.refs >= 1, hi 
 h = nil
 ok("require.unload", pex.unload("hello"), select(2, pex.unload("hello")))
 ok("require.gone", pex.info("hello") == nil)
+
+-- XIP from Lua (0.7): install, list, require finds the installed copy, uninstall
+if pex.install then
+  local xi, xe = pex.install("hello")
+  ok("xip.install", xi and xi.name == "hello" and xi.signed, xe)
+  local listed = false
+  for _, m in ipairs(pex.installed()) do listed = listed or m.name == "hello" end
+  ok("xip.installed", listed)
+  local hx = require("hello")
+  local hi2 = pex.info("hello")
+  ok("xip.require_in_place", hi2 and hi2.xip == true and hx.answer == 42, hi2 and tostring(hi2.xip))
+  ok("xip.uninstall_refused_loaded", select(2, pex.uninstall("hello")) ~= nil)
+  hx = nil
+  ok("xip.unload", pex.unload("hello"), select(2, pex.unload("hello")))
+  local un, uerr = pex.uninstall("hello")
+  ok("xip.uninstall", un, uerr)
+end
 ok("done", true)
 save()

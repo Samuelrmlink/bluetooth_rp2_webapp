@@ -11,27 +11,50 @@ config PEX
       Nothing runs at boot unless cfg/pex_autostart.json lists it.
 
 config PEX_POOL_KB
-    int "PEX pool (KB)"
+    int "PEX pool, static (KB; 0 = take a small one from the C heap)"
     depends on PEX
+    default 0
+    help
+      Module RW, the modules' long-term memory, scratch arenas and pools,
+      and the code of modules loaded into RAM (spec 7.2). A static block of
+      its own: apart from the Lua arena (a Lua VM restart never touches it)
+      and from the C heap. The shipped configs take it out of the Lua
+      arena's budget (CONFIG_LUA_HEAP_KB) now that native modules do the
+      work and Lua is a launcher; installed modules (XIP) need only their
+      RW here.
+
+      0 keeps the v1 behaviour: a pool of up to PEX_HEAP_POOL_KB taken from
+      the C heap on first use.
+
+config PEX_HEAP_POOL_KB
+    int "PEX pool from the C heap (KB)"
+    depends on PEX && PEX_POOL_KB = 0
     default 12
     help
-      Code, data and the modules' memory (spec 7.2). Taken on first use from
-      the C heap: as much as this, but never leaving less than
-      PEX_HEAP_RESERVE_KB free (the SD build has ~19 KB of C heap once booted,
-      and pico_malloc panics when it runs out), and at least 6 KB.
-      The C heap is the only RAM PEX may take on this branch: the Lua arena
-      is re-initialised whole by a VM restart. The planned home for a larger
-      pool is RAM handed over from the Lua arena (CONFIG_LUA_HEAP_KB) once
-      the iTi backend runs natively.
+      Only without a static pool: taken on first use from the C heap, as
+      much as this but never leaving less than PEX_HEAP_RESERVE_KB free (the
+      SD build has ~19 KB of C heap once booted, and pico_malloc panics when
+      it runs out), and at least 6 KB.
 
 config PEX_HEAP_RESERVE_KB
     int "C heap kept free when the pool is taken (KB)"
-    depends on PEX
+    depends on PEX && PEX_POOL_KB = 0
     default 8
     help
       pico_malloc panics on ANY failed allocation, so the rest of the
       firmware keeps this much. The pool is taken with newlib's own malloc
       (no panic) and shrinks to fit, down to 6 KB.
+
+config PEX_XIP
+    bool "Install modules into the PEX flash partition and run them in place"
+    depends on PEX
+    default y
+    help
+      pex.install writes a module into the PEX partition (fs.h FS_PEX_OFF,
+      256 KB at 0x3BC000 on the 4 MB part), with an index kept power-fail
+      safe (two copies, sequence numbers); an installed module loads with
+      its code in flash (executed through QMI ATRANS1 on RP2350) and only
+      its RW in the pool. pex.load prefers the installed copy.
 
 config PEX_ALLOW_UNSIGNED
     bool "Load unsigned modules (development)"

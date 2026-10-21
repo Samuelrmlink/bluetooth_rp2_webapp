@@ -311,7 +311,7 @@ if(CONFIG_PEX)
     include(${CMAKE_CURRENT_LIST_DIR}/pex/runtime/pex_runtime.cmake)
     pex_runtime_add(btgw GROUPS sys board bus fs net bt NO_PICO_PORT SIG_UECC)
     target_sources(btgw PRIVATE ${CMAKE_CURRENT_LIST_DIR}/pex/runtime/port/pico/pex_port_pico.c
-        src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c)
+        src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c)
     if(CONFIG_NET_HTTP_CLIENT)
         target_sources(btgw PRIVATE src/pex/pex_gw_net.c)
     endif()
@@ -328,7 +328,7 @@ if(CONFIG_PEX)
     endif()
     # micro-ecc: the OTA key checks module signatures (spec 10).
     target_include_directories(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc)
-    set_property(SOURCE src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c
+    set_property(SOURCE src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c
         src/pex/pex_gw_net.c src/pex/pex_gw_bt.c src/pex/pex_gw_lua.c APPEND PROPERTY COMPILE_OPTIONS -Os)
     # Paying for PEX (~38 KB) in the 864 KiB slot, measured on the SD build
     # (2026-10-21; it had ~8 KB left): code that is not on a hot path goes
@@ -344,6 +344,18 @@ if(CONFIG_PEX)
         endforeach()
     endif()
     set_property(SOURCE src/net/http.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+    # XIP (0.7) took the SD build past its slot: with native modules doing
+    # the work and Lua a launcher, the firmware's Lua glue (bindings, the
+    # runtime, file/HTTP/JSON bridges; the interpreter core above and the
+    # allocator, lheap.c, every Lua allocation goes through, stay -O3)
+    # goes -Os, as do the cold paths -- OTA/SMP (bound by the link and the
+    # flash), the one-time LittleFS migration, littlefs itself (bound by
+    # flash erase/program).
+    file(GLOB _lua_glue ${CMAKE_CURRENT_LIST_DIR}/src/lua/*.c)
+    list(FILTER _lua_glue EXCLUDE REGEX "/lheap\\.c$")
+    file(GLOB _ota_srcs ${CMAKE_CURRENT_LIST_DIR}/src/ota/*.c)
+    set_property(SOURCE ${_lua_glue} ${_ota_srcs} src/fs/fs_migrate.c src/fs/littlefs/lfs.c
+        APPEND PROPERTY COMPILE_OPTIONS -Os)
 endif()
 
 if(CONFIG_NET_MDNS)

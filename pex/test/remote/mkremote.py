@@ -7,7 +7,7 @@ Everything a real board loads is SIGNED with the OTA key (the gateway runs
 signed-only): built that way by the module build (-DPEX_TEST_SIGN=ON). The
 deliberately bad files are derived here. The fault modules (crashapp,
 hangapp) are NOT included: they are for the simulator only.
-  DIR/pex/<name>.m33.pex        hello arith counter imports needboard app memtest (model B)
+  DIR/pex/<name>.m33.pex        hello arith counter imports needboard app memtest big (model B)
   DIR/pex/gwbus|gwfs|gwnet|gwbt.m33.pex
   DIR/pex/a/<name>.m33.pex      the same modules, model A
   DIR/bad/hello_unsigned.m33.pex, hello_badsig, hello_badcrc, hello.m0p.pex
@@ -19,7 +19,7 @@ TOOLS = os.path.join(HERE, "..", "..", "tools")
 sys.path.insert(0, TOOLS)
 import pexlink  # noqa: E402
 
-CORE = ["hello", "arith", "counter", "imports", "needboard", "app", "memtest"]
+CORE = ["hello", "arith", "counter", "imports", "needboard", "app", "memtest", "big"]
 GW = ["gwbus", "gwfs", "gwnet", "gwbt"]
 
 
