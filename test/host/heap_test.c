@@ -420,6 +420,57 @@ static void t_overhead_and_stats(void) {
     ck();
 }
 
+/* Scratch: a request's blocks in pages from the top, freed whole; the main
+ * arena's invariants hold throughout and it is one block again at the end. */
+static void t_scratch(void) {
+    current = "scratch pages";
+    lheap_init();
+    void *lo = lheap_alloc(100);
+    lheap_scratch_t *s = lheap_scratch_begin(1024);
+    CHECK(s != NULL, "a scratch");
+    void *p[200];
+    size_t sz[200];
+    unsigned rng = 7;
+    for (int i = 0; i < 200; i++) {
+        rng = rng * 1103515245u + 12345u;
+        sz[i] = (rng >> 8) % 300 + 1;
+        if (i % 37 == 5) { sz[i] = 3000; }           /* bigger than a page */
+        p[i] = lheap_scratch_alloc(s, sz[i]);
+        CHECK(p[i] != NULL, "scratch alloc");
+        CHECK(i > 0 || (uint8_t *)p[i] > (uint8_t *)lheap_base() + lheap_capacity() / 2, "scratch pages come from the top");
+        paint(p[i], sz[i], (unsigned)i);
+        if (i % 3 == 0) { lheap_free_any(p[i]); p[i] = NULL; }
+        ck();
+    }
+    void *mid = lheap_alloc(200);                  /* the arena goes on meanwhile */
+    for (int i = 0; i < 200; i++) {
+        if (p[i]) { CHECK(painted(p[i], sz[i], (unsigned)i), "scratch payload intact"); }
+    }
+    lheap_scratch_stats_t st;
+    lheap_scratch_stats(&st);
+    CHECK(st.active == 1 && st.pages > 1 && st.live > 0, "stats see the scratch");
+    for (int i = 0; i < 200; i += 2) { if (p[i]) { lheap_free_any(p[i]); p[i] = NULL; } }
+    ck();
+    lheap_scratch_end(s);                          /* the rest goes with it */
+    ck();
+    lheap_scratch_stats(&st);
+    CHECK(st.active == 0 && st.pages == 0 && st.live == 0 && st.bytes == 0, "all of it back");
+    lheap_free_any(mid);                           /* an arena block through free_any */
+    lheap_free(lo);
+    ck();
+    lheap_stats_t hs;
+    lheap_check(&hs, NULL);
+    CHECK(hs.blocks == 1 && lheap_used() == 0, "the arena is one block again");
+    /* current scratch, and a scratch from before a reset is dead */
+    lheap_scratch_t *a = lheap_scratch_begin(0);
+    CHECK(lheap_scratch_use(a) == NULL && lheap_scratch_current() == a, "current scratch");
+    lheap_init();
+    CHECK(lheap_scratch_current() == NULL, "reset forgets the current scratch");
+    CHECK(lheap_scratch_alloc(a, 10) == NULL, "a scratch from before a reset is dead");
+    lheap_scratch_end(a);
+    ck();
+}
+
 /*
  * The headline number: peak usage while a buffer grows the way Lua grows one.
  * The old allocator needed old+new resident at once, so doubling a 32 KB
@@ -464,6 +515,7 @@ int main(void) {
     t_alloc_high();
     t_high_mode();
     t_overhead_and_stats();
+    t_scratch();
     t_growth_peak();
     if (failures) {
         printf("heap_test: %d failure(s)\n", failures);

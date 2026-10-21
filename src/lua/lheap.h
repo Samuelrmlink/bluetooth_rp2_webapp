@@ -101,12 +101,54 @@ typedef struct {
     size_t live_bytes;      /* recomputed sum of live payloads */
     size_t free_bytes;
     size_t largest_free;
+    /* lheap_stats only: the largest free block is the gap between the two
+     * sides; the free space below it (the scripts' data side) and above it
+     * (modules, long-lived buffers, scratch pages) is in holes. */
+    size_t largest_free_low, largest_free_high;
+    size_t free_low, free_high;
+    size_t gap_offset;
 } lheap_stats_t;
 
 bool lheap_check(lheap_stats_t *out, const char **why);
 
-/* The same figures without the checks: one walk, for a script that wants to
- * watch its own fragmentation (sys.heap). */
+/* The same figures without the checks (and the two sides): one walk, for a
+ * script that wants to watch its own fragmentation (sys.heap). */
 void lheap_stats(lheap_stats_t *out);
+
+/*
+ * Scratch: short-lived C memory, grouped and freed whole (lheap.c). Memory is
+ * kept apart BY LIFETIME rather than made movable: what lives as long as the
+ * system (the TLS record buffers) and what lives as long as a module sit at
+ * the top of the arena; the scripts' objects pack from the bottom; and what
+ * lives as long as one request or one job comes from a scratch, whose pages
+ * (carved from the top, LIFO with the job's modules) all go back when it
+ * ends -- so a request never leaves holes between blocks that outlive it.
+ *
+ *   lheap_scratch_begin(page)    a scratch (page 0 = 2 KB pages)
+ *   lheap_scratch_alloc(s, n)    from its pages; NULL when the arena is out
+ *   lheap_free_any(p)            frees a scratch block or an arena block
+ *   lheap_scratch_end(s)         every page back, whatever is still in them
+ *   lheap_scratch_use(s)         the CURRENT scratch (returns the previous):
+ *                                where C code that allocates on behalf of a
+ *                                request (the HTTP client, mbedTLS) puts it
+ *
+ * A scratch from before an lheap_init (a VM restart) is dead: its alloc
+ * returns NULL and its end only forgets it.
+ */
+typedef struct lheap_scratch lheap_scratch_t;
+lheap_scratch_t *lheap_scratch_begin(size_t page);
+void *lheap_scratch_alloc(lheap_scratch_t *s, size_t n);
+void  lheap_free_any(void *p);
+void  lheap_scratch_end(lheap_scratch_t *s);
+lheap_scratch_t *lheap_scratch_use(lheap_scratch_t *s);
+lheap_scratch_t *lheap_scratch_current(void);
+typedef struct {
+    size_t active, pages;        /* scratches alive now, their pages */
+    size_t bytes, live;          /* in their pages / handed out, now */
+    size_t bytes_peak, live_peak;
+    uint32_t page_fails;         /* a page wanted and the arena had no room */
+    uint32_t runs;               /* scratches begun since boot */
+} lheap_scratch_stats_t;
+void lheap_scratch_stats(lheap_scratch_stats_t *out);
 
 #endif
