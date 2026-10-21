@@ -37,6 +37,7 @@
 #endif
 #if CONFIG_SD
 #include "sd/sd_api.h"
+#include "sd/sd_card.h"
 #include "sd/sd_core.h"
 #include "sd/sd_jobs.h"
 #include "sd/sd_store.h"
@@ -863,23 +864,40 @@ static bool restore_phase(bool fresh, uint32_t t0) {
 
 static bool wait_for_card(void) {
     uint32_t t0 = now_ms();
+    int media = -1;
+    bool present = false;
+    bool ok = false;
     while (now_ms() - t0 < CARD_WAIT_MS) {
         pump();
         const struct sd_pub *p = sd_pub();
-        if (p->media == LS_MEDIA_OK) { return true; }
+        if (p->media != media || p->present != present) {
+            media = p->media;
+            present = p->present;
+            printf("migrate: card @%lu ms: present %d, media %d\n", (unsigned long)(now_ms() - t0), present, media);
+        }
+        if (p->media == LS_MEDIA_OK) { ok = true; break; }
         /* No card in the socket: card detect says so within a few passes. */
-        if (!p->present && now_ms() - t0 > 1000u) { return false; }
+        if (!p->present && now_ms() - t0 > 1000u) { break; }
         sleep_us(500);
     }
-    return false;
+    const sd_stats_t *st = sd_card_stats();
+    printf("migrate: card wait %lu ms: %s; inits %lu, crc errors %lu, read retries %lu, dma blocks %lu, %lu kHz\n",
+           (unsigned long)(now_ms() - t0), ok ? "mounted" : "NOT mounted", (unsigned long)st->inits,
+           (unsigned long)st->crc_errors, (unsigned long)st->read_retries, (unsigned long)st->dma_blocks,
+           (unsigned long)sd_card_clock_limit_khz());
+    return ok;
 }
 
 static void migrate_sd(bool legacy, bool inprog) {
     uint32_t t0 = now_ms();
     sd_init();
     if (!wait_for_card()) {
-        if (legacy) { set_pending("no SD card"); }
-        else if (inprog) { set_pending("restore incomplete: no SD card"); }
+        /* Present but not mounting is not "no card": a card that identifies
+         * and then fails every read (a data line it does not drive) looked
+         * exactly like an empty socket in the first bench report. */
+        const char *why = sd_pub()->present ? "SD card present but not readable (see /api/sd)" : "no SD card";
+        if (legacy) { set_pending("%s", why); }
+        else if (inprog) { set_pending("restore incomplete: %s", why); }
         return;
     }
     mig_state_t st;

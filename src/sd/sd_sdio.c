@@ -28,6 +28,7 @@
 
 #include "autoconf.h"
 #include "sd/sd_crc.h"
+#include <stdio.h>
 #include "sd/sd_port.h"
 #include "sd/sdio_hw.h"
 
@@ -238,7 +239,28 @@ static int read_run(uint32_t addr, uint8_t *buf, uint32_t count) {
     }
     e = sdio_hw_read_wait(crcs, SD_READ_TIMEOUT_US);
     for (uint32_t i = 0; e == SD_OK && i < count; i++) {
-        if (crcs[i] != block_crc(buf + 512 * i)) { e = SD_ECRC; }
+        if (crcs[i] != block_crc(buf + 512 * i)) {
+            e = SD_ECRC;
+            /* Which data line is wrong, from the block itself: a line that
+             * reads 1 (or 0) for all 512 bytes is stuck or not connected --
+             * how a DAT3 line the card did not drive showed on the bench (every byte
+             * read as b | 0x88). */
+            static uint32_t told;
+            if (told++ < 3) {
+                const uint8_t *q = buf + 512 * i;
+                uint8_t all_or = 0, all_and = 0xFF;
+                for (int k = 0; k < 512; k++) { all_or |= q[k]; all_and &= q[k]; }
+                char lanes[40] = "";
+                for (int l = 0; l < 4; l++) {
+                    uint8_t m = (uint8_t)(0x11u << l);
+                    if ((all_and & m) == m) { snprintf(lanes + strlen(lanes), sizeof lanes - strlen(lanes), " DAT%d high", l); }
+                    if ((all_or & m) == 0) { snprintf(lanes + strlen(lanes), sizeof lanes - strlen(lanes), " DAT%d low", l); }
+                }
+                printf("sdio: CRC error, block %lu: got %016llx want %016llx;%s\n", (unsigned long)(addr + i),
+                       (unsigned long long)crcs[i], (unsigned long long)block_crc(q),
+                       lanes[0] ? lanes : " no line stuck for the whole block");
+            }
+        }
     }
     if (multi || e != SD_OK) { stop_transmission(); }
     return e;
