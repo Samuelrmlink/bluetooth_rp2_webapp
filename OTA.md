@@ -26,7 +26,10 @@ fails to buy, and the ROM falls back.
 
 LittleFS (`cfg/`, `lua/`, web assets) is a third partition **shared by both
 slots and never touched by an update**. The Wi-Fi firmware blob is its own
-partition, flashed once and never OTA'd.
+partition, flashed once and never OTA'd. After LittleFS comes the PEX
+partition (256 KB, reserved for native modules) and BTstack's NVM; the whole
+map, and the one-time migration that made room for PEX, are in
+[docs/flash-layout.md](docs/flash-layout.md).
 
 Three things must line up, and they are all checked by
 `tools/run_tests.py`: `partitions.json`, `src/fs/fs.h`, and
@@ -85,7 +88,10 @@ blocks are absolute-addressed, so they write the same bytes to the same
 offsets as `provision.sh` — the partition table at `0x10000000`, the
 firmware at `0x10010000` (slot A) and the blob at `0x101C0000` — and the
 board reboots into the new firmware. LittleFS (`0x200000`+) is untouched, so
-a reprovision keeps `cfg/`, `lua/` and the web assets.
+a reprovision keeps `cfg/`, `lua/` and the web assets. (A board provisioned
+before the PEX partition gets the new table this way; its LittleFS is then
+migrated by the firmware on the next boot, through the SD card:
+[docs/flash-layout.md](docs/flash-layout.md).)
 
 Confirm it came up:
 
@@ -191,7 +197,27 @@ reachable. The explicit sequence above is the one to use.
 
 ---
 
+## Updating a board from before the PEX partition
+
+Firmware from the PEX layout on shrinks LittleFS from 2032 KB to 1776 KB, by
+copying it through the SD card and back ([docs/flash-layout.md](docs/flash-layout.md)).
+Over OTA:
+
+* the new image **does not migrate while it is unbought** (`sys.info`:
+  `"migration":"migration pending: waiting for the OTA confirm ..."`): an
+  unbought image reverts on any reboot, and the old firmware would format a
+  migrated filesystem;
+* after step 5 (`--confirm`) it **reboots by itself** 3 s later and migrates
+  (needs the SD card; without one it stays on the old geometry, working, and
+  says *pending: no SD card*);
+* from then on **never roll back** to a pre-PEX image (see below): it would
+  format LittleFS. The copy on the card (`sd:/.lfs-migrate/<n>/`) stays as a
+  backup.
+
 ## Rolling back
+
+Not to a firmware older than the PEX layout once a board has migrated
+(`cfg/migrated.json` exists): such a firmware formats the smaller LittleFS.
 
 If a freshly-bought update misbehaves, the previous version is still intact
 in the other slot. Upload nothing — just arm and reboot into it:

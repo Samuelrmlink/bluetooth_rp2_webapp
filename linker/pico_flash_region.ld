@@ -3,8 +3,9 @@
  * normally sizes this region from PICO_FLASH_SIZE_BYTES (the board's true
  * 4MiB on a Pico 2 W). We deliberately shrink *only* what the linker is
  * allowed to place code/rodata/data in, to one A/B slot (864 KiB; see
- * partitions.json) — LittleFS owns 0x200000 on and BTstack's NVM the last 16KiB (see src/fs/fs.h's
- * FS_FLASH_OFF/FS_SIZE/FS_BT_TAIL, which must match this file's LENGTH).
+ * partitions.json) — LittleFS owns 0x200000 on, then the PEX partition, and BTstack's NVM the last
+ * 16KiB (see src/fs/fs.h's FS_FLASH_OFF/FS_SIZE/FS_PEX_OFF/FS_BT_TAIL and docs/flash-layout.md;
+ * tools/run_tests.py checks the slot size here against partitions.json).
  *
  * PICO_FLASH_SIZE_BYTES itself is left untouched at the board's true
  * size (NOT redefined here, unlike pico_override_flash_size() — that

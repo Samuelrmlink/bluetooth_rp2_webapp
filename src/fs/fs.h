@@ -16,8 +16,8 @@
  * the Pico W test target has only 2MiB and needs 1MiB + 1MiB. Getting this
  * wrong is silent — the defaults put the whole filesystem past the end of a
  * 2MiB chip — so fs.c asserts the region fits the board's real flash. */
-/* 4 MB part. Firmware is capped at 2 MiB by linker/pico_flash_region.ld, the
- * filesystem takes the rest, and the last 16 KiB is BTstack's NVM (bonds and
+/* 4 MB part (docs/flash-layout.md). From 2 MiB: LittleFS (FS_SIZE), then the
+ * PEX partition (FS_PEX_SIZE), and the last 16 KiB is BTstack's NVM (bonds and
  * the LE device DB) via pico_btstack_flash_bank -- RP2350-E10 spare sector plus
  * two flash banks, per pm220-pico2w. Stay below it. */
 #ifndef FS_FLASH_OFF
@@ -35,9 +35,22 @@
 #ifndef FS_BT_TAIL
 #define FS_BT_TAIL   (16u * 1024u)
 #endif
-#ifndef FS_SIZE
-#define FS_SIZE      ((2u * 1024u * 1024u) - FS_BT_TAIL)
+/* The region LittleFS had to itself until the PEX partition (2032 KiB): the
+ * geometry of every filesystem formatted before it, which fs_init() still
+ * mounts as it is (fs_legacy()) until fs_migrate.c has moved it. */
+#ifndef FS_REGION_SIZE
+#define FS_REGION_SIZE ((2u * 1024u * 1024u) - FS_BT_TAIL)
 #endif
+/* The PEX partition (docs/flash-layout.md, docs/pex-format.md 6.1): native
+ * modules executed in place, at the END of the old LittleFS region so
+ * LittleFS keeps its start. Only reserved so far -- nothing writes it. */
+#ifndef FS_PEX_SIZE
+#define FS_PEX_SIZE  (256u * 1024u)
+#endif
+#ifndef FS_SIZE
+#define FS_SIZE      (FS_REGION_SIZE - FS_PEX_SIZE)
+#endif
+#define FS_PEX_OFF   (FS_FLASH_OFF + FS_SIZE)
 
 #define FS_NAME_MAX 64   /* per path segment */
 #define FS_PATH_MAX 128  /* full "a/b/c.ext" path */
@@ -50,6 +63,14 @@
 #define FS_READS 8
 
 bool fs_init(void);
+/* The geometry actually mounted, in bytes: FS_SIZE, or the larger pre-PEX
+ * size while a migration is pending (fs_legacy()). 0 when not mounted. */
+uint32_t fs_mounted_size(void);
+bool fs_legacy(void);
+/* One line for /api/fs and sys.info while something about the filesystem is
+ * not as it should be ("migration pending: no SD card"); "" otherwise. */
+void fs_set_note(const char *note);
+const char *fs_note(void);
 bool fs_valid_path(const char *path);
 bool fs_is_dir(const char *path);
 

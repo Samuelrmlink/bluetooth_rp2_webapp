@@ -25,6 +25,7 @@
 #include "util/stackmark.h"
 #include "api/ops.h"
 #include "fs/fs.h"
+#include "fs/fs_migrate.h"
 #include "net/http.h"
 #include "net/ws.h"
 #include "net/cyw43_wait.h"
@@ -224,6 +225,11 @@ static void op_sys_reboot(const char *params, api_reply_fn reply, void *ctx, lon
     api_emit("sys.rebooting", "{}");
 }
 
+void api_reboot_in(uint32_t ms) {
+    s_reboot_at_ms = now_ms() + ms;
+    if (!s_reboot_at_ms) { s_reboot_at_ms = 1; }
+}
+
 bool api_reboot_due(void) {
     return s_reboot_at_ms && (int32_t)(now_ms() - s_reboot_at_ms) >= 0;
 }
@@ -241,14 +247,16 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
     (void)params;
     char mods[512];
     ops_modules_json(mods, sizeof(mods));
-    char result[768];
+    char fsj[256];
+    fs_migrate_json(fsj, sizeof fsj);
+    char result[1024];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
              "\"watchdog_reboot\":%s,\"radio_wait_max_us\":%lu,"
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
-             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu}",
+             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
               * because a device reached over WireGuard has no RTT, and a
@@ -272,7 +280,10 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
               * of a HardFault if that is what stopped it (src/util/crumb.h). */
              (unsigned long)crumb_last, (unsigned long)crumb_last_fault_pc,
              /* core0's deepest stack use since boot (util/stackmark.h). */
-             (unsigned long)stackmark_max_used());
+             (unsigned long)stackmark_max_used(),
+             /* The mounted LittleFS, its migration (fs_migrate.h) and the
+              * PEX partition it makes room for. */
+             fsj);
     api_reply_ok(reply, ctx, id, result);
 }
 

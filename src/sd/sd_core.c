@@ -94,7 +94,12 @@ void sd_core_worker_body(void) {
     }
 }
 
+/* Idempotent: fs_migrate.c may start the worker early in boot, to move a
+ * pre-PEX LittleFS through the card before the network comes up. */
 void sd_init(void) {
+    static bool started;
+    if (started) { return; }
+    started = true;
     sdw_start(sd_core_worker_body);
 }
 

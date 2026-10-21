@@ -20,6 +20,7 @@
  */
 #include "sd/sdio_hw.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "autoconf.h"
@@ -211,6 +212,8 @@ bool sdio_hw_init(const sdio_pins_t *pins) {
     pio_sm_init(pd, smd, offd, &d);
     pio_sm_set_pindirs_with_mask(pd, smd, 0, 0xFu << P.d0);
     pio_sm_set_enabled(pd, smd, true);
+    printf("sdio: cmd pio%u sm%u @%u, data pio%u sm%u @%u, dma rx %d ctl %d tx %d crc %d\n",
+           pio_get_index(pc), smc, offc, pio_get_index(pd), smd, offd, dma_rx, dma_ctl, dma_tx, dma_txcrc);
     return true;
 }
 
@@ -330,6 +333,17 @@ int sdio_hw_read_wait(uint64_t *crcs, uint32_t timeout_us) {
         sd_port_wait_step(last);
     }
     clk_leave();
+    if (e != SD_OK) {
+        static uint32_t told;
+        if (told++ < 3) {          /* the first few, with the hardware's own view */
+            printf("sdio: read timeout: rx ctrl %08lx count %lu waddr %08lx, ctl raddr %08lx (end %08lx) ctrl %08lx, "
+                   "pio flevel %08lx fdebug %08lx sm addr %lu\n",
+                   (unsigned long)dma_hw->ch[dma_rx].ctrl_trig, (unsigned long)dma_hw->ch[dma_rx].transfer_count,
+                   (unsigned long)dma_hw->ch[dma_rx].write_addr, (unsigned long)dma_hw->ch[dma_ctl].read_addr,
+                   (unsigned long)(uintptr_t)(ctl_list + 4 * armed + 2), (unsigned long)dma_hw->ch[dma_ctl].ctrl_trig,
+                   (unsigned long)pd->flevel, (unsigned long)pd->fdebug, (unsigned long)pio_sm_get_pc(pd, smd));
+        }
+    }
     if (e == SD_OK) {
         for (uint32_t i = 0; i < armed; i++) {
             crcs[i] = ((uint64_t)bswap16(crc_in[i][0]) << 48) | ((uint64_t)bswap16(crc_in[i][1]) << 32) |

@@ -25,6 +25,7 @@
 #include "autoconf.h"
 #include "app_config.h"
 #include "fs/fs.h"
+#include "fs/fs_migrate.h"
 #include "config/config.h"
 #include "net/http.h"
 #include "net/usb_ncm.h"
@@ -104,6 +105,10 @@ int main(void) {
     if (!fs_init()) {
         printf("fs: unavailable (the API still serves, the filesystem does not)\n");
     } else {
+        /* BEFORE any config is read: a filesystem in the pre-PEX layout is
+         * moved here (through the SD card), so Wi-Fi, Ethernet and WireGuard
+         * come up from the restored cfg/. Does nothing on a migrated one. */
+        fs_migrate_boot();
         cfg_load();
     }
 
@@ -287,6 +292,7 @@ int main(void) {
 #endif
         crumb(CRUMB_LOOP_CFG);
         cfg_tick();
+        fs_migrate_tick();
         /* Coalesce whatever the pass produced into as few segments as possible;
          * the per-line tcp_output() was removed deliberately. */
         crumb(CRUMB_LOOP_WS);

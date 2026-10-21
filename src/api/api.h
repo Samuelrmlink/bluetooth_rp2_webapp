@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* True when THIS boot followed a watchdog reset, i.e. the previous boot's main
  * loop stopped running. Set once in main() and reported by sys.info, because a
@@ -27,6 +28,8 @@ void api_emit(const char *topic, const char *json);
 /* True once a sys.reboot has been asked for and its grace period is over:
  * the main loop then resets the board. */
 bool api_reboot_due(void);
+/* The same reboot, asked for from inside the firmware (fs_migrate.c). */
+void api_reboot_in(uint32_t ms);
 
 /* Escape a string INTO a JSON string body (no surrounding quotes), returning
  * the number of bytes written. Device names and script errors are
