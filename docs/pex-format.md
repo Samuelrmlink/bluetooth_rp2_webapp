@@ -1292,9 +1292,9 @@ typedef int (*pex_task_fn)(void *arg);
 | `int pex_sched_cancel(int id)` | `a2a03565` | 1.0 |  |
 | `uint32_t pex_sched_count(void)` | `79d75482` | 1.0 | tasks the calling module has scheduled |
 
-### A.5 `pex` -- group 5, v1.0
+### A.5 `pex` -- group 5, v1.1
 
-the module's own handle, references (spec 8) and app control
+the module's own handle, references (spec 8) and app control; 1.1: calling another loaded module (a driver module such as otap.m33.pex) by name, through the trampoline
 
 ```c
 typedef struct pex_mod pex_mod_t;
@@ -1307,6 +1307,9 @@ typedef struct pex_mod pex_mod_t;
 | `void pex_unref(pex_mod_t *m)` | `226345e5` | 1.0 |  |
 | `const char *pex_name(pex_mod_t *m)` | `66d85c54` | 1.0 |  |
 | `void pex_app_exit(int code)` | `823fd857` | 1.0 | an app ends: its tasks are cancelled after the current callback returns; UNLOAD_ON_EXIT apps are then unloaded |
+| `pex_mod_t *pex_find(const char *name)` | `ece0fb7c` | 1.1 | a loaded module by instance name, or NULL (pex_ref it while using it) |
+| `uint32_t pex_sym(pex_mod_t *m, const char *name)` | `75e374c6` | 1.1 | the address of one of m's EXPORTS (Thumb bit set), or 0 |
+| `uint64_t pex_call(pex_mod_t *m, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3)` | `4492d467` | 1.1 | call fn of module m through the trampoline (r9 = m's RW base, active count, executing-module stack); up to four word arguments, r0:r1 back; PEX_EFAULT if m faulted |
 
 ### A.6 `board` -- group 6, v1.0
 
