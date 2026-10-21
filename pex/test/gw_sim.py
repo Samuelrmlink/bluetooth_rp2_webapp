@@ -31,6 +31,12 @@ mcusim's virtual network and an iti-otap BLE peer.
          (reported: what the config sizes are chosen from).
   --via R   first OTA release R (the board's current one, 1.212) into slot B,
             then the new one into slot A -- the order the real board takes.
+            NOTE (2026-10-21): in mcusim the second flash-update boot (slot B
+            -> slot A) comes up without the ROM's partition table ("no A/B
+            partition table ... boot type 4", the image cannot be bought) --
+            with 1.212 as the new image just the same, so it is the simulator
+            (the known watchdog-reset gap, docs/pex-format.md 15); the real
+            gateway has taken B -> A updates (1.163 -> 1.180).
 Nothing leaves 127.0.0.1. Exit status 0 when everything passed.
 """
 import argparse, base64, http.server, random, json, os, re, shutil, signal, socketserver, subprocess, sys, threading, time
@@ -40,8 +46,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PEX = os.path.dirname(HERE)
 ROOT = os.path.dirname(PEX)
 PC_IP = "192.168.8.16"              # the PC on the USB network (the firmware's DHCP hands it out)
-HTTP_PORT, FWD = 18391, 18782
-BIND = "127.0.0.77"                 # the board's forwards listen here: a loopback address of our own (SMP is udp 1337)
+HTTP_PORT = int(os.environ.get("GWSIM_HTTP_PORT", "18391"))
+FWD = 18782
+# the board's forwards listen here: a loopback address of our own (SMP is udp 1337, fixed);
+# GWSIM_BIND / GWSIM_HTTP_PORT let two runs share the PC
+BIND = os.environ.get("GWSIM_BIND", "127.0.0.77")
 OTAP = "49646561-7346-6c6f-6174-40882af10000"
 FS_OFF, FS_BLOCKS = 0x200000, 444
 
