@@ -1,6 +1,13 @@
-# PEX — portable executable modules for microcontrollers (DRAFT 0.6)
+# PEX — portable executable modules for microcontrollers (DRAFT 0.7)
 
-Status: **draft 0.6 -- format 1.0 and the RAM-mode runtime are implemented**
+Status: **draft 0.7 -- format 1.0, the RAM-mode runtime and XIP are
+implemented.** 0.7: modules are installed into the PEX flash partition and
+run in place (§16: the index, placement, compaction, power-fail safety,
+model A relocated to its flash address); the gateway's pool is static and
+taken from the Lua arena's budget (Q10, §15); `sd:/` loading (Q12); the
+changes are listed in §18.
+
+Status of 0.6: **format 1.0 and the RAM-mode runtime are implemented**
 (`pex/` in this repository: SDK, `pexlink`, runtime, Lua layer, tests; the
 gateway integration in `src/pex/`). 0.4: two code models; 0.5: the memory
 model, §7.2; **0.6: what the implementation settled -- section payloads
@@ -335,6 +342,7 @@ address. The header's `PIC` flag says which one a file uses.
   **carve a `PEX` partition out of LittleFS** (e.g. 256 KB) in
   `partitions.json` **[D, Q3]** -- after a full backup, see §14. The loader keeps an index there (build id ->
   placement), so a module installed once boots from flash with no copy.
+  (0.7: done and implemented -- §14, §16.)
 - Model A code is relocated to its flash address when installed; moving it
   (reinstall, compaction) rewrites it. Model B code is copied as-is and can be
   moved by a plain copy; only its RW block (RAM) is set up per load. Flash
@@ -474,6 +482,11 @@ Rules:
   high-water mark) and for the pool as a whole (largest free run on each side),
   exposed in `sys.info`. (0.6: in `pex.list`/`pex.info`, not `sys.info`, whose
   reply buffer is full.)
+
+0.7, the gateway: the pool is a **static block of its own** (`CONFIG_PEX_POOL_KB`,
+48 KB), apart from the Lua arena -- a VM restart never touches it -- and from
+the C heap; the RAM came out of the Lua arena's budget (§15). Installed
+modules need only their RW (and their own allocations) in it.
 
 As implemented (0.6): the pool is one block given to `pex_init()`. The
 long-term side holds, besides the modules' own blocks, each instance's
@@ -666,6 +679,10 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
    pex.load("iti")
    pex.start("iti", { poll_ms = 500 })
    ```
+   0.7: `pex.install(name | path) -> info | nil, err` (into the flash
+   partition, §16), `pex.installed() -> { info, ... }`, `pex.uninstall(name)`;
+   **`pex.load(name)` and `require` prefer the installed copy**, which loads
+   with its code in place (the host's `find` returns `xip:<name>`).
 2. **`require 'name'`** (0.6 correction: the PEX is tried **first**, the 0.5
    order contradicted "prefers the PEX"): `lfs:/pex/<name>.<arch>.pex` if it
    exists and loads for this target/API, else the firmware's own `require`
@@ -682,10 +699,11 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
    the bridge, which fixes the trampoline's books and re-raises from host
    code. Yielding across a module call is not supported.
 
-- `sd:/pex/` is not searched in this version (§16).
-- The Lua module's memory: its code is not in the arena at all (XIP later;
-  RAM mode: the PEX pool); its C data is in the PEX pool; only the table and
-  closures it pushes live in the Lua arena.
+- `sd:/pex/` is not searched by `require` (0.7: the `pex.load` and
+  `pex.install` ops take `sd:/` paths, asynchronously -- §15).
+- The Lua module's memory: its code is not in the arena at all (installed:
+  flash; RAM mode: the PEX pool); its C data is in the PEX pool; only the
+  table and closures it pushes live in the Lua arena.
 - First candidates from the iTi backend: `otap` (transfer engine + hex),
   `bleota`, `json`-shaping of catalog listings, `registry` index -- now as
   native apps (`iti.m33.pex`, `otap.m33.pex`) serving their own ops.
@@ -780,7 +798,8 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
   (`otap.armv8m-main-fp.pex`)?
 - ~~[Q9]~~ **[D]** The format, SDK and `pexlink` live in this firmware repo for
   now (`pex/`), structured so they can become a separate submodule later.
-- **[Q10] (0.6) Where the gateway's PEX pool comes from.** The SD build has
+- ~~[Q10]~~ **[D, 0.7: (a) -- a static pool of 48 KB, the Lua arena 164 ->
+  116 KB, sized from measurements (§15)]** (0.6) Where the gateway's PEX pool comes from. The SD build has
   ~18 KB of C heap once booted and ~10 KB of its 864 KiB slot left. v1 takes
   the pool lazily from the C heap (default up to 12 KB, keeping 8 KB free --
   pico_malloc panics on any failed allocation, so the pool is taken with
@@ -791,12 +810,14 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
   iTi backend is native (the arena's own users shrink with it); (b) an
   `lheap` region that survives a VM restart (needs `lheap.c`, which another
   branch is reworking -- its TLS pool is the same idea).
-- **[Q11] (0.6) Late op replies.** The firmware's ops reply synchronously (a
+- **[Q11] (0.6, still open in 0.7) Late op replies.** The firmware's ops reply synchronously (a
   WebSocket reply context has no generation check; the HTTP one is gone when
   the handler returns), so a native op replies at once and reports completion
   with an event -- the pattern the built-in ops use. Add a reply token with a
   connection generation if a module needs true async replies?
-- **[Q12] (0.6) Loading from the SD card.** v1 loads from LittleFS (and memory/
+- ~~[Q12]~~ **[D, 0.7: read the whole file into the pool asynchronously, then
+  load or install it; the op replies `{pending:true}` and the event
+  `pex.sd_done` reports the outcome (§15)]** (0.6) Loading from the SD card. v1 loads from LittleFS (and memory/
   flash); a card read is an asynchronous job, so `sd:/pex/` needs either a
   load that completes through a callback, or a copy to LittleFS first. Which?
 
@@ -860,7 +881,7 @@ format the new geometry). The layout now:
 | 0x3BC000 | **256 KB** | **PEX** (id `0x7065780000000000`, family `data`; reserved, reported in `sys.info.fs.pex`) |
 | 0x3FC000 | 16 KB | BTstack NVM (unpartitioned) |
 
-## 15. Gateway integration (0.6, implemented)
+## 15. Gateway integration (0.6, implemented; 0.7 in §15.1)
 
 The runtime and the groups are in the gateway firmware behind `CONFIG_PEX`
 (default y): `src/pex/` holds everything new; existing files get one hook each.
@@ -878,7 +899,7 @@ The runtime and the groups are in the gateway firmware behind `CONFIG_PEX`
 | `src/bt/le/central.c` | a weak `le_pex_event()` called where values, write completions and link changes are already reported (no change without PEX) |
 | `src/lua/lfile.c` | `pex_gw_lua_open(L)` at the end of `lfile_open` (Lua builds with `CONFIG_PEX_LUA`) |
 
-Not touched: `src/lua/lheap.*`, `lrt.*`, `lbind.c`, `lhttp.c`, `configs/*`.
+Not touched: `src/lua/lheap.*`, `lrt.*`, `lbind.c`, `lhttp.c`. (0.7: `configs/*` -- the arena/pool split, §15.1 -- and compile options for `src/lua/*.c` in `CMakeLists.txt`, not the files.)
 
 **Ops** (WebSocket and `POST /api/op`): `pex.list` (runtime, policy, pool,
 C-heap headroom, the previous boot's fault, modules), `pex.info {name}`,
@@ -908,7 +929,7 @@ either (the pool is allocated on first use).
   as any image does.
 Proven in mcusim (`pex/test/gw_sim.py`, scenarios `fault`, `hang`).
 
-**Measured in mcusim** (the deploy image, SD + Wi-Fi + WireGuard + BLE up):
+**Measured in mcusim** (0.6; for 0.7 see §15.1) (the deploy image, SD + Wi-Fi + WireGuard + BLE up):
 the pool came out at 10 KB (contiguous room), leaving 8 KB of C heap.
 Testing on a real board: `pex/test/remote/mkremote.py` makes the upload set
 (signed with the OTA key; the fault modules are never in it) and
@@ -926,7 +947,7 @@ normal boot if that happened there too.
 **Signing**: signed-only by default; the OTA public key (`src/ota/ota_pubkey.h`)
 verifies modules signed by `pexlink --sign` with the OTA key.
 
-**Budget** (pico2w_sd, 2026-10-21): the runtime ~15 KB, the gateway groups and
+**Budget** (0.6; for 0.7 see §15.1) (pico2w_sd, 2026-10-21): the runtime ~15 KB, the gateway groups and
 ops ~11 KB, pexlua ~4 KB of flash; RAM ~3 KB of tables + the pool. The SD
 image had ~8 KB of its slot left, so code off the hot path went `-Os`: Lua's
 compile-time half and cold libraries (code generator, parser, lexer,
@@ -934,7 +955,171 @@ compile-time half and cold libraries (code generator, parser, lexer,
 interpreter core and the string library stay -O3) and the HTTP server (-6 KB,
 bound by TCP and flash). ~10 KB of the slot are left. Pool: see Q10.
 
-## 16. What is left for the XIP version
+### 15.1 The gateway in 0.7: the pool, XIP, `sd:/`
+
+**RAM budget** (pico2w_sd, `.bss` unchanged in total; the TLS pool and the
+lwIP trim came with feature/lua-net-fs):
+
+| region | 0.6 (fw 1.212) | 0.7 | what decides it |
+|---|---|---|---|
+| Lua arena (`CONFIG_LUA_HEAP_KB`) | 176 KB | **116 KB** | the launcher + the Pi Switch driver + a few scripts, measured below |
+| PEX pool (`CONFIG_PEX_POOL_KB`) | 10 KB from the C heap, on first use | **48 KB static** | module RW, their memory, RAM-loaded code (a 41 KB module loads into RAM) |
+| TLS pool (`CONFIG_NET_TLS_POOL_KB`) | -- (in the arena) | 40 KB | one TLS session, measured 31-33 KB (lua-net-fs) |
+| lwIP `MEM_SIZE` / pbuf pool | 48 KB / 24 | 32 KB / 16 | measured peaks 16.8 KB / 6 (lua-net-fs) |
+| C heap | ~19 KB, 8 KB after the v1 pool | ~17 KB, none of it PEX's | pico_malloc panics when it runs out |
+
+Measured in mcusim (`pex/test/gw_sim.py --scenarios budget`, the SD build,
+Wi-Fi, WireGuard, SD and BLE up; `script.heap` after a full collection):
+
+| state | Lua live | Lua peak | largest free (116 KB arena) |
+|---|---|---|---|
+| after boot (VM + bindings, no script) | 19.7 KB | 38 KB | 91 KB |
+| Pi Switch driver uploaded, compiled into the bytecode cache | 19.7 KB | **93 KB** | 53 KB |
+| Pi Switch driver running (scanning) | 73.5 KB | 93 KB | 21 KB |
+| + a PEX launcher script (`pex.load`/`pex.start`, kept alive) | 75 KB | 93 KB | 21 KB |
+| after a VM restart, both started again from the cache | 75 KB | 83 KB | 27 KB |
+
+No allocation failed. The compile peak is what needs the room: a changed
+module is compiled from an (almost) empty arena -- at boot, or after a VM
+restart -- not next to a running driver. Moving RAM between the two is
+`CONFIG_LUA_HEAP_KB` / `CONFIG_PEX_POOL_KB` with a constant sum.
+
+**Flash**: XIP and the ops took the SD slot past full (-4.7 KB); the
+firmware's Lua glue (bindings, the runtime, the file/HTTP/JSON bridges -- not
+the interpreter core and not the allocator `lheap.c`), OTA/SMP, the
+one-time LittleFS migration and littlefs went `-Os`. With the lua-net-fs
+merge the SD image is 861.6 KB of the 864 KiB slot: **~22.6 KB left**.
+
+**Ops** (0.7): `pex.install {name | path}` (a name means
+`lfs:/pex/<name>.<arch>.pex`; `sd:/...` is read asynchronously), 
+`pex.installed` (the partition: size, free, largest run, each module with
+offset, size, model, signed, loaded, xip_ready), `pex.uninstall {name}`
+(refused while it runs from flash), `pex.compact`, `pex.verify {name}` (CRC
+and signature of the installed copy, in place). `pex.load {name}` prefers
+the installed copy (`xip:<name>`; `{ram:true}` loads the lfs file instead);
+`pex.load {path:"sd:/..."}` and `pex.install {path:"sd:/..."}` reply
+`{pending:true}` and report through the event `pex.sd_done {op, path, ok,
+name | error, msg}` -- the file is read into the pool through the storage
+worker's job slot (a long-term block, freed afterwards), then loaded or
+installed. Autostart and `require` find installed modules first.
+`pex.list` adds `pool.static` and `xip {size, free, largest, modules,
+rw_area, flash_ops}`.
+
+**Where the partition is seen.** Booted from an A/B slot, the ROM maps the
+slot at 0x10000000 through QMI ATRANS0 and leaves the rest of the first 4 MB
+window unmapped -- 0x10000000 + 0x3BC000 faults (`src/fs/fs.h`). Reads (the
+index, verification) use the untranslated uncached alias, as LittleFS does;
+**code runs through ATRANS1**: the window at 0x10400000 is pointed at the
+partition (BASE 0x3BC, SIZE 0x40 pages), cached like the firmware's own
+code. The ROM uses ATRANS1 only for a slot larger than 4 MB and nothing in
+the firmware or the SDK's flash paths touches ATRANS; it is set again after
+every flash operation. (The RP2350 test host uses the same window.) No XIP
+while the LittleFS migration is pending: the partition is then still inside
+the old filesystem.
+
+**Flash writes** go the way of LittleFS and OTA: `flash_range_erase/program`
+inside `flash_safe_execute` (core 1 parked), the watchdog fed per operation.
+An install blocks the main loop for its erase/program time: on the real
+part ~45 ms per 4 KB sector and ~0.8 ms per page, so ~0.6 s for 41 KB plus
+the index update, and the signature checks (before and after, in place);
+compacting the whole partition is several seconds.
+
+**Remote test** (0.7): `pex_remote_test.py` adds the pool checks, a 41 KB
+module loaded into RAM, and the XIP part -- install hello/arith/big/counter,
+run big in place from the ATRANS1 window (and its pool cost: RW only),
+shared flash code, arith (every relocation kind) in place, compaction, model
+A replacing B (RAM until a reboot), `sd:/` install and load (with `--sd`),
+the Lua `pex.install`/`installed`/`uninstall` and `require` in place, and
+with `--allow-reboot` (last, once) persistence and model A in place. It
+uninstalls what it installed and never touches modules others installed
+(compacting moves them, safely, so it needs `--allow-compact` when there are
+any).
+
+## 16. XIP (0.7, implemented)
+
+`pex/runtime/pex_xip.c`, portable: the host describes the partition with a
+`pex_flash_t` in `pex_config_t` (size, the address code is executed at, the
+address it is read at, erase-sector and program-pages functions).
+
+**Layout.** Sectors 0 and 1 hold the index, two copies; files start at
+sector 2, each whole `.pex` file from a sector boundary (the image is
+8-aligned in the file, so code is placed as the spec requires).
+
+**The index** (one copy: a 64-byte header + up to 32 entries of 88 bytes,
+3 KB): magic `PXI1`, a sequence number, the entry count, a move journal and a
+CRC-32 over header and entries. Per entry: build id, name, first sector, file
+size, version, flags, target, image offset, code and RW size, for model A the
+bases its RO words carry and its RW slot, and the state (signed, verified at
+install). **An update writes the copy that does not hold the current index**
+(erase + program + read back); at mount the valid copy with the newer
+sequence number wins. A power cut during any update leaves the previous index
+in force. A RAM copy of the index lives in the pool (runtime-owned).
+
+**Every change is copy-then-commit**: a file is written into free sectors,
+verified in place, and only then entered in the index (replacing an older
+build of the same name in the same commit); an uninstall is an index update.
+Space no entry covers is free -- what a cut left half-written is free again.
+
+**Code models.**
+- **B**: stored exactly as signed; the build id and the signature cover the
+  bytes that run; moved by a copy; any number of instances share it (RW per
+  instance from the pool).
+- **A**: the RO words are relocated while the file is written -- code words to
+  its flash address, RW words to a **fixed RW address at the top of the
+  pool** (`pool end - aoff`): at mount the runtime reserves the area every
+  installed model-A module's RW needs (the first block of an empty pool lands
+  at its very top). The entry records the bases, so a reader that subtracts
+  them gives back the signed file: that is how the copy is verified in place,
+  loaded into RAM when it cannot run in place, and read as the source of a
+  move. Model A installed after the mount loads into RAM until the next boot
+  (`xip_ready` false); a second instance loads into RAM (the flash copy is
+  bound to one RW); a firmware whose pool moved re-relocates a fresh copy on
+  the next load. The RO list must be sorted (pexlink always wrote it so; the
+  install checks). Model B is what to install; model A works.
+- `RAM_ONLY` files are refused; `XIP_OK` is informational.
+
+**Compaction** (on demand, and by an install that finds enough free space
+but not in one run): entries in order of position slide down into the free
+space below them; one that runs from flash stays where it is. A slide by
+`d` sectors of a file of `n` may overlap its old place: sector `j` goes to
+`dst + j` in ascending order, which destroys source sector `j - d`, copied at
+step `j - d`. **Before such a step the index records a journal** (the entry,
+the destination, steps done = `j`, the new bases), so a resumed move
+(`pex_xip_mount`) redoes only steps whose source is intact; a move without
+overlap needs no journal. Model A is re-relocated as it is copied. The move
+ends with an index commit that points the entry at its new place.
+
+**Loading.** `pex_load_installed(name)` runs the normal loader over a reader
+of the flash copy, with the code pointer in place (nothing copied, RO
+relocations already applied) and RW from the pool; the CRC is checked over
+the original bytes on every load; the signature was checked at install.
+
+**Trust.** Installing verifies the file (CRC, signature, policy: an unsigned
+file is never installed on a signed-only device), then verifies the written
+copy again in place; `pex_xip_verify` repeats that at any time. An index
+copy damaged other than by a cut (a flipped bit) falls back to the older
+copy, which may name files whose sectors were reused since: such a module
+fails its CRC at load and is refused (uninstall it).
+
+**Tested.** On the build host (`pex/test/unit/pex_xip_unit.c`, ASan/UBSan):
+synthetic modules of any size, a power cut (a torn erase or program) at
+**every** flash operation of installs, replacements, uninstalls and an
+overlapping compaction, a second cut during the recovery, damaged index
+copies, a moved pool, and 3000 random operations with random cuts -- after
+each cut and reboot the index is the state before or after and every file
+verifies and loads (24,592 checks). In mcusim: the test hosts install and
+run in place on RP2350 (through ATRANS1) and RP2040, both code models
+(`run_sim.py`); the gateway firmware (`gw_sim.py`, scenario `xip`) with the
+simulator SIGKILLed during installs and during an overlapping compaction --
+every restart consistent, interrupted moves resumed.
+
+**Left for later**: `stack_hint` from a call graph; `DEPS`; fat files (§4.4);
+the raw `lua54_*` group; the planned HAL groups (gpio, i2c, spi, uart, pio,
+dma, timer, pwm, adc, crypto); async op replies (Q11); an install that does
+not block the loop (a state machine in `pex_poll`); growing the model-A RW
+area without a reboot; `require` searching `sd:/`.
+
+### 16.1 What 0.6 listed as left for XIP (for the record; all of it done in 0.7 except the last item)
 
 - `pex_install()` (stubbed: `PEX_ENOTSUP`): write a module into the PEX flash
   partition (0x3BC000, 256 KB) and keep the index there (build id -> offset,
@@ -978,6 +1163,22 @@ bound by TCP and flash). ~10 KB of the slot are left. Pool: see Q10.
   firmware vs VM; protected calls.
 - §10, §11: key handling and tool paths as built.
 - §13: Q10-Q12. §15: the gateway. §16: the XIP version.
+
+## 18. Changes in 0.7
+
+- §16 XIP implemented: the index (two copies, sequence numbers, a move
+  journal), copy-then-commit, model B as signed, model A relocated to its
+  flash address and a fixed RW slot at the pool's top, verification in place,
+  compaction with journalled overlapping moves; the runtime API
+  `pex_install(_mem)`, `pex_uninstall`, `pex_installed(_find/_json)`,
+  `pex_load_installed`, `pex_xip_verify/compact/stats/mount`, `pex_flash_t`;
+  `PEX_ENOSPC`.
+- §15.1 the gateway: the static 48 KB pool (Q10, the Lua arena 116 KB, from
+  measurements), the ATRANS1 window, the ops, `sd:/` (Q12), the budget and
+  the flash headroom.
+- §9 the Lua launcher: `pex.install`, `pex.installed`, `pex.uninstall`;
+  `pex.load` and `require` prefer the installed copy.
+- Q10 and Q12 decided.
 
 ## Appendix A. The v1 host API (generated)
 
