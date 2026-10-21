@@ -1987,12 +1987,16 @@ size_t lrt_vm_restart(bool resume, bool keep_status, char *dst, size_t cap) {
 size_t lrt_stats_json(char *dst, size_t cap) {
     size_t fail_last = 0, fail_count = 0;
     lheap_fail_stats(&fail_last, &fail_count);
+    lheap_stats_t st;
+    lheap_stats(&st);
     return (size_t)snprintf(dst, cap,
         "{\"arena_bytes\":%u,\"used\":%u,\"peak\":%u,\"largest_free\":%u,"
+        "\"free\":%u,\"blocks\":%u,\"free_blocks\":%u,"
         "\"alloc_fails\":%u,\"alloc_fail_last\":%u,\"hook_kills\":%lu,"
         "\"budget\":%d,\"slice_overruns\":%lu,\"slice_max_ms\":%d}",
         (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)lheap_peak(),
-        (unsigned)lheap_largest_free(), (unsigned)fail_count, (unsigned)fail_last,
+        (unsigned)st.largest_free, (unsigned)st.free_bytes, (unsigned)st.blocks,
+        (unsigned)st.free_blocks, (unsigned)fail_count, (unsigned)fail_last,
         (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET,
         (unsigned long)s_slice_overruns, SLICE_MAX_MS);
 }

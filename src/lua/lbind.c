@@ -21,6 +21,7 @@
 
 #include "lua/lbind.h"
 #include "lua/lrt.h"
+#include "lua/lheap.h"
 #include "api/api.h"
 #include "api/ops.h"
 #include "bt/registry.h"
@@ -454,6 +455,33 @@ static int l_sys_unload(lua_State *L) {
 /* sys.collect() -- full collection, returns the live heap size. */
 static int l_sys_collect(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)lrt_collect());
+    return 1;
+}
+
+/* sys.heap() -> the Lua arena, as the allocator sees it (no collection):
+ *   {capacity=, used=, peak=, free=, largest_free=, blocks=, free_blocks=,
+ *    header=, alloc_fails=, alloc_fail_last=}
+ * `used` counts live payload bytes, `free` free payload bytes; the rest of
+ * the capacity is block headers. largest_free is the biggest single
+ * allocation that can succeed now: when it falls far below `free`, the arena
+ * is fragmented. alloc_fails counts requests that found no block (Lua then
+ * collects and retries, so most are not errors). One walk of the arena. */
+static int l_sys_heap(lua_State *L) {
+    lheap_stats_t st;
+    lheap_stats(&st);
+    size_t fail_last = 0, fail_count = 0;
+    lheap_fail_stats(&fail_last, &fail_count);
+    lua_createtable(L, 0, 10);
+    lua_pushinteger(L, (lua_Integer)lheap_capacity());   lua_setfield(L, -2, "capacity");
+    lua_pushinteger(L, (lua_Integer)lheap_used());       lua_setfield(L, -2, "used");
+    lua_pushinteger(L, (lua_Integer)lheap_peak());       lua_setfield(L, -2, "peak");
+    lua_pushinteger(L, (lua_Integer)st.free_bytes);      lua_setfield(L, -2, "free");
+    lua_pushinteger(L, (lua_Integer)st.largest_free);    lua_setfield(L, -2, "largest_free");
+    lua_pushinteger(L, (lua_Integer)st.blocks);          lua_setfield(L, -2, "blocks");
+    lua_pushinteger(L, (lua_Integer)st.free_blocks);     lua_setfield(L, -2, "free_blocks");
+    lua_pushinteger(L, (lua_Integer)lheap_header_size()); lua_setfield(L, -2, "header");
+    lua_pushinteger(L, (lua_Integer)fail_count);         lua_setfield(L, -2, "alloc_fails");
+    lua_pushinteger(L, (lua_Integer)fail_last);          lua_setfield(L, -2, "alloc_fail_last");
     return 1;
 }
 
@@ -1581,7 +1609,8 @@ void lbind_open_all(lua_State *L) {
         { "ms", l_sys_ms }, { "sleep", l_sys_sleep },
         { "time", l_sys_time }, { "hostname", l_sys_hostname },
         { "secret", l_sys_secret },
-        { "unload", l_sys_unload }, { "collect", l_sys_collect }, { NULL, NULL } };
+        { "unload", l_sys_unload }, { "collect", l_sys_collect },
+        { "heap", l_sys_heap }, { NULL, NULL } };
     set_table(L, "sys", sys);
 
 #if CONFIG_BT_LE

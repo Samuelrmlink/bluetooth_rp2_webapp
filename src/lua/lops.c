@@ -139,6 +139,19 @@ static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) 
     api_reply_ok(reply, ctx, id, buf);
 }
 
+/* script.stats: the runtime's figures (arena use, largest free block, failed
+ * allocations, slice overruns) and every script's state -- no collection,
+ * no filesystem walk, so cheap enough to poll every few seconds. */
+static void op_stats(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    size_t n = (size_t)snprintf(buf, BUF_SZ, "{\"runtime\":");
+    n += lrt_stats_json(buf + n, BUF_SZ - n);
+    n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"scripts\":");
+    n += lrt_list_json(buf + n, BUF_SZ - n);
+    snprintf(buf + n, BUF_SZ - n, "}");
+    api_reply_ok(reply, ctx, id, buf);
+}
+
 /* script.heap: the arena and every Lua object, after a full collection. */
 static void op_heap(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
@@ -335,6 +348,7 @@ static const op_def_t lua_ops_tbl[] = {
     { "script.list",   op_list },
     { "script.loaded", op_loaded },
     { "script.heap",   op_heap },
+    { "script.stats",  op_stats },
     { "script.arena",  op_arena },
     { "script.vm_restart", op_vm_restart },
     { "script.start",  op_start },
