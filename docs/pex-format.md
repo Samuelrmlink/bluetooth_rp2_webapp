@@ -1,6 +1,6 @@
 # PEX — portable executable modules for microcontrollers (DRAFT 0.1)
 
-Status: **planning draft 0.3** -- format and loader not implemented yet; all of Q1-Q9 decided; the PEX flash partition exists on the gateway (§14, done 2026-10-21). Decisions marked **[D]**,
+Status: **planning draft 0.4** (0.4: two code models, both relocatable to any address) -- format and loader not implemented yet; all of Q1-Q9 decided; the PEX flash partition exists on the gateway (§14, done 2026-10-21). Decisions marked **[D]**,
 open questions **[Q]** (collected at the end).
 
 ## 1. Why
@@ -77,7 +77,7 @@ major, target, size) before reading anything else.
 | 16 | 4 | `target_features` | bits: FPU-SP, FPU-DP, DSP, CMSE-secure, Hazard3 Zcb/Zcmp, ... required by the code |
 | 20 | 2 | `api_major` | host API major it was built against (§7) — must equal the firmware's |
 | 22 | 2 | `api_minor` | must be <= the firmware's |
-| 24 | 4 | `flags` | `XIP_OK` (code may run from flash), `RAM_ONLY`, `LUA_MODULE`, `APP`, `REENTRANT`, `NEEDS_SIG` |
+| 24 | 4 | `flags` | `PIC` (code model B, §6.2: text+ro are position-independent, RW is r9-relative), `XIP_OK` (code may run from flash), `RAM_ONLY`, `LUA_MODULE`, `APP`, `REENTRANT` (with `PIC`: several instances may share one copy of the code), `NEEDS_SIG` |
 | 28 | 4 | `module_version` | the module's own version, `major<<24 \| minor<<16 \| patch` |
 | 32 | 4 | `image_size` | bytes of the image as loaded (text + rodata + data, contiguous) |
 | 36 | 4 | `text_size` | executable part; starts at image offset 0 |
@@ -153,9 +153,26 @@ Rules:
 - Chip-specific code (PIO, DMA channels, ...) goes through the host API, not
   register pokes, so the same `armv8m-main-fp` module runs on any RP2350 board.
 
-## 6. Code model and relocations
+## 6. Code models: relocated or position-independent **[D]**
 
-**[D] Pre-linked on the host, one image, minimal relocations.**
+A PEX is **never built for a fixed address**. The format supports two code
+models; both produce an image that can be placed at any (4-byte aligned)
+address. The header's `PIC` flag says which one a file uses.
+
+| | A. relocated at install | B. position-independent (ROPI + RWPI) |
+|---|---|---|
+| `flags.PIC` | 0 | 1 |
+| what is patched at placement | every absolute word in the image (code/ro list + data list) and the GOT | **nothing in code/ro**; only the RW block (data list, GOT), which is in RAM |
+| the same flash bytes valid elsewhere | no -- moving/compacting rewrites them | **yes** -- move, copy, compact freely |
+| several instances, one copy of code | no | **yes** (one RW block per instance, `REENTRANT`) |
+| signature / build id covers | the image before patching | exactly the bytes that run |
+| register cost | none | r9 reserved as the RW base (static base) |
+| code size / speed | best | ~3-8% larger, slightly slower (more on M0+: r9 is a high register) |
+| toolchain | GCC or clang | clang (`-fropi -frwpi`); GCC only where it is proven (see §11) |
+| restrictions | none beyond §6.1 | no static initialisers in RW that point into code/ro (pexlink reports them; initialise at run time) |
+| preferred for | RAM loading, GCC builds, hot code | modules installed into the PEX flash partition |
+
+### 6.1 Model A: relocated at install
 
 - Built with the normal toolchain (`arm-none-eabi-gcc -mthumb -mcpu=... -Os
   -ffunction-sections -fdata-sections -fno-common`), linked with a PEX linker
@@ -163,26 +180,59 @@ Rules:
   and keeps relocations (`ld -q`/`--emit-relocs`).
 - `pexlink` (host tool, §11) then:
   - resolves everything internal at link time (all `BL`/`B` and PC-relative
-    loads inside the image are already final — they move with the image);
+    loads inside the image are already final -- they move with the image);
   - turns the remaining **absolute 32-bit references to the image itself**
     (`R_ARM_ABS32` from rodata/data pointer tables, vtables, function pointers)
-    into the `RELOC` list;
+    into the `RELOC` lists;
   - turns references to host symbols into **GOT** entries (§7);
   - **refuses** anything else (`MOVW/MOVT` absolute pairs, `R_ARM_THM_CALL` to
     an undefined symbol, TLS, ...), with a message saying which compiler flag
-    avoids it (e.g. `-mslow-flash-data`, `-mno-pic-data-is-text-relative`).
-- `RELOC` entries are `u32 image_offset` of a 32-bit word to which the loader
-  adds the image's run-time base. Split in two lists: words in the code/ro
-  part (patched before the image is written to flash) and words in data.
-- For RISC-V targets the same model with `R_RISCV_32` only; calls via `auipc`
-  are PC-relative and need nothing. **[Q2]**
+    avoids it (e.g. `-mslow-flash-data`).
+- `RELOC` holds two lists of `u32 image_offset` of 32-bit words to which the
+  loader adds a base: `RO` words (in text/ro, base = where the code is placed;
+  patched before the image is written to flash or RAM) and `RW` words (in
+  data, base = code base for pointers into code/ro, RW base for pointers into
+  data -- each entry carries which: bit 31 of the offset = "points into RW").
 
-Why not position-independent code (`-fPIC`/`-msingle-pic-base`): it costs a
-register and an indirection on every global access on M0+, toolchain support
-for v6-M PIC is patchy, and a pre-linked image with a relocation list is
-just as relocatable for a loader that places it once.
+### 6.2 Model B: position-independent (ROPI + RWPI)
 
-### 6.1 Where the image runs
+- Built with clang: `--target=thumbv8m.main-none-eabi -mcpu=cortex-m33
+  -mfloat-abi=softfp -fropi -frwpi` (M33) or
+  `--target=thumbv6m-none-eabi -mcpu=cortex-m0plus -fropi -frwpi` (M0+), same
+  `-ffunction-sections -fdata-sections -fno-common`; linked with the PEX
+  linker script for model B: text+ro from address 0, RW (data+bss+GOT) as a
+  separate segment also from address 0.
+- **ROPI**: code and read-only data reach each other PC-relative, so text+ro
+  is valid at any address with **no patching** -- the `RO` reloc list must be
+  empty (pexlink refuses the file otherwise).
+- **RWPI**: all writable data, and the GOT of host imports (§7), is reached
+  relative to **r9** (the static base). The loader allocates one RW block per
+  instance, copies `.data`, zeroes `.bss`, applies the `RW` reloc list (only
+  words in RW; pointers into code/ro get the code base) and fills the GOT.
+- **r9 rule**: every entry into a model-B module -- `pex_main`, exported Lua
+  functions, callbacks the module registered -- goes through the host's export
+  trampoline (§8), which saves the caller's r9, loads the instance's RW base
+  into r9, calls, and restores r9. The firmware itself is built normally (r9 is
+  an ordinary callee-saved register in AAPCS, so saving/restoring it is
+  enough); host API functions called *from* a module must not depend on r9 and
+  must preserve it (they are ordinary AAPCS functions: they do).
+- Restriction: a static initialiser in RW pointing into text/ro
+  (`static const char *names[] = {...}` that is not `const` itself,
+  `static void (*fn)(void) = handler;`) needs a run-time fix-up under ROPI;
+  clang emits it into an init routine or pexlink lists it in `RW` relocs --
+  either way it never touches flash.
+- The image's `build_id` and signature cover exactly the bytes that run, so an
+  installed model-B module can be re-verified in place at any time.
+
+### 6.3 Shared rules
+
+- For both models the image starts at offset 0 of its placement and must be
+  placed 4-byte aligned (8 if it contains `ldrd`/`strd` on 8-byte data); the
+  header's `entry` and every export are image offsets.
+- For RISC-V targets (later): model A with `R_RISCV_32` only; model B with
+  `-fPIC`-style GP/`auipc` addressing. **[Q2: later]**
+
+### 6.4 Where the image runs
 
 | Mode | Code (text+ro) | RW (data+bss) | RAM cost | When |
 |---|---|---|---|---|
@@ -194,9 +244,11 @@ just as relocatable for a loader that places it once.
   **carve a `PEX` partition out of LittleFS** (e.g. 256 KB) in
   `partitions.json` **[D, Q3]** -- after a full backup, see §14. The loader keeps an index there (build id ->
   placement), so a module installed once boots from flash with no copy.
-- Code is linked for address 0 and relocated to its flash address when
-  installed; reinstall/compaction rewrites it. Flash writes stop XIP briefly
-  (the firmware already handles this for LittleFS and OTA).
+- Model A code is relocated to its flash address when installed; moving it
+  (reinstall, compaction) rewrites it. Model B code is copied as-is and can be
+  moved by a plain copy; only its RW block (RAM) is set up per load. Flash
+  writes stop XIP briefly (the firmware already handles this for LittleFS and
+  OTA).
 - RP2350: **PEX code runs in the Secure world, like the rest of the firmware**
   **[D, Q4]** (a later format revision may move it to Non-secure behind CMSE
   veneers -- the `target_features` CMSE bit is there for that). Code in SRAM
@@ -302,6 +354,9 @@ without stranding modules.
 
 ## 8. Entry points and lifecycle
 
+- Every call into a module goes through the host's **export trampoline**: it
+  bumps the module's `active` count (§8 unload), and for a `PIC` module sets r9
+  to that instance's RW base (§6.2) and restores the caller's r9 on return.
 - `entry` points to `int pex_main(const pex_host_t *host, uint32_t reason, void *arg)`:
   - `reason = PEX_INIT` after linking, once per load: set up, register;
   - `PEX_LUA_OPEN` for a Lua module: push the module table (like
@@ -364,6 +419,12 @@ without stranding modules.
   firmware's export table, `pex_host_t`, entry reasons), a linker script per
   target, a CMake function `pex_add_module(name SOURCES ... TARGETS armv6m
   armv8m-main-fp)` that builds one `.pex` per target.
+- Compilers: model A with the pico-sdk's arm-none-eabi-gcc (as the firmware);
+  model B with clang (`-fropi -frwpi`; the pico-sdk already ships clang
+  toolchain files). `pex_add_module(... MODEL pic|reloc)` picks one; pic is the
+  default for modules meant for the flash partition. GCC's
+  `-msingle-pic-base -mpic-register=r9 -mno-pic-data-is-text-relative` may be
+  accepted for model B once a test proves it yields the same ROPI/RWPI shape.
 - `pexlink` (Python, no device code): ELF in -> `.pex` out; checks relocation
   types, emits GOT/veneers, writes header, sections, CRC, optional signature;
   `pexlink --dump file.pex` prints everything.
