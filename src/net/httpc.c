@@ -86,6 +86,7 @@ typedef struct req {
     void    *user;
     bool     done_called;
     bool     started;          /* the first connection has been begun (httpc_tick) */
+    void    *scope;            /* the request's memory (httpc_opts_t.scope) */
 #if CONFIG_NET_HTTP_TLS
     mbedtls_ssl_context *ssl;
     bool roots_held;           /* this handshake holds a reference on s_roots */
@@ -109,6 +110,10 @@ static void xfree(void *p) {
     if (!s_mem.free) { free(p); return; }
     s_mem.free(p);
 }
+/* The scope allocations go to (see httpc_alloc_fns.use): the request being
+ * worked on, or NULL (the long-term side) for what outlives requests. */
+static void *use(void *scope) { return s_mem.use ? s_mem.use(scope) : NULL; }
+
 static char *xstrdup(const char *s) {
     size_t n = strlen(s);
     char *d = xalloc(n + 1);
@@ -182,7 +187,9 @@ _Static_assert(sizeof(tlsblk_t) % 8 == 0, "tlsblk_t keeps the payload 8-aligned"
 static tlsblk_t *slot_take(tls_slot_t *sl, size_t cap, size_t total) {
     if (total > cap || sl->used) { return NULL; }
     if (!sl->mem) {
+        void *prev = use(NULL);          /* kept for the VM's life: not the request's */
         sl->mem = xalloc(cap);
+        use(prev);
         if (!sl->mem) { return NULL; }
         sl->cap = cap;
     }
@@ -258,13 +265,18 @@ static int s_roots_users;
 
 static int roots_ref(void) {
     if (s_roots_users == 0) {
+        /* Shared by every handshake that needs them, so not any one
+         * request's: the long-term side, while any holds them. */
+        void *prev = use(NULL);
+        int rc = 0;
         mbedtls_x509_crt_init(&s_roots);
-        for (size_t i = 0; i < CA_ROOTS_N; i++) {
-            int rc = mbedtls_x509_crt_parse_der_nocopy(&s_roots, ca_roots[i].der, ca_roots[i].len);
-            if (rc != 0) {
-                mbedtls_x509_crt_free(&s_roots);
-                return rc;
-            }
+        for (size_t i = 0; i < CA_ROOTS_N && rc == 0; i++) {
+            rc = mbedtls_x509_crt_parse_der_nocopy(&s_roots, ca_roots[i].der, ca_roots[i].len);
+        }
+        use(prev);
+        if (rc != 0) {
+            mbedtls_x509_crt_free(&s_roots);
+            return rc;
         }
         mbedtls_ssl_conf_ca_chain(&s_conf, &s_roots, NULL);
     }
@@ -685,6 +697,7 @@ static err_t cb_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
         if (p) { tcp_recved(pcb, p->tot_len); pbuf_free(p); }
         return ERR_OK;
     }
+    void *prev = use(r->scope);
     if (!p) {
         r->rx_closed = true;
     } else if (r->rx) {
@@ -694,19 +707,27 @@ static err_t cb_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
         r->rx_off = 0;
     }
     pump(r);
+    use(prev);
     return ERR_OK;
 }
 
 static err_t cb_sent(void *arg, struct tcp_pcb *pcb, u16_t len) {
     (void)pcb; (void)len;
     req_t *r = from_arg(arg);
-    if (r) { pump(r); }
+    if (r) { void *prev = use(r->scope); pump(r); use(prev); }
     return ERR_OK;
 }
 
+static void cb_err_on(req_t *r, err_t err);
 static void cb_err(void *arg, err_t err) {
     req_t *r = from_arg(arg);
     if (!r) { return; }
+    void *prev = use(r->scope);
+    cb_err_on(r, err);
+    use(prev);
+}
+
+static void cb_err_on(req_t *r, err_t err) {
     r->pcb = NULL;                 /* lwIP has freed it */
     if (r->state == HTTPC_CONNECT) { finish(r, HTTPC_ECONNECT, err == ERR_RST ? "refused" : "connect failed"); }
     else if (r->state == HTTPC_RECV && !r->parser.error) {
@@ -720,14 +741,25 @@ static void cb_err(void *arg, err_t err) {
     }
 }
 
+static err_t cb_connected_on(req_t *r, err_t err);
 static err_t cb_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
     (void)pcb;
     req_t *r = from_arg(arg);
     if (!r) { return ERR_OK; }
+    void *prev = use(r->scope);
+    err_t e = cb_connected_on(r, err);
+    use(prev);
+    return e;
+}
+
+static err_t cb_connected_on(req_t *r, err_t err) {
     if (err != ERR_OK) { finish(r, HTTPC_ECONNECT, "connect failed"); return ERR_OK; }
 #if CONFIG_NET_HTTP_TLS
     if (r->u.tls) {
-        if (!tls_init()) { finish(r, HTTPC_ETLS, "tls init failed"); return ERR_OK; }
+        void *prev = use(NULL);            /* the shared configuration outlives the request */
+        bool ok = tls_init();
+        use(prev);
+        if (!ok) { finish(r, HTTPC_ETLS, "tls init failed"); return ERR_OK; }
         r->ssl = mbedtls_calloc(1, sizeof(mbedtls_ssl_context));
         if (!r->ssl) { finish(r, HTTPC_ENOMEM, "out of memory for tls"); return ERR_OK; }
         mbedtls_ssl_init(r->ssl);
@@ -767,9 +799,10 @@ static void cb_dns(const char *name, const ip_addr_t *ip, void *arg) {
     (void)name;
     req_t *r = from_arg(arg);
     if (!r || r->state != HTTPC_DNS) { return; }
-    if (!ip) { finish(r, HTTPC_EDNS, "name not resolved"); return; }
-    r->ip = *ip;
-    do_connect(r);
+    void *prev = use(r->scope);
+    if (!ip) { finish(r, HTTPC_EDNS, "name not resolved"); }
+    else { r->ip = *ip; do_connect(r); }
+    use(prev);
 }
 #endif
 
@@ -831,6 +864,7 @@ int httpc_start(const httpc_opts_t *o, const httpc_sink_t *sink, void *user, htt
     if (slot < 0) { *err = HTTPC_ENOMEM; return -1; }
     req_t *r = xalloc(sizeof *r);
     if (!r) { *err = HTTPC_ENOMEM; return -1; }
+    r->scope = o->scope;
     if (++s_gen > 0x7FFFFF) { s_gen = 1; }
     r->id = (s_gen << 4) | slot;
     r->url = xstrdup(o->url);
@@ -892,21 +926,31 @@ bool httpc_info(int id, httpc_state_t *state, uint64_t *bytes, int64_t *total, i
     return true;
 }
 
+static void tick_one(req_t *r, uint32_t now);
+
 void httpc_tick(void) {
     uint32_t now = now_ms();
     for (int i = 0; i < HTTPC_MAX; i++) {
         req_t *r = s_req[i];
         if (!r) { continue; }
+        void *prev = use(r->scope);
+        tick_one(r, now);
+        use(prev);
+    }
+}
+
+static void tick_one(req_t *r, uint32_t now) {
+    {
         if (r->state == HTTPC_DONE || r->state == HTTPC_ERROR) {
             /* Finished: the owner frees it through httpc_cancel when it has
              * collected the result. */
-            continue;
+            return;
         }
-        if ((int32_t)(now - r->deadline_ms) >= 0) { finish(r, HTTPC_ETIMEOUT, "request timed out"); continue; }
+        if ((int32_t)(now - r->deadline_ms) >= 0) { finish(r, HTTPC_ETIMEOUT, "request timed out"); return; }
         if (!r->started) {
             r->started = true;
             start_connection(r);
-            continue;
+            return;
         }
         /* A frame the interface refused is gone, and lwIP leaves the
          * segment on `unsent` with nothing to retry it -- for a SYN that is
@@ -933,8 +977,22 @@ void httpc_reset(void) {
 #endif
 }
 
+#if CONFIG_NET_HTTP_TLS
+static bool reserve_slots(void);
+#endif
 bool httpc_reserve(void) {
 #if CONFIG_NET_HTTP_TLS
+    void *prev = use(NULL);            /* kept for the VM's life */
+    bool ok = reserve_slots();
+    use(prev);
+    return ok;
+#else
+    return false;
+#endif
+}
+
+#if CONFIG_NET_HTTP_TLS
+static bool reserve_slots(void) {
     if (!s_slot_in.mem) {
         if (!(s_slot_in.mem = xalloc(TLS_SLOT_IN))) { return false; }
         s_slot_in.cap = TLS_SLOT_IN;
@@ -944,10 +1002,8 @@ bool httpc_reserve(void) {
         s_slot_out.cap = TLS_SLOT_OUT;
     }
     return true;
-#else
-    return false;
-#endif
 }
+#endif
 
 bool httpc_unreserve(void) {
 #if CONFIG_NET_HTTP_TLS

@@ -472,7 +472,7 @@ static int l_sys_heap(lua_State *L) {
     lheap_stats(&st);
     size_t fail_last = 0, fail_count = 0;
     lheap_fail_stats(&fail_last, &fail_count);
-    lua_createtable(L, 0, 10);
+    lua_createtable(L, 0, 15);
     lua_pushinteger(L, (lua_Integer)lheap_capacity());   lua_setfield(L, -2, "capacity");
     lua_pushinteger(L, (lua_Integer)lheap_used());       lua_setfield(L, -2, "used");
     lua_pushinteger(L, (lua_Integer)lheap_peak());       lua_setfield(L, -2, "peak");
@@ -483,6 +483,22 @@ static int l_sys_heap(lua_State *L) {
     lua_pushinteger(L, (lua_Integer)lheap_header_size()); lua_setfield(L, -2, "header");
     lua_pushinteger(L, (lua_Integer)fail_count);         lua_setfield(L, -2, "alloc_fails");
     lua_pushinteger(L, (lua_Integer)fail_last);          lua_setfield(L, -2, "alloc_fail_last");
+    /* By lifetime: the largest free block is the gap between the scripts'
+     * data (bottom) and the long-lived side (top); the rest are holes. */
+    lua_pushinteger(L, (lua_Integer)st.largest_free_low);  lua_setfield(L, -2, "largest_free_low");
+    lua_pushinteger(L, (lua_Integer)st.largest_free_high); lua_setfield(L, -2, "largest_free_high");
+    lua_pushinteger(L, (lua_Integer)st.free_low);          lua_setfield(L, -2, "free_low");
+    lua_pushinteger(L, (lua_Integer)st.free_high);         lua_setfield(L, -2, "free_high");
+    lheap_scratch_stats_t sc;
+    lheap_scratch_stats(&sc);
+    lua_createtable(L, 0, 6);
+    lua_pushinteger(L, (lua_Integer)sc.active);     lua_setfield(L, -2, "active");
+    lua_pushinteger(L, (lua_Integer)sc.bytes);      lua_setfield(L, -2, "bytes");
+    lua_pushinteger(L, (lua_Integer)sc.bytes_peak); lua_setfield(L, -2, "bytes_peak");
+    lua_pushinteger(L, (lua_Integer)sc.live_peak);  lua_setfield(L, -2, "live_peak");
+    lua_pushinteger(L, (lua_Integer)sc.page_fails); lua_setfield(L, -2, "page_fails");
+    lua_pushinteger(L, (lua_Integer)sc.runs);       lua_setfield(L, -2, "runs");
+    lua_setfield(L, -2, "scratch");
     return 1;
 }
 

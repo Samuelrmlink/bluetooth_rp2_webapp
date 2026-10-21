@@ -95,6 +95,9 @@ size_t lrt_loaded_json(char *dst, size_t cap);
  * past the last slot, 0 for an empty slot, 1 with `out` filled. */
 typedef struct { uint32_t arena_bytes, used, peak, hook_kills, slice_overruns, running; } lrt_stats_t;
 void lrt_stats(lrt_stats_t *out);
+/* The arena by lifetime: both sides' free space and largest hole, the gap
+ * between them, the short-term scratches (JSON object). */
+size_t lrt_mem_json(char *dst, size_t cap);
 /* Diagnostics (script.heap / script.arena) and a Lua-only restart. */
 size_t lrt_heap_json(char *dst, size_t cap);
 size_t lrt_arena_json(long offset, long len, char *dst, size_t cap);

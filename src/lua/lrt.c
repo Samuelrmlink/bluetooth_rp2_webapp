@@ -2084,6 +2084,26 @@ size_t lrt_stats_json(char *dst, size_t cap) {
         (unsigned long)s_slice_overruns, SLICE_MAX_MS);
 }
 
+/* The arena by lifetime (sys.info "lua_mem", script.stats "mem"): the gap
+ * between the two sides, the holes on each side, and the short-term
+ * scratches (one per HTTP request). */
+size_t lrt_mem_json(char *dst, size_t cap) {
+    lheap_stats_t st;
+    lheap_stats(&st);
+    lheap_scratch_stats_t sc;
+    lheap_scratch_stats(&sc);
+    return (size_t)snprintf(dst, cap,
+        "{\"arena\":%u,\"used\":%u,\"free\":%u,\"largest_free\":%u,\"blocks\":%u,"
+        "\"low\":{\"free\":%u,\"largest_free\":%u},\"high\":{\"free\":%u,\"largest_free\":%u},"
+        "\"gap_at\":%u,\"scratch\":{\"active\":%u,\"pages\":%u,\"bytes\":%u,\"live\":%u,"
+        "\"bytes_peak\":%u,\"live_peak\":%u,\"page_fails\":%u,\"runs\":%u}}",
+        (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)st.free_bytes, (unsigned)st.largest_free,
+        (unsigned)st.blocks, (unsigned)st.free_low, (unsigned)st.largest_free_low, (unsigned)st.free_high,
+        (unsigned)st.largest_free_high, (unsigned)st.gap_offset, (unsigned)sc.active, (unsigned)sc.pages,
+        (unsigned)sc.bytes, (unsigned)sc.live, (unsigned)sc.bytes_peak, (unsigned)sc.live_peak,
+        (unsigned)sc.page_fails, (unsigned)sc.runs);
+}
+
 void lrt_stats(lrt_stats_t *out) {
     out->arena_bytes = (uint32_t)lheap_capacity();
     out->used = (uint32_t)lheap_used();

@@ -57,12 +57,19 @@ typedef struct {
     uint32_t timeout_ms;       /* the whole request, redirects included */
     uint8_t follow;            /* redirects to follow */
     bool insecure;             /* https without certificate verification */
+    void *scope;               /* where the request's memory goes (alloc fns' use()); may be NULL */
 } httpc_opts_t;
 
 typedef struct {
     void *(*alloc)(size_t n);  /* zeroed */
     void  (*free)(void *p);
     void  (*stat)(size_t *used, size_t *largest_free);   /* for diagnostics; may be NULL */
+    /* Make `scope` the place alloc() puts memory from now on and return the
+     * previous one (NULL: the long-term side). The client sets each
+     * request's scope while it works on that request -- its TLS session,
+     * the sink's buffers -- and NULL for what outlives requests (the record
+     * buffers, the trusted roots). May be NULL: one place for everything. */
+    void *(*use)(void *scope);
 } httpc_alloc_fns;
 void httpc_set_alloc(const httpc_alloc_fns *fns);
 

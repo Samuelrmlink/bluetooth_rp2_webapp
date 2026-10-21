@@ -33,6 +33,7 @@
 #include "autoconf.h"
 #if CONFIG_LUA_ENABLE
 #include "lua/lbind.h"
+#include "lua/lrt.h"
 #endif
 
 /* One scratch buffer: every caller runs from the single cooperative loop, one
@@ -249,14 +250,20 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
     ops_modules_json(mods, sizeof(mods));
     char fsj[256];
     fs_migrate_json(fsj, sizeof fsj);
-    char result[1024];
+    /* The Lua arena by lifetime (lrt_mem_json): both sides and the gap,
+     * the short-term scratches. */
+    char memj[400] = "null";
+#if CONFIG_LUA_ENABLE
+    lrt_mem_json(memj, sizeof memj);
+#endif
+    static char result[1536];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
              "\"watchdog_reboot\":%s,\"radio_wait_max_us\":%lu,"
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
-             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s}",
+             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s,\"lua_mem\":%s}",
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
               * because a device reached over WireGuard has no RTT, and a
@@ -283,7 +290,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              (unsigned long)stackmark_max_used(),
              /* The mounted LittleFS, its migration (fs_migrate.h) and the
               * PEX partition it makes room for. */
-             fsj);
+             fsj, memj);
     api_reply_ok(reply, ctx, id, result);
 }
 

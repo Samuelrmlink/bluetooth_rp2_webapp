@@ -188,14 +188,14 @@ dates are checked once the clock is set (`sys.time()` ~= nil, SNTP); before
 that they are not, rather than failing every handshake on a board that has not
 heard from a time server yet. `insecure = true` skips verification entirely.
 
-**Memory.** Every request, its buffers and its TLS session come from the *top*
-of the Lua arena (`lheap_alloc_high`), so they sit above everything Lua packs
-from the bottom. A TLS session needs a 16 KiB receive record buffer (servers --
+**Memory.** Every request, its buffers and its TLS session come from the
+request's own scratch (§8: pages from the *top* of the Lua arena, given back
+together when the request is released), so they sit above everything Lua packs
+from the bottom and never between blocks that outlive the request. A TLS session needs a 16 KiB receive record buffer (servers --
 Google's included -- ignore `max_fragment_length`) and a 4 KiB send buffer,
 each one contiguous block, and a script that has run for a while leaves the
-first-fit arena in pieces (measured: 51 KB free, no 17 KB hole). So the first
-HTTPS request **reserves one pair, 22.5 KB, and keeps it for the life of the Lua
-VM** (`http.stats().tls_reserved`); a second session at the same time takes
+first-fit arena in pieces (measured: 51 KB free, no 17 KB hole). So **one pair, 22.5 KB, is reserved when the Lua VM starts (at the very top of
+the empty arena) and kept for its life** (`http.stats().tls_reserved`); a second session at the same time takes
 its buffers from the arena like everything else. The reservation gives way to
 scripts: `http.reserve(false)` returns it while no HTTPS is needed, and a Lua
 allocation that fails even after the emergency collection frees it (if idle)
@@ -321,6 +321,23 @@ Two placements:
   then never lies interleaved with the scripts' long-lived data; a module
   dropped with `sys.unload` gives its space back to the free middle in one
   piece instead of leaving holes between objects created while it was loaded.
+
+Memory is kept apart **by lifetime** rather than made movable (the PEX spec,
+`docs/pex-format.md` §7.2, applies the same rule to native modules):
+
+| lifetime | where | what |
+|---|---|---|
+| the VM's | the very top, reserved at VM start | the TLS record buffers (22.5 KB; they still give way to a script that runs out, and the next HTTPS request takes them back) |
+| a module's | the top, below them (high placement) | every module `require()` loads; the module cache table is never placed high |
+| one request | a **scratch**: 2 KB pages from the top, all given back when the request ends | the HTTP client's copy of the request, the TLS session and mbedTLS's handshake temporaries, response headers and body, a LittleFS file buffer -- everything `http.start` to collection allocates; inside a page the same allocator runs, so a handshake's alloc-free-alloc reuses it, and an emptied page goes back at once |
+| the scripts' objects | the bottom (first fit) | Lua's tables, strings, closures; strings, userdata and threads -- and a block that has to move to grow -- always from the bottom |
+
+The trusted roots (shared by concurrent handshakes) are long-term while any
+handshake holds them. `sys.heap()` and `sys.info.lua_mem` report the two sides
+separately: the largest free block is the gap between them, and the free space
+and largest hole below it (`largest_free_low`) and above it
+(`largest_free_high`) are what each side has lost to holes; `scratch` gives the
+pages in use, the high-water marks and failed page requests.
 
 A cached module (`cache/<module>.luac`) is **streamed** into `lua_load` from
 LittleFS in 256-byte pieces; it used to be read whole into a buffer first,
