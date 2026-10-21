@@ -298,6 +298,17 @@ writeback = true
 """
 
 
+# An empty socket: the breakout drives card detect (GP9) low without a card.
+NO_CARD = """
+[[device]]
+type = "button"
+name = "sd_detect"
+pin = 9
+released = "low"
+stdin = false
+"""
+
+
 class Harness:
     def __init__(self, a):
         self.a = a
@@ -337,7 +348,7 @@ class Harness:
             reboot='reboot = "flash_update:Main A"' if tbyb else "",
             pt=pt or self.new_pt, wifi=os.path.join(self.a.new, "btgw_wifi_firmware.bin"), flash=flash, elf=elf,
             extra_images=extra_images, port=self.port, time=time_,
-            card=CARD.format(img=card, extra=card_extra) if card else ""))
+            card=CARD.format(img=card, extra=card_extra) if card else NO_CARD))
         return t
 
     def sim(self, toml):
