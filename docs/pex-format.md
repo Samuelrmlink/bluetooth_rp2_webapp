@@ -259,7 +259,7 @@ Each group is its own `major.minor`; a module imports only the groups it uses,
 and a firmware may omit groups (a build without SD has no `sd_*` symbols: weak
 imports become 0 and the module checks `pex_has(group)`).
 
-### 7.2 Lua from native code: full C API, curated API, or both? **[Q5 -- analysis]**
+### 7.2 Lua from native code: full C API, curated API, or both? **[D, Q5: option C]**
 
 **A. Export the whole Lua C API** (`lua_*`, `luaL_*`, as `lua.h`/`lauxlib.h`)
 
@@ -435,7 +435,7 @@ Steps:
   writes, but costs RAM — the thing we are short of).
 - ~~[Q4]~~ **[D: Secure world for now]** RP2350 Secure/Non-secure: run PEX code Secure like the firmware, or
   Non-secure behind the host API (real isolation, more work, CMSE veneers)?
-- **[Q5]** The Lua C API is large and tied to `luaconf.h` (64-bit integers
+- ~~[Q5]~~ **[D: option C -- curated `pexlua` first, the raw API later as its own exact-match group]** The Lua C API is large and tied to `luaconf.h` (64-bit integers
   today). Export it whole, or a smaller curated `pexlua` API that survives a
   later switch to 32-bit Lua numbers? -> trade-offs in §7.2; recommendation C
   (curated `pexlua` first, raw API later as its own exact-match group).
