@@ -56,6 +56,8 @@ add_executable(btgw
     src/net/http.c
     src/net/ws.c
     src/fs/fs.c
+    src/fs/fs_migrate.c
+    src/ota/crc32.c
     src/util/inflate.c
     src/fs/littlefs/lfs.c
     src/fs/littlefs/lfs_util.c
@@ -64,6 +66,9 @@ add_executable(btgw
     src/util/libc_slim.c
     src/util/stackmark.c
 )
+
+# Runs once per board (the pre-PEX filesystem move, fs_migrate.h): size over speed.
+set_property(SOURCE src/fs/fs_migrate.c APPEND PROPERTY COMPILE_OPTIONS -Os)
 
 target_include_directories(btgw PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/include
@@ -251,7 +256,7 @@ if(CONFIG_OTA)
     target_sources(btgw PRIVATE
         src/ota/cbor.c src/ota/smp.c src/ota/smp_udp.c src/ota/ota_slot.c
         src/ota/img_mgmt.c src/ota/os_mgmt.c src/ota/fs_mgmt.c src/ota/stat_mgmt.c
-        src/ota/crc32.c src/ota/ota_ops.c)
+        src/ota/ota_ops.c)
     if(NOT CONFIG_PROTO_ANKER_CRYPTO)
         target_sources(btgw PRIVATE src/crypto/sha256.c)
     endif()
