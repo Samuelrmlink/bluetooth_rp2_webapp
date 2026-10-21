@@ -113,6 +113,7 @@ static void finish(req_t *r, int rc) {
     pex_mod_t *m = r->mod;
     pex_fs_cb cb = r->cb;
     void *arg = r->arg;
+    if (r->op == Q_WRITE && r->buf) { pex_free(r->buf); }     /* the copy pex_fs_write made of the data */
     pex_free(r);
     if (cb) { pex_call(m, (uint32_t)(uintptr_t)cb, (uint32_t)(uintptr_t)arg, (uint32_t)rc, 0, 0); }
 }
