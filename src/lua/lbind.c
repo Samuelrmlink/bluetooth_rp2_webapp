@@ -486,6 +486,20 @@ static int l_sys_heap(lua_State *L) {
     return 1;
 }
 
+/* sys.restart_vm() -> true. Asks for the Lua VM to be rebuilt on the next
+ * main-loop pass (not now: this script is running): every script stopped, the
+ * arena reset, and the scripts that were running started again -- what a
+ * reboot does for Lua, without dropping Wi-Fi or Bluetooth. Lua never moves
+ * an object, so this is the one way to put a long-running set of scripts'
+ * arena back in one piece; a script asks for it when it is idle and finds the
+ * free space too fragmented, after saving whatever must survive (nothing in
+ * the arena does). Yield after asking (sys.sleep): the restart happens then. */
+static int l_sys_restart_vm(lua_State *L) {
+    lrt_request_vm_restart();
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 /* sys.time() -> Unix seconds once SNTP has set the clock, else nil. */
 static int l_sys_time(lua_State *L) {
     if (!sntp_time_valid()) { lua_pushnil(L); return 1; }
@@ -1682,7 +1696,7 @@ void lbind_open_all(lua_State *L) {
         { "time", l_sys_time }, { "hostname", l_sys_hostname },
         { "secret", l_sys_secret },
         { "unload", l_sys_unload }, { "collect", l_sys_collect },
-        { "heap", l_sys_heap }, { NULL, NULL } };
+        { "heap", l_sys_heap }, { "restart_vm", l_sys_restart_vm }, { NULL, NULL } };
     set_table(L, "sys", sys);
 
 #if CONFIG_BT_LE

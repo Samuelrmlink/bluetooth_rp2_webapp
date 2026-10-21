@@ -83,6 +83,9 @@ size_t lrt_list_json(char *dst, size_t cap);
  * file's new JSON. */
 bool lrt_autostart_set(const char *name, bool enabled, char *out, size_t cap, const char **err);
 size_t lrt_stats_json(char *dst, size_t cap);
+/* sys.restart_vm(): the VM is rebuilt on the next lrt_tick, the running
+ * scripts started again in the fresh arena (see lrt_vm_restart). */
+void lrt_request_vm_restart(void);
 /* script.loaded: every running script and resident module, with the tier and
  * hash it was compiled from and the hash of its file now. */
 size_t lrt_loaded_json(char *dst, size_t cap);

@@ -1214,6 +1214,9 @@ bool lrt_start(const char *name, const char **err) {
  * does that (lrt_vm_restart) -- unless something has started meanwhile. */
 static bool s_defrag_due;
 static bool s_restarting;
+static bool s_restart_asked;      /* sys.restart_vm(): on the next tick */
+
+void lrt_request_vm_restart(void) { s_restart_asked = true; }
 
 static bool any_running(const script_t *except) {
     for (int i = 0; i < MAX_SCRIPTS; i++) {
@@ -1510,6 +1513,15 @@ void lrt_tick(void) {
             lrt_vm_restart(false, true, r, sizeof r);   /* keep a dead script's error */
             return;
         }
+    }
+    if (s_restart_asked) {
+        /* Asked for by a script (sys.restart_vm): here, between slices, where
+         * no script is running. The running ones are started again. */
+        s_restart_asked = false;
+        static char r2[256];
+        printf("lua: VM restart asked for by a script\n");
+        lrt_vm_restart(true, false, r2, sizeof r2);
+        return;
     }
     cache_tick();
     lbind_pairing_pump();
