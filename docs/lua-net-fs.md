@@ -280,6 +280,54 @@ the file's new contents.
   server is `pool.ntp.org`, or `cfg/ntp.json` `{"server":"..."}`; polled hourly.
 * `sys.hostname()` -> the mDNS / DHCP host name (`mdns.hostname()`).
 
+* `sys.heap()` -> the arena as the allocator sees it, without a collection:
+  `{capacity, used, peak, free, largest_free, blocks, free_blocks, header,
+  alloc_fails, alloc_fail_last}`. `used` and `free` are payload bytes (the
+  rest of `capacity` is block headers, one word each); `largest_free` is the
+  biggest allocation that can succeed right now -- far below `free` means the
+  arena is in pieces. `alloc_fails` counts requests that found no block (Lua
+  then collects and retries, so most are not errors). One walk of the arena.
+
+## 8. The Lua arena
+
+`src/lua/lheap.c`: one static block (`CONFIG_LUA_HEAP_KB`, 176 KB), address-
+ordered first fit with boundary tags. Each block starts with one word (its size
+and two flags: free, previous block free); a free block also has a footer and
+the links of an address-ordered free list. A live block costs 4 bytes (the
+first version's header was 16: on the iTi backend's ~1300 objects that was
+21 KB of headers), free coalesces with both neighbours in O(1), and an
+allocation scans only the free blocks, lowest address first, so live data packs
+at the bottom and the free space stays in one piece above it.
+
+Two placements:
+
+* **low** (first fit from the bottom): Lua's objects;
+* **high** (the top of the highest free block that fits): what is allocated and
+  freed as a unit -- the HTTP client's requests and TLS buffers
+  (`lheap_alloc_high`), and **every module `require()` loads**: the chunk is
+  loaded and its main chunk run with `lheap_high_begin/end` open. Module code
+  then never lies interleaved with the scripts' long-lived data; a module
+  dropped with `sys.unload` gives its space back to the free middle in one
+  piece instead of leaving holes between objects created while it was loaded.
+
+A cached module (`cache/<module>.luac`) is **streamed** into `lua_load` from
+LittleFS in 256-byte pieces; it used to be read whole into a buffer first,
+which needed one free block the size of the bytecode on top of the loaded code
+-- often not there in an arena that had run for a while ("not enough memory to
+load it" with tens of KB free in smaller pieces).
+
+The **collector** runs close behind: pause 110 %, step multiplier 400 %, 2 KB
+steps (`LRT_GC_*` in `lrt.c`). Lua's default (pause 200 %) starts a cycle only
+when the heap has doubled since the last; with ~80 KB live that let garbage
+fill the arena and everything made meanwhile went above it.
+
+`script.stats` (WebSocket / `POST /api/op`) returns the runtime figures (arena
+used, peak, free, largest free block, blocks, failed allocations, slice
+overruns) and every script's state, without a collection or a filesystem walk;
+`script.heap` is the full census (after a collection: the free-block histogram,
+every object by type, the largest tables). `tools/lua_heapdump.py` reads raw
+dumps of either block format.
+
 ## Notes for whoever changes this
 
 * **Modules and memory.** When a module's cached bytecode cannot be loaded
@@ -358,7 +406,8 @@ the file's new contents.
 * `test/host/httpc_parse_test.c` -- the response parser at every split point, URLs, redirects.
 * `test/host/sd_stack_test.c` (jobs section) -- the SD jobs through the real FatFs on both buses.
 * `test/host/tls_mem_test.c` -- the mbedTLS configuration against a local `openssl s_server`.
-* `test/host/heap_test.c` (alloc from the top) -- `lheap_alloc_high`.
+* `test/host/heap_test.c` -- the arena: every invariant after every operation,
+  a fuzz, alloc from the top, high placement of a unit, one-word overhead.
 * `test/host/lfile_sd_test.c` -- `lfile.c` on the SD card end to end (binding, yields, jobs, worker, FatFs).
 * `test/host/lhttp_sd_test.c` -- `to_file` onto the SD card through `lhttp.c`'s state machine.
 * `test/sim/lua_net_fs.py` -- the firmware in mcusim over USB-NCM: `file`, `json`,
