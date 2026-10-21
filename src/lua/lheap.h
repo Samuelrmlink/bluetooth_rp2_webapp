@@ -47,6 +47,11 @@ void *lheap_alloc_high(size_t want);
  * while it ran). lheap_init closes it. */
 void  lheap_high_begin(void);
 void  lheap_high_end(void);
+/* Close it for a moment, whatever the nesting (returns what to resume): for a
+ * long-lived structure touched while a unit loads -- require()'s module cache
+ * gets the NESTED module's entry while the outer one's main chunk runs. */
+int   lheap_high_suspend(void);
+void  lheap_high_resume(int depth);
 /* First fit from the bottom whatever the placement: for what a unit creates
  * but does not own -- strings (interned, so a module's constant is the same
  * object as the value some long-lived table holds), userdata, threads. A

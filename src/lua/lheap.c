@@ -226,6 +226,8 @@ void *lheap_alloc_low(size_t want) { return alloc_low(want); }
 
 void lheap_high_begin(void) { s_high++; }
 void lheap_high_end(void) { if (s_high > 0) { s_high--; } }
+int  lheap_high_suspend(void) { int d = s_high; s_high = 0; return d; }
+void lheap_high_resume(int depth) { s_high = depth; }
 
 void lheap_free(void *p) {
     if (!p) {

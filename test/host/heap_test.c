@@ -371,6 +371,15 @@ static void t_high_mode(void) {
           "a block that moves to grow is placed from the bottom");
     void *fresh = lheap_realloc(NULL, 5, 100);
     CHECK((uint8_t *)fresh > (uint8_t *)lheap_base() + lheap_capacity() / 2, "a new block still from the top");
+    lheap_high_begin();                 /* nested */
+    int depth = lheap_high_suspend();
+    void *low2 = lheap_alloc(40);
+    CHECK((uint8_t *)low2 < (uint8_t *)lheap_base() + lheap_capacity() / 2, "suspended: from the bottom");
+    lheap_high_resume(depth);
+    void *hi2 = lheap_alloc(40);
+    CHECK((uint8_t *)hi2 > (uint8_t *)lheap_base() + lheap_capacity() / 2, "resumed: from the top again");
+    lheap_high_end();
+    lheap_free(low2); lheap_free(hi2);
     lheap_high_end();
     lheap_free(s1); lheap_free(moved); lheap_free(fresh); lheap_free(wall);
     ck();

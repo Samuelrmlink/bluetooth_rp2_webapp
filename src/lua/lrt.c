@@ -883,9 +883,13 @@ static int l_require(lua_State *Ls) {
 
     if (lua_getfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE) != LUA_TTABLE) {
         lua_pop(Ls, 1);
-        lua_newtable(Ls);
+        int hd = lheap_high_suspend();
+        /* Sized for a profile's worth of modules up front: grown later, its
+         * node array would be reallocated wherever the arena had room. */
+        lua_createtable(Ls, 0, 32);
         lua_pushvalue(Ls, -1);
         lua_setfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE);
+        lheap_high_resume(hd);
     }
     if (lua_getfield(Ls, -1, name) != LUA_TNIL) {
         if (module_is_current(name)) {
@@ -998,7 +1002,13 @@ static int l_require(lua_State *Ls) {
         lua_pushboolean(Ls, 1);      /* a module that returns nothing is still loaded */
     }
     lua_pushvalue(Ls, -1);
+    /* From the bottom even when this is a module required by another one's
+     * main chunk (whose high placement is still open): the cache outlives
+     * them both -- grown up there, its node array was an island in the space
+     * the modules gave back (found in a dump of the arena in mcusim). */
+    int hd = lheap_high_suspend();
     lua_setfield(Ls, -3, name);      /* cache[name] = module */
+    lheap_high_resume(hd);
     return 1;
 }
 
