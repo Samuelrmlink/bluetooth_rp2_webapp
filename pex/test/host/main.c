@@ -232,9 +232,9 @@ static void suite(const char *model) {
     if (m) {
         uint32_t r = pex_call0(m, sym(m, "imports_run"));
 #if PICO_RP2040
-        uint32_t want = 0x01 | 0x02 | 0x04 | 0x10 | 0x20 | 0x40;    /* NOBOARD */
+        uint32_t want = 0x01 | 0x02 | 0x04 | 0x10 | 0x20 | 0x40 | 0x80;    /* NOBOARD */
 #else
-        uint32_t want = 0x01 | 0x02 | 0x04 | 0x08 | 0x20 | 0x40;    /* BOARD */
+        uint32_t want = 0x01 | 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80;    /* BOARD */
 #endif
         result("imports.run", r == want, "mask 0x%02lx want 0x%02lx", (unsigned long)r, (unsigned long)want);
         result("imports.unload", pex_unload(m) == PEX_OK, NULL);

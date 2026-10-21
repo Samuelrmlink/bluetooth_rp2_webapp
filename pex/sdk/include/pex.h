@@ -110,6 +110,7 @@ extern "C" {
 #define PEX_EEXIST    (-17)
 #define PEX_ESTATE    (-18)
 #define PEX_EFAULT    (-19)   /* the module faulted earlier */
+#define PEX_EAGAIN    (-20)   /* would block: retry later, or pass a callback */
 
 typedef struct pex_host {
     uint32_t size;          /* sizeof(pex_host_t) as the host knows it */

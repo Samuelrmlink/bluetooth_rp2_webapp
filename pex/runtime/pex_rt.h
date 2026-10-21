@@ -24,6 +24,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#ifndef PEX_HOST_SIDE
+#define PEX_HOST_SIDE 1      /* pex_api.h: libc comes from <string.h> here */
+#endif
 #include "pex.h"
 
 #ifdef __cplusplus
@@ -42,7 +46,8 @@ typedef struct pex_group {
     const char *name;
 } pex_group_t;
 
-extern const pex_group_t pex_group_core, pex_group_log, pex_group_mem, pex_group_sched, pex_group_pex;
+extern const pex_group_t pex_group_core, pex_group_log, pex_group_mem, pex_group_sched, pex_group_pex,
+    pex_group_json;
 
 /* A host adds the optional groups it implements (board, lua, bt, fs, ...). */
 int pex_register_group(const pex_group_t *g);

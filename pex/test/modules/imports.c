@@ -13,6 +13,7 @@ PEX_WEAK_IMPORT(pex_board_uid);
 #define IMP_NOBOARD  (1u << 4)    /* board group absent and the slot is 0 */
 #define IMP_VERSION  (1u << 5)
 #define IMP_MEM      (1u << 6)
+#define IMP_JSON     (1u << 7)
 
 uint32_t imports_run(void) {
     uint32_t r = 0;
@@ -42,6 +43,20 @@ uint32_t imports_run(void) {
     }
     void *p = pex_malloc(100);
     if (p) { memset(p, 0, 100); pex_free(p); r |= IMP_MEM; }
+    int64_t v = 0;
+    char out[64];
+    pex_jw_t w;
+    pex_jw_init(&w, out, sizeof out);
+    pex_jw_obj(&w, NULL);
+    pex_jw_int(&w, "n", 7);
+    pex_jw_arr(&w, "l");
+    pex_jw_str(&w, NULL, "a");
+    pex_jw_end(&w);
+    pex_jw_end(&w);
+    if (pex_json_int("{\"x\":{\"y\":[1,42]}}", "x.y.1", &v) && v == 42 && pex_jw_finish(&w) > 0 &&
+        strcmp(out, "{\"n\":7,\"l\":[\"a\"]}") == 0) {
+        r |= IMP_JSON;
+    }
     pex_log(PEX_LOG_INFO, "imports: 0x%x", (unsigned)r);
     return r;
 }

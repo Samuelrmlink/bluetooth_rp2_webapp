@@ -8,12 +8,19 @@
     "major bump may change or remove them. Hash collisions fail the generator.",
     "'impl' names the host function when it differs from the exported name;",
     "'decl': false leaves a compiler helper (__aeabi_*) out of the header.",
-    "'types' is C emitted into pex_api.h ahead of the group's prototypes."
+    "'types' is C emitted into pex_api.h ahead of the group's prototypes.",
+    "'libc': true marks a C library function: declared for modules only (hosts have <string.h>)."
   ],
-  "api": {"major": 1, "minor": 0},
+  "api": {
+    "major": 1,
+    "minor": 0
+  },
   "groups": [
     {
-      "name": "core", "id": 1, "major": 1, "minor": 0,
+      "name": "core",
+      "id": 1,
+      "major": 1,
+      "minor": 0,
       "doc": "version and capability queries, time, libc string/memory helpers the compilers call implicitly",
       "types": [
         "#include <stddef.h>",
@@ -21,38 +28,163 @@
         "#include <stdarg.h>"
       ],
       "functions": [
-        {"name": "pex_api_version", "proto": "uint32_t pex_api_version(void)", "doc": "api_major << 16 | api_minor of the host"},
-        {"name": "pex_has", "proto": "uint32_t pex_has(uint32_t group)", "doc": "group major << 16 | minor if the host provides it, else 0"},
-        {"name": "pex_target", "proto": "uint32_t pex_target(void)", "doc": "the host's target id (spec section 5)"},
-        {"name": "pex_ms", "proto": "uint32_t pex_ms(void)", "doc": "milliseconds since boot (wraps)"},
-        {"name": "pex_us", "proto": "uint64_t pex_us(void)", "doc": "microseconds since boot"},
-        {"name": "pex_snprintf", "proto": "int pex_snprintf(char *dst, size_t cap, const char *fmt, ...)"},
-        {"name": "pex_vsnprintf", "proto": "int pex_vsnprintf(char *dst, size_t cap, const char *fmt, va_list ap)"},
-        {"name": "pex_assert_fail", "proto": "void pex_assert_fail(const char *expr, const char *file, int line)", "doc": "logs and returns: asserts never stop the host"},
-        {"name": "memcpy", "proto": "void *memcpy(void *dst, const void *src, size_t n)"},
-        {"name": "memmove", "proto": "void *memmove(void *dst, const void *src, size_t n)"},
-        {"name": "memset", "proto": "void *memset(void *dst, int c, size_t n)"},
-        {"name": "memcmp", "proto": "int memcmp(const void *a, const void *b, size_t n)"},
-        {"name": "strlen", "proto": "size_t strlen(const char *s)"},
-        {"name": "strcmp", "proto": "int strcmp(const char *a, const char *b)"},
-        {"name": "strncmp", "proto": "int strncmp(const char *a, const char *b, size_t n)"},
-        {"name": "strchr", "proto": "char *strchr(const char *s, int c)"},
-        {"name": "__aeabi_memcpy", "impl": "pexh_aeabi_memcpy", "decl": false, "proto": "void __aeabi_memcpy(void *dst, const void *src, size_t n)"},
-        {"name": "__aeabi_memcpy4", "impl": "pexh_aeabi_memcpy", "decl": false, "proto": "void __aeabi_memcpy4(void *dst, const void *src, size_t n)"},
-        {"name": "__aeabi_memcpy8", "impl": "pexh_aeabi_memcpy", "decl": false, "proto": "void __aeabi_memcpy8(void *dst, const void *src, size_t n)"},
-        {"name": "__aeabi_memmove", "impl": "pexh_aeabi_memmove", "decl": false, "proto": "void __aeabi_memmove(void *dst, const void *src, size_t n)"},
-        {"name": "__aeabi_memmove4", "impl": "pexh_aeabi_memmove", "decl": false, "proto": "void __aeabi_memmove4(void *dst, const void *src, size_t n)"},
-        {"name": "__aeabi_memmove8", "impl": "pexh_aeabi_memmove", "decl": false, "proto": "void __aeabi_memmove8(void *dst, const void *src, size_t n)"},
-        {"name": "__aeabi_memset", "impl": "pexh_aeabi_memset", "decl": false, "proto": "void __aeabi_memset(void *dst, size_t n, int c)"},
-        {"name": "__aeabi_memset4", "impl": "pexh_aeabi_memset", "decl": false, "proto": "void __aeabi_memset4(void *dst, size_t n, int c)"},
-        {"name": "__aeabi_memset8", "impl": "pexh_aeabi_memset", "decl": false, "proto": "void __aeabi_memset8(void *dst, size_t n, int c)"},
-        {"name": "__aeabi_memclr", "impl": "pexh_aeabi_memclr", "decl": false, "proto": "void __aeabi_memclr(void *dst, size_t n)"},
-        {"name": "__aeabi_memclr4", "impl": "pexh_aeabi_memclr", "decl": false, "proto": "void __aeabi_memclr4(void *dst, size_t n)"},
-        {"name": "__aeabi_memclr8", "impl": "pexh_aeabi_memclr", "decl": false, "proto": "void __aeabi_memclr8(void *dst, size_t n)"}
+        {
+          "name": "pex_api_version",
+          "proto": "uint32_t pex_api_version(void)",
+          "doc": "api_major << 16 | api_minor of the host"
+        },
+        {
+          "name": "pex_has",
+          "proto": "uint32_t pex_has(uint32_t group)",
+          "doc": "group major << 16 | minor if the host provides it, else 0"
+        },
+        {
+          "name": "pex_target",
+          "proto": "uint32_t pex_target(void)",
+          "doc": "the host's target id (spec section 5)"
+        },
+        {
+          "name": "pex_ms",
+          "proto": "uint32_t pex_ms(void)",
+          "doc": "milliseconds since boot (wraps)"
+        },
+        {
+          "name": "pex_us",
+          "proto": "uint64_t pex_us(void)",
+          "doc": "microseconds since boot"
+        },
+        {
+          "name": "pex_snprintf",
+          "proto": "int pex_snprintf(char *dst, size_t cap, const char *fmt, ...)"
+        },
+        {
+          "name": "pex_vsnprintf",
+          "proto": "int pex_vsnprintf(char *dst, size_t cap, const char *fmt, va_list ap)"
+        },
+        {
+          "name": "pex_assert_fail",
+          "proto": "void pex_assert_fail(const char *expr, const char *file, int line)",
+          "doc": "logs and returns: asserts never stop the host"
+        },
+        {
+          "name": "memcpy",
+          "proto": "void *memcpy(void *dst, const void *src, size_t n)",
+          "libc": true
+        },
+        {
+          "name": "memmove",
+          "proto": "void *memmove(void *dst, const void *src, size_t n)",
+          "libc": true
+        },
+        {
+          "name": "memset",
+          "proto": "void *memset(void *dst, int c, size_t n)",
+          "libc": true
+        },
+        {
+          "name": "memcmp",
+          "proto": "int memcmp(const void *a, const void *b, size_t n)",
+          "libc": true
+        },
+        {
+          "name": "strlen",
+          "proto": "size_t strlen(const char *s)",
+          "libc": true
+        },
+        {
+          "name": "strcmp",
+          "proto": "int strcmp(const char *a, const char *b)",
+          "libc": true
+        },
+        {
+          "name": "strncmp",
+          "proto": "int strncmp(const char *a, const char *b, size_t n)",
+          "libc": true
+        },
+        {
+          "name": "strchr",
+          "proto": "char *strchr(const char *s, int c)",
+          "libc": true
+        },
+        {
+          "name": "__aeabi_memcpy",
+          "impl": "pexh_aeabi_memcpy",
+          "decl": false,
+          "proto": "void __aeabi_memcpy(void *dst, const void *src, size_t n)"
+        },
+        {
+          "name": "__aeabi_memcpy4",
+          "impl": "pexh_aeabi_memcpy",
+          "decl": false,
+          "proto": "void __aeabi_memcpy4(void *dst, const void *src, size_t n)"
+        },
+        {
+          "name": "__aeabi_memcpy8",
+          "impl": "pexh_aeabi_memcpy",
+          "decl": false,
+          "proto": "void __aeabi_memcpy8(void *dst, const void *src, size_t n)"
+        },
+        {
+          "name": "__aeabi_memmove",
+          "impl": "pexh_aeabi_memmove",
+          "decl": false,
+          "proto": "void __aeabi_memmove(void *dst, const void *src, size_t n)"
+        },
+        {
+          "name": "__aeabi_memmove4",
+          "impl": "pexh_aeabi_memmove",
+          "decl": false,
+          "proto": "void __aeabi_memmove4(void *dst, const void *src, size_t n)"
+        },
+        {
+          "name": "__aeabi_memmove8",
+          "impl": "pexh_aeabi_memmove",
+          "decl": false,
+          "proto": "void __aeabi_memmove8(void *dst, const void *src, size_t n)"
+        },
+        {
+          "name": "__aeabi_memset",
+          "impl": "pexh_aeabi_memset",
+          "decl": false,
+          "proto": "void __aeabi_memset(void *dst, size_t n, int c)"
+        },
+        {
+          "name": "__aeabi_memset4",
+          "impl": "pexh_aeabi_memset",
+          "decl": false,
+          "proto": "void __aeabi_memset4(void *dst, size_t n, int c)"
+        },
+        {
+          "name": "__aeabi_memset8",
+          "impl": "pexh_aeabi_memset",
+          "decl": false,
+          "proto": "void __aeabi_memset8(void *dst, size_t n, int c)"
+        },
+        {
+          "name": "__aeabi_memclr",
+          "impl": "pexh_aeabi_memclr",
+          "decl": false,
+          "proto": "void __aeabi_memclr(void *dst, size_t n)"
+        },
+        {
+          "name": "__aeabi_memclr4",
+          "impl": "pexh_aeabi_memclr",
+          "decl": false,
+          "proto": "void __aeabi_memclr4(void *dst, size_t n)"
+        },
+        {
+          "name": "__aeabi_memclr8",
+          "impl": "pexh_aeabi_memclr",
+          "decl": false,
+          "proto": "void __aeabi_memclr8(void *dst, size_t n)"
+        }
       ]
     },
     {
-      "name": "log", "id": 2, "major": 1, "minor": 0,
+      "name": "log",
+      "id": 2,
+      "major": 1,
+      "minor": 0,
       "doc": "the host's log (UART/RTT/console), prefixed with the module's name",
       "types": [
         "#define PEX_LOG_ERR 0",
@@ -61,13 +193,25 @@
         "#define PEX_LOG_DEBUG 3"
       ],
       "functions": [
-        {"name": "pex_log", "proto": "void pex_log(int level, const char *fmt, ...)"},
-        {"name": "pex_logv", "proto": "void pex_logv(int level, const char *fmt, va_list ap)"},
-        {"name": "pex_log_hex", "proto": "void pex_log_hex(int level, const char *what, const void *data, size_t len)"}
+        {
+          "name": "pex_log",
+          "proto": "void pex_log(int level, const char *fmt, ...)"
+        },
+        {
+          "name": "pex_logv",
+          "proto": "void pex_logv(int level, const char *fmt, va_list ap)"
+        },
+        {
+          "name": "pex_log_hex",
+          "proto": "void pex_log_hex(int level, const char *what, const void *data, size_t len)"
+        }
       ]
     },
     {
-      "name": "mem", "id": 3, "major": 1, "minor": 0,
+      "name": "mem",
+      "id": 3,
+      "major": 1,
+      "minor": 0,
       "doc": "lifetime-separated memory (spec 7.2): long-term from the top of the PEX pool, LIFO scratch arenas from the bottom, fixed-size pools; all of a module's long-term blocks are freed at unload",
       "types": [
         "typedef struct pex_arena pex_arena_t;",
@@ -84,25 +228,78 @@
         "} pex_mem_stats_t;"
       ],
       "functions": [
-        {"name": "pex_alloc_long", "proto": "void *pex_alloc_long(size_t size)"},
-        {"name": "pex_alloc_ex", "proto": "void *pex_alloc_ex(size_t size, uint32_t flags)", "doc": "PEX_MEM_DMA: 32-byte aligned, never scratch"},
-        {"name": "pex_free", "proto": "void pex_free(void *p)"},
-        {"name": "pex_malloc", "proto": "void *pex_malloc(size_t size)"},
-        {"name": "pex_calloc", "proto": "void *pex_calloc(size_t n, size_t size)"},
-        {"name": "pex_realloc", "proto": "void *pex_realloc(void *p, size_t size)"},
-        {"name": "pex_scratch_begin", "proto": "pex_arena_t *pex_scratch_begin(size_t cap)", "doc": "reserve cap bytes from the scratch side; NULL if they do not fit"},
-        {"name": "pex_scratch_alloc", "proto": "void *pex_scratch_alloc(pex_arena_t *a, size_t size)", "doc": "bump allocation, 8-aligned; NULL when the arena is full"},
-        {"name": "pex_scratch_end", "proto": "int pex_scratch_end(pex_arena_t *a)", "doc": "frees the whole arena; arenas end in reverse order (PEX_EORDER otherwise)"},
-        {"name": "pex_scratch_avail", "proto": "size_t pex_scratch_avail(void)"},
-        {"name": "pex_pool_new", "proto": "pex_pool_t *pex_pool_new(size_t obj_size, uint32_t count)"},
-        {"name": "pex_pool_get", "proto": "void *pex_pool_get(pex_pool_t *p)"},
-        {"name": "pex_pool_put", "proto": "void pex_pool_put(pex_pool_t *p, void *obj)"},
-        {"name": "pex_pool_delete", "proto": "void pex_pool_delete(pex_pool_t *p)"},
-        {"name": "pex_mem_stats", "proto": "int pex_mem_stats(pex_mem_stats_t *out)", "doc": "the calling module's accounting plus the pool's"}
+        {
+          "name": "pex_alloc_long",
+          "proto": "void *pex_alloc_long(size_t size)"
+        },
+        {
+          "name": "pex_alloc_ex",
+          "proto": "void *pex_alloc_ex(size_t size, uint32_t flags)",
+          "doc": "PEX_MEM_DMA: 32-byte aligned, never scratch"
+        },
+        {
+          "name": "pex_free",
+          "proto": "void pex_free(void *p)"
+        },
+        {
+          "name": "pex_malloc",
+          "proto": "void *pex_malloc(size_t size)"
+        },
+        {
+          "name": "pex_calloc",
+          "proto": "void *pex_calloc(size_t n, size_t size)"
+        },
+        {
+          "name": "pex_realloc",
+          "proto": "void *pex_realloc(void *p, size_t size)"
+        },
+        {
+          "name": "pex_scratch_begin",
+          "proto": "pex_arena_t *pex_scratch_begin(size_t cap)",
+          "doc": "reserve cap bytes from the scratch side; NULL if they do not fit"
+        },
+        {
+          "name": "pex_scratch_alloc",
+          "proto": "void *pex_scratch_alloc(pex_arena_t *a, size_t size)",
+          "doc": "bump allocation, 8-aligned; NULL when the arena is full"
+        },
+        {
+          "name": "pex_scratch_end",
+          "proto": "int pex_scratch_end(pex_arena_t *a)",
+          "doc": "frees the whole arena; arenas end in reverse order (PEX_EORDER otherwise)"
+        },
+        {
+          "name": "pex_scratch_avail",
+          "proto": "size_t pex_scratch_avail(void)"
+        },
+        {
+          "name": "pex_pool_new",
+          "proto": "pex_pool_t *pex_pool_new(size_t obj_size, uint32_t count)"
+        },
+        {
+          "name": "pex_pool_get",
+          "proto": "void *pex_pool_get(pex_pool_t *p)"
+        },
+        {
+          "name": "pex_pool_put",
+          "proto": "void pex_pool_put(pex_pool_t *p, void *obj)"
+        },
+        {
+          "name": "pex_pool_delete",
+          "proto": "void pex_pool_delete(pex_pool_t *p)"
+        },
+        {
+          "name": "pex_mem_stats",
+          "proto": "int pex_mem_stats(pex_mem_stats_t *out)",
+          "doc": "the calling module's accounting plus the pool's"
+        }
       ]
     },
     {
-      "name": "sched", "id": 4, "major": 1, "minor": 0,
+      "name": "sched",
+      "id": 4,
+      "major": 1,
+      "minor": 0,
       "doc": "cooperative tasks on the host's main loop: no RTOS; callbacks must return quickly",
       "types": [
         "/* Return PEX_TASK_AGAIN to stay scheduled, PEX_TASK_DONE to end the task. */",
@@ -111,38 +308,481 @@
         "#define PEX_TASK_DONE 1"
       ],
       "functions": [
-        {"name": "pex_sched_every", "proto": "int pex_sched_every(uint32_t period_ms, pex_task_fn fn, void *arg)", "doc": "task id > 0, or a negative PEX_E* code"},
-        {"name": "pex_sched_after", "proto": "int pex_sched_after(uint32_t delay_ms, pex_task_fn fn, void *arg)", "doc": "one shot"},
-        {"name": "pex_sched_post", "proto": "int pex_sched_post(pex_task_fn fn, void *arg)", "doc": "run on the next main-loop pass"},
-        {"name": "pex_sched_cancel", "proto": "int pex_sched_cancel(int id)"},
-        {"name": "pex_sched_count", "proto": "uint32_t pex_sched_count(void)", "doc": "tasks the calling module has scheduled"}
+        {
+          "name": "pex_sched_every",
+          "proto": "int pex_sched_every(uint32_t period_ms, pex_task_fn fn, void *arg)",
+          "doc": "task id > 0, or a negative PEX_E* code"
+        },
+        {
+          "name": "pex_sched_after",
+          "proto": "int pex_sched_after(uint32_t delay_ms, pex_task_fn fn, void *arg)",
+          "doc": "one shot"
+        },
+        {
+          "name": "pex_sched_post",
+          "proto": "int pex_sched_post(pex_task_fn fn, void *arg)",
+          "doc": "run on the next main-loop pass"
+        },
+        {
+          "name": "pex_sched_cancel",
+          "proto": "int pex_sched_cancel(int id)"
+        },
+        {
+          "name": "pex_sched_count",
+          "proto": "uint32_t pex_sched_count(void)",
+          "doc": "tasks the calling module has scheduled"
+        }
       ]
     },
     {
-      "name": "pex", "id": 5, "major": 1, "minor": 0,
+      "name": "pex",
+      "id": 5,
+      "major": 1,
+      "minor": 0,
       "doc": "the module's own handle, references (spec 8) and app control",
       "types": [
         "typedef struct pex_mod pex_mod_t;"
       ],
       "functions": [
-        {"name": "pex_self", "proto": "pex_mod_t *pex_self(void)"},
-        {"name": "pex_ref", "proto": "void pex_ref(pex_mod_t *m)", "doc": "a live reference blocks unload"},
-        {"name": "pex_unref", "proto": "void pex_unref(pex_mod_t *m)"},
-        {"name": "pex_name", "proto": "const char *pex_name(pex_mod_t *m)"},
-        {"name": "pex_app_exit", "proto": "void pex_app_exit(int code)", "doc": "an app ends: its tasks are cancelled after the current callback returns; UNLOAD_ON_EXIT apps are then unloaded"}
+        {
+          "name": "pex_self",
+          "proto": "pex_mod_t *pex_self(void)"
+        },
+        {
+          "name": "pex_ref",
+          "proto": "void pex_ref(pex_mod_t *m)",
+          "doc": "a live reference blocks unload"
+        },
+        {
+          "name": "pex_unref",
+          "proto": "void pex_unref(pex_mod_t *m)"
+        },
+        {
+          "name": "pex_name",
+          "proto": "const char *pex_name(pex_mod_t *m)"
+        },
+        {
+          "name": "pex_app_exit",
+          "proto": "void pex_app_exit(int code)",
+          "doc": "an app ends: its tasks are cancelled after the current callback returns; UNLOAD_ON_EXIT apps are then unloaded"
+        }
       ]
     },
     {
-      "name": "board", "id": 6, "major": 1, "minor": 0,
+      "name": "board",
+      "id": 6,
+      "major": 1,
+      "minor": 0,
       "doc": "board identity; optional (a host may leave it out: import it WEAK)",
       "functions": [
-        {"name": "pex_board_name", "proto": "const char *pex_board_name(void)"},
-        {"name": "pex_board_cpu_hz", "proto": "uint32_t pex_board_cpu_hz(void)"},
-        {"name": "pex_board_uid", "proto": "int pex_board_uid(uint8_t *out, size_t cap)", "doc": "bytes written"}
+        {
+          "name": "pex_board_name",
+          "proto": "const char *pex_board_name(void)"
+        },
+        {
+          "name": "pex_board_cpu_hz",
+          "proto": "uint32_t pex_board_cpu_hz(void)"
+        },
+        {
+          "name": "pex_board_uid",
+          "proto": "int pex_board_uid(uint8_t *out, size_t cap)",
+          "doc": "bytes written"
+        }
       ]
     },
     {
-      "name": "lua", "id": 16, "major": 1, "minor": 0,
+      "name": "sys",
+      "id": 7,
+      "major": 1,
+      "minor": 0,
+      "doc": "system facts: wall clock, host name, firmware version, memory",
+      "types": [
+        "typedef struct {",
+        "    uint32_t c_heap_free;     /* C heap (malloc) headroom, bytes */",
+        "    uint32_t lua_used, lua_size; /* the Lua arena, 0 without Lua */",
+        "    uint32_t pex_free, pex_size; /* the PEX pool */",
+        "    uint32_t stack_max;       /* deepest main stack seen */",
+        "} pex_sys_mem_t;"
+      ],
+      "functions": [
+        {
+          "name": "pex_sys_time",
+          "proto": "int64_t pex_sys_time(void)",
+          "doc": "Unix seconds, 0 until the clock is set (SNTP)"
+        },
+        {
+          "name": "pex_sys_hostname",
+          "proto": "const char *pex_sys_hostname(void)"
+        },
+        {
+          "name": "pex_sys_version",
+          "proto": "const char *pex_sys_version(void)",
+          "doc": "firmware version, e.g. \"1.201\""
+        },
+        {
+          "name": "pex_sys_mem",
+          "proto": "int pex_sys_mem(pex_sys_mem_t *out)"
+        }
+      ]
+    },
+    {
+      "name": "json",
+      "id": 8,
+      "major": 1,
+      "minor": 0,
+      "doc": "small JSON helpers so modules need no parser of their own: path lookups (\"a.b.0.c\") on a JSON text, and a streaming writer into a caller buffer. Portable: part of the runtime, any host can register it.",
+      "types": [
+        "typedef struct {",
+        "    char *buf;",
+        "    size_t cap, len;",
+        "    uint32_t depth, first, arr; /* per depth: first element pending, is an array */",
+        "    int err;                 /* PEX_ENOMEM once it overflowed */",
+        "} pex_jw_t;"
+      ],
+      "functions": [
+        {
+          "name": "pex_json_find",
+          "proto": "const char *pex_json_find(const char *json, const char *path, size_t *len)",
+          "doc": "the raw value at path (object, array, string with quotes, number, literal), or NULL"
+        },
+        {
+          "name": "pex_json_str",
+          "proto": "int pex_json_str(const char *json, const char *path, char *out, size_t cap)",
+          "doc": "1 = a string (unescaped into out), 0 = absent or not a string"
+        },
+        {
+          "name": "pex_json_int",
+          "proto": "int pex_json_int(const char *json, const char *path, int64_t *out)"
+        },
+        {
+          "name": "pex_json_num",
+          "proto": "int pex_json_num(const char *json, const char *path, double *out)"
+        },
+        {
+          "name": "pex_json_bool",
+          "proto": "int pex_json_bool(const char *json, const char *path, int *out)"
+        },
+        {
+          "name": "pex_json_len",
+          "proto": "int pex_json_len(const char *json, const char *path)",
+          "doc": "elements of the array/object at path, -1 if none"
+        },
+        {
+          "name": "pex_jw_init",
+          "proto": "void pex_jw_init(pex_jw_t *w, char *buf, size_t cap)"
+        },
+        {
+          "name": "pex_jw_obj",
+          "proto": "void pex_jw_obj(pex_jw_t *w, const char *key)",
+          "doc": "open an object (key NULL inside an array or at the top)"
+        },
+        {
+          "name": "pex_jw_arr",
+          "proto": "void pex_jw_arr(pex_jw_t *w, const char *key)"
+        },
+        {
+          "name": "pex_jw_end",
+          "proto": "void pex_jw_end(pex_jw_t *w)"
+        },
+        {
+          "name": "pex_jw_str",
+          "proto": "void pex_jw_str(pex_jw_t *w, const char *key, const char *v)"
+        },
+        {
+          "name": "pex_jw_strn",
+          "proto": "void pex_jw_strn(pex_jw_t *w, const char *key, const char *v, size_t n)"
+        },
+        {
+          "name": "pex_jw_int",
+          "proto": "void pex_jw_int(pex_jw_t *w, const char *key, int64_t v)"
+        },
+        {
+          "name": "pex_jw_num",
+          "proto": "void pex_jw_num(pex_jw_t *w, const char *key, double v)"
+        },
+        {
+          "name": "pex_jw_bool",
+          "proto": "void pex_jw_bool(pex_jw_t *w, const char *key, int v)"
+        },
+        {
+          "name": "pex_jw_null",
+          "proto": "void pex_jw_null(pex_jw_t *w, const char *key)"
+        },
+        {
+          "name": "pex_jw_raw",
+          "proto": "void pex_jw_raw(pex_jw_t *w, const char *key, const char *json)",
+          "doc": "a value that is JSON already"
+        },
+        {
+          "name": "pex_jw_hex",
+          "proto": "void pex_jw_hex(pex_jw_t *w, const char *key, const void *data, size_t n)",
+          "doc": "bytes as a hex string"
+        },
+        {
+          "name": "pex_jw_finish",
+          "proto": "int pex_jw_finish(pex_jw_t *w)",
+          "doc": "length, or PEX_ENOMEM if it did not fit"
+        }
+      ]
+    },
+    {
+      "name": "bus",
+      "id": 9,
+      "major": 1,
+      "minor": 0,
+      "doc": "serve the web UI directly: register ops (request JSON in, reply JSON out, synchronous) and emit events; a module's ops go away at unload",
+      "types": [
+        "/* Write the reply (a JSON value) into reply[0..cap) and return its length;",
+        "   or return a negative PEX_E* with an error message in reply. */",
+        "typedef int (*pex_op_fn)(void *arg, const char *params_json, char *reply, size_t cap);"
+      ],
+      "functions": [
+        {
+          "name": "pex_bus_op",
+          "proto": "int pex_bus_op(const char *name, pex_op_fn fn, void *arg)",
+          "doc": "register op \"ns.name\"; built-in and Lua op names are refused"
+        },
+        {
+          "name": "pex_bus_op_remove",
+          "proto": "int pex_bus_op_remove(const char *name)"
+        },
+        {
+          "name": "pex_bus_emit",
+          "proto": "int pex_bus_emit(const char *topic, const char *json)",
+          "doc": "broadcast {\"evt\":topic,\"data\":json} to every WebSocket client"
+        }
+      ]
+    },
+    {
+      "name": "fs",
+      "id": 10,
+      "major": 1,
+      "minor": 0,
+      "doc": "files on lfs:/ (LittleFS) and sd:/ (the SD card) with the Lua file module's semantics. LittleFS calls complete synchronously; the card is asynchronous: pass a callback (it runs from the main loop later). With cb == NULL a call is synchronous and sd:/ answers PEX_EAGAIN.",
+      "types": [
+        "#define PEX_FS_READ 0",
+        "#define PEX_FS_WRITE 1   /* create/truncate, parents created */",
+        "#define PEX_FS_APPEND 2",
+        "typedef void (*pex_fs_cb)(void *arg, int rc);  /* rc: result (>= 0) or PEX_E* */",
+        "typedef struct { char name[65]; uint8_t is_dir; uint32_t size; } pex_fs_entry_t;",
+        "typedef void (*pex_fs_list_cb)(void *arg, const pex_fs_entry_t *e);  /* e == NULL: the end */",
+        "typedef struct { int lfs_ok; uint32_t lfs_free, lfs_total; char sd_state[12]; uint64_t sd_free, sd_total; } pex_fs_media_t;"
+      ],
+      "functions": [
+        {
+          "name": "pex_fs_open",
+          "proto": "int pex_fs_open(const char *path, int mode, pex_fs_cb cb, void *arg)",
+          "doc": "a file handle (>= 0)"
+        },
+        {
+          "name": "pex_fs_read",
+          "proto": "int pex_fs_read(int fd, void *buf, size_t n, pex_fs_cb cb, void *arg)",
+          "doc": "bytes read (0 = end)"
+        },
+        {
+          "name": "pex_fs_write",
+          "proto": "int pex_fs_write(int fd, const void *buf, size_t n, pex_fs_cb cb, void *arg)",
+          "doc": "bytes written; buf is copied before the call returns"
+        },
+        {
+          "name": "pex_fs_seek",
+          "proto": "int pex_fs_seek(int fd, uint32_t pos, pex_fs_cb cb, void *arg)"
+        },
+        {
+          "name": "pex_fs_size",
+          "proto": "int32_t pex_fs_size(int fd)"
+        },
+        {
+          "name": "pex_fs_close",
+          "proto": "int pex_fs_close(int fd)"
+        },
+        {
+          "name": "pex_fs_stat",
+          "proto": "int pex_fs_stat(const char *path, pex_fs_entry_t *out, pex_fs_cb cb, void *arg)"
+        },
+        {
+          "name": "pex_fs_list",
+          "proto": "int pex_fs_list(const char *dir, pex_fs_list_cb each, void *arg)",
+          "doc": "entries, then each(arg, NULL); sync on lfs:/, from the main loop on sd:/"
+        },
+        {
+          "name": "pex_fs_mkdir",
+          "proto": "int pex_fs_mkdir(const char *path, pex_fs_cb cb, void *arg)"
+        },
+        {
+          "name": "pex_fs_remove",
+          "proto": "int pex_fs_remove(const char *path, pex_fs_cb cb, void *arg)"
+        },
+        {
+          "name": "pex_fs_rename",
+          "proto": "int pex_fs_rename(const char *from, const char *to, pex_fs_cb cb, void *arg)"
+        },
+        {
+          "name": "pex_fs_media",
+          "proto": "int pex_fs_media(pex_fs_media_t *out)"
+        }
+      ]
+    },
+    {
+      "name": "net",
+      "id": 11,
+      "major": 1,
+      "minor": 0,
+      "doc": "the firmware's HTTP(S) client: start, status, cancel; the body into a module buffer or straight into a file (lfs:/)",
+      "types": [
+        "typedef struct {",
+        "    const char *method;      /* NULL = GET */",
+        "    const char *url;",
+        "    const char *headers;     /* \"Name: value\\r\\n\" lines, or NULL */",
+        "    const void *body; size_t body_len;",
+        "    uint32_t timeout_ms;     /* 0 = 30 s */",
+        "    uint8_t follow;          /* redirects to follow */",
+        "    uint8_t insecure;        /* skip certificate checks */",
+        "    void *buf; size_t buf_cap; /* the body goes here (truncated past cap) ... */",
+        "    const char *to_file;     /* ... or into this file (lfs:/...) */",
+        "} pex_http_req_t;",
+        "typedef struct { int status; int err; uint32_t bytes; int64_t total; uint8_t done, truncated; char msg[48]; } pex_http_res_t;",
+        "typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);"
+      ],
+      "functions": [
+        {
+          "name": "pex_http_start",
+          "proto": "int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)",
+          "doc": "request id (> 0); done runs once from the main loop"
+        },
+        {
+          "name": "pex_http_status",
+          "proto": "int pex_http_status(int id, pex_http_res_t *out)"
+        },
+        {
+          "name": "pex_http_cancel",
+          "proto": "int pex_http_cancel(int id)"
+        }
+      ]
+    },
+    {
+      "name": "bt",
+      "id": 12,
+      "major": 1,
+      "minor": 0,
+      "doc": "Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop)",
+      "types": [
+        "typedef struct {",
+        "    uint8_t addr[6]; uint8_t addr_type; int8_t rssi;",
+        "    char name[31]; uint8_t connectable, connected, n_uuid16;",
+        "    uint16_t uuid16[4];",
+        "    uint8_t mfg_len; uint8_t mfg[31];",
+        "    uint32_t age_ms;",
+        "} pex_bt_dev_t;",
+        "#define PEX_BT_NOTIFY 1",
+        "#define PEX_BT_INDICATE 2",
+        "#define PEX_BT_READ 3",
+        "#define PEX_BT_WRITE 4      /* a write completed: status = att_error | reason << 8 (0 = ok) */",
+        "#define PEX_BT_LINK_UP 16",
+        "#define PEX_BT_LINK_DOWN 17",
+        "#define PEX_BT_READY 18     /* GATT discovered: pex_bt_find works */",
+        "#define PEX_BT_FAILED 19    /* connect or discovery failed */",
+        "typedef struct {",
+        "    uint8_t addr[6]; uint8_t kind; uint8_t pad;",
+        "    int16_t chr; int16_t status;",
+        "    uint16_t len; const uint8_t *data;",
+        "} pex_bt_event_t;",
+        "typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);",
+        "#define PEX_BT_DISCONNECTED 0",
+        "#define PEX_BT_CONNECTING 1",
+        "#define PEX_BT_CONNECTED 2"
+      ],
+      "functions": [
+        {
+          "name": "pex_bt_scan",
+          "proto": "int pex_bt_scan(uint32_t duration_ms, int active)",
+          "doc": "0 = until pex_bt_scan_stop"
+        },
+        {
+          "name": "pex_bt_scan_stop",
+          "proto": "void pex_bt_scan_stop(void)"
+        },
+        {
+          "name": "pex_bt_scanning",
+          "proto": "int pex_bt_scanning(void)"
+        },
+        {
+          "name": "pex_bt_devices",
+          "proto": "int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128)",
+          "doc": "the scan table, filtered (either rule matches; NULLs = all); count"
+        },
+        {
+          "name": "pex_bt_uuids128",
+          "proto": "int pex_bt_uuids128(const uint8_t *addr, char (*out)[37], int max)"
+        },
+        {
+          "name": "pex_bt_addr",
+          "proto": "int pex_bt_addr(const char *str, uint8_t *addr)",
+          "doc": "parse \"AA:BB:..\""
+        },
+        {
+          "name": "pex_bt_addr_str",
+          "proto": "void pex_bt_addr_str(const uint8_t *addr, char *out)",
+          "doc": "18 bytes"
+        },
+        {
+          "name": "pex_bt_connect",
+          "proto": "int pex_bt_connect(const uint8_t *addr)",
+          "doc": "asynchronous: PEX_BT_LINK_UP then PEX_BT_READY (or PEX_BT_FAILED)"
+        },
+        {
+          "name": "pex_bt_disconnect",
+          "proto": "int pex_bt_disconnect(const uint8_t *addr)"
+        },
+        {
+          "name": "pex_bt_state",
+          "proto": "int pex_bt_state(const uint8_t *addr, int *ready)"
+        },
+        {
+          "name": "pex_bt_mtu",
+          "proto": "int pex_bt_mtu(const uint8_t *addr)"
+        },
+        {
+          "name": "pex_bt_find",
+          "proto": "int pex_bt_find(const uint8_t *addr, const char *svc_uuid, const char *chr_uuid, int instance)",
+          "doc": "a characteristic id (>= 0) or PEX_ENOENT"
+        },
+        {
+          "name": "pex_bt_props",
+          "proto": "int pex_bt_props(const uint8_t *addr, int chr)",
+          "doc": "ATT property bits"
+        },
+        {
+          "name": "pex_bt_read",
+          "proto": "int pex_bt_read(const uint8_t *addr, int chr)",
+          "doc": "the value comes as a PEX_BT_READ event"
+        },
+        {
+          "name": "pex_bt_write",
+          "proto": "int pex_bt_write(const uint8_t *addr, int chr, const void *data, size_t len, int with_response, int want_done)",
+          "doc": "want_done: a PEX_BT_WRITE event reports completion"
+        },
+        {
+          "name": "pex_bt_subscribe",
+          "proto": "int pex_bt_subscribe(const uint8_t *addr, int chr, int mode)",
+          "doc": "0 off, 1 notify, 2 indicate"
+        },
+        {
+          "name": "pex_bt_listen",
+          "proto": "int pex_bt_listen(const uint8_t *addr, pex_bt_fn fn, void *arg)",
+          "doc": "events of one device (addr NULL: all); id"
+        },
+        {
+          "name": "pex_bt_unlisten",
+          "proto": "int pex_bt_unlisten(int id)"
+        }
+      ]
+    },
+    {
+      "name": "lua",
+      "id": 16,
+      "major": 1,
+      "minor": 0,
       "doc": "pexlua: the curated, Lua-version-independent bridge (spec 7.3 option C); only present on hosts built with Lua, so import it WEAK unless the module is Lua-only. Errors raised here unwind the module call safely (the bridge calls modules under protection).",
       "types": [
         "typedef struct lua_State lua_State;",
@@ -158,32 +798,114 @@
         "#define PEXLUA_TFUNCTION 6"
       ],
       "functions": [
-        {"name": "pexlua_gettop", "proto": "int pexlua_gettop(lua_State *L)"},
-        {"name": "pexlua_settop", "proto": "void pexlua_settop(lua_State *L, int idx)"},
-        {"name": "pexlua_pushvalue", "proto": "void pexlua_pushvalue(lua_State *L, int idx)"},
-        {"name": "pexlua_type", "proto": "int pexlua_type(lua_State *L, int idx)"},
-        {"name": "pexlua_checkint", "proto": "int64_t pexlua_checkint(lua_State *L, int arg)"},
-        {"name": "pexlua_optint", "proto": "int64_t pexlua_optint(lua_State *L, int arg, int64_t def)"},
-        {"name": "pexlua_checknum", "proto": "double pexlua_checknum(lua_State *L, int arg)"},
-        {"name": "pexlua_checkstr", "proto": "const char *pexlua_checkstr(lua_State *L, int arg, size_t *len)"},
-        {"name": "pexlua_optstr", "proto": "const char *pexlua_optstr(lua_State *L, int arg, const char *def, size_t *len)"},
-        {"name": "pexlua_toboolean", "proto": "int pexlua_toboolean(lua_State *L, int idx)"},
-        {"name": "pexlua_checktype", "proto": "void pexlua_checktype(lua_State *L, int arg, int type)"},
-        {"name": "pexlua_pushint", "proto": "void pexlua_pushint(lua_State *L, int64_t v)"},
-        {"name": "pexlua_pushnum", "proto": "void pexlua_pushnum(lua_State *L, double v)"},
-        {"name": "pexlua_pushstr", "proto": "void pexlua_pushstr(lua_State *L, const char *s)"},
-        {"name": "pexlua_pushbytes", "proto": "void pexlua_pushbytes(lua_State *L, const void *p, size_t len)"},
-        {"name": "pexlua_pushbool", "proto": "void pexlua_pushbool(lua_State *L, int b)"},
-        {"name": "pexlua_pushnil", "proto": "void pexlua_pushnil(lua_State *L)"},
-        {"name": "pexlua_newtable", "proto": "void pexlua_newtable(lua_State *L, int narr, int nrec)"},
-        {"name": "pexlua_setfield", "proto": "void pexlua_setfield(lua_State *L, int idx, const char *k)", "doc": "t[k] = top, pops it"},
-        {"name": "pexlua_getfield", "proto": "int pexlua_getfield(lua_State *L, int idx, const char *k)", "doc": "pushes t[k], returns its type"},
-        {"name": "pexlua_seti", "proto": "void pexlua_seti(lua_State *L, int idx, int64_t i)"},
-        {"name": "pexlua_geti", "proto": "int pexlua_geti(lua_State *L, int idx, int64_t i)"},
-        {"name": "pexlua_rawlen", "proto": "size_t pexlua_rawlen(lua_State *L, int idx)"},
-        {"name": "pexlua_register", "proto": "void pexlua_register(lua_State *L, const pexlua_reg_t *fns, uint32_t n)", "doc": "adds n functions to the table on top; each call enters the module through the trampoline and holds a reference until collected"},
-        {"name": "pexlua_error", "proto": "int pexlua_error(lua_State *L, const char *msg)", "doc": "raises a Lua error; does not return"},
-        {"name": "pexlua_argerror", "proto": "int pexlua_argerror(lua_State *L, int arg, const char *msg)"}
+        {
+          "name": "pexlua_gettop",
+          "proto": "int pexlua_gettop(lua_State *L)"
+        },
+        {
+          "name": "pexlua_settop",
+          "proto": "void pexlua_settop(lua_State *L, int idx)"
+        },
+        {
+          "name": "pexlua_pushvalue",
+          "proto": "void pexlua_pushvalue(lua_State *L, int idx)"
+        },
+        {
+          "name": "pexlua_type",
+          "proto": "int pexlua_type(lua_State *L, int idx)"
+        },
+        {
+          "name": "pexlua_checkint",
+          "proto": "int64_t pexlua_checkint(lua_State *L, int arg)"
+        },
+        {
+          "name": "pexlua_optint",
+          "proto": "int64_t pexlua_optint(lua_State *L, int arg, int64_t def)"
+        },
+        {
+          "name": "pexlua_checknum",
+          "proto": "double pexlua_checknum(lua_State *L, int arg)"
+        },
+        {
+          "name": "pexlua_checkstr",
+          "proto": "const char *pexlua_checkstr(lua_State *L, int arg, size_t *len)"
+        },
+        {
+          "name": "pexlua_optstr",
+          "proto": "const char *pexlua_optstr(lua_State *L, int arg, const char *def, size_t *len)"
+        },
+        {
+          "name": "pexlua_toboolean",
+          "proto": "int pexlua_toboolean(lua_State *L, int idx)"
+        },
+        {
+          "name": "pexlua_checktype",
+          "proto": "void pexlua_checktype(lua_State *L, int arg, int type)"
+        },
+        {
+          "name": "pexlua_pushint",
+          "proto": "void pexlua_pushint(lua_State *L, int64_t v)"
+        },
+        {
+          "name": "pexlua_pushnum",
+          "proto": "void pexlua_pushnum(lua_State *L, double v)"
+        },
+        {
+          "name": "pexlua_pushstr",
+          "proto": "void pexlua_pushstr(lua_State *L, const char *s)"
+        },
+        {
+          "name": "pexlua_pushbytes",
+          "proto": "void pexlua_pushbytes(lua_State *L, const void *p, size_t len)"
+        },
+        {
+          "name": "pexlua_pushbool",
+          "proto": "void pexlua_pushbool(lua_State *L, int b)"
+        },
+        {
+          "name": "pexlua_pushnil",
+          "proto": "void pexlua_pushnil(lua_State *L)"
+        },
+        {
+          "name": "pexlua_newtable",
+          "proto": "void pexlua_newtable(lua_State *L, int narr, int nrec)"
+        },
+        {
+          "name": "pexlua_setfield",
+          "proto": "void pexlua_setfield(lua_State *L, int idx, const char *k)",
+          "doc": "t[k] = top, pops it"
+        },
+        {
+          "name": "pexlua_getfield",
+          "proto": "int pexlua_getfield(lua_State *L, int idx, const char *k)",
+          "doc": "pushes t[k], returns its type"
+        },
+        {
+          "name": "pexlua_seti",
+          "proto": "void pexlua_seti(lua_State *L, int idx, int64_t i)"
+        },
+        {
+          "name": "pexlua_geti",
+          "proto": "int pexlua_geti(lua_State *L, int idx, int64_t i)"
+        },
+        {
+          "name": "pexlua_rawlen",
+          "proto": "size_t pexlua_rawlen(lua_State *L, int idx)"
+        },
+        {
+          "name": "pexlua_register",
+          "proto": "void pexlua_register(lua_State *L, const pexlua_reg_t *fns, uint32_t n)",
+          "doc": "adds n functions to the table on top; each call enters the module through the trampoline and holds a reference until collected"
+        },
+        {
+          "name": "pexlua_error",
+          "proto": "int pexlua_error(lua_State *L, const char *msg)",
+          "doc": "raises a Lua error; does not return"
+        },
+        {
+          "name": "pexlua_argerror",
+          "proto": "int pexlua_argerror(lua_State *L, int arg, const char *msg)"
+        }
       ]
     }
   ]

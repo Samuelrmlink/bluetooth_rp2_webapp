@@ -68,7 +68,10 @@ def header(api):
         for f in g.get("functions", []):
             if f["decl"]:
                 doc = f"  /* {f['doc']} */" if f.get("doc") else ""
-                o.append(f"{f['proto']};{doc}")
+                if f.get("libc"):
+                    o.append(f"#ifndef PEX_HOST_SIDE\n{f['proto']};\n#endif")
+                else:
+                    o.append(f"{f['proto']};{doc}")
         o.append("")
     o.append("#endif")
     return "\n".join(o) + "\n"

@@ -84,6 +84,22 @@ def pexlink_refusals(build_dir):
     return out
 
 
+def unit_tests(work):
+    """The portable runtime parts, compiled for the build host."""
+    gen = os.path.join(work, "unit-gen")
+    os.makedirs(gen, exist_ok=True)
+    sh([sys.executable, os.path.join(PEX, "tools", "gen_host_api.py"), "header", os.path.join(PEX, "host_api.json"),
+        os.path.join(gen, "pex_api.h")])
+    exe = os.path.join(work, "pex_unit")
+    r = sh(["gcc", "-O1", "-Wall", "-Wextra", "-Werror", "-I", os.path.join(PEX, "runtime"), "-I",
+            os.path.join(PEX, "sdk", "include"), "-I", gen, os.path.join(HERE, "unit", "pex_unit.c"),
+            os.path.join(PEX, "runtime", "groups", "pex_json.c"), os.path.join(PEX, "runtime", "pex_hash.c"), "-o", exe])
+    if r.returncode:
+        return [("unit.build", False, r.stderr[-300:])]
+    r = sh([exe])
+    return [("unit.json_crc_sha", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else r.stderr[-200:])]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/run"))
@@ -115,7 +131,7 @@ def main():
                 results.setdefault("unexpected_fault", {})[(t, "-")] = (False, line)
         if t not in done:
             results.setdefault("completed", {})[(t, "-")] = (False, "no 'PEXT DONE' (see sim log)")
-    refusals = pexlink_refusals(builds["m33"])
+    refusals = pexlink_refusals(builds["m33"]) + unit_tests(a.work)
 
     cols = [(t, m) for t, *_ in HOSTS for m in ("reloc", "pic", "-")]
     used = [c for c in cols if any(c in v for v in results.values())]
@@ -136,7 +152,7 @@ def main():
         for c, (ok, det) in row.items():
             if not ok:
                 print(f"FAIL {case} {c[0]}/{c[1]}: {det}")
-    print("pexlink refusals:")
+    print("pexlink refusals and host unit tests:")
     for name, ok, msg in refusals:
         print(f"  {'PASS' if ok else 'FAIL'} {name}: {msg}")
         fails += 0 if ok else 1

@@ -67,12 +67,12 @@ int pex_init(const pex_config_t *cfg) {
     if (!pex__cfg.host_name) { pex__cfg.host_name = "host"; }
     pex__mem_init(cfg->pool, cfg->pool_size);
     pex__sched_init();
-    s_ngroups = 0;
     pex_register_group(&pex_group_core);
     pex_register_group(&pex_group_log);
     pex_register_group(&pex_group_mem);
     pex_register_group(&pex_group_sched);
     pex_register_group(&pex_group_pex);
+    pex_register_group(&pex_group_json);
     pex__logf(PEX_LOG_INFO, "pex: runtime %s, api %u.%u, target 0x%04lx, pool %lu bytes, %s", PEX_RT_VERSION,
               PEX_API_MAJOR, PEX_API_MINOR, (unsigned long)pex__host_target(), (unsigned long)cfg->pool_size,
               (cfg->policy & PEX_POLICY_ALLOW_UNSIGNED) ? "UNSIGNED MODULES ALLOWED (development)" : "signed modules only");
