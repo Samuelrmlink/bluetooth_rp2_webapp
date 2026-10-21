@@ -15,6 +15,12 @@
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 #include "hardware/clocks.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include "hardware/regs/addressmap.h"
+#if !PICO_RP2040
+#include "hardware/structs/qmi.h"
+#endif
 #include "pex_rt.h"
 #include "pex_testkey.h"
 
@@ -383,19 +389,267 @@ static void integrity_suite(void) {
     result("signed_only.unsigned_refused", !m && err == PEX_EUNSIGNED, "%s", pex_errmsg());
     if (m) { pex_unload(m); }
     pex_set_policy(PEX_POLICY_ALLOW_UNSIGNED);
-    result("xip.stub", pex_install(NULL, 0) == PEX_ENOTSUP, NULL);
 }
 
-static uint8_t s_pool[56 * 1024] __attribute__((aligned(8)));
+/* ---- XIP: the PEX flash partition on this host ------------------------------------
+ * RP2350: storage 2 MB..2 MB+256 KB, executed through QMI ATRANS1 -- the window at
+ * 0x10400000 mapped onto it, as the gateway does (its slot boot leaves window 1
+ * free) -- and read through the untranslated uncached alias. RP2040: 1.5 MB, at
+ * its plain XIP address. Power cuts: the cut operation is not done (or, for a
+ * multi-page program, only its first pages) and every later one fails, until
+ * the "reboot" (pex_xip_mount). */
+#if PICO_RP2040
+#define PART_OFF (1536u * 1024u)
+#define PART_EXEC (XIP_BASE + PART_OFF)
+#define PART_READ (XIP_NOCACHE_NOALLOC_BASE + PART_OFF)
+#else
+#define PART_OFF (2048u * 1024u)
+#define PART_EXEC 0x10400000u
+#define PART_READ (XIP_NOCACHE_NOALLOC_NOTRANSLATE_BASE + PART_OFF)
+#endif
+#define PART_SIZE (256u * 1024u)
+static long s_fops, s_fcut = -1;
+static int s_fdead;
+
+static int part_erase(void *ctx, uint32_t off) {
+    (void)ctx;
+    if (s_fdead) { return -1; }
+    if (s_fops++ == s_fcut) { s_fdead = 1; return -1; }
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(PART_OFF + off, 4096);
+    restore_interrupts(ints);
+    return 0;
+}
+static int part_prog(void *ctx, uint32_t off, const void *src, uint32_t n) {
+    (void)ctx;
+    if (s_fdead) { return -1; }
+    uint32_t k = n;
+    if (s_fops++ == s_fcut) { s_fdead = 1; k = (n / 2) & ~255u; }
+    if (k) {
+        uint32_t ints = save_and_disable_interrupts();
+        flash_range_program(PART_OFF + off, src, k);
+        restore_interrupts(ints);
+    }
+    return k == n ? 0 : -1;
+}
+static const pex_flash_t s_part = { PART_SIZE, PART_EXEC, PART_READ, part_erase, part_prog, NULL };
+
+static void part_window(void) {
+#if !PICO_RP2040
+    qmi_hw->atrans[1] = (0x40u << QMI_ATRANS1_SIZE_LSB) | (PART_OFF >> 12);   /* 256 KB at 2 MB */
+#endif
+}
+
+static int install_b(const char *bundle_name, uint32_t flags) {
+    uint32_t n;
+    const uint8_t *b = bfind(bundle_name, &n);
+    if (!b) { printf("PEXT %s - missing %s in the bundle\n", TGT, bundle_name); return PEX_ENOENT; }
+    return pex_install_mem(b, n, flags);
+}
+
+static bool in_part(uintptr_t a) { return a >= PART_EXEC && a < PART_EXEC + PART_SIZE; }
+
+static void xip_suite(const char *model) {
+    s_model = model;
+    int err;
+    char nb[64], why[200];
+    pex_mem_stats_t base;
+    pex_pool_stats(&base);
+    bool pic = strcmp(model, "pic") == 0;
+
+    /* big: 41 KB (more than the gateway's whole v1 pool), signed: verified in place */
+    snprintf(nb, sizeof nb, "sig/%s_big.%s.pex", model, TGT);
+    uint64_t t0 = time_us_64();
+    int slot = install_b(nb, 0);
+    uint32_t us = (uint32_t)(time_us_64() - t0);
+    pex_installed_t in;
+    result("xip.install_big_signed", slot >= 0 && pex_installed_find("big", &in) >= 0 && in.signed_ && in.file_size > 40000,
+           "slot %d, %lu bytes in %lu ms %s", slot, (unsigned long)in.file_size, (unsigned long)(us / 1000), slot < 0 ? pex_errmsg() : "");
+    result("xip.verify_in_place", pex_xip_verify("big") == PEX_OK, "%s", pex_errmsg());
+    pex_mod_t *m = pex_load_installed("big", NULL, &err);
+    pex_info_t inf;
+    if (m) { pex_info(m, &inf); }
+    if (!pic) {
+        /* model A: its RW address is reserved at mount -- before a "reboot" it loads into RAM */
+        result("xip.reloc_ram_until_reboot", m && !inf.xip && pex_call0(m, sym(m, "big_check")) == 0, "%s",
+               m ? (inf.xip ? "in place?" : "") : pex_errmsg());
+        if (m) { pex_unload(m); }
+        result("xip.remount", pex_xip_mount() == PEX_OK, "%s", pex_errmsg());
+        m = pex_load_installed("big", NULL, &err);
+        if (m) { pex_info(m, &inf); }
+    }
+    uint32_t chk = m ? pex_call0(m, sym(m, "big_check")) : 99;
+    uintptr_t ca = m ? pex_call0(m, sym(m, "big_code_addr")) : 0, ra = m ? pex_call0(m, sym(m, "big_rw_addr")) : 0;
+    result("xip.big_runs_in_place", m && inf.xip && chk == 0 && in_part(ca) && !in_part(ra) && inf.code == in.code,
+           "check 0x%lx code %08lx rw %08lx %s", (unsigned long)chk, (unsigned long)ca, (unsigned long)ra, m ? "" : pex_errmsg());
+    pex_mem_stats_t ms;
+    pex_pool_stats(&ms);
+    result("xip.big_costs_rw_only", m && base.pool_free - ms.pool_free < 2048 + (pic ? inf.rw_size : 0),
+           "pool used by the load: %lu bytes (code %lu in flash)", (unsigned long)(base.pool_free - ms.pool_free),
+           (unsigned long)inf.code_size);
+    result("xip.uninstall_refused_loaded", pex_uninstall("big") == PEX_EBUSY, "%s", pex_errmsg());
+    if (m) { pex_unload(m); }
+
+    /* the same file into RAM: a module larger than the old pool */
+    m = load(p_of(model, "big", TGT), "bigram", &err);
+    result("big.ram_load", m && pex_call0(m, sym(m, "big_check")) == 0, "%s", m ? "" : pex_errmsg());
+    if (m) { pex_unload(m); }
+
+    /* arith in place: every relocation kind, ctor/dtor, libgcc -- signed */
+    snprintf(nb, sizeof nb, "sig/%s_arith.%s.pex", model, TGT);
+    slot = install_b(nb, 0);
+    if (!pic) { pex_xip_mount(); }
+    m = slot >= 0 ? pex_load_installed("arith", NULL, &err) : NULL;
+    if (m) { pex_info(m, &inf); }
+    result("xip.arith_in_place", m && inf.xip && pex_call0(m, sym(m, "arith_selftest")) == 0 &&
+                                 (int)pex_call(m, sym(m, "arith_apply"), 2, 6, 7, 0) == 42,
+           "%s", m ? (inf.xip ? "" : "not in place") : pex_errmsg());
+    if (m) { pex_unload(m); }
+
+    /* counter: model B instances share the flash copy */
+    snprintf(nb, sizeof nb, "%s/counter.%s.pex", model, TGT);
+    slot = install_b(nb, 0);
+    if (!pic) { pex_xip_mount(); }
+    pex_mod_t *a = pex_load_installed("counter", NULL, &err), *b = pex_load_installed("counter", NULL, &err);
+    if (a && b) {
+        pex_info_t ia, ib;
+        pex_info(a, &ia);
+        pex_info(b, &ib);
+        int x = (int)pex_call1(a, sym(a, "counter_add"), 5), y = (int)pex_call1(b, sym(b, "counter_add"), 7);
+        result(pic ? "xip.instances_share_flash" : "xip.second_instance_ram",
+               x == 5 && y == 7 && (pic ? (ia.xip && ib.xip && ia.code == ib.code) : (ia.xip && !ib.xip)),
+               "xip %d/%d code %08lx %08lx", ia.xip, ib.xip, (unsigned long)ia.code, (unsigned long)ib.code);
+    } else {
+        result("xip.instances", false, "%s", pex_errmsg());
+    }
+    if (a) { pex_unload(a); }
+    if (b) { pex_unload(b); }
+
+    /* app on the loop, from flash */
+    snprintf(nb, sizeof nb, "%s/app.%s.pex", model, TGT);
+    install_b(nb, 0);
+    if (!pic) { pex_xip_mount(); }
+    m = pex_load_installed("app", NULL, &err);
+    if (m) {
+        pex_start(m, "{\"ticks\":4,\"period\":5}");
+        for (int i = 0; i < 100 && pex_call0(m, sym(m, "app_ticks")) < 4; i++) { poll_for(5); }
+        poll_for(20);
+        pex_info(m, &inf);
+        result("xip.app_runs", inf.xip && pex_call0(m, sym(m, "app_ticks")) == 4 && inf.state == PEX_ST_EXITED, "%s",
+               pex_state_name(inf.state));
+        pex_unload(m);
+    } else {
+        result("xip.app_runs", false, "%s", pex_errmsg());
+    }
+
+    /* a fault in flash code is attributed */
+    snprintf(nb, sizeof nb, "%s/crash.%s.pex", model, TGT);
+    install_b(nb, 0);
+    if (!pic) { pex_xip_mount(); }
+    m = pex_load_installed("crash", NULL, &err);
+    if (m) {
+        pex_info(m, &inf);
+        uint32_t where = pex_call0(m, sym(m, "crash_where"));
+        bool faulted = guarded(m, sym(m, "crash_now"), 1, NULL);
+        const pex_fault_t *f = pex_last_fault();
+        uint32_t lv2 = (where & ~1u) - (uint32_t)inf.code;
+        result("xip.fault_attributed", inf.xip && faulted && f && in_part(f->pc) && f->offset >= lv2 && f->offset < lv2 + 16,
+               "pc %08lx offset 0x%lx", f ? (unsigned long)f->pc : 0, f ? (unsigned long)f->offset : 0);
+        pex_unload(m);
+    }
+
+    /* compaction: free a hole at the bottom, then something that only fits after moving the others */
+    result("xip.uninstall", pex_uninstall("big") == PEX_OK && pex_installed_find("big", NULL) == PEX_ENOENT, "%s", pex_errmsg());
+    pex_xip_stats_t st;
+    pex_xip_stats(&st);
+    uint32_t free0 = st.free, moves0 = st.moves;
+    snprintf(nb, sizeof nb, "%s/big.%s.pex", model, TGT);
+    slot = install_b(nb, 0);
+    pex_xip_stats(&st);
+    result("xip.reinstall_after_uninstall", slot >= 0, "free %lu -> %lu, moves %lu %s", (unsigned long)free0,
+           (unsigned long)st.free, (unsigned long)(st.moves - moves0), slot < 0 ? pex_errmsg() : "");
+    pex_uninstall("arith");
+    pex_uninstall("counter");
+    int mv = pex_xip_compact();
+    pex_xip_stats(&st);
+    if (!pic) { pex_xip_mount(); }
+    m = pex_load_installed("big", NULL, &err);
+    result("xip.compacted_still_runs", mv >= 1 && st.largest == st.free && m && pex_call0(m, sym(m, "big_check")) == 0,
+           "moved %d, free %lu largest %lu %s", mv, (unsigned long)st.free, (unsigned long)st.largest, m ? "" : pex_errmsg());
+    if (m) { pex_unload(m); }
+
+    /* power cuts during an install: the index is the old or the new one, and what is in it runs */
+    snprintf(nb, sizeof nb, "%s/arith.%s.pex", model, TGT);
+    pex_uninstall("arith");
+    long f0 = s_fops;
+    install_b(nb, 0);
+    long nops = s_fops - f0;          /* erase, pages, then the index (erase + program) */
+    const long cuts[] = { 0, 1, nops / 2, nops - 3, nops - 2, nops - 1 };
+    int good = 0, before = 0, after = 0;
+    for (unsigned c = 0; c < sizeof cuts / sizeof cuts[0]; c++) {
+        pex_uninstall("arith");
+        s_fdead = 0;
+        s_fcut = s_fops + cuts[c];
+        install_b(nb, 0);
+        s_fcut = -1;
+        s_fdead = 0;
+        int rc = pex_xip_mount();
+        bool has = pex_installed_find("arith", NULL) >= 0;
+        bool ok = rc == PEX_OK && pex_installed_find("big", NULL) >= 0;
+        if (has) {
+            ok = ok && pex_xip_verify("arith") == PEX_OK;
+            pex_mod_t *x = pex_load_installed("arith", NULL, &err);
+            ok = ok && x && pex_call0(x, sym(x, "arith_selftest")) == 0;
+            if (x) { pex_unload(x); }
+            after++;
+        } else {
+            before++;
+        }
+        pex_mod_t *y = pex_load_installed("big", NULL, &err);
+        ok = ok && y && pex_call0(y, sym(y, "big_check")) == 0;
+        if (y) { pex_unload(y); }
+        good += ok;
+    }
+    result("xip.power_cut_install", good == (int)(sizeof cuts / sizeof cuts[0]) && before >= 4,
+           "%d/%u consistent (%d before, %d after; %ld flash operations)", good, (unsigned)(sizeof cuts / sizeof cuts[0]),
+           before, after, nops);
+
+    /* policy: an unsigned module is never installed on a signed-only host; a bad signature never */
+    pex_set_policy(0);
+    snprintf(nb, sizeof nb, "%s/hello.%s.pex", model, TGT);
+    int r1 = install_b(nb, 0);
+    snprintf(nb, sizeof nb, "bad/hello_badsig.%s.pex", TGT);
+    int r2 = install_b(nb, 0);
+    snprintf(nb, sizeof nb, "bad/hello_signed.%s.pex", TGT);
+    int r3 = install_b(nb, 0);
+    pex_set_policy(PEX_POLICY_ALLOW_UNSIGNED);
+    result("xip.signed_only_policy", r1 == PEX_EUNSIGNED && r2 == PEX_ESIG && r3 >= 0, "%d %d %d", r1, r2, r3);
+
+    /* clean up for the next model */
+    pex_installed_t e;
+    while (pex_installed(0, &e) == PEX_OK) {
+        if (pex_uninstall(e.name) != PEX_OK) { break; }
+    }
+    pex_xip_mount();
+    pex_pool_stats(&ms);
+    snprintf(why, sizeof why, "free %lu (baseline %lu)", (unsigned long)ms.pool_free, (unsigned long)base.pool_free);
+    result("xip.pool_clean", ms.pool_free >= base.pool_free && ms.scratch_bytes == 0, "%s", why);
+}
+
+static uint8_t s_pool[96 * 1024] __attribute__((aligned(8)));
 
 int main(void) {
     stdio_init_all();
     sleep_ms(20);
     printf("PEXT BEGIN target=%s board=%s\n", TGT, PICO_BOARD);
     pex_sig_uecc_set_keys(PEX_TEST_PUBKEY, 1);
+    /* a fresh partition: both index copies erased */
+    part_window();
+    part_erase(NULL, 0);
+    part_erase(NULL, 4096);
     pex_config_t cfg = {
         .pool = s_pool, .pool_size = sizeof s_pool, .policy = PEX_POLICY_ALLOW_UNSIGNED,
-        .verify = pex_sig_uecc_verify, .host_name = "pex-test",
+        .verify = pex_sig_uecc_verify, .host_name = "pex-test", .flash = &s_part,
     };
     int rc = pex_init(&cfg);
     result("init", rc == 0, NULL);
@@ -406,11 +660,14 @@ int main(void) {
     suite("reloc");
     suite("pic");
     integrity_suite();
+    xip_suite("reloc");
+    xip_suite("pic");
     pex_mem_stats_t s;
     pex_pool_stats(&s);
     s_model = "-";
-    result("final.pool_empty", s.long_blocks == 0 && s.scratch_bytes == 0 && s.pool_free == s.pool_size, "free %lu/%lu",
-           (unsigned long)s.pool_free, (unsigned long)s.pool_size);
+    /* what stays: the XIP index (3 KB, runtime-owned) */
+    result("final.pool_empty", s.long_blocks == 1 && s.scratch_bytes == 0 && s.pool_size - s.pool_free <= 3200,
+           "free %lu/%lu, %lu blocks", (unsigned long)s.pool_free, (unsigned long)s.pool_size, (unsigned long)s.long_blocks);
     printf("PEXT DONE target=%s pass=%d fail=%d ms=%lu\n", TGT, s_pass, s_fail,
            (unsigned long)(to_ms_since_boot(get_absolute_time()) - t0));
     for (;;) { sleep_ms(1000); }

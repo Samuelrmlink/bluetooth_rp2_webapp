@@ -97,7 +97,28 @@ def unit_tests(work):
     if r.returncode:
         return [("unit.build", False, r.stderr[-300:])]
     r = sh([exe])
-    return [("unit.json_crc_sha", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else r.stderr[-200:])]
+    out = [("unit.json_crc_sha", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else r.stderr[-200:])]
+    # XIP on the build host: install/uninstall/compaction with a power cut at every flash operation
+    for g in ("core", "log", "mem", "sched", "pex", "json"):
+        sh([sys.executable, os.path.join(PEX, "tools", "gen_host_api.py"), "table", os.path.join(PEX, "host_api.json"), g,
+            os.path.join(gen, f"pex_host_{g}.c")])
+    rt = os.path.join(PEX, "runtime")
+    exe = os.path.join(work, "pex_xip_unit")
+    r = sh(["gcc", "-O1", "-Wall", "-Wextra", "-DPEX_FORCE_TARGET=2", "-DPEX_FORCE_FEATURES=5", "-fsanitize=address,undefined",
+            "-I", rt, "-I", os.path.join(PEX, "sdk", "include"), "-I", gen, os.path.join(HERE, "unit", "pex_xip_unit.c")]
+           + [os.path.join(rt, f) for f in ("pex_core.c", "pex_load.c", "pex_mem.c", "pex_sched.c", "pex_hash.c", "pex_xip.c",
+                                          os.path.join("groups", "pex_json.c"))]
+           + [os.path.join(gen, f"pex_host_{g}.c") for g in ("core", "log", "mem", "sched", "pex", "json")] + ["-o", exe])
+    if r.returncode:
+        return out + [("unit.xip.build", False, r.stderr[-300:])]
+    r = sh([exe], env=dict(os.environ, ASAN_OPTIONS="detect_leaks=0"), timeout=900)
+    open(os.path.join(work, "pex_xip_unit.log"), "w").write(r.stdout + r.stderr)
+    lines = [l for l in r.stdout.splitlines() if not l.startswith("  |")]
+    for l in lines:
+        if "cut points" in l or l.startswith("random workload"):
+            print("  xip unit: " + l)
+    out.append(("unit.xip_power_cuts", r.returncode == 0, lines[-1] if lines else r.stderr[-200:]))
+    return out
 
 
 def main():

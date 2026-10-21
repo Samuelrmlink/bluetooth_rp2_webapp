@@ -13,6 +13,8 @@ Besides the built modules it derives the refusal cases (bad/...):
   hello_fmt2     format major 2
   hello_api99    api minor 99
   hello_trunc    truncated
+and signed copies of arith and big in both models (sig/<model>_<name>), for the
+XIP checks.
 Bundle: "PXB1", u32 count, count x {char name[40], u32 off, u32 size}, data (8-aligned).
 """
 import argparse, os, shutil, struct, subprocess, sys
@@ -82,6 +84,13 @@ def main():
         struct.pack_into("<H", b, 22, 99)
         files[f"bad/hello_api99.{t}.pex"] = bytes(fix_crc(b))
         files[f"bad/hello_trunc.{t}.pex"] = hello[:len(hello) // 2]
+        # signed copies for the XIP checks (verification in place, model A un-relocated)
+        for model in ("reloc", "pic"):
+            for mod in ("arith", "big"):
+                open(tmp, "wb").write(files[f"{model}/{mod}.{t}.pex"])
+                subprocess.check_call([sys.executable, os.path.join(TOOLS, "pexlink.py"), "sign", tmp, "-o", sgn,
+                                       "--key", a.key], stdout=subprocess.DEVNULL)
+                files[f"sig/{model}_{mod}.{t}.pex"] = open(sgn, "rb").read()
         for p in (tmp, sgn):
             os.unlink(p)
     names = sorted(files)

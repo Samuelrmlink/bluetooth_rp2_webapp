@@ -51,25 +51,18 @@ static const char *tname(uint32_t t) {
     return "?";
 }
 
-static int rread(const pex_reader_t *rd, uint32_t off, void *dst, uint32_t n) {
+int pex__rread(const pex_reader_t *rd, uint32_t off, void *dst, uint32_t n) {
     if (!n) { return 0; }
     if (rd->size && (off > rd->size || n > rd->size - off)) { return PEX_EIO; }
     return rd->read(rd->ctx, off, dst, n) == (int)n ? 0 : PEX_EIO;
 }
 
 /* ---- header ---------------------------------------------------------------- */
-typedef struct { uint16_t type, flags; uint32_t off, size; } sec_t;
-typedef struct {
-    uint16_t fmaj, fmin, hsize, target, api_major, api_minor;
-    uint32_t file_size, features, flags, version, image_size, text, ro, data, bss, stack, entry;
-    uint32_t nsec, sec_off, image_off, crc;
-    uint8_t build_id[16];
-    sec_t sec[PEX_MAX_SECTIONS];
-    uint32_t sig_off;
-    int sig;
-} hdr_t;
+typedef pex__sec_t sec_t;
+typedef pex__hdr_t hdr_t;
+const pex__xload_t *pex__xload;
 
-static const sec_t *find_sec(const hdr_t *h, uint16_t type) {
+const pex__sec_t *pex__find_sec(const pex__hdr_t *h, uint16_t type) {
     for (uint32_t i = 0; i < h->nsec; i++) {
         if (h->sec[i].type == type) { return &h->sec[i]; }
     }
@@ -81,10 +74,10 @@ static int fail(int code, const char *msg) {
     return code;
 }
 
-static int parse_header(const pex_reader_t *rd, hdr_t *h) {
+int pex__parse_header(const pex_reader_t *rd, pex__hdr_t *h) {
     uint8_t b[PEX_HEADER_SIZE];
     memset(h, 0, sizeof *h);
-    if (rread(rd, 0, b, 16)) { return fail(PEX_EIO, "cannot read the file"); }
+    if (pex__rread(rd, 0, b, 16)) { return fail(PEX_EIO, "cannot read the file"); }
     if (rd32(b) != PEX_MAGIC) { return fail(PEX_EFORMAT, "not a .pex (bad magic)"); }
     h->fmaj = rd16(b + 4); h->fmin = rd16(b + 6); h->hsize = rd16(b + 8); h->target = rd16(b + 10);
     h->file_size = rd32(b + 12);
@@ -103,7 +96,7 @@ static int parse_header(const pex_reader_t *rd, hdr_t *h) {
                  (unsigned long)h->file_size);
         return PEX_EFORMAT;
     }
-    if (rread(rd, 0, b, PEX_HEADER_SIZE)) { return fail(PEX_EIO, "cannot read the header"); }
+    if (pex__rread(rd, 0, b, PEX_HEADER_SIZE)) { return fail(PEX_EIO, "cannot read the header"); }
     h->features = rd32(b + 16); h->api_major = rd16(b + 20); h->api_minor = rd16(b + 22);
     h->flags = rd32(b + 24); h->version = rd32(b + 28); h->image_size = rd32(b + 32);
     h->text = rd32(b + 36); h->ro = rd32(b + 40); h->data = rd32(b + 44); h->bss = rd32(b + 48);
@@ -129,7 +122,7 @@ static int parse_header(const pex_reader_t *rd, hdr_t *h) {
     h->sig_off = h->file_size;
     h->sig = -1;
     for (uint32_t i = 0; i < h->nsec; i++) {
-        if (rread(rd, h->sec_off + 12 * i, t, 12)) { return fail(PEX_EIO, "cannot read the section table"); }
+        if (pex__rread(rd, h->sec_off + 12 * i, t, 12)) { return fail(PEX_EIO, "cannot read the section table"); }
         sec_t *s = &h->sec[i];
         s->type = rd16(t); s->flags = rd16(t + 2); s->off = rd32(t + 4); s->size = rd32(t + 8);
         if (s->off > h->file_size || s->size > h->file_size - s->off || (s->off & 3)) {
@@ -168,16 +161,16 @@ static int parse_header(const pex_reader_t *rd, hdr_t *h) {
 
 /* CRC over [0, sig_off) with the crc field as zero; SHA-256 of the same bytes;
  * then the signature and the policy (spec 10). */
-static int integrity(const pex_reader_t *rd, const hdr_t *h) {
+int pex__integrity(const pex_reader_t *rd, const pex__hdr_t *h, bool skip_sig) {
     uint8_t buf[128];
     uint32_t crc = 0;
     pex_sha256_t sha;
-    bool signed_ = h->sig >= 0;
-    if (signed_) { pex_sha256_init(&sha); }
+    bool signed_ = h->sig >= 0, hash = signed_ && !skip_sig;
+    if (hash) { pex_sha256_init(&sha); }
     for (uint32_t off = 0; off < h->sig_off;) {
         uint32_t n = h->sig_off - off < sizeof buf ? h->sig_off - off : (uint32_t)sizeof buf;
-        if (rread(rd, off, buf, n)) { return fail(PEX_EIO, "read error"); }
-        if (signed_) { pex_sha256_update(&sha, buf, n); }
+        if (pex__rread(rd, off, buf, n)) { return fail(PEX_EIO, "read error"); }
+        if (hash) { pex_sha256_update(&sha, buf, n); }
         for (uint32_t k = 0; k < 4; k++) {
             if (off <= CRC_OFF + k && CRC_OFF + k < off + n) { buf[CRC_OFF + k - off] = 0; }
         }
@@ -189,10 +182,12 @@ static int integrity(const pex_reader_t *rd, const hdr_t *h) {
                  (unsigned long)h->crc);
         return PEX_ECRC;
     }
-    if (signed_) {
+    if (signed_ && skip_sig) {
+        /* verified when it was installed into flash (pex_xip.c) */
+    } else if (signed_) {
         const sec_t *s = &h->sec[h->sig];
         uint8_t sig[4 + 64];
-        if (s->size != sizeof sig || rread(rd, s->off, sig, sizeof sig)) {
+        if (s->size != sizeof sig || pex__rread(rd, s->off, sig, sizeof sig)) {
             return fail(PEX_ESIG, "malformed SIG section");
         }
         uint8_t digest[32];
@@ -212,24 +207,42 @@ static int integrity(const pex_reader_t *rd, const hdr_t *h) {
     return PEX_OK;
 }
 
+void pex__meta_name(const pex_reader_t *rd, const pex__hdr_t *h, char out[24]) {
+    out[0] = 0;
+    const sec_t *sm = pex__find_sec(h, PEX_SEC_META);
+    uint8_t b4[4];
+    for (uint32_t i = 0; sm && i + 4 <= sm->size;) {
+        if (pex__rread(rd, sm->off + i, b4, 4)) { return; }
+        uint16_t tag = rd16(b4), len = rd16(b4 + 2);
+        if (i + 4 + len > sm->size) { return; }
+        if (tag == PEX_META_NAME && len) {
+            uint32_t n = len < 23 ? len : 23;
+            if (pex__rread(rd, sm->off + i + 4, out, n)) { out[0] = 0; return; }
+            out[n] = 0;
+            return;
+        }
+        i += (4u + len + 3u) & ~3u;
+    }
+}
+
 int pex_check(const pex_reader_t *rd) {
     hdr_t h;
-    int rc = parse_header(rd, &h);
-    return rc ? rc : integrity(rd, &h);
+    int rc = pex__parse_header(rd, &h);
+    return rc ? rc : pex__integrity(rd, &h, false);
 }
 
 /* An import's name from the optional DEBUG section, for messages. */
 static void debug_name(const pex_reader_t *rd, const hdr_t *h, uint32_t hash, char *out, size_t cap) {
     snprintf(out, cap, "0x%08lx", (unsigned long)hash);
-    const sec_t *s = find_sec(h, PEX_SEC_DEBUG);
+    const sec_t *s = pex__find_sec(h, PEX_SEC_DEBUG);
     if (!s) { return; }
     uint8_t r[8];
     for (uint32_t i = 0; i + 8 <= s->size;) {
-        if (rread(rd, s->off + i, r, 8)) { return; }
+        if (pex__rread(rd, s->off + i, r, 8)) { return; }
         uint16_t kind = rd16(r + 4), len = rd16(r + 6);
         if (kind == 1 && rd32(r) == hash) {
             uint32_t n = len < cap - 1 ? len : (uint32_t)cap - 1;
-            if (rread(rd, s->off + i + 8, out, n) == 0) { out[n] = 0; }
+            if (pex__rread(rd, s->off + i + 8, out, n) == 0) { out[n] = 0; }
             return;
         }
         i += (8u + len + 3u) & ~3u;
@@ -313,6 +326,11 @@ static uint8_t new_id(void) {
     return 0;
 }
 
+static void code_free(pex_code_t *c) {
+    if (!c->xip) { pex__free(c->base); }
+    pex__free(c);
+}
+
 static void release(pex_mod_t *m) {
     /* everything tagged with the module's id, then its share of the code */
     pex_code_t *c = m->code;
@@ -320,10 +338,7 @@ static void release(pex_mod_t *m) {
     pex__sched_cancel_owner(m);
     pex__scratch_release_owner(id);
     pex__free_owner(id, NULL);
-    if (c && --c->users == 0) {
-        pex__free(c->base);
-        pex__free(c);
-    }
+    if (c && --c->users == 0) { code_free(c); }
 }
 
 static void unlink_mod(pex_mod_t *m) {
@@ -338,23 +353,25 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     pex_mod_t *m = NULL;
     int rc;
     char nm[48];
+    const pex__xload_t *xl = pex__xload;     /* XIP: the code is in flash (pex_load_installed) */
+    pex__xload = NULL;
 #define FAIL(code) do { rc = (code); goto out; } while (0)
     pex__err(PEX_OK, "ok");
     if (!rd || !rd->read) { pex__err(PEX_EINVAL, "no reader"); rc = PEX_EINVAL; goto out; }
     tmp = pex__scratch_begin(sizeof(hdr_t) + 512, PEX_OWNER_HOST);
     if (!tmp) { pex__err(PEX_ENOMEM, "PEX pool full (no room for the load buffer)"); FAIL(PEX_ENOMEM); }
     h = pex__scratch_alloc(tmp, sizeof *h);
-    if ((rc = parse_header(rd, h)) != 0) { goto out; }
-    if ((rc = integrity(rd, h)) != 0) { goto out; }
+    if ((rc = pex__parse_header(rd, h)) != 0) { goto out; }
+    if ((rc = pex__integrity(rd, h, xl && xl->skip_sig)) != 0) { goto out; }
 
     /* ---- imports: resolve every symbol before allocating anything */
-    const sec_t *si = find_sec(h, PEX_SEC_IMPORTS);
+    const sec_t *si = pex__find_sec(h, PEX_SEC_IMPORTS);
     uint32_t ng = 0, ni = 0;
     uint8_t *imp = NULL;
     uint32_t *addrs = NULL;
     if (si) {
         uint8_t b4[4];
-        if (si->size < 4 || rread(rd, si->off, b4, 4)) { pex__err(PEX_EFORMAT, "bad IMPORTS"); FAIL(PEX_EFORMAT); }
+        if (si->size < 4 || pex__rread(rd, si->off, b4, 4)) { pex__err(PEX_EFORMAT, "bad IMPORTS"); FAIL(PEX_EFORMAT); }
         ng = rd16(b4);
         ni = rd16(b4 + 2);
         if (4 + 4 * ng + 12 * ni > si->size) { pex__err(PEX_EFORMAT, "IMPORTS truncated"); FAIL(PEX_EFORMAT); }
@@ -363,7 +380,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         if (!tmp2) { pex__err(PEX_ENOMEM, "PEX pool full (imports)"); FAIL(PEX_ENOMEM); }
         imp = pex__scratch_alloc(tmp2, si->size);
         addrs = pex__scratch_alloc(tmp2, 4 * ni + 4);
-        if (!imp || !addrs || rread(rd, si->off, imp, si->size)) { pex__err(PEX_EIO, "cannot read IMPORTS"); FAIL(PEX_EIO); }
+        if (!imp || !addrs || pex__rread(rd, si->off, imp, si->size)) { pex__err(PEX_EIO, "cannot read IMPORTS"); FAIL(PEX_EIO); }
         for (uint32_t gi = 0; gi < ng; gi++) {
             const uint8_t *gr = imp + 4 + 4 * gi;
             uint16_t gid = rd16(gr);
@@ -427,17 +444,17 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     m->entry = h->entry;
 
     /* ---- metadata: exports, fini list, strings (one block) */
-    const sec_t *se = find_sec(h, PEX_SEC_EXPORTS), *sm = find_sec(h, PEX_SEC_META), *sf = find_sec(h, PEX_SEC_FINI);
+    const sec_t *se = pex__find_sec(h, PEX_SEC_EXPORTS), *sm = pex__find_sec(h, PEX_SEC_META), *sf = pex__find_sec(h, PEX_SEC_FINI);
     uint32_t nexp = 0, nfini = 0, strsz = 0, descl = 0, metaname_len = 0;
     uint8_t b8[8];
     if (se) {
-        if (se->size < 4 || rread(rd, se->off, b8, 4)) { pex__err(PEX_EFORMAT, "bad EXPORTS"); FAIL(PEX_EFORMAT); }
+        if (se->size < 4 || pex__rread(rd, se->off, b8, 4)) { pex__err(PEX_EFORMAT, "bad EXPORTS"); FAIL(PEX_EFORMAT); }
         nexp = rd32(b8);
         if (nexp > 1024 || 4 + 16 * nexp > se->size) { pex__err(PEX_EFORMAT, "bad EXPORTS"); FAIL(PEX_EFORMAT); }
         strsz = se->size - 4 - 16 * nexp;
     }
     if (sf) {
-        if (sf->size < 4 || rread(rd, sf->off, b8, 4)) { pex__err(PEX_EFORMAT, "bad FINI"); FAIL(PEX_EFORMAT); }
+        if (sf->size < 4 || pex__rread(rd, sf->off, b8, 4)) { pex__err(PEX_EFORMAT, "bad FINI"); FAIL(PEX_EFORMAT); }
         nfini = rd32(b8);
         if (nfini > 256 || 4 + 4 * nfini > sf->size) { pex__err(PEX_EFORMAT, "bad FINI"); FAIL(PEX_EFORMAT); }
     }
@@ -445,12 +462,12 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     uint32_t desc_off = 0;
     if (sm) {
         for (uint32_t i = 0; i + 4 <= sm->size;) {
-            if (rread(rd, sm->off + i, b8, 4)) { break; }
+            if (pex__rread(rd, sm->off + i, b8, 4)) { break; }
             uint16_t tag = rd16(b8), len = rd16(b8 + 2);
             if (i + 4 + len > sm->size) { break; }
             if (tag == PEX_META_NAME && len) {
                 metaname_len = len < sizeof metaname - 1 ? len : (uint32_t)sizeof metaname - 1;
-                rread(rd, sm->off + i + 4, metaname, metaname_len);
+                pex__rread(rd, sm->off + i + 4, metaname, metaname_len);
                 metaname[metaname_len] = 0;
             } else if (tag == PEX_META_DESC && len) {
                 descl = len < 120 ? len : 120;
@@ -469,7 +486,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     m->n_fini = nfini;
     for (uint32_t i = 0; i < nexp; i++) {
         uint8_t e[16];
-        if (rread(rd, se->off + 4 + 16 * i, e, 16)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
+        if (pex__rread(rd, se->off + 4 + 16 * i, e, 16)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
         m->exports[i].hash = rd32(e);
         m->exports[i].value = rd32(e + 4);
         m->exports[i].name_off = rd32(e + 12);
@@ -478,15 +495,15 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
             FAIL(PEX_EFORMAT);
         }
     }
-    if (strsz && rread(rd, se->off + 4 + 16 * nexp, m->strings, strsz)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
+    if (strsz && pex__rread(rd, se->off + 4 + 16 * nexp, m->strings, strsz)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
     m->strings[strsz ? strsz - 1 : 0] = 0;
     for (uint32_t i = 0; i < nfini; i++) {
-        if (rread(rd, sf->off + 4 + 4 * i, b8, 4)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
+        if (pex__rread(rd, sf->off + 4 + 4 * i, b8, 4)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
         m->fini[i] = rd32(b8);
         if ((m->fini[i] & ~1u) >= m->text_size || !(m->fini[i] & 1)) { pex__err(PEX_EFORMAT, "bad FINI entry"); FAIL(PEX_EFORMAT); }
     }
     char *desc = m->strings + strsz + 1;
-    if (descl) { rread(rd, desc_off, desc, descl); }
+    if (descl) { pex__rread(rd, desc_off, desc, descl); }
     desc[descl] = 0;
     m->desc = desc;
 
@@ -500,7 +517,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     if ((h->flags & PEX_F_PIC) && (h->flags & PEX_F_REENTRANT)) {
         for (pex_mod_t *o = pex__mods; o; o = o->next) {
             if (o->code && o->state != PEX_ST_FAULTED && memcmp(o->code->build_id, h->build_id, 16) == 0 &&
-                o->code->size == m->code_size) {
+                o->code->size == m->code_size && (!xl || o->code->xip)) {
                 c = o->code;
                 break;
             }
@@ -511,33 +528,42 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         c = pex__alloc(sizeof *c, 8, PEX_OWNER_RT, 1);
         if (!c) { pex__err(PEX_ENOMEM, "PEX pool full"); FAIL(PEX_ENOMEM); }
         memset(c, 0, sizeof *c);
-        c->base = pex__alloc(m->code_size ? m->code_size : 4, 8, PEX_OWNER_RT, 1);
-        if (!c->base) {
-            pex__free(c);
-            pex__err(PEX_ENOMEM, "PEX pool full: %lu bytes of code", (unsigned long)m->code_size);
-            FAIL(PEX_ENOMEM);
-        }
         c->size = m->code_size;
         memcpy(c->build_id, h->build_id, 16);
-        if (rread(rd, h->image_off, c->base, m->code_size)) {
-            pex__free(c->base); pex__free(c);
-            pex__err(PEX_EIO, "cannot read the image");
-            FAIL(PEX_EIO);
+        if (xl) {
+            c->base = (uint8_t *)xl->code;      /* in place: nothing to copy, RO relocations already applied */
+            c->xip = 1;
+        } else {
+            c->base = pex__alloc(m->code_size ? m->code_size : 4, 8, PEX_OWNER_RT, 1);
+            if (!c->base) {
+                pex__free(c);
+                pex__err(PEX_ENOMEM, "PEX pool full: %lu bytes of code", (unsigned long)m->code_size);
+                FAIL(PEX_ENOMEM);
+            }
+            if (pex__rread(rd, h->image_off, c->base, m->code_size)) {
+                pex__free(c->base); pex__free(c);
+                pex__err(PEX_EIO, "cannot read the image");
+                FAIL(PEX_EIO);
+            }
         }
     }
     c->users++;
     m->code = c;
 
-    /* ---- RW: data copied, bss zeroed */
-    m->rw = pex__alloc(m->rw_size ? m->rw_size : 4, 8, id, 1);
+    /* ---- RW: data copied, bss zeroed (model A in flash: at the address its code was relocated for) */
+    if (xl && xl->rw) {
+        m->rw = (uint8_t *)xl->rw;
+    } else {
+        m->rw = pex__alloc(m->rw_size ? m->rw_size : 4, 8, id, 1);
+    }
     if (!m->rw) { pex__err(PEX_ENOMEM, "PEX pool full: %lu bytes of RW", (unsigned long)m->rw_size); FAIL(PEX_ENOMEM); }
-    if (rread(rd, h->image_off + m->code_size, m->rw, h->data)) { pex__err(PEX_EIO, "cannot read data"); FAIL(PEX_EIO); }
+    if (pex__rread(rd, h->image_off + m->code_size, m->rw, h->data)) { pex__err(PEX_EIO, "cannot read data"); FAIL(PEX_EIO); }
     memset(m->rw + h->data, 0, h->bss);
 
     /* ---- relocations (spec 6): word += base of the segment it points into */
-    const sec_t *sr = find_sec(h, PEX_SEC_RELOC);
+    const sec_t *sr = pex__find_sec(h, PEX_SEC_RELOC);
     if (sr) {
-        if (sr->size < 8 || rread(rd, sr->off, b8, 8)) { pex__err(PEX_EFORMAT, "bad RELOC"); FAIL(PEX_EFORMAT); }
+        if (sr->size < 8 || pex__rread(rd, sr->off, b8, 8)) { pex__err(PEX_EFORMAT, "bad RELOC"); FAIL(PEX_EFORMAT); }
         uint32_t nro = rd32(b8), nrw = rd32(b8 + 4);
         if (nro > sr->size / 4 || nrw > sr->size / 4 || 8 + 4 * (nro + nrw) > sr->size) {
             pex__err(PEX_EFORMAT, "RELOC truncated");
@@ -552,7 +578,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         uint8_t chunk[64];
         for (uint32_t k = 0; k < nro + nrw; k += 16) {
             uint32_t n = nro + nrw - k < 16 ? nro + nrw - k : 16;
-            if (rread(rd, sr->off + 8 + 4 * k, chunk, 4 * n)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
+            if (pex__rread(rd, sr->off + 8 + 4 * k, chunk, 4 * n)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
             for (uint32_t j = 0; j < n; j++) {
                 uint32_t e = rd32(chunk + 4 * j), off = e & 0x7FFFFFFFu;
                 uint32_t add = (e & PEX_RELOC_TO_RW) ? rb : cb;
@@ -561,7 +587,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
                     pex__err(PEX_EFORMAT, "relocation %lu out of range", (unsigned long)(k + j));
                     FAIL(PEX_EFORMAT);
                 }
-                if (ro && shared) { continue; }      /* never happens: PIC has no RO list */
+                if (ro && (shared || c->xip)) { continue; }  /* shared: PIC has no RO list; XIP: done at install */
                 uint32_t *w = (uint32_t *)((ro ? c->base : m->rw) + off);
                 *w += add;
             }
@@ -572,7 +598,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         const uint8_t *e = imp + 4 + 4 * ng + 12 * k;
         *(uint32_t *)(m->rw + rd32(e + 8)) = addrs[k];
     }
-    if (!shared) { pex_port_code_sync(c->base, c->size); }
+    if (!shared && !c->xip) { pex_port_code_sync(c->base, c->size); }
 
     m->host.size = sizeof m->host;
     m->host.api_major = PEX_API_MAJOR;
@@ -589,7 +615,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
 
     /* the temporary buffers are no longer needed: give the scratch side back
      * before any module code runs (it may want scratch itself) */
-    const sec_t *sinit = find_sec(h, PEX_SEC_INIT);
+    const sec_t *sinit = pex__find_sec(h, PEX_SEC_INIT);
     uint32_t init_off = sinit ? sinit->off : 0, init_size = sinit ? sinit->size : 0;
     bool no_init = opts && opts->no_init;
     if (tmp2) { pex__scratch_end(tmp2); tmp2 = NULL; }
@@ -598,11 +624,11 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     h = NULL;
 
     if (init_size >= 4) {
-        if (rread(rd, init_off, b8, 4)) { pex__err(PEX_EIO, "read error"); rc = PEX_EIO; goto undo; }
+        if (pex__rread(rd, init_off, b8, 4)) { pex__err(PEX_EIO, "read error"); rc = PEX_EIO; goto undo; }
         uint32_t n = rd32(b8);
         if (n > 256 || 4 + 4 * n > init_size) { pex__err(PEX_EFORMAT, "bad INIT"); rc = PEX_EFORMAT; goto undo; }
         for (uint32_t i = 0; i < n; i++) {
-            if (rread(rd, init_off + 4 + 4 * i, b8, 4)) { pex__err(PEX_EIO, "read error"); rc = PEX_EIO; goto undo; }
+            if (pex__rread(rd, init_off + 4 + 4 * i, b8, 4)) { pex__err(PEX_EIO, "read error"); rc = PEX_EIO; goto undo; }
             uint32_t f = rd32(b8);
             if (!(f & 1) || (f & ~1u) >= m->text_size) { pex__err(PEX_EFORMAT, "bad INIT entry"); rc = PEX_EFORMAT; goto undo; }
             pex_call(m, (uint32_t)(uintptr_t)c->base + f, 0, 0, 0, 0);
@@ -617,10 +643,10 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
             goto undo;
         }
     }
-    pex__logf(PEX_LOG_INFO, "pex: loaded %s v%lu.%lu.%lu (%s, model %c%s): code %lu @%p, RW %lu @%p, %lu imports, %lu exports",
+    pex__logf(PEX_LOG_INFO, "pex: loaded %s v%lu.%lu.%lu (%s, model %c%s%s): code %lu @%p, RW %lu @%p, %lu imports, %lu exports",
               m->name, (unsigned long)(m->version >> 24), (unsigned long)((m->version >> 16) & 0xFF),
               (unsigned long)(m->version & 0xFFFF), tname(m->target), (m->flags & PEX_F_PIC) ? 'B' : 'A',
-              shared ? ", code shared" : "", (unsigned long)m->code_size, (void *)c->base,
+              c->xip ? ", in place (XIP)" : "", shared ? ", code shared" : "", (unsigned long)m->code_size, (void *)c->base,
               (unsigned long)m->rw_size, (void *)m->rw, (unsigned long)ni, (unsigned long)nexp);
     if (errp) { *errp = PEX_OK; }
     return m;
@@ -639,7 +665,7 @@ out:
         pex_code_t *cc = m->code;
         uint8_t id2 = m->id;
         pex__free_owner(id2, NULL);
-        if (cc && --cc->users == 0) { pex__free(cc->base); pex__free(cc); }
+        if (cc && --cc->users == 0) { code_free(cc); }
     }
     if (errp) { *errp = rc; }
     if (rc) { pex__logf(PEX_LOG_WARN, "pex: load refused: %s (%s)", pex_errmsg(), pex_strerror(rc)); }
@@ -753,8 +779,7 @@ int pex_unload(pex_mod_t *m) {
     pex__free_owner(m->id, NULL);   /* the module's blocks, its RW and this record */
     bool code_freed = false;
     if (c && --c->users == 0) {
-        pex__free(c->base);
-        pex__free(c);
+        code_free(c);
         code_freed = true;
     }
     if (leak_blocks || nscr || ntasks) {
@@ -809,6 +834,7 @@ int pex_info(pex_mod_t *m, pex_info_t *o) {
     o->code_size = m->code_size;
     o->rw_size = m->rw_size;
     o->code_shared = m->code->users > 1;
+    o->xip = m->code->xip != 0;
     o->active = m->active;
     o->refs = m->refs;
     o->tasks = m->tasks;
@@ -830,9 +856,9 @@ static size_t mod_json(pex_mod_t *m, char *dst, size_t cap, bool full) {
            pex_state_name((pex_state_t)m->state), (unsigned long)(m->version >> 24),
            (unsigned long)((m->version >> 16) & 0xFF), (unsigned long)(m->version & 0xFFFF));
     for (int i = 0; i < (full ? 16 : 8); i++) { APPEND("%02x", m->build_id[i]); }
-    APPEND("\",\"model\":\"%s\",\"app\":%s,\"lua\":%s,\"code\":%lu,\"rw\":%lu,\"shared\":%s,\"active\":%d,\"refs\":%d,"
+    APPEND("\",\"model\":\"%s\",\"xip\":%s,\"app\":%s,\"lua\":%s,\"code\":%lu,\"rw\":%lu,\"shared\":%s,\"active\":%d,\"refs\":%d,"
            "\"tasks\":%d,\"long\":%lu,\"blocks\":%lu,\"scratch_peak\":%lu", (m->flags & PEX_F_PIC) ? "pic" : "reloc",
-           (m->flags & PEX_F_APP) ? "true" : "false", (m->flags & PEX_F_LUA_MODULE) ? "true" : "false",
+           m->code->xip ? "true" : "false", (m->flags & PEX_F_APP) ? "true" : "false", (m->flags & PEX_F_LUA_MODULE) ? "true" : "false",
            (unsigned long)m->code_size, (unsigned long)m->rw_size, m->code->users > 1 ? "true" : "false", m->active,
            m->refs, m->tasks, (unsigned long)m->long_bytes, (unsigned long)m->long_blocks,
            (unsigned long)m->scratch_peak);

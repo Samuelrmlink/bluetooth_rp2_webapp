@@ -13,7 +13,9 @@ static uint32_t s_ngroups;
 
 /* ---- target of THIS host (spec 5: the module's target must match exactly) */
 uint32_t pex__host_target(void) {
-#if defined(__ARM_ARCH_8M_MAIN__)
+#if defined(PEX_FORCE_TARGET)           /* the runtime's unit tests on the build host */
+    return PEX_FORCE_TARGET;
+#elif defined(__ARM_ARCH_8M_MAIN__)
     return PEX_TARGET_ARMV8M_MAIN;
 #elif defined(__ARM_ARCH_6M__)
     return PEX_TARGET_ARMV6M;
@@ -28,6 +30,9 @@ uint32_t pex__host_target(void) {
 
 uint32_t pex__host_features(void) {
     uint32_t f = 0;
+#if defined(PEX_FORCE_FEATURES)
+    return PEX_FORCE_FEATURES;
+#endif
 #if defined(__ARM_FP) && (__ARM_FP & 4)
     f |= PEX_FEAT_FPU_SP;
 #endif
@@ -76,6 +81,7 @@ int pex_init(const pex_config_t *cfg) {
     pex__logf(PEX_LOG_INFO, "pex: runtime %s, api %u.%u, target 0x%04lx, pool %lu bytes, %s", PEX_RT_VERSION,
               PEX_API_MAJOR, PEX_API_MINOR, (unsigned long)pex__host_target(), (unsigned long)cfg->pool_size,
               (cfg->policy & PEX_POLICY_ALLOW_UNSIGNED) ? "UNSIGNED MODULES ALLOWED (development)" : "signed modules only");
+    if (cfg->flash) { pex__xip_mount_cfg(); }
     return PEX_OK;
 }
 
@@ -126,6 +132,9 @@ const char *pex_strerror(int e) {
     case PEX_EEXIST: return "already exists";
     case PEX_ESTATE: return "wrong state";
     case PEX_EFAULT: return "module faulted";
+    case PEX_EAGAIN: return "try again";
+    case PEX_EPENDING: return "pending";
+    case PEX_ENOSPC: return "no room in the PEX flash partition";
     }
     return "error";
 }
@@ -205,10 +214,4 @@ void pex_app_exit(int code) {
         m->exit_code = code;
         m->exit_pending = 1;
     }
-}
-
-int pex_install(const pex_reader_t *rd, uint32_t flags) {
-    (void)rd; (void)flags;
-    pex__err(PEX_ENOTSUP, "XIP install into the PEX flash partition is not in this version (RAM mode only)");
-    return PEX_ENOTSUP;
 }

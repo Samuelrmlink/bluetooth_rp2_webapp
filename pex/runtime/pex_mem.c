@@ -55,6 +55,8 @@ void pex__mem_init(void *pool, uint32_t size) {
     s_scratch_peak = 0;
 }
 
+uint8_t *pex__pool_end(void) { return s_end; }
+
 bool pex__in_pool(const void *p) {
     return (const uint8_t *)p >= s_base && (const uint8_t *)p < s_end;
 }

@@ -56,6 +56,20 @@ const pex_group_t *pex_find_group(uint16_t id);
 /* ---- configuration ------------------------------------------------------- */
 #define PEX_POLICY_ALLOW_UNSIGNED 1u    /* development: unsigned modules load (say so loudly) */
 
+/* The PEX flash partition (XIP, spec 16): installed modules run in place.
+ * Offsets are partition offsets. erase: one 4 KB sector; prog: n bytes, n a
+ * multiple of 256 at a 256-aligned offset (erased before). Both return 0 on
+ * success; they must leave the flash readable (and the cache coherent) at
+ * read_base and executable at exec_base when they return. */
+typedef struct {
+    uint32_t size;               /* bytes, a multiple of 4096, >= 16 KB */
+    uintptr_t exec_base;         /* partition byte 0 as code is fetched (cached XIP) */
+    uintptr_t read_base;         /* partition byte 0 as data is read (may equal exec_base) */
+    int (*erase)(void *ctx, uint32_t off);
+    int (*prog)(void *ctx, uint32_t off, const void *src, uint32_t n);
+    void *ctx;
+} pex_flash_t;
+
 typedef int (*pex_verify_fn)(uint16_t alg, uint16_t key_id, const uint8_t digest[32],
                              const uint8_t *sig, uint32_t sig_len);
 
@@ -71,6 +85,7 @@ typedef struct {
     /* Called at unload (also of a faulted module), after PEX_DEINIT, before its
      * memory goes: host groups release what the module registered with them. */
     void (*on_unload)(pex_mod_t *m);
+    const pex_flash_t *flash;   /* NULL: no XIP partition (RAM mode only) */
     bool stack_scan;            /* debug option: also refuse unload when a word on the stack looks like a
                                    return address into the image. The trampoline's active count is the
                                    real check; live frames can hold STALE return addresses, so this
@@ -147,6 +162,7 @@ typedef struct {
     uintptr_t code, rw;          /* where they are */
     uint32_t code_size, rw_size;
     bool code_shared;            /* model B: another instance owns the same code copy */
+    bool xip;                    /* the code runs in place from the PEX flash partition */
     int active, refs, tasks;
     int exit_code;
     uint32_t n_exports;
@@ -179,8 +195,56 @@ const pex_fault_t *pex_last_fault(void);
 /* Which module (if any) contains addr; *off = image offset. */
 pex_mod_t *pex_mod_at(uint32_t addr, uint32_t *off);
 
-/* XIP install into a flash partition: the next version (spec 6.4). */
-int pex_install(const pex_reader_t *rd, uint32_t flags);   /* PEX_ENOTSUP in this version */
+/* ---- XIP: install into the flash partition, run in place (spec 16) ------- *
+ * The partition holds an index (two copies with sequence numbers: a power cut
+ * during any update leaves the previous index valid) and whole .pex files,
+ * each at a 4 KB boundary. Model B is stored as signed; model A is stored
+ * with its RO words relocated to its flash address (and to a fixed RW
+ * address at the top of the pool), and is re-relocated when it moves.
+ * Every update is copy-then-commit; compaction slides files down with a
+ * journal in the index, resumed by pex_xip_mount() after a power cut. */
+#define PEX_INSTALL_NO_COMPACT 1u    /* fail with PEX_ENOSPC rather than move other files */
+
+/* Install a file (validated first: CRC, signature, policy -- an unsigned
+ * file is refused under signed-only). Same build already installed: returns
+ * its slot. An installed module of the same name is replaced (refused while
+ * it is loaded from flash). Returns the slot (>= 0) or a PEX_E* code. */
+int pex_install(const pex_reader_t *rd, uint32_t flags);
+int pex_install_mem(const void *buf, uint32_t len, uint32_t flags);
+int pex_uninstall(const char *name);  /* PEX_EBUSY while loaded from flash */
+
+typedef struct {
+    char name[24];
+    uint8_t build_id[16];
+    uint32_t version, flags, target;
+    uint32_t offset, file_size;    /* in the partition */
+    uint32_t code_size, rw_size;
+    uintptr_t code;                /* where its code runs */
+    bool signed_, loaded;          /* loaded: a module runs from this copy now */
+    bool xip_ready;                /* model A: its RW address is reserved (else it loads into RAM until a reboot) */
+} pex_installed_t;
+int pex_installed(int i, pex_installed_t *out);            /* i-th; PEX_ENOENT past the end */
+int pex_installed_find(const char *name, pex_installed_t *out);   /* slot, or PEX_ENOENT */
+/* Load an installed module: code in place, RW from the pool. Falls back to a
+ * RAM copy (logged) when the copy cannot run in place (model A whose RW
+ * address is taken). */
+pex_mod_t *pex_load_installed(const char *name, const pex_load_opts_t *opts, int *err);
+int pex_xip_verify(const char *name);  /* CRC + signature of the installed copy, in place */
+int pex_xip_compact(void);             /* files moved, or PEX_E*; loaded ones stay */
+
+typedef struct {
+    bool mounted;
+    uint32_t size, data_size;      /* partition, the part files go in */
+    uint32_t used, free, largest;  /* bytes, in whole sectors */
+    uint32_t entries, seq;
+    uint32_t moves, recovered;     /* since mount: files moved; 1 if a move was resumed at mount */
+    uint32_t rw_area;              /* bytes reserved at the pool's top for model A RW */
+} pex_xip_stats_t;
+int pex_xip_stats(pex_xip_stats_t *out);
+/* Read the index again (pex_init does this). Resumes an interrupted move.
+ * Refused while a module runs from flash. */
+int pex_xip_mount(void);
+int pex_installed_json(char *dst, size_t cap);
 
 #ifdef __cplusplus
 }

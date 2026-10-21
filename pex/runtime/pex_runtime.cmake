@@ -24,7 +24,7 @@ function(pex_runtime_add target)
     cmake_parse_arguments(R "SIG_UECC;NO_PICO_PORT" "" "GROUPS" ${ARGN})
     _pex_gen_header()
     set(_r ${PEX_ROOT}/runtime)
-    set(_srcs ${_r}/pex_core.c ${_r}/pex_load.c ${_r}/pex_mem.c ${_r}/pex_sched.c ${_r}/pex_hash.c
+    set(_srcs ${_r}/pex_core.c ${_r}/pex_load.c ${_r}/pex_mem.c ${_r}/pex_sched.c ${_r}/pex_hash.c ${_r}/pex_xip.c
         ${_r}/arch/pex_tramp.S ${_r}/groups/pex_json.c)
     foreach(g core log mem sched pex json ${R_GROUPS})
         pex_group_table(${g} _t)

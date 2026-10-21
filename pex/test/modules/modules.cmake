@@ -40,6 +40,8 @@ foreach(model reloc pic)
     list(APPEND PEX_TEST_MODULE_FILES ${memtest_PEX_FILES})
     pex_add_module(crash   SOURCES ${_m}/crash.c   TARGETS m33 m0p MODEL ${model} VERSION 1.0.0 OUTPUT_DIR ${_o} ${_sign})
     list(APPEND PEX_TEST_MODULE_FILES ${crash_PEX_FILES})
+    pex_add_module(big     SOURCES ${_m}/big.c     TARGETS m33 m0p MODEL ${model} VERSION 1.0.0 OUTPUT_DIR ${_o} ${_sign})
+    list(APPEND PEX_TEST_MODULE_FILES ${big_PEX_FILES})
 endforeach()
 
 # The gateway's test modules (bt/fs/net/bus/sys groups): M33, model B.

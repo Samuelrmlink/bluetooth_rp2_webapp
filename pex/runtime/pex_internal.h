@@ -27,6 +27,7 @@ typedef struct pex_code {
     uint8_t build_id[16];
     uint16_t users;
     uint8_t owner;                /* the block's owner tag */
+    uint8_t xip;                  /* base is in the PEX flash partition (not a pool block) */
 } pex_code_t;
 
 typedef struct { uint32_t hash, value; uint32_t name_off; } pex_export_t;
@@ -55,6 +56,35 @@ struct pex_mod {
     /* mem accounting (the module's own allocations) */
     uint32_t long_bytes, long_blocks, scratch_bytes, scratch_peak;
 };
+
+/* the parsed header (pex_load.c) */
+typedef struct { uint16_t type, flags; uint32_t off, size; } pex__sec_t;
+typedef struct {
+    uint16_t fmaj, fmin, hsize, target, api_major, api_minor;
+    uint32_t file_size, features, flags, version, image_size, text, ro, data, bss, stack, entry;
+    uint32_t nsec, sec_off, image_off, crc;
+    uint8_t build_id[16];
+    pex__sec_t sec[PEX_MAX_SECTIONS];
+    uint32_t sig_off;
+    int sig;
+} pex__hdr_t;
+int pex__rread(const pex_reader_t *rd, uint32_t off, void *dst, uint32_t n);
+int pex__parse_header(const pex_reader_t *rd, pex__hdr_t *h);
+/* CRC (and, unless skip_sig, SHA-256 + the signature and the policy) */
+int pex__integrity(const pex_reader_t *rd, const pex__hdr_t *h, bool skip_sig);
+const pex__sec_t *pex__find_sec(const pex__hdr_t *h, uint16_t type);
+/* META name (24 bytes incl. NUL): "" when there is none */
+void pex__meta_name(const pex_reader_t *rd, const pex__hdr_t *h, char out[24]);
+
+/* XIP (pex_xip.c): pex_load_installed() sets this around its pex_load() call */
+typedef struct {
+    uintptr_t code;               /* the code runs here (flash), already relocated (model A) */
+    uintptr_t rw;                 /* != 0: RW must be here (model A in flash) */
+    bool skip_sig;                /* verified when it was installed */
+} pex__xload_t;
+extern const pex__xload_t *pex__xload;
+int pex__xip_mount_cfg(void);     /* from pex_init */
+uint8_t *pex__pool_end(void);
 
 /* globals */
 extern pex_config_t pex__cfg;
