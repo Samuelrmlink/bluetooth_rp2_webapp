@@ -10,9 +10,11 @@ A dump is what Settings -> System -> "Download heap dump" saves, or what
 --host fetches: the device's own census (script.heap, taken after a full
 collection) plus the raw arena (script.arena, 1 KB at a time).
 
-The offline half walks the allocator's block chain (src/lua/lheap.c: a
-gapless, address-ordered list; each block's header is {size, next, free} in
-the first `header` bytes, 32-bit little-endian) and labels every live block
+The offline half walks the allocator's blocks (src/lua/lheap.c: they tile the
+arena; in the boundary-tag arena each starts with ONE 32-bit little-endian word, the
+whole block's size with bit 0 = free and bit 1 = the previous block is free
+-- `header` is 4; dumps of older firmware, `header` 16, have {size, next,
+free} with size the payload's) and labels every live block
 by the Lua GC header at the start of its payload ({next, tt, marked}): a
 string, a table, a closure ... or plain data (arrays, hash parts, stacks,
 buffers), which have no such header. --diff compares two dumps by label and
@@ -84,6 +86,17 @@ def blocks(dump):
     raw = bytes.fromhex(a['hex'])
     base, hdr = a['base'], a['header']
     out, off = [], 0
+    if hdr == 4:
+        while off + 4 <= len(raw):
+            w = struct.unpack_from('<I', raw, off)[0]
+            whole, free = w & ~3, w & 1
+            if whole < 16 or off + whole > len(raw):
+                out.append((off, 0, False, 'CHAIN BROKEN'))
+                break
+            payload = raw[off + 4: off + whole]
+            out.append((off, whole - 4, bool(free), 'free' if free else label_of(payload, base, len(raw))))
+            off += whole
+        return out
     while off + hdr <= len(raw):
         size, nxt, free = struct.unpack_from('<IIB', raw, off)
         payload = raw[off + hdr: off + hdr + size]

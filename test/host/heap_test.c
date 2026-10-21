@@ -13,8 +13,8 @@
  *                twice. heap_used wrapped to 4294882968 (2^32 - 84328).
  *                -> lheap_check()'s live_bytes == heap_used, after EVERY op.
  *
- * HDR is 16 on-device and 24 on x86-64, so nothing here asserts byte totals
- * that depend on it.
+ * The header is one word (4 bytes on-device, 8 on x86-64), so nothing here
+ * asserts byte totals that depend on it.
  */
 #include <assert.h>
 #include <stdint.h>
@@ -321,6 +321,79 @@ static void t_alloc_high(void) {
     ck();
 }
 
+/* lheap_high_begin/end: new blocks from the top while open (nested), from
+ * the bottom again after; a unit loaded high and dropped leaves the free
+ * space in one piece even with long-lived blocks made meanwhile below. */
+static void t_high_mode(void) {
+    current = "high placement for a unit";
+    lheap_init();
+    void *a = lheap_alloc(64);
+    lheap_high_begin();
+    lheap_high_begin();
+    void *m[40];
+    for (int i = 0; i < 40; i++) {
+        m[i] = lheap_realloc(NULL, 6, (size_t)(24 + i * 7));
+        CHECK(m[i] && (uint8_t *)m[i] > (uint8_t *)lheap_base() + lheap_capacity() / 2,
+              "while open, blocks come from the top half");
+        ck();
+    }
+    lheap_high_end();
+    void *still = lheap_alloc(32);
+    CHECK((uint8_t *)still > (uint8_t *)lheap_base() + lheap_capacity() / 2, "nested: still high");
+    lheap_high_end();
+    lheap_high_end();   /* an extra end is harmless */
+    /* long-lived data made while the unit is loaded */
+    void *d[20];
+    for (int i = 0; i < 20; i++) {
+        d[i] = lheap_alloc(40);
+        CHECK((uint8_t *)d[i] < (uint8_t *)lheap_base() + lheap_capacity() / 2, "closed: from the bottom");
+    }
+    for (int i = 0; i < 40; i++) { lheap_free(m[i]); }
+    lheap_free(still);
+    ck();
+    lheap_stats_t st;
+    lheap_check(&st, NULL);
+    CHECK(st.free_blocks == 1, "the unit's space rejoined the free space in one piece");
+    for (int i = 0; i < 20; i++) { lheap_free(d[i]); }
+    lheap_free(a);
+    ck();
+    lheap_check(&st, NULL);
+    CHECK(st.blocks == 1 && lheap_used() == 0, "back to one block");
+    lheap_high_begin();
+    lheap_init();
+    void *lo = lheap_alloc(16);
+    CHECK((uint8_t *)lo == (uint8_t *)lheap_base() + lheap_header_size(), "lheap_init closes high placement");
+}
+
+/* One word of header per block, and lheap_stats agreeing with lheap_check. */
+static void t_overhead_and_stats(void) {
+    current = "block overhead and stats";
+    lheap_init();
+    CHECK(lheap_header_size() == sizeof(void *), "one word of header per block");
+    void *p[100];
+    for (int i = 0; i < 100; i++) { p[i] = lheap_alloc(20); }
+    lheap_stats_t a, b;
+    lheap_check(&a, NULL);
+    lheap_stats(&b);
+    CHECK(a.blocks == b.blocks && a.free_blocks == b.free_blocks && a.live_bytes == b.live_bytes &&
+          a.free_bytes == b.free_bytes && a.largest_free == b.largest_free, "stats == check");
+    CHECK(b.largest_free == lheap_largest_free(), "largest free agrees");
+    /* 100 blocks of 20 B: the live payloads plus headers stay within a word
+     * of rounding each. */
+    CHECK(lheap_used() <= 100 * (20 + sizeof(void *)), "a 20-byte block costs at most a word more");
+    for (int i = 0; i < 100; i += 2) { lheap_free(p[i]); }
+    ck();
+    lheap_check(&a, NULL);
+    lheap_stats(&b);
+    CHECK(a.free_blocks == 51 && b.free_blocks == 51, "50 holes and the tail");
+    void *big = lheap_alloc(lheap_largest_free());
+    CHECK(big != NULL, "the largest free block can be had whole");
+    ck();
+    for (int i = 1; i < 100; i += 2) { lheap_free(p[i]); }
+    lheap_free(big);
+    ck();
+}
+
 /*
  * The headline number: peak usage while a buffer grows the way Lua grows one.
  * The old allocator needed old+new resident at once, so doubling a 32 KB
@@ -363,6 +436,8 @@ int main(void) {
     t_payload_integrity();
     t_fuzz();
     t_alloc_high();
+    t_high_mode();
+    t_overhead_and_stats();
     t_growth_peak();
     if (failures) {
         printf("heap_test: %d failure(s)\n", failures);

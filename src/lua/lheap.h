@@ -2,7 +2,8 @@
 #define BTGW_LHEAP_H
 
 /*
- * The Lua heap: a first-fit free list over one static arena.
+ * The Lua heap: address-ordered first fit, with boundary tags, over one
+ * static arena (one word of header per block; see lheap.c).
  *
  * A dedicated block, not the system heap. A runaway script then hits its own
  * ceiling and gets an ordinary Lua out-of-memory error, instead of starving
@@ -21,6 +22,7 @@
  */
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifndef LHEAP_KB
 #include "autoconf.h"
@@ -36,6 +38,15 @@ void  lheap_free(void *p);
 /* The same, but from the top of the arena (see lheap.c): for long-lived C
  * allocations made on Lua's behalf. Freed with lheap_free. Not zeroed. */
 void *lheap_alloc_high(size_t want);
+/* While open (they nest), lheap_alloc -- and so every new block Lua asks for
+ * -- comes from the top, as lheap_alloc_high does. lrt.c opens it around
+ * require(): a module's code is loaded and dropped as a unit, and from the
+ * top it never ends up interleaved with the scripts' long-lived data at the
+ * bottom (which is what cut the free space into pieces: each module loaded
+ * for a job and dropped after it left holes between the objects created
+ * while it ran). lheap_init closes it. */
+void  lheap_high_begin(void);
+void  lheap_high_end(void);
 /* Bumped by every lheap_init (a Lua VM restart). A block from an older
  * generation is gone -- the arena was reset under it -- and must not be
  * passed to lheap_free. */
@@ -83,5 +94,9 @@ typedef struct {
 } lheap_stats_t;
 
 bool lheap_check(lheap_stats_t *out, const char **why);
+
+/* The same figures without the checks: one walk, for a script that wants to
+ * watch its own fragmentation (sys.heap). */
+void lheap_stats(lheap_stats_t *out);
 
 #endif
