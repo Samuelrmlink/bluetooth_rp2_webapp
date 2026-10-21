@@ -293,7 +293,7 @@ negative `PEX_E*` codes. Groups planned for v1:
 | group | covers | notes |
 |---|---|---|
 | `core` | version info, `sys_ms`/`us`, `sleep`/yield, log, panic-free asserts | |
-| `mem` | lifetime-scoped memory (§7.3): the module's long-term heap, per-call/per-job scratch arenas, fixed-size pools; `malloc/free` as a fallback; `memcpy`-family | never the Lua arena |
+| `mem` | lifetime-scoped memory (§7.2): the module's long-term heap, per-call/per-job scratch arenas, fixed-size pools; `malloc/free` as a fallback; `memcpy`-family | never the Lua arena |
 | `sched` | cooperative tasks/timers on the main loop, deferred calls, events | the firmware is single-loop; no RTOS assumed |
 | `gpio` | pin claim/release (the existing `io` pin registry), dir, read/write, IRQ callback | refuses pins owned by SD/W5500/CYW43 |
 | `i2c`, `spi`, `uart` | bus claim, transfers (blocking-with-yield and async+callback) | shares the firmware's bus arbitration (`spibus`) |
