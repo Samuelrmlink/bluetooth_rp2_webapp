@@ -1,5 +1,5 @@
 {
-  "_comment": "RP2350 flash layout (4 MB). The first 64 KB is unpartitioned and holds this table; Main A/B are one binary bootable from either (QMI address translation); the WiFi blob is provisioned once and never OTA'd; LittleFS keeps its historical place (src/fs/fs.h FS_FLASH_OFF) and the last 16 KB is BTstack's NVM, unpartitioned. tools/run_tests.py checks the numbers against fs.h and the linker script.",
+  "_comment": "RP2350 flash layout (4 MB), see docs/flash-layout.md. The first 64 KB is unpartitioned and holds this table; Main A/B are one binary bootable from either (QMI address translation); the WiFi blob is provisioned once and never OTA'd; LittleFS keeps its historical start (src/fs/fs.h FS_FLASH_OFF) and is followed by the PEX partition (FS_PEX_OFF, native modules executed in place: reserved, nothing writes it yet); the last 16 KB is BTstack's NVM, unpartitioned. tools/run_tests.py checks the numbers against fs.h and the linker script.",
   "version": [1, 0],
   "unpartitioned": {
     "families": ["absolute"],
@@ -28,7 +28,13 @@
     },
     {
       "name": "LittleFS", "id": "0x6c66730000000000",
-      "start": "2048K", "size": "2032K",
+      "start": "2048K", "size": "1776K",
+      "families": ["data"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+    },
+    {
+      "name": "PEX", "id": "0x7065780000000000",
+      "start": "3824K", "size": "256K",
       "families": ["data"],
       "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
     }

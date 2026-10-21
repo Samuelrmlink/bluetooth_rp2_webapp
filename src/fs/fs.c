@@ -6,6 +6,7 @@
  * this project's own flash offset/size (see fs.h) instead of reserving a
  * BTstack NVM tail this project has no equivalent of. */
 #include "fs.h"
+#include "fs_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -27,6 +28,8 @@ _Static_assert(FS_FLASH_OFF + FS_SIZE + FS_BT_TAIL <= PICO_FLASH_SIZE_BYTES,
                "fs region plus the BTstack NVM tail exceeds the board's flash");
 _Static_assert(FS_FLASH_OFF + FS_SIZE <= PICO_FLASH_SIZE_BYTES,
                "fs region exceeds the board's flash size");
+_Static_assert(FS_PEX_SIZE % FLASH_SECTOR_SIZE == 0, "pex partition must be sector-aligned");
+_Static_assert(FS_SIZE + FS_PEX_SIZE == FS_REGION_SIZE, "LittleFS + PEX must fill the old LittleFS region");
 
 static lfs_t lfs;
 static struct lfs_config cfg;
@@ -34,6 +37,11 @@ static uint8_t read_buf[FLASH_PAGE_SIZE];
 static uint8_t prog_buf[FLASH_PAGE_SIZE];
 static uint8_t lookahead_buf[32];
 static bool mounted;
+/* Blocks of the mounted geometry, and the limit the block device enforces
+ * (never past the old LittleFS region: the BTstack NVM follows it). */
+static uint32_t g_blocks;
+static bool g_legacy;
+static const char *g_note = "";
 
 static lfs_file_t wfile;
 static bool wopen;
@@ -121,9 +129,12 @@ static void flash_do(flash_job_t *j) {
     restore_interrupts(ints);
 }
 
+#define BD_BLOCKS_MAX (FS_REGION_SIZE / FS_BLOCK)
+
 static int bd_read(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
                    void *buffer, lfs_size_t size) {
     (void)c;
+    if (block >= BD_BLOCKS_MAX || off + size > FS_BLOCK) { return LFS_ERR_IO; }
     /* NOT XIP_BASE. Booted from an A/B partition, the ROM translates the
      * first 4 MB XIP window so the running slot appears at 0x10000000 and
      * leaves a HOLE past it -- a plain read of 0x10200000 would fault. The
@@ -136,6 +147,7 @@ static int bd_read(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
 static int bd_prog(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
                    const void *buffer, lfs_size_t size) {
     (void)c;
+    if (block >= g_blocks || off + size > FS_BLOCK) { return LFS_ERR_IO; }
     flash_job_t j = {
         .off = FS_FLASH_OFF + block * FS_BLOCK + off,
         .data = buffer,
@@ -148,6 +160,7 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
 
 static int bd_erase(const struct lfs_config *c, lfs_block_t block) {
     (void)c;
+    if (block >= g_blocks) { return LFS_ERR_IO; }
     flash_job_t j = {
         .off = FS_FLASH_OFF + block * FS_BLOCK,
         .data = NULL,
@@ -237,7 +250,8 @@ bool fs_is_dir(const char *path) {
     return lfs_stat(&lfs, path, &info) >= 0 && info.type == LFS_TYPE_DIR;
 }
 
-static void cfg_init(void) {
+/* blocks = 0: take the geometry from the superblock (lfs_mount reads it). */
+static void cfg_init(uint32_t blocks) {
     memset(&cfg, 0, sizeof(cfg));
     cfg.read = bd_read;
     cfg.prog = bd_prog;
@@ -246,7 +260,7 @@ static void cfg_init(void) {
     cfg.read_size = FLASH_PAGE_SIZE;
     cfg.prog_size = FLASH_PAGE_SIZE;
     cfg.block_size = FS_BLOCK;
-    cfg.block_count = FS_SIZE / FS_BLOCK;
+    cfg.block_count = blocks;
     cfg.cache_size = FLASH_PAGE_SIZE;
     cfg.lookahead_size = sizeof(lookahead_buf);
     cfg.block_cycles = 500;
@@ -255,10 +269,44 @@ static void cfg_init(void) {
     cfg.lookahead_buffer = lookahead_buf;
 }
 
-bool fs_init(void) {
-    cfg_init();
+/* The filesystem as it is on flash, whatever its size: a superblock that
+ * names a geometry other than FS_SIZE is NOT a reason to format.
+ *
+ * littlefs refuses (LFS_ERR_INVAL) a mount whose block_count differs from the
+ * superblock's, and this used to format on any mount error -- so the first
+ * firmware with a smaller FS_SIZE would have wiped cfg/ (Wi-Fi, WireGuard:
+ * the only way in) on every board it reached. Now a mismatch is mounted with
+ * the superblock's own geometry (block_count 0) and left for fs_migrate.c. */
+static int mount_as_found(void) {
+    cfg_init(0);
+    g_blocks = BD_BLOCKS_MAX;               /* reads only until the count is known */
     int err = lfs_mount(&lfs, &cfg);
+    if (err) { return err; }
+    struct lfs_fsinfo fi;
+    if (lfs_fs_stat(&lfs, &fi) < 0 || fi.block_count == 0 || fi.block_count > BD_BLOCKS_MAX) {
+        lfs_unmount(&lfs);
+        return LFS_ERR_CORRUPT;
+    }
+    g_blocks = fi.block_count;
+    cfg.block_count = fi.block_count;        /* what lfs->block_count already is */
+    return 0;
+}
+
+bool fs_init(void) {
+    cfg_init(FS_SIZE / FS_BLOCK);
+    g_blocks = FS_SIZE / FS_BLOCK;
+    int err = lfs_mount(&lfs, &cfg);
+    if (err && mount_as_found() == 0) {
+        mounted = true;
+        g_legacy = g_blocks > FS_SIZE / FS_BLOCK;
+        printf("fs: superblock says %lu KiB, not %lu: mounted as found%s\n",
+               (unsigned long)(g_blocks * FS_BLOCK / 1024u), (unsigned long)(FS_SIZE / 1024u),
+               g_legacy ? " (the pre-PEX layout; fs_migrate decides)" : "");
+        return true;
+    }
     if (err) {
+        cfg_init(FS_SIZE / FS_BLOCK);
+        g_blocks = FS_SIZE / FS_BLOCK;
         printf("fs: mount %d, formatting\n", err);
         err = lfs_format(&lfs, &cfg);
         if (err) {
@@ -276,6 +324,32 @@ bool fs_init(void) {
            (unsigned long)FS_FLASH_OFF);
     return true;
 }
+
+uint32_t fs_mounted_size(void) { return mounted ? g_blocks * FS_BLOCK : 0; }
+bool fs_legacy(void) { return mounted && g_legacy; }
+void fs_set_note(const char *note) { g_note = note ? note : ""; }
+const char *fs_note(void) { return g_note; }
+
+/* --- for fs_migrate.c only (fs_internal.h) --- */
+lfs_t *fs_lfs(void) { return mounted ? &lfs : NULL; }
+
+/* Nothing may be open: the migration runs at boot, before anything else
+ * touches the filesystem. */
+int fs_reformat(uint32_t blocks) {
+    if (mounted) { lfs_unmount(&lfs); }
+    mounted = false;
+    g_legacy = false;
+    cfg_init(blocks);
+    g_blocks = blocks;
+    int err = lfs_format(&lfs, &cfg);
+    if (err) { return err; }
+    err = lfs_mount(&lfs, &cfg);
+    if (err) { return err; }
+    mounted = true;
+    return 0;
+}
+
+uint32_t fs_mounted_blocks(void) { return mounted ? g_blocks : 0; }
 
 int fs_walk(const char *dir, fs_walk_fn cb, void *ctx) {
     if (!mounted || !cb) {
@@ -351,7 +425,11 @@ int fs_list_json(const char *dir, char *buf, size_t cap) {
     if (shown[0]) {
         n += (size_t)snprintf(buf + n, cap - n, "{\"dir\":\"%s\",\"block\":%u,\"files\":[", shown, (unsigned)FS_BLOCK);
     } else {
-        n += (size_t)snprintf(buf + n, cap - n, "{\"block\":%u,\"files\":[", (unsigned)FS_BLOCK);
+        n += (size_t)snprintf(buf + n, cap - n, "{\"block\":%u,", (unsigned)FS_BLOCK);
+        if (g_note[0]) {
+            n += (size_t)snprintf(buf + n, cap - n, "\"migration\":\"%s\",", g_note);
+        }
+        n += (size_t)snprintf(buf + n, cap - n, "\"files\":[");
     }
     lfs_dir_t ldir;
     if (lfs_dir_open(&lfs, &ldir, open_path) < 0) {
@@ -666,7 +744,7 @@ bool fs_usage(uint32_t *used, uint32_t *total) {
     lfs_ssize_t blocks = lfs_fs_size(&lfs);
     if (blocks < 0) { return false; }
     if (used) { *used = (uint32_t)blocks * FS_BLOCK; }
-    if (total) { *total = FS_SIZE; }
+    if (total) { *total = g_blocks * FS_BLOCK; }
     return true;
 }
 

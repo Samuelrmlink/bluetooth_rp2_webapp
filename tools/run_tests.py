@@ -1225,16 +1225,35 @@ def t_lua_net_fs_sim(radio):
     return fn
 
 
+def _fs_h_defines():
+    """The flash-layout numbers in src/fs/fs.h, evaluated (they are written
+    as `(2u * 1024u * 1024u)` and in terms of each other)."""
+    src = open(os.path.join(ROOT, "src/fs/fs.h")).read()
+    defs = {}
+    for name, expr in re.findall(r"^#define\s+(FS_[A-Z_]+)\s+(\(.*\))\s*$", src, re.M):
+        e = re.sub(r"(\d+)u\b", r"\1", expr)
+        for k, v in defs.items():
+            e = re.sub(r"\b%s\b" % k, str(v), e)
+        if re.fullmatch(r"[\d\s()*+\-/]+", e):
+            defs[name] = eval(e)
+    return defs
+
+
 def t_ota_partition_layout():
     """partitions.json, fs.h and the linker script agree on the flash map.
 
     The ROM boots from the table, fs.c reads at FS_FLASH_OFF, and the linker
     caps the image at one slot; three copies of the same numbers, so they are
-    checked against each other rather than trusted."""
+    checked against each other rather than trusted. Since the PEX partition
+    (docs/flash-layout.md): LittleFS keeps its start and is FS_SIZE, PEX
+    follows it, and the two together end where the old LittleFS did, 16 KB
+    before the end of the 4 MB part (BTstack's NVM, unpartitioned)."""
     import json
     pt = json.load(open(os.path.join(ROOT, "partitions.json")))["partitions"]
     by = {p["name"]: p for p in pt}
-    a, b, w, fs = by["Main A"], by["Main B"], by["Wi-Fi Firmware"], by["LittleFS"]
+    if "PEX" not in by:
+        return False, "partitions.json has no PEX partition"
+    a, b, w, fs, pex = by["Main A"], by["Main B"], by["Wi-Fi Firmware"], by["LittleFS"], by["PEX"]
     a0, asz, bsz = _kb(a["start"]), _kb(a["size"]), _kb(b["size"])
     if asz != bsz or asz % 4096 or a0 % 4096:
         return False, "A/B slots must be equal and sector aligned"
@@ -1247,18 +1266,34 @@ def t_ota_partition_layout():
         return False, "WiFi firmware partition id is not the SDK's"
     if w0 + wsz > _kb(fs["start"]):
         return False, "WiFi partition overlaps LittleFS"
-    fsh = open(os.path.join(ROOT, "src/fs/fs.h")).read()
-    if "#define FS_FLASH_OFF (2u * 1024u * 1024u)" not in fsh or _kb(fs["start"]) != 2 * 1024 * 1024:
-        return False, "LittleFS partition start != FS_FLASH_OFF"
-    if _kb(fs["size"]) != 2 * 1024 * 1024 - 16 * 1024:
-        return False, "LittleFS partition size != FS_SIZE (2 MiB - BT NVM tail)"
+    d = _fs_h_defines()
+    for k in ("FS_FLASH_OFF", "FS_BT_TAIL", "FS_REGION_SIZE", "FS_PEX_SIZE", "FS_SIZE", "FS_PEX_OFF"):
+        if k not in d:
+            return False, f"fs.h: cannot read {k}"
+    if _kb(fs["start"]) != d["FS_FLASH_OFF"] or d["FS_FLASH_OFF"] != 2 * 1024 * 1024:
+        return False, "LittleFS partition start != FS_FLASH_OFF (2 MiB)"
+    if _kb(fs["size"]) != d["FS_SIZE"]:
+        return False, f"LittleFS partition size {_kb(fs['size'])} != FS_SIZE {d['FS_SIZE']}"
+    if _kb(pex["start"]) != d["FS_PEX_OFF"] or _kb(pex["size"]) != d["FS_PEX_SIZE"]:
+        return False, "PEX partition != FS_PEX_OFF / FS_PEX_SIZE"
+    if pex["id"].lower() in (fs["id"].lower(), w["id"].lower()) or pex.get("families") != ["data"]:
+        return False, "PEX partition needs its own id and the data family"
+    if d["FS_SIZE"] + d["FS_PEX_SIZE"] != d["FS_REGION_SIZE"] or \
+            d["FS_FLASH_OFF"] + d["FS_REGION_SIZE"] + d["FS_BT_TAIL"] != 4 * 1024 * 1024:
+        return False, "LittleFS + PEX must end 16 KB (BTstack NVM) before the end of flash"
+    if d["FS_SIZE"] % 4096 or d["FS_PEX_SIZE"] % 4096:
+        return False, "LittleFS / PEX not sector aligned"
     ld = open(os.path.join(ROOT, "linker/pico_flash_region.ld")).read()
     m = re.search(r"LENGTH\s*=\s*(\d+)\s*\*\s*1024", ld)
     if not m or int(m.group(1)) * 1024 != asz:
         return False, "linker FLASH LENGTH != slot size"
-    if "FS_READ_BASE" not in open(os.path.join(ROOT, "src/fs/fs.c")).read():
+    fsc = open(os.path.join(ROOT, "src/fs/fs.c")).read()
+    if "FS_READ_BASE" not in fsc:
         return False, "fs.c reads flash via XIP_BASE: faults past the translated slot"
-    return True, f"A/B {asz // 1024} KB @ {a0 // 1024} KB, WiFi {wsz // 1024} KB, LittleFS untouched"
+    if "mount_as_found" not in fsc:
+        return False, "fs.c formats on a geometry mismatch: the pre-PEX filesystem would be wiped"
+    return True, (f"A/B {asz // 1024} KB @ {a0 // 1024} KB, WiFi {wsz // 1024} KB, LittleFS "
+                  f"{d['FS_SIZE'] // 1024} KB @ 2048 KB, PEX {d['FS_PEX_SIZE'] // 1024} KB @ {d['FS_PEX_OFF'] // 1024} KB")
 
 
 def t_ota_keys():
