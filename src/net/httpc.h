@@ -3,9 +3,11 @@
  * Asynchronous and callback-driven, run from the main loop (lwIP callbacks
  * and httpc_tick): nothing here blocks. The Lua `http` module (lhttp.c) is
  * its one user and supplies the sink -- where the response headers and body
- * go -- and the memory: every request, and every TLS session, is allocated
- * through httpc_alloc_fns, which the Lua glue points at the top of the Lua
- * arena. Nothing is static beyond the slot table and one shared TLS config.
+ * go -- and the memory for a request's bulk data (its body; the sink's
+ * buffers are the sink's own) through httpc_alloc_fns. The requests
+ * themselves and the TLS session live in a pool of their own, apart from the
+ * Lua arena (lheap_pool_*, CONFIG_NET_TLS_POOL_KB), and https:// requests
+ * take the one TLS session in turn.
  *
  * One request is one connection ("Connection: close"): DNS, connect, TLS
  * handshake, send, receive, follow up to `follow` redirects (each a new
@@ -19,7 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define HTTPC_MAX 3            /* requests at once (each TLS one ~35 KB of arena at peak) */
+#define HTTPC_MAX 3            /* requests at once; ONE TLS session at a time (the others wait) */
 
 typedef enum {
     HTTPC_DNS = 0, HTTPC_CONNECT, HTTPC_TLS, HTTPC_SEND, HTTPC_RECV, HTTPC_DONE, HTTPC_ERROR,
@@ -57,12 +59,19 @@ typedef struct {
     uint32_t timeout_ms;       /* the whole request, redirects included */
     uint8_t follow;            /* redirects to follow */
     bool insecure;             /* https without certificate verification */
+    void *scope;               /* where the request's memory goes (alloc fns' use()); may be NULL */
 } httpc_opts_t;
 
 typedef struct {
     void *(*alloc)(size_t n);  /* zeroed */
     void  (*free)(void *p);
     void  (*stat)(size_t *used, size_t *largest_free);   /* for diagnostics; may be NULL */
+    /* Make `scope` the place alloc() puts memory from now on and return the
+     * previous one (NULL: the long-term side). The client sets each
+     * request's scope while it works on that request -- its TLS session,
+     * the sink's buffers -- and NULL for what outlives requests (the record
+     * buffers, the trusted roots). May be NULL: one place for everything. */
+    void *(*use)(void *scope);
 } httpc_alloc_fns;
 void httpc_set_alloc(const httpc_alloc_fns *fns);
 
@@ -78,15 +87,14 @@ void httpc_tick(void);
 /* Drop everything without callbacks (the Lua VM is restarting). */
 void httpc_reset(void);
 
-/* For sys/http stats: TLS sessions now, and the most arena any one used. */
-typedef struct { uint32_t tls_now, tls_peak_bytes, tls_bytes_now, requests, failures, tls_reserved; } httpc_stats_t;
+/* For sys/http stats: TLS sessions now, and the pool (CONFIG_NET_TLS_POOL_KB)
+ * that holds them and the requests' bookkeeping. */
+typedef struct {
+    uint32_t tls_now, requests, failures;
+    uint32_t pool_size, pool_used, pool_peak, pool_largest_free, pool_fails;
+    uint32_t tls_waits;          /* https requests that waited for the session */
+    uint32_t tls_alloc_fails;    /* mbedTLS allocations the pool refused */
+} httpc_stats_t;
 void httpc_stats(httpc_stats_t *out);
-/* Give back the reserved TLS record buffers if no session is using them
- * (the Lua runtime's out-of-memory hook). True if anything was freed. */
-bool httpc_release_reserve(void);
-/* http.reserve(): reserve the record buffers now / give them back (false
- * while a session uses them). */
-bool httpc_reserve(void);
-bool httpc_unreserve(void);
 
 #endif

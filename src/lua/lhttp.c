@@ -11,8 +11,17 @@
  * The client runs on lwIP callbacks, outside any Lua call, so nothing it
  * calls back into may touch the Lua API: an allocation failure there would
  * raise through lwIP. Response headers and an in-memory body therefore go
- * into plain blocks from the top of the Lua arena (lheap_alloc_high) and only
- * become Lua values in http.await, inside the script's own call.
+ * into plain blocks of the Lua arena and only become Lua values in
+ * http.await, inside the script's own call.
+ *
+ * The client's own memory -- the request, its URL and header copies, the
+ * TLS session with mbedTLS's record buffers, handshake state and the trusted
+ * roots -- is the TLS pool (httpc.c), not the Lua arena. What becomes or
+ * comes from a Lua value -- a request body, the response headers and an
+ * in-memory body (up to 64 KB), a LittleFS file buffer -- goes into the
+ * request's own scratch (lheap_scratch_*: pages from the top of the arena,
+ * all given back when the request is released), never between blocks that
+ * outlive it.
  *
  * to_file: a 2xx body streams into the file (LittleFS through the fs pool,
  * the SD card through storage-worker jobs with a 4 KiB staging block, the
@@ -96,6 +105,7 @@ typedef struct {
     uint8_t *early;            /* body that came with the headers, before the file was open */
     size_t   early_len;
 #endif
+    lheap_scratch_t *sc;       /* where all of this request's memory is */
 } hreq_t;
 
 static hreq_t s_r[HTTPC_MAX];
@@ -107,13 +117,17 @@ static hreq_t s_r[HTTPC_MAX];
  * (mcusim). Never reached from inside Lua's allocator (lheap_realloc), so a
  * collection here is safe; finalizers that run (file handles) do not
  * allocate through it. */
+static void *place(size_t n) {
+    lheap_scratch_t *sc = lheap_scratch_current();
+    return sc ? lheap_scratch_alloc(sc, n) : lheap_alloc_high(n);
+}
+
 static void *arena_alloc(size_t n) {
-    void *p = lheap_alloc_high(n);
+    void *p = place(n);
     if (!p) {
         lrt_collect();
-        p = lheap_alloc_high(n);
+        p = place(n);
     }
-    if (!p && httpc_release_reserve()) { p = lheap_alloc_high(n); }   /* an idle TLS reservation */
     if (!p) {
         printf("lhttp: %u B not available: arena %u B used, largest free %u B\n",
                (unsigned)n, (unsigned)lheap_used(), (unsigned)lheap_largest_free());
@@ -128,10 +142,11 @@ static void arena_stat(size_t *used, size_t *largest) {
     *largest = lheap_largest_free();
 }
 
+static void *scope_use(void *scope) { return lheap_scratch_use(scope); }
+
 static void lhttp_mem_init(void) {
-    static const httpc_alloc_fns fns = { arena_alloc, lheap_free, arena_stat };
+    static const httpc_alloc_fns fns = { arena_alloc, lheap_free_any, arena_stat, scope_use };
     httpc_set_alloc(&fns);
-    lrt_set_oom_hook(httpc_release_reserve);
 }
 
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
@@ -143,22 +158,24 @@ static hreq_t *by_id(int id) {
 }
 
 static void free_body(hreq_t *h) {
-    for (chunk_t *c = h->head; c; ) { chunk_t *n = c->next; lheap_free(c); c = n; }
+    for (chunk_t *c = h->head; c; ) { chunk_t *n = c->next; lheap_free_any(c); c = n; }
     h->head = h->tail = NULL;
 }
 
 static void release(hreq_t *h) {
     free_body(h);
-    lheap_free(h->hdr);
+    lheap_free_any(h->hdr);
     h->hdr = NULL;
-    if (h->lfs_h >= 0 && h->fvol == F_LFS) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free(h->lfs_mem); h->lfs_mem = NULL; }
+    if (h->lfs_h >= 0 && h->fvol == F_LFS) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free_any(h->lfs_mem); h->lfs_mem = NULL; }
 #if CONFIG_SD
     if (h->sd_token) { sdj_abandon(h->sd_token); h->sd_token = 0; }
     if (h->fill_token) { sdj_abandon(h->fill_token); h->fill_token = 0; }
     if (h->sd_file >= 0) { sdj_close_async(h->sd_file); h->sd_file = -1; }
-    lheap_free(h->early);
+    lheap_free_any(h->early);
     h->early = NULL;
 #endif
+    lheap_scratch_end(h->sc);          /* and whatever else the request had */
+    h->sc = NULL;
     h->used = false;
 }
 
@@ -180,7 +197,7 @@ static void on_status(void *u, int status) {
         h->lfs_mem = arena_alloc(fs_file_mem());
         h->lfs_h = fs_fopen(h->fpath, FS_O_WRITE, h->lfs_mem);
         if (h->lfs_h < 0) {
-            lheap_free(h->lfs_mem);
+            lheap_free_any(h->lfs_mem);
             h->lfs_mem = NULL;
             h->file_err = true;
             h->file_errc = HTTPC_EIO;
@@ -220,7 +237,7 @@ static void on_header(void *u, const char *name, const char *value) {
         if (cap > HDR_MAX) { cap = HDR_MAX; }
         char *n = arena_alloc(cap);
         if (!n) { return; }                /* headers are dropped, not the response */
-        if (h->hdr) { memcpy(n, h->hdr, h->hdr_len); lheap_free(h->hdr); }
+        if (h->hdr) { memcpy(n, h->hdr, h->hdr_len); lheap_free_any(h->hdr); }
         h->hdr = n;
         h->hdr_cap = cap;
     }
@@ -333,7 +350,7 @@ static void finish_lfs(hreq_t *h) {
     if (h->lfs_h >= 0) {
         int r = fs_fclose(h->lfs_h);
         h->lfs_h = -1;
-        lheap_free(h->lfs_mem);
+        lheap_free_any(h->lfs_mem);
         h->lfs_mem = NULL;
         if (r < 0 && h->err == HTTPC_OK) { h->err = HTTPC_EIO; snprintf(h->msg, sizeof h->msg, "close failed"); }
     }
@@ -405,7 +422,7 @@ static void sd_step(hreq_t *h) {
         memcpy(sdj_buf() + h->fill_len, h->early, h->early_len);
         h->fill_len += h->early_len;
         h->early_len = 0;
-        lheap_free(h->early);
+        lheap_free_any(h->early);
         h->early = NULL;
     }
     if (h->sd_state == SDW_READY && h->fill_token) {
@@ -578,14 +595,21 @@ static int l_start(lua_State *L) {
     snprintf(h->fpath, sizeof h->fpath, "%s", fpath);
     h->max_body = (size_t)max_body;
     h->owner = (int8_t)lrt_current_slot();
+    h->sc = lheap_scratch_begin(0);
+    if (!h->sc) { lrt_collect(); h->sc = lheap_scratch_begin(0); }
+    if (!h->sc) { return fail(L, "nomem"); }
     httpc_opts_t o = {
         .method = method, .url = url, .headers = hdrs, .body = (const uint8_t *)body, .body_len = body_len,
-        .timeout_ms = (uint32_t)timeout, .follow = (uint8_t)follow, .insecure = insecure,
+        .timeout_ms = (uint32_t)timeout, .follow = (uint8_t)follow, .insecure = insecure, .scope = h->sc,
     };
     httpc_err_t err = HTTPC_OK;
     h->used = true;
+    lheap_scratch_t *prev = lheap_scratch_use(h->sc);
     int id = httpc_start(&o, &SINK, h, &err);
+    lheap_scratch_use(prev);
     if (id < 0) {
+        lheap_scratch_end(h->sc);
+        h->sc = NULL;
         h->used = false;
         return fail(L, err == HTTPC_EPROTO ? "badurl" : err == HTTPC_ETLS ? "tls" : err == HTTPC_ENOMEM ? "nomem" : "busy");
     }
@@ -696,7 +720,7 @@ static int l_cancel(lua_State *L) {
     httpc_cancel(id);
     if (h->to_file && !h->done) {
         if (h->fvol == F_LFS) {
-            if (h->lfs_h >= 0) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free(h->lfs_mem); h->lfs_mem = NULL; }
+            if (h->lfs_h >= 0) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free_any(h->lfs_mem); h->lfs_mem = NULL; }
             fs_delete(h->fpath);
         }
         /* SD: the file is closed in the background; the partial stays (no
@@ -707,29 +731,29 @@ static int l_cancel(lua_State *L) {
     return 1;
 }
 
-/* http.reserve(on) -> bool
- *   false: give the reserved TLS record buffers (22.5 KB) back to the arena,
- *          if no HTTPS session is using them; false if one is.
- *   true:  reserve them now (normally the first HTTPS request does); false
- *          if the arena has no room for them.
- * Either way the next HTTPS request reserves them again if they are not. */
+/* http.reserve(on) -> true. Kept for scripts written when the TLS record
+ * buffers lived in the Lua arena and could be reserved and given back; they
+ * are in the TLS pool now (httpc.c), which is never the scripts', so there
+ * is nothing to reserve. */
 static int l_reserve(lua_State *L) {
-    bool on = lua_toboolean(L, 1);
-    lhttp_mem_init();
-    lua_pushboolean(L, on ? httpc_reserve() : httpc_unreserve());
+    lua_pushboolean(L, 1);
     return 1;
 }
 
 static int l_stats(lua_State *L) {
     httpc_stats_t s;
     httpc_stats(&s);
-    lua_createtable(L, 0, 5);
+    lua_createtable(L, 0, 10);
     lua_pushinteger(L, s.requests);       lua_setfield(L, -2, "requests");
     lua_pushinteger(L, s.failures);       lua_setfield(L, -2, "failures");
     lua_pushinteger(L, s.tls_now);        lua_setfield(L, -2, "tls_sessions");
-    lua_pushinteger(L, s.tls_bytes_now);  lua_setfield(L, -2, "tls_bytes");
-    lua_pushinteger(L, s.tls_peak_bytes); lua_setfield(L, -2, "tls_peak_bytes");
-    lua_pushinteger(L, s.tls_reserved);   lua_setfield(L, -2, "tls_reserved");
+    /* The pool the TLS session and the requests' bookkeeping live in. */
+    lua_pushinteger(L, s.pool_used);      lua_setfield(L, -2, "tls_bytes");
+    lua_pushinteger(L, s.pool_peak);      lua_setfield(L, -2, "tls_peak_bytes");
+    lua_pushinteger(L, s.pool_size);      lua_setfield(L, -2, "tls_pool");
+    lua_pushinteger(L, s.pool_largest_free); lua_setfield(L, -2, "tls_pool_largest_free");
+    lua_pushinteger(L, s.pool_fails);     lua_setfield(L, -2, "tls_pool_fails");
+    lua_pushinteger(L, s.tls_waits);      lua_setfield(L, -2, "tls_waits");
     return 1;
 }
 
@@ -740,6 +764,7 @@ void lhttp_open(lua_State *L) {
     lua_newtable(L);
     luaL_setfuncs(L, fns, 0);
     lua_setglobal(L, "http");
+    lhttp_mem_init();
 }
 
 void lhttp_release(int slot) {
@@ -748,7 +773,7 @@ void lhttp_release(int slot) {
         if (!h->used || h->owner != slot) { continue; }
         httpc_cancel(h->id);
         if (h->to_file && !h->done && h->fvol == F_LFS) {
-            if (h->lfs_h >= 0) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free(h->lfs_mem); h->lfs_mem = NULL; }
+            if (h->lfs_h >= 0) { fs_fclose(h->lfs_h); h->lfs_h = -1; lheap_free_any(h->lfs_mem); h->lfs_mem = NULL; }
             fs_delete(h->fpath);
         }
         release(h);

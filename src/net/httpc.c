@@ -30,6 +30,7 @@
 #include "lwip/netif.h"
 #include "fs/fs.h"
 #include "net/httpc_parse.h"
+#include "lua/lheap.h"
 #include "pico/time.h"
 
 #if CONFIG_NET_HTTP_TLS
@@ -86,10 +87,12 @@ typedef struct req {
     void    *user;
     bool     done_called;
     bool     started;          /* the first connection has been begun (httpc_tick) */
+    void    *scope;            /* the request's memory (httpc_opts_t.scope) */
 #if CONFIG_NET_HTTP_TLS
     mbedtls_ssl_context *ssl;
     bool roots_held;           /* this handshake holds a reference on s_roots */
     bool clock_ok;             /* the clock was set when this handshake began */
+    bool tls_waited;           /* counted once in tls_waits */
 #endif
 } req_t;
 
@@ -100,18 +103,41 @@ static httpc_stats_t s_stats;
 
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
 
+/* Two places for memory. The request's bulk data (its body, and the sink's
+ * buffers, which lhttp.c owns) go through httpc_alloc_fns -- the Lua side,
+ * since they become or come from Lua values. Everything else -- the request
+ * itself, its URL and header copies, the request text, a redirect's
+ * Location, and the TLS session (mbedTLS's every allocation) -- is the pool
+ * (lheap_pool_*, CONFIG_NET_TLS_POOL_KB): memory of its own, apart from the
+ * Lua arena, so HTTPS neither takes space from the scripts nor fails because
+ * the scripts' objects have cut theirs into pieces. With no pool configured
+ * the pool's share goes through httpc_alloc_fns too. */
 static void *xalloc(size_t n) {
     if (!s_mem.alloc) { void *p = calloc(1, n); return p; }
     return s_mem.alloc(n);
 }
+static void *palloc(size_t n) {
+#if LHEAP_POOL_KB > 0
+    void *p = lheap_pool_alloc(n ? n : 1);
+    if (p) { memset(p, 0, n); }
+    return p;
+#else
+    return xalloc(n);
+#endif
+}
 static void xfree(void *p) {
     if (!p) { return; }
+    if (lheap_pool_owns(p)) { lheap_pool_free(p); return; }
     if (!s_mem.free) { free(p); return; }
     s_mem.free(p);
 }
+/* The scope allocations go to (see httpc_alloc_fns.use): the request being
+ * worked on, or NULL (the long-term side) for what outlives requests. */
+static void *use(void *scope) { return s_mem.use ? s_mem.use(scope) : NULL; }
+
 static char *xstrdup(const char *s) {
     size_t n = strlen(s);
-    char *d = xalloc(n + 1);
+    char *d = palloc(n + 1);
     if (d) { memcpy(d, s, n + 1); }
     return d;
 }
@@ -153,80 +179,31 @@ static mbedtls_ssl_config s_conf;
 static mbedtls_ssl_config s_conf_insecure;
 static mbedtls_ctr_drbg_context s_drbg;
 static bool s_tls_ready;
-static size_t s_tls_now, s_tls_peak;
 static uint32_t s_tls_alloc_fails;        /* allocations mbedTLS asked for and did not get */
 static size_t s_tls_fail_size;
+/* The one TLS session at a time (see tick_one): the request that may have
+ * one. Others for https:// wait, before they even connect, until it is
+ * done -- the pool is sized for one session, and two at once would only
+ * fail each other half way through a handshake. */
+static struct req *s_tls_owner;
+static uint32_t s_tls_waits;
 
-/* mbedtls' allocator: the same as the requests', with a header so the bytes
- * held by TLS can be reported (http.stats()). */
-/* The two record buffers (16 KiB in, 4 KiB out, plus mbedTLS's overhead)
- * are the only large blocks TLS asks for, and they must be contiguous. A
- * script that has run for a while leaves the first-fit arena in pieces --
- * measured in mcusim: 51 KB free and no 17 KB hole, so every HTTPS request
- * failed "out of memory for tls" -- so one set is reserved at the first HTTPS
- * request, from the top of the arena, and kept for the life of the Lua VM
- * (httpc_reset forgets it: the VM restart that calls it resets the arena).
- * A second session at the same time takes its buffers from the arena like
- * everything else. Everything smaller always comes from the arena. And the
- * reservation yields: when a script's allocation fails even after the
- * collector, lrt.c calls httpc_release_reserve() and retries -- the next
- * HTTPS request reserves again if it can. */
-#define TLS_SLOT_IN  (MBEDTLS_SSL_IN_CONTENT_LEN + 1024)
-#define TLS_SLOT_OUT (MBEDTLS_SSL_OUT_CONTENT_LEN + 1024)
-typedef struct { uint8_t *mem; size_t cap; bool used; } tls_slot_t;
-static tls_slot_t s_slot_in, s_slot_out;
-
-typedef struct { size_t n; uint8_t kind; uint8_t pad[3]; } tlsblk_t;   /* kind: 0 arena, 1 in slot, 2 out slot */
-_Static_assert(sizeof(tlsblk_t) % 8 == 0, "tlsblk_t keeps the payload 8-aligned");
-
-static tlsblk_t *slot_take(tls_slot_t *sl, size_t cap, size_t total) {
-    if (total > cap || sl->used) { return NULL; }
-    if (!sl->mem) {
-        sl->mem = xalloc(cap);
-        if (!sl->mem) { return NULL; }
-        sl->cap = cap;
-    }
-    sl->used = true;
-    memset(sl->mem, 0, total);
-    return (tlsblk_t *)sl->mem;
-}
-
+/* mbedTLS's allocator: the pool, and nothing else. */
 static void *tls_calloc(size_t n, size_t sz) {
-    if (sz && n > (SIZE_MAX - sizeof(tlsblk_t)) / sz) { return NULL; }
-    size_t want = n * sz, total = sizeof(tlsblk_t) + want;
-    tlsblk_t *b = NULL;
-    uint8_t kind = 0;
-    if (want >= MBEDTLS_SSL_IN_CONTENT_LEN) {
-        if ((b = slot_take(&s_slot_in, TLS_SLOT_IN, total))) { kind = 1; }
-    } else if (want >= MBEDTLS_SSL_OUT_CONTENT_LEN) {
-        if ((b = slot_take(&s_slot_out, TLS_SLOT_OUT, total))) { kind = 2; }
-    }
-    if (!b) { b = xalloc(total); }
-    if (!b) {
+    if (sz && n > SIZE_MAX / sz) { return NULL; }
+    size_t want = n * sz;
+    void *p = palloc(want);
+    if (!p) {
         s_tls_alloc_fails++;
         s_tls_fail_size = want;
-        if (s_mem.stat) {
-            size_t used = 0, largest = 0;
-            s_mem.stat(&used, &largest);
-            printf("httpc: TLS wanted %u B: arena %u B used, largest free %u B, %u B held by TLS\n",
-                   (unsigned)want, (unsigned)used, (unsigned)largest, (unsigned)s_tls_now);
-        }
-        return NULL;
+        lheap_pool_stats_t ps;
+        lheap_pool_stats(&ps);
+        printf("httpc: TLS wanted %u B: pool %u of %u B used, largest free %u B\n",
+               (unsigned)want, (unsigned)ps.used, (unsigned)ps.capacity, (unsigned)ps.largest_free);
     }
-    b->n = want;
-    b->kind = kind;
-    s_tls_now += want;
-    if (s_tls_now > s_tls_peak) { s_tls_peak = s_tls_now; }
-    return b + 1;
+    return p;
 }
-static void tls_free(void *p) {
-    if (!p) { return; }
-    tlsblk_t *b = (tlsblk_t *)p - 1;
-    s_tls_now -= b->n;
-    if (b->kind == 1) { s_slot_in.used = false; return; }     /* kept for the next session */
-    if (b->kind == 2) { s_slot_out.used = false; return; }
-    xfree(b);
-}
+static void tls_free(void *p) { xfree(p); }
 
 int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len, size_t *olen);
 
@@ -258,13 +235,14 @@ static int s_roots_users;
 
 static int roots_ref(void) {
     if (s_roots_users == 0) {
+        int rc = 0;
         mbedtls_x509_crt_init(&s_roots);
-        for (size_t i = 0; i < CA_ROOTS_N; i++) {
-            int rc = mbedtls_x509_crt_parse_der_nocopy(&s_roots, ca_roots[i].der, ca_roots[i].len);
-            if (rc != 0) {
-                mbedtls_x509_crt_free(&s_roots);
-                return rc;
-            }
+        for (size_t i = 0; i < CA_ROOTS_N && rc == 0; i++) {
+            rc = mbedtls_x509_crt_parse_der_nocopy(&s_roots, ca_roots[i].der, ca_roots[i].len);
+        }
+        if (rc != 0) {
+            mbedtls_x509_crt_free(&s_roots);
+            return rc;
         }
         mbedtls_ssl_conf_ca_chain(&s_conf, &s_roots, NULL);
     }
@@ -401,8 +379,17 @@ static void conn_close(req_t *r, bool abort_it) {
     r->reqtext = NULL;
 }
 
+static void tls_let_go(req_t *r) {
+#if CONFIG_NET_HTTP_TLS
+    if (s_tls_owner == r) { s_tls_owner = NULL; }
+#else
+    (void)r;
+#endif
+}
+
 static void req_free(req_t *r) {
     conn_close(r, true);
+    tls_let_go(r);
     xfree(r->url); xfree(r->method); xfree(r->headers); xfree(r->body); xfree(r->location);
     int slot = r->id & 0xF;
     if (slot < HTTPC_MAX && s_req[slot] == r) { s_req[slot] = NULL; }
@@ -412,6 +399,7 @@ static void req_free(req_t *r) {
 static void finish(req_t *r, httpc_err_t err, const char *msg) {
     if (r->state == HTTPC_DONE || r->state == HTTPC_ERROR) { return; }
     conn_close(r, err != HTTPC_OK);
+    tls_let_go(r);
     r->err = err;
     r->errmsg = msg;
     r->state = err == HTTPC_OK ? HTTPC_DONE : HTTPC_ERROR;
@@ -438,7 +426,7 @@ static bool build_request(req_t *r, bool same_host) {
     else { snprintf(hostport, sizeof hostport, "%s:%u", r->u.host, r->u.port); }
     size_t hl = r->headers ? strlen(r->headers) : 0;
     size_t cap = strlen(m) + r->u.path_len + strlen(hostport) + hl + 160;
-    char *t = xalloc(cap);
+    char *t = palloc(cap);
     if (!t) { return false; }
     int n = snprintf(t, cap, "%s %.*s HTTP/1.1\r\nHost: %s\r\nUser-Agent: btgw\r\n"
                      "Accept-Encoding: identity\r\nConnection: close\r\n",
@@ -495,7 +483,7 @@ static void on_body(void *ctx, const uint8_t *d, size_t n) {
 static void start_connection(req_t *r);
 
 static void follow_redirect(req_t *r) {
-    char *next = xalloc(LOC_MAX + 1);
+    char *next = palloc(LOC_MAX + 1);
     if (!next || !r->location || !httpc_url_resolve(r->url, r->location, next, LOC_MAX + 1)) {
         xfree(next);
         finish(r, HTTPC_EPROTO, "bad redirect location");
@@ -526,6 +514,14 @@ static void follow_redirect(req_t *r) {
     r->redirecting = false;
     bool same = strcasecmp(oldhost, r->u.host) == 0;
     if (!build_request(r, same)) { finish(r, HTTPC_ENOMEM, "out of memory"); return; }
+#if CONFIG_NET_HTTP_TLS
+    if (r->u.tls && s_tls_owner != r) {
+        /* An http:// redirect to https://: it waits its turn like any other. */
+        r->state = HTTPC_DNS;
+        r->started = false;
+        return;
+    }
+#endif
     start_connection(r);
 }
 
@@ -653,7 +649,7 @@ static void pump(req_t *r) {
             if (s_tls_alloc_fails != fails_before) {
                 /* Whatever mbedTLS made of it (a fatal X.509 error, a failed
                  * key parse...), the cause is memory: say so. */
-                snprintf(msg, sizeof msg, "out of memory in the TLS handshake (wanted %u B)",
+                snprintf(msg, sizeof msg, "TLS pool full in the handshake (wanted %u B)",
                          (unsigned)s_tls_fail_size);
                 finish(r, HTTPC_ENOMEM, msg);
                 return;
@@ -685,6 +681,7 @@ static err_t cb_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
         if (p) { tcp_recved(pcb, p->tot_len); pbuf_free(p); }
         return ERR_OK;
     }
+    void *prev = use(r->scope);
     if (!p) {
         r->rx_closed = true;
     } else if (r->rx) {
@@ -694,19 +691,27 @@ static err_t cb_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) 
         r->rx_off = 0;
     }
     pump(r);
+    use(prev);
     return ERR_OK;
 }
 
 static err_t cb_sent(void *arg, struct tcp_pcb *pcb, u16_t len) {
     (void)pcb; (void)len;
     req_t *r = from_arg(arg);
-    if (r) { pump(r); }
+    if (r) { void *prev = use(r->scope); pump(r); use(prev); }
     return ERR_OK;
 }
 
+static void cb_err_on(req_t *r, err_t err);
 static void cb_err(void *arg, err_t err) {
     req_t *r = from_arg(arg);
     if (!r) { return; }
+    void *prev = use(r->scope);
+    cb_err_on(r, err);
+    use(prev);
+}
+
+static void cb_err_on(req_t *r, err_t err) {
     r->pcb = NULL;                 /* lwIP has freed it */
     if (r->state == HTTPC_CONNECT) { finish(r, HTTPC_ECONNECT, err == ERR_RST ? "refused" : "connect failed"); }
     else if (r->state == HTTPC_RECV && !r->parser.error) {
@@ -720,14 +725,23 @@ static void cb_err(void *arg, err_t err) {
     }
 }
 
+static err_t cb_connected_on(req_t *r, err_t err);
 static err_t cb_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
     (void)pcb;
     req_t *r = from_arg(arg);
     if (!r) { return ERR_OK; }
+    void *prev = use(r->scope);
+    err_t e = cb_connected_on(r, err);
+    use(prev);
+    return e;
+}
+
+static err_t cb_connected_on(req_t *r, err_t err) {
     if (err != ERR_OK) { finish(r, HTTPC_ECONNECT, "connect failed"); return ERR_OK; }
 #if CONFIG_NET_HTTP_TLS
     if (r->u.tls) {
-        if (!tls_init()) { finish(r, HTTPC_ETLS, "tls init failed"); return ERR_OK; }
+        bool ok = tls_init();
+        if (!ok) { finish(r, HTTPC_ETLS, "tls init failed"); return ERR_OK; }
         r->ssl = mbedtls_calloc(1, sizeof(mbedtls_ssl_context));
         if (!r->ssl) { finish(r, HTTPC_ENOMEM, "out of memory for tls"); return ERR_OK; }
         mbedtls_ssl_init(r->ssl);
@@ -767,9 +781,10 @@ static void cb_dns(const char *name, const ip_addr_t *ip, void *arg) {
     (void)name;
     req_t *r = from_arg(arg);
     if (!r || r->state != HTTPC_DNS) { return; }
-    if (!ip) { finish(r, HTTPC_EDNS, "name not resolved"); return; }
-    r->ip = *ip;
-    do_connect(r);
+    void *prev = use(r->scope);
+    if (!ip) { finish(r, HTTPC_EDNS, "name not resolved"); }
+    else { r->ip = *ip; do_connect(r); }
+    use(prev);
 }
 #endif
 
@@ -829,8 +844,9 @@ int httpc_start(const httpc_opts_t *o, const httpc_sink_t *sink, void *user, htt
     int slot = -1;
     for (int i = 0; i < HTTPC_MAX; i++) { if (!s_req[i]) { slot = i; break; } }
     if (slot < 0) { *err = HTTPC_ENOMEM; return -1; }
-    req_t *r = xalloc(sizeof *r);
+    req_t *r = palloc(sizeof *r);
     if (!r) { *err = HTTPC_ENOMEM; return -1; }
+    r->scope = o->scope;
     if (++s_gen > 0x7FFFFF) { s_gen = 1; }
     r->id = (s_gen << 4) | slot;
     r->url = xstrdup(o->url);
@@ -892,21 +908,38 @@ bool httpc_info(int id, httpc_state_t *state, uint64_t *bytes, int64_t *total, i
     return true;
 }
 
+static void tick_one(req_t *r, uint32_t now);
+
 void httpc_tick(void) {
     uint32_t now = now_ms();
     for (int i = 0; i < HTTPC_MAX; i++) {
         req_t *r = s_req[i];
         if (!r) { continue; }
+        void *prev = use(r->scope);
+        tick_one(r, now);
+        use(prev);
+    }
+}
+
+static void tick_one(req_t *r, uint32_t now) {
+    {
         if (r->state == HTTPC_DONE || r->state == HTTPC_ERROR) {
             /* Finished: the owner frees it through httpc_cancel when it has
              * collected the result. */
-            continue;
+            return;
         }
-        if ((int32_t)(now - r->deadline_ms) >= 0) { finish(r, HTTPC_ETIMEOUT, "request timed out"); continue; }
+        if ((int32_t)(now - r->deadline_ms) >= 0) { finish(r, HTTPC_ETIMEOUT, "request timed out"); return; }
         if (!r->started) {
+#if CONFIG_NET_HTTP_TLS
+            if (r->u.tls && s_tls_owner && s_tls_owner != r) {
+                if (!r->tls_waited) { r->tls_waited = true; s_tls_waits++; }
+                return;            /* another request has the TLS session: wait (its deadline runs) */
+            }
+            if (r->u.tls) { s_tls_owner = r; }
+#endif
             r->started = true;
             start_connection(r);
-            continue;
+            return;
         }
         /* A frame the interface refused is gone, and lwIP leaves the
          * segment on `unsent` with nothing to retry it -- for a SYN that is
@@ -921,60 +954,25 @@ void httpc_tick(void) {
 }
 
 void httpc_reset(void) {
+    /* Requests are freed for real: their memory is the pool's (which a VM
+     * restart does not reset) and the sink's (whose arena is reset only
+     * after this). The shared configs and RNG are static and survive. */
     for (int i = 0; i < HTTPC_MAX; i++) {
         if (s_req[i]) { s_req[i]->done_called = true; req_free(s_req[i]); }
     }
-#if CONFIG_NET_HTTP_TLS
-    /* The shared configs and RNG hold no arena memory (they are static) and
-     * survive. The reserved record buffers were in the arena that is being
-     * reset: forget them, the next HTTPS request reserves them again. */
-    memset(&s_slot_in, 0, sizeof s_slot_in);
-    memset(&s_slot_out, 0, sizeof s_slot_out);
-#endif
-}
-
-bool httpc_reserve(void) {
-#if CONFIG_NET_HTTP_TLS
-    if (!s_slot_in.mem) {
-        if (!(s_slot_in.mem = xalloc(TLS_SLOT_IN))) { return false; }
-        s_slot_in.cap = TLS_SLOT_IN;
-    }
-    if (!s_slot_out.mem) {
-        if (!(s_slot_out.mem = xalloc(TLS_SLOT_OUT))) { return false; }
-        s_slot_out.cap = TLS_SLOT_OUT;
-    }
-    return true;
-#else
-    return false;
-#endif
-}
-
-bool httpc_unreserve(void) {
-#if CONFIG_NET_HTTP_TLS
-    if (s_slot_in.used || s_slot_out.used) { return false; }   /* a session has them */
-    httpc_release_reserve();
-    return true;
-#else
-    return true;
-#endif
-}
-
-bool httpc_release_reserve(void) {
-#if CONFIG_NET_HTTP_TLS
-    bool freed = false;
-    if (s_slot_in.mem && !s_slot_in.used)   { xfree(s_slot_in.mem);  memset(&s_slot_in, 0, sizeof s_slot_in);  freed = true; }
-    if (s_slot_out.mem && !s_slot_out.used) { xfree(s_slot_out.mem); memset(&s_slot_out, 0, sizeof s_slot_out); freed = true; }
-    return freed;
-#else
-    return false;
-#endif
 }
 
 void httpc_stats(httpc_stats_t *out) {
     *out = s_stats;
+    lheap_pool_stats_t ps;
+    lheap_pool_stats(&ps);
+    out->pool_size = (uint32_t)ps.capacity;
+    out->pool_used = (uint32_t)ps.used;
+    out->pool_peak = (uint32_t)ps.peak;
+    out->pool_largest_free = (uint32_t)ps.largest_free;
+    out->pool_fails = ps.fails;
 #if CONFIG_NET_HTTP_TLS
-    out->tls_bytes_now = (uint32_t)s_tls_now;
-    out->tls_peak_bytes = (uint32_t)s_tls_peak;
-    out->tls_reserved = (uint32_t)((s_slot_in.mem ? s_slot_in.cap : 0) + (s_slot_out.mem ? s_slot_out.cap : 0));
+    out->tls_waits = s_tls_waits;
+    out->tls_alloc_fails = s_tls_alloc_fails;
 #endif
 }

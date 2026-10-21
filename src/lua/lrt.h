@@ -39,9 +39,6 @@ void lrt_yield_soon(void);
  * is established -- see lrt.c for what the caller must also do. */
 bool lrt_unload_module(const char *name);
 size_t lrt_collect(void);
-/* Called when a Lua allocation fails even after the emergency collection;
- * returns true if it gave memory back (the allocation is then retried). */
-void lrt_set_oom_hook(bool (*fn)(void));
 
 /* --- script lifecycle ---------------------------------------------------- */
 /* Source resolution, in order: RAM draft, staged/<name>.lua, lua/<name>.lua.
@@ -83,6 +80,9 @@ size_t lrt_list_json(char *dst, size_t cap);
  * file's new JSON. */
 bool lrt_autostart_set(const char *name, bool enabled, char *out, size_t cap, const char **err);
 size_t lrt_stats_json(char *dst, size_t cap);
+/* sys.restart_vm(): the VM is rebuilt on the next lrt_tick, the running
+ * scripts started again in the fresh arena (see lrt_vm_restart). */
+void lrt_request_vm_restart(void);
 /* script.loaded: every running script and resident module, with the tier and
  * hash it was compiled from and the hash of its file now. */
 size_t lrt_loaded_json(char *dst, size_t cap);
@@ -92,6 +92,9 @@ size_t lrt_loaded_json(char *dst, size_t cap);
  * past the last slot, 0 for an empty slot, 1 with `out` filled. */
 typedef struct { uint32_t arena_bytes, used, peak, hook_kills, slice_overruns, running; } lrt_stats_t;
 void lrt_stats(lrt_stats_t *out);
+/* The arena by lifetime: both sides' free space and largest hole, the gap
+ * between them, the short-term scratches (JSON object). */
+size_t lrt_mem_json(char *dst, size_t cap);
 /* Diagnostics (script.heap / script.arena) and a Lua-only restart. */
 size_t lrt_heap_json(char *dst, size_t cap);
 size_t lrt_arena_json(long offset, long len, char *dst, size_t cap);

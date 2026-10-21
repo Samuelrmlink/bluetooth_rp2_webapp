@@ -371,6 +371,15 @@ static void t_high_mode(void) {
           "a block that moves to grow is placed from the bottom");
     void *fresh = lheap_realloc(NULL, 5, 100);
     CHECK((uint8_t *)fresh > (uint8_t *)lheap_base() + lheap_capacity() / 2, "a new block still from the top");
+    lheap_high_begin();                 /* nested */
+    int depth = lheap_high_suspend();
+    void *low2 = lheap_alloc(40);
+    CHECK((uint8_t *)low2 < (uint8_t *)lheap_base() + lheap_capacity() / 2, "suspended: from the bottom");
+    lheap_high_resume(depth);
+    void *hi2 = lheap_alloc(40);
+    CHECK((uint8_t *)hi2 > (uint8_t *)lheap_base() + lheap_capacity() / 2, "resumed: from the top again");
+    lheap_high_end();
+    lheap_free(low2); lheap_free(hi2);
     lheap_high_end();
     lheap_free(s1); lheap_free(moved); lheap_free(fresh); lheap_free(wall);
     ck();
@@ -411,6 +420,57 @@ static void t_overhead_and_stats(void) {
     ck();
 }
 
+/* Scratch: a request's blocks in pages from the top, freed whole; the main
+ * arena's invariants hold throughout and it is one block again at the end. */
+static void t_scratch(void) {
+    current = "scratch pages";
+    lheap_init();
+    void *lo = lheap_alloc(100);
+    lheap_scratch_t *s = lheap_scratch_begin(1024);
+    CHECK(s != NULL, "a scratch");
+    void *p[200];
+    size_t sz[200];
+    unsigned rng = 7;
+    for (int i = 0; i < 200; i++) {
+        rng = rng * 1103515245u + 12345u;
+        sz[i] = (rng >> 8) % 300 + 1;
+        if (i % 37 == 5) { sz[i] = 3000; }           /* bigger than a page */
+        p[i] = lheap_scratch_alloc(s, sz[i]);
+        CHECK(p[i] != NULL, "scratch alloc");
+        CHECK(i > 0 || (uint8_t *)p[i] > (uint8_t *)lheap_base() + lheap_capacity() / 2, "scratch pages come from the top");
+        paint(p[i], sz[i], (unsigned)i);
+        if (i % 3 == 0) { lheap_free_any(p[i]); p[i] = NULL; }
+        ck();
+    }
+    void *mid = lheap_alloc(200);                  /* the arena goes on meanwhile */
+    for (int i = 0; i < 200; i++) {
+        if (p[i]) { CHECK(painted(p[i], sz[i], (unsigned)i), "scratch payload intact"); }
+    }
+    lheap_scratch_stats_t st;
+    lheap_scratch_stats(&st);
+    CHECK(st.active == 1 && st.pages > 1 && st.live > 0, "stats see the scratch");
+    for (int i = 0; i < 200; i += 2) { if (p[i]) { lheap_free_any(p[i]); p[i] = NULL; } }
+    ck();
+    lheap_scratch_end(s);                          /* the rest goes with it */
+    ck();
+    lheap_scratch_stats(&st);
+    CHECK(st.active == 0 && st.pages == 0 && st.live == 0 && st.bytes == 0, "all of it back");
+    lheap_free_any(mid);                           /* an arena block through free_any */
+    lheap_free(lo);
+    ck();
+    lheap_stats_t hs;
+    lheap_check(&hs, NULL);
+    CHECK(hs.blocks == 1 && lheap_used() == 0, "the arena is one block again");
+    /* current scratch, and a scratch from before a reset is dead */
+    lheap_scratch_t *a = lheap_scratch_begin(0);
+    CHECK(lheap_scratch_use(a) == NULL && lheap_scratch_current() == a, "current scratch");
+    lheap_init();
+    CHECK(lheap_scratch_current() == NULL, "reset forgets the current scratch");
+    CHECK(lheap_scratch_alloc(a, 10) == NULL, "a scratch from before a reset is dead");
+    lheap_scratch_end(a);
+    ck();
+}
+
 /*
  * The headline number: peak usage while a buffer grows the way Lua grows one.
  * The old allocator needed old+new resident at once, so doubling a 32 KB
@@ -438,6 +498,42 @@ static void t_growth_peak(void) {
     lheap_free(p);
 }
 
+/* The pool: its own memory, untouched by the arena and by lheap_init, and
+ * whole again once everything in it is freed (one TLS session at a time). */
+static void t_pool(void) {
+    current = "pool";
+#if LHEAP_POOL_KB > 0
+    lheap_init();
+    lheap_pool_stats_t ps;
+    lheap_pool_stats(&ps);
+    size_t whole = ps.largest_free;
+    CHECK(ps.capacity == (size_t)LHEAP_POOL_KB * 1024u && ps.used == 0, "an empty pool");
+    void *a = lheap_pool_alloc(16384 + 64), *b = lheap_pool_alloc(2100), *c[40];
+    CHECK(a && b && lheap_pool_owns(a) && lheap_pool_owns(b), "record buffers from the pool");
+    void *l = lheap_alloc(100);
+    CHECK(l && !lheap_pool_owns(l), "the arena is not the pool");
+    size_t used = lheap_used();
+    for (int i = 0; i < 40; i++) { c[i] = lheap_pool_alloc((size_t)(i * 37) % 400 + 8); CHECK(c[i] != NULL, "small pool blocks"); }
+    CHECK(lheap_used() == used, "pool blocks are not counted in the arena");
+    lheap_init();                                    /* a VM restart */
+    lheap_pool_stats(&ps);
+    CHECK(ps.used > 16384 + 2100, "the pool survives lheap_init");
+    for (int i = 0; i < 40; i += 2) { lheap_pool_free(c[i]); }
+    lheap_pool_free(a);
+    for (int i = 1; i < 40; i += 2) { lheap_pool_free(c[i]); }
+    lheap_pool_free(b);
+    lheap_pool_stats(&ps);
+    CHECK(ps.used == 0 && ps.largest_free == whole && ps.free_blocks == 1, "the pool is one piece again");
+    CHECK(ps.peak > 16384 + 2100, "the pool's peak");
+    CHECK(lheap_pool_alloc((size_t)LHEAP_POOL_KB * 1024u) == NULL, "too big for the pool");
+    lheap_pool_stats(&ps);
+    CHECK(ps.fails == 1, "a refused pool request is counted");
+    CHECK(lheap_check(NULL, NULL), "the arena is sane");
+#else
+    CHECK(lheap_pool_alloc(8) == NULL, "no pool");
+#endif
+}
+
 int main(void) {
     /* Line-buffered: ck() aborts on a structural failure, and an abort
      * discards a buffered explanation -- which is the one line worth having. */
@@ -455,7 +551,9 @@ int main(void) {
     t_alloc_high();
     t_high_mode();
     t_overhead_and_stats();
+    t_scratch();
     t_growth_peak();
+    t_pool();
     if (failures) {
         printf("heap_test: %d failure(s)\n", failures);
         return 1;

@@ -31,9 +31,6 @@
  * reverted attempts at its in-place realloc broke. */
 
 /* Lua's allocator hook. The work is in lheap_realloc; this only drops `ud`. */
-static bool (*s_oom_hook)(void);
-void lrt_set_oom_hook(bool (*fn)(void)) { s_oom_hook = fn; }
-
 /* A new string, userdata or thread is placed from the bottom even while a
  * module loads from the top (lheap_high_begin in l_require): strings are
  * interned, so a module's constant "done" is the very object a long-lived
@@ -51,14 +48,7 @@ static void *lrt_place(void *ptr, size_t osize, size_t nsize) {
 
 static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     (void)ud;
-    void *p = lrt_place(ptr, osize, nsize);
-    /* Out of arena even after Lua's emergency collection: memory the C side
-     * keeps in reserve (the HTTP client's TLS record buffers) goes back
-     * before a script is told "not enough memory". */
-    if (!p && nsize && s_oom_hook && s_oom_hook()) {
-        p = lrt_place(ptr, osize, nsize);
-    }
-    return p;
+    return lrt_place(ptr, osize, nsize);
 }
 
 /* The incremental collector's settings (see lrt_init). */
@@ -883,9 +873,13 @@ static int l_require(lua_State *Ls) {
 
     if (lua_getfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE) != LUA_TTABLE) {
         lua_pop(Ls, 1);
-        lua_newtable(Ls);
+        int hd = lheap_high_suspend();
+        /* Sized for a profile's worth of modules up front: grown later, its
+         * node array would be reallocated wherever the arena had room. */
+        lua_createtable(Ls, 0, 32);
         lua_pushvalue(Ls, -1);
         lua_setfield(Ls, LUA_REGISTRYINDEX, MODULE_CACHE);
+        lheap_high_resume(hd);
     }
     if (lua_getfield(Ls, -1, name) != LUA_TNIL) {
         if (module_is_current(name)) {
@@ -998,7 +992,13 @@ static int l_require(lua_State *Ls) {
         lua_pushboolean(Ls, 1);      /* a module that returns nothing is still loaded */
     }
     lua_pushvalue(Ls, -1);
+    /* From the bottom even when this is a module required by another one's
+     * main chunk (whose high placement is still open): the cache outlives
+     * them both -- grown up there, its node array was an island in the space
+     * the modules gave back (found in a dump of the arena in mcusim). */
+    int hd = lheap_high_suspend();
     lua_setfield(Ls, -3, name);      /* cache[name] = module */
+    lheap_high_resume(hd);
     return 1;
 }
 
@@ -1204,6 +1204,9 @@ bool lrt_start(const char *name, const char **err) {
  * does that (lrt_vm_restart) -- unless something has started meanwhile. */
 static bool s_defrag_due;
 static bool s_restarting;
+static bool s_restart_asked;      /* sys.restart_vm(): on the next tick */
+
+void lrt_request_vm_restart(void) { s_restart_asked = true; }
 
 static bool any_running(const script_t *except) {
     for (int i = 0; i < MAX_SCRIPTS; i++) {
@@ -1500,6 +1503,15 @@ void lrt_tick(void) {
             lrt_vm_restart(false, true, r, sizeof r);   /* keep a dead script's error */
             return;
         }
+    }
+    if (s_restart_asked) {
+        /* Asked for by a script (sys.restart_vm): here, between slices, where
+         * no script is running. The running ones are started again. */
+        s_restart_asked = false;
+        static char r2[256];
+        printf("lua: VM restart asked for by a script\n");
+        lrt_vm_restart(true, false, r2, sizeof r2);
+        return;
     }
     cache_tick();
     lbind_pairing_pump();
@@ -2060,6 +2072,31 @@ size_t lrt_stats_json(char *dst, size_t cap) {
         (unsigned)st.free_blocks, (unsigned)fail_count, (unsigned)fail_last,
         (unsigned long)s_hook_kills, CONFIG_LUA_HOOK_BUDGET,
         (unsigned long)s_slice_overruns, SLICE_MAX_MS);
+}
+
+/* The arena by lifetime (sys.info "lua_mem", script.stats "mem"): the gap
+ * between the two sides, the holes on each side, and the short-term
+ * scratches (one per HTTP request). */
+size_t lrt_mem_json(char *dst, size_t cap) {
+    lheap_stats_t st;
+    lheap_stats(&st);
+    lheap_scratch_stats_t sc;
+    lheap_scratch_stats(&sc);
+    lheap_pool_stats_t ps;
+    lheap_pool_stats(&ps);
+    return (size_t)snprintf(dst, cap,
+        "{\"arena\":%u,\"used\":%u,\"free\":%u,\"largest_free\":%u,\"blocks\":%u,"
+        "\"low\":{\"free\":%u,\"largest_free\":%u},\"high\":{\"free\":%u,\"largest_free\":%u},"
+        "\"gap_at\":%u,\"scratch\":{\"active\":%u,\"pages\":%u,\"bytes\":%u,\"live\":%u,"
+        "\"bytes_peak\":%u,\"live_peak\":%u,\"page_fails\":%u,\"runs\":%u},"
+        "\"tls_pool\":{\"size\":%u,\"used\":%u,\"peak\":%u,\"largest_free\":%u,\"fails\":%u,\"fail_last\":%u}}",
+        (unsigned)lheap_capacity(), (unsigned)lheap_used(), (unsigned)st.free_bytes, (unsigned)st.largest_free,
+        (unsigned)st.blocks, (unsigned)st.free_low, (unsigned)st.largest_free_low, (unsigned)st.free_high,
+        (unsigned)st.largest_free_high, (unsigned)st.gap_offset, (unsigned)sc.active, (unsigned)sc.pages,
+        (unsigned)sc.bytes, (unsigned)sc.live, (unsigned)sc.bytes_peak, (unsigned)sc.live_peak,
+        (unsigned)sc.page_fails, (unsigned)sc.runs,
+        (unsigned)ps.capacity, (unsigned)ps.used, (unsigned)ps.peak, (unsigned)ps.largest_free,
+        (unsigned)ps.fails, (unsigned)ps.fail_last);
 }
 
 void lrt_stats(lrt_stats_t *out) {

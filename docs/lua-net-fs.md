@@ -98,9 +98,9 @@ local id, err = http.start{
 http.status(id)    -- {state="dns"|"connect"|"tls"|"send"|"recv"|"done"|"error", status=n, bytes=n, total=n|nil}
 http.await(id, ms) -- the result, or nil, "timeout" (the request keeps going) | nil, "badid"
 http.cancel(id)    -- true (false: no such request)
-http.stats()       -- {requests=, failures=, tls_sessions=, tls_bytes=, tls_peak_bytes=, tls_reserved=}
-http.reserve(on)   -- the TLS record-buffer reservation (below): false gives it back
-                   -- (false while a session uses it), true takes it now
+http.stats()       -- {requests=, failures=, tls_sessions=, tls_waits=, tls_bytes=, tls_peak_bytes=,
+                   --  tls_pool=, tls_pool_largest_free=, tls_pool_fails=}: the TLS pool (below)
+http.reserve(on)   -- true; does nothing (the TLS buffers were once reserved in the Lua arena)
 ```
 
 `http.start` fails with `nil, "busy"` (3 requests already), `"badurl"`,
@@ -188,38 +188,48 @@ dates are checked once the clock is set (`sys.time()` ~= nil, SNTP); before
 that they are not, rather than failing every handshake on a board that has not
 heard from a time server yet. `insecure = true` skips verification entirely.
 
-**Memory.** Every request, its buffers and its TLS session come from the *top*
-of the Lua arena (`lheap_alloc_high`), so they sit above everything Lua packs
-from the bottom. A TLS session needs a 16 KiB receive record buffer (servers --
-Google's included -- ignore `max_fragment_length`) and a 4 KiB send buffer,
-each one contiguous block, and a script that has run for a while leaves the
-first-fit arena in pieces (measured: 51 KB free, no 17 KB hole). So the first
-HTTPS request **reserves one pair, 22.5 KB, and keeps it for the life of the Lua
-VM** (`http.stats().tls_reserved`); a second session at the same time takes
-its buffers from the arena like everything else. The reservation gives way to
-scripts: `http.reserve(false)` returns it while no HTTPS is needed, and a Lua
-allocation that fails even after the emergency collection frees it (if idle)
-and retries. Either way the next HTTPS request reserves it again, or fails
-cleanly with `nomem` if the arena cannot give 22.5 KB in two pieces. And because memory a script
-has dropped is garbage until the collector runs -- which only Lua's own
-allocations trigger -- an HTTP/TLS allocation that fails runs a full
-collection and tries once more. A handshake that still runs out says
-`error = "nomem"` with what it wanted, never a certificate error.
+**Memory.** The TLS session is **not in the Lua arena**. mbedTLS's every
+allocation -- the 16 KiB receive record buffer (servers, Google's included,
+ignore `max_fragment_length`), the 2 KiB send buffer, the handshake state, the
+server's chain and the trusted roots while it is verified -- and each
+request's own bookkeeping (the request, its URL and header copies, the request
+text, a redirect's Location) come from the **TLS pool**: a static block of its
+own (`CONFIG_NET_TLS_POOL_KB`, 40 KB), with the same allocator as the arena
+(`lheap_pool_*`). In the shipped configs the arena went from 176 to 164 KB: the
+40 KB of the pool, less 28 KB taken back from lwIP's heap and receive pool
+(measured headroom, `include/lwipopts.h`).
+There is **one TLS session at a time**: an `https://` request that finds it
+taken waits, before it even connects, until the other is done (`state` stays
+`"dns"` meanwhile; its `timeout_ms` runs; `http.stats().tls_waits` counts
+them). With the pool empty between sessions, a session can neither cut the
+scripts' space into pieces nor fail because their objects already have -- the
+failure this replaced: a long-running script left a 176 KB arena with 51 KB
+free and no 17 KB hole, so every HTTPS request failed `nomem`; reserving the
+record buffers in the arena moved the problem around rather than solving it.
+A VM restart (`sys.restart_vm`) leaves the pool alone; the requests it cancels
+are freed from it properly.
+
+What becomes or comes from a Lua value stays on the Lua side, in the
+request's own scratch (§8: pages from the *top* of the arena, given back
+together when the request is released): a request body, the response
+headers, an in-memory body, a LittleFS file buffer. Memory a script has
+dropped is garbage until the collector runs, so such an allocation that fails
+runs a full collection and tries once more. A handshake the pool cannot
+serve says `error = "nomem"` with what it wanted, never a certificate error.
 
 | | bytes |
 |---|---|
-| a session, after setup / steady after the handshake (4 KiB out buffer; now 2 KiB, ~2 K less) | 22.5 K / 22.7 K |
-| a session at its handshake peak (RSA-4096 root, RSA-2048 intermediate, ECDSA or RSA leaf) | ~37 K |
-| on the device against firebasestorage.googleapis.com (mcusim, real network), `tls_peak_bytes` | 33.0 K |
-| reserved for the record buffers after the first HTTPS request, kept | 22.5 K |
-| an in-memory body | up to `max_body` (2 KiB chunks) |
-| response headers kept | at most 8 KiB |
+| a session, after setup / steady after the handshake | ~20.5 K / ~21 K |
+| a session at its handshake peak (RSA-4096 root, RSA-2048 intermediate, ECDSA or RSA leaf) | ~37 K (host) |
+| on the device against Firebase Storage and Supabase (mcusim, real network), pool peak with the requests' bookkeeping | see `http.stats().tls_peak_bytes` |
+| an in-memory body (Lua arena, request scratch) | up to `max_body` (2 KiB chunks) |
+| response headers kept (Lua arena, request scratch) | at most 8 KiB |
 
-(measured with the firmware's mbedTLS configuration by `test/host/tls_mem_test.c`
-on a 64-bit host, which slightly overstates the device; `http.stats()` reports
-the device's own figures). Two HTTPS requests at once therefore want ~75 KB of
-the 176 KB arena at their peaks. Static RAM for all of `http` is the slot table,
-one shared TLS configuration and a 512-byte scratch.
+(the first two measured with the firmware's mbedTLS configuration by
+`test/host/tls_mem_test.c` on a 64-bit host, which overstates the device;
+`http.stats()` reports the device's own figures.) Static RAM for all of `http`
+is the TLS pool, the slot table, one shared TLS configuration and a 512-byte
+scratch.
 
 ## 3. `json`
 
@@ -300,9 +310,16 @@ the file's new contents.
   arena is in pieces. `alloc_fails` counts requests that found no block (Lua
   then collects and retries, so most are not errors). One walk of the arena.
 
+* `sys.restart_vm()` -> `true`: the Lua VM is rebuilt on the next main-loop
+  pass (not during the call -- yield after it): every script stopped, the arena
+  reset, the scripts that were running started again; Wi-Fi and Bluetooth stay
+  up (open links are dropped). Lua never moves an object, so this is the one
+  way to put a long-running set of scripts' arena back in one piece; nothing
+  in the arena survives it, so save what must (a file) first.
+
 ## 8. The Lua arena
 
-`src/lua/lheap.c`: one static block (`CONFIG_LUA_HEAP_KB`, 176 KB), address-
+`src/lua/lheap.c`: one static block (`CONFIG_LUA_HEAP_KB`, 164 KB), address-
 ordered first fit with boundary tags. Each block starts with one word (its size
 and two flags: free, previous block free); a free block also has a footer and
 the links of an address-ordered free list. A live block costs 4 bytes (the
@@ -315,12 +332,30 @@ Two placements:
 
 * **low** (first fit from the bottom): Lua's objects;
 * **high** (the top of the highest free block that fits): what is allocated and
-  freed as a unit -- the HTTP client's requests and TLS buffers
-  (`lheap_alloc_high`), and **every module `require()` loads**: the chunk is
+  freed as a unit -- long-lived C buffers made for Lua (`lheap_alloc_high`),
+  and **every module `require()` loads**: the chunk is
   loaded and its main chunk run with `lheap_high_begin/end` open. Module code
   then never lies interleaved with the scripts' long-lived data; a module
   dropped with `sys.unload` gives its space back to the free middle in one
   piece instead of leaving holes between objects created while it was loaded.
+
+Memory is kept apart **by lifetime** rather than made movable (the PEX spec,
+`docs/pex-format.md` §7.2, applies the same rule to native modules):
+
+| lifetime | where | what |
+|---|---|---|
+| the system's | **not the arena**: the TLS pool (§2) | the TLS session, one at a time, and the HTTP requests' bookkeeping |
+| a module's | the top (high placement) | every module `require()` loads; the module cache table is never placed high |
+| one request | a **scratch**: 2 KB pages from the top, all given back when the request ends | an HTTP request's body, response headers and body, a LittleFS file buffer -- everything `http.start` to collection allocates on the Lua side; inside a page the same allocator runs, so a handshake's alloc-free-alloc reuses it, and an emptied page goes back at once |
+| the scripts' objects | the bottom (first fit) | Lua's tables, strings, closures; strings, userdata and threads -- and a block that has to move to grow -- always from the bottom |
+
+`sys.heap()` and `sys.info.lua_mem` report the two sides
+separately: the largest free block is the gap between them, and the free space
+and largest hole below it (`largest_free_low`) and above it
+(`largest_free_high`) are what each side has lost to holes; `scratch` gives the
+pages in use, the high-water marks and failed page requests; `sys.info.lua_mem`
+(and `script.stats`'s `mem`) also give `tls_pool`: its size, use, high-water
+mark, largest free block and refused requests.
 
 A cached module (`cache/<module>.luac`) is **streamed** into `lua_load` from
 LittleFS in 256-byte pieces; it used to be read whole into a buffer first,

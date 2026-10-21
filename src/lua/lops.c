@@ -148,6 +148,8 @@ static void op_stats(const char *params, api_reply_fn reply, void *ctx, long id)
     n += lrt_stats_json(buf + n, BUF_SZ - n);
     n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"scripts\":");
     n += lrt_list_json(buf + n, BUF_SZ - n);
+    n += (size_t)snprintf(buf + n, BUF_SZ - n, ",\"mem\":");
+    n += lrt_mem_json(buf + n, BUF_SZ - n);
     snprintf(buf + n, BUF_SZ - n, "}");
     api_reply_ok(reply, ctx, id, buf);
 }
