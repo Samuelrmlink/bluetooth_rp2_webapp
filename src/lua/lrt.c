@@ -46,6 +46,11 @@ static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     return p;
 }
 
+/* The incremental collector's settings (see lrt_init). */
+#define LRT_GC_PAUSE    110
+#define LRT_GC_STEPMUL  400
+#define LRT_GC_STEPSIZE 11      /* log2 of the bytes between steps: 2 KB */
+
 /* --- state --------------------------------------------------------------- */
 #define MAX_SCRIPTS 8
 #define NAME_MAX_LEN 32
@@ -671,33 +676,59 @@ static bool cache_store(lua_State *Ls, const char *rel, uint32_t hash, uint32_t 
     return true;
 }
 
-/* Push this module's cached chunk and return true, or push nothing and
- * return false. Overwrites src_buf. */
-static bool cache_load(lua_State *Ls, const char *rel, const char *chunkname,
-                       uint32_t hash, uint32_t srclen) {
+/* lua_load's reader over an open LittleFS file, in pieces: a module loads
+ * without its bytecode ever being in the arena at once. Static, not on the
+ * stack (core0 has 8 KB); safe because nothing is read while a chunk loads
+ * but the chunk itself -- a require() inside the module runs only after its
+ * load has finished and closed the file. */
+typedef struct { int h; bool err; } fsrd_t;
+static uint8_t s_rd_piece[256];
+static const char *fs_reader(lua_State *Ls, void *ud, size_t *size) {
+    (void)Ls;
+    fsrd_t *r = ud;
+    int n = fs_read(r->h, s_rd_piece, sizeof s_rd_piece);
+    if (n < 0) { r->err = true; }
+    if (n <= 0) { *size = 0; return NULL; }
+    *size = (size_t)n;
+    return (const char *)s_rd_piece;
+}
+
+/* Push this module's cached chunk and return 1; push nothing and return 0
+ * when there is no usable cache, or -1 when it is there and the arena could
+ * not hold it.
+ *
+ * Streamed from flash (fs_reader), not read whole into src_buf first: that
+ * needed one free block the size of the bytecode (up to ~7 KB for the iTi
+ * hub) on top of what the loaded code takes, and in an arena that had run
+ * for a while there often was no such block -- "module '...': not enough
+ * memory to load it" with tens of KB free in smaller pieces. */
+static int cache_load(lua_State *Ls, const char *rel, const char *chunkname,
+                      uint32_t hash, uint32_t srclen) {
     char path[96];
     cache_path(rel, path, sizeof path);
-    if (!cache_matches(path, hash, srclen)) { return false; }
-    size_t len = 0;
-    if (!read_src(path, &len) || len <= CACHE_HDR) {
-        if (s_src_nomem) { luaL_error(Ls, "module '%s': not enough memory to load it", rel); }
-        return false;
-    }
-    int rc = luaL_loadbufferx(Ls, src_buf + CACHE_HDR, len - CACHE_HDR, chunkname, "b");
+    if (!cache_matches(path, hash, srclen)) { return 0; }
+    int h = fs_begin_read(path, NULL);
+    if (h < 0) { return 0; }
+    uint8_t skip[CACHE_HDR];
+    if (fs_read(h, skip, CACHE_HDR) != CACHE_HDR) { fs_end_read(h); return 0; }
+    fsrd_t rd = { h, false };
+    int rc = lua_load(Ls, fs_reader, &rd, chunkname, "b");
+    fs_end_read(h);
     if (rc == LUA_ERRMEM) {
         /* Out of memory, not a bad cache: compiling the source instead needs
          * about twice as much, so it would only fail later and worse. Keep
          * the cache and say what happened. */
         lua_pop(Ls, 1);
-        luaL_error(Ls, "module '%s': not enough memory to load it", rel);
+        return -1;
     }
-    if (rc != LUA_OK) {
-        printf("lua: cache for %s unusable (%s); compiling the source\n", rel, lua_tostring(Ls, -1));
+    if (rc != LUA_OK || rd.err) {
+        printf("lua: cache for %s unusable (%s); compiling the source\n", rel,
+               rc != LUA_OK ? lua_tostring(Ls, -1) : "read error");
         lua_pop(Ls, 1);
         fs_delete(path);
-        return false;
+        return 0;
     }
-    return true;
+    return 1;
 }
 
 /* Bring one module's cache up to date with its source: compile and store
@@ -870,7 +901,14 @@ static int l_require(lua_State *Ls) {
     snprintf(chunkname, sizeof chunkname, "@%s", name);
     char rel[64];
     bool cacheable = tier == SRC_TIER_COMMITTED && module_rel(name, rel, sizeof rel);
-    if (!(cacheable && cache_load(Ls, rel, chunkname, hash, (uint32_t)stored))) {
+    /* A module's code and whatever its main chunk builds go in from the top
+     * of the arena (lheap_high_begin): loaded and dropped as a unit, it then
+     * never lies interleaved with the scripts' long-lived data below. */
+    lheap_high_begin();
+    int cached = cacheable ? cache_load(Ls, rel, chunkname, hash, (uint32_t)stored) : 0;
+    lheap_high_end();
+    if (cached < 0) { return luaL_error(Ls, "module '%s': not enough memory to load it", name); }
+    if (!cached) {
         /* Not cached (or stale): the source, inflated if it is .gz. */
         const char *src = NULL;
         size_t len = 0;
@@ -879,7 +917,10 @@ static int l_require(lua_State *Ls) {
             if (s_src_nomem) { return luaL_error(Ls, "module '%s': not enough memory to load it", name); }
             return luaL_error(Ls, "module '%s' could not be read (a .gz that does not inflate, or over 32 KB)", name);
         }
-        if (luaL_loadbufferx(Ls, src, len, chunkname, "t") != LUA_OK) {
+        lheap_high_begin();
+        int rc = luaL_loadbufferx(Ls, src, len, chunkname, "t");
+        lheap_high_end();
+        if (rc != LUA_OK) {
             return luaL_error(Ls, "module '%s': %s", name, lua_tostring(Ls, -1));
         }
         if (cacheable && cache_store(Ls, rel, hash, (uint32_t)stored)) {
@@ -929,7 +970,12 @@ static int l_require(lua_State *Ls) {
     if (!have_env) { lua_pushglobaltable(Ls); }
     lua_setupvalue(Ls, -2, 1);                  /* chunk's _ENV := that env */
 
-    lua_call(Ls, 0, 1);
+    /* Protected, so the placement goes back to normal whatever happens; the
+     * error then goes on exactly as lua_call would have let it. */
+    lheap_high_begin();
+    int rc = lua_pcall(Ls, 0, 1, 0);
+    lheap_high_end();
+    if (rc != LUA_OK) { return lua_error(Ls); }
     module_note_user(name, lrt_current_slot());
     module_set_src(name, tier, hash);
     if (lua_isnil(Ls, -1)) {
@@ -2032,6 +2078,15 @@ void lrt_init(void) {
         printf("lua: could not create state in a %u KB arena\n", CONFIG_LUA_HEAP_KB);
         return;
     }
+    /* Collect close behind the scripts. Lua's default (pause 200%) starts a
+     * cycle only once the heap has DOUBLED since the last one: with ~80 KB
+     * live in a 176 KB arena that let garbage fill the arena to the brim
+     * between cycles (mcusim, the iTi backend: 139 KB "used" of which 30 KB
+     * was dead, alloc failures and emergency collections every few seconds),
+     * and every object made meanwhile was placed above the garbage instead of
+     * in the holes it would have left. Pause 110% / step multiplier 400% /
+     * 2 KB steps keeps the dead share small, in small slices. */
+    lua_gc(L, LUA_GCINC, LRT_GC_PAUSE, LRT_GC_STEPMUL, LRT_GC_STEPSIZE);
     /* The string table starts at 512 slots (MINSTRTABSIZE, set in
      * third_party/lua/CMakeLists.txt) and lgc.c is patched never to shrink it
      * below that: growing it from 256 mid-session left its 2 KB array as an

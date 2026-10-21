@@ -434,7 +434,7 @@ def t_script_loaded_reports_arena():
     script.loaded: each unit's compiled tier + FNV-1a hash, and the hash of its
     file now. Check the op is registered, the load paths record what they
     compiled (scripts in load_tier, modules in require), a module's hash is
-    taken before lua_call can reuse src_buf, and the FNV-1a constants match
+    taken before the module runs (lua_pcall) and can reuse src_buf, and the FNV-1a constants match
     the 32-bit standard the browser side implements."""
     c = open(os.path.join(ROOT, "src/lua/lrt.c")).read()
     o = open(os.path.join(ROOT, "src/lua/lops.c")).read()
@@ -443,7 +443,7 @@ def t_script_loaded_reports_arena():
     if "s->src_hash = hash" not in c or "module_set_src(name, tier, hash)" not in c:
         return False, "a load path no longer records what it compiled"
     req = c[c.index("static int l_require"):]
-    if req.index("module_identity(name, &tier, &hash, &stored)") > req.index("lua_call(Ls, 0, 1)"):
+    if req.index("module_identity(name, &tier, &hash, &stored)") > req.index("lua_pcall(Ls, 0, 1, 0)"):
         return False, "module hash taken after lua_call -- src_buf may hold another module by then"
     if "2166136261u" not in c or "16777619u" not in c:
         return False, "fnv1a constants changed; the web editor hashes with the standard ones"
