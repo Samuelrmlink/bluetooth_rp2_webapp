@@ -37,6 +37,15 @@
 #endif
 
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
+
+/* Native consumers (the PEX bt group, src/pex/pex_gw_bt.c): every value, write
+ * completion and link change, as it is reported to the web UI and to Lua.
+ * Weak, so a build without PEX links nothing. kind: 1 notify, 2 indicate,
+ * 3 read, 4 write done, 16 link up, 17 link down, 18 GATT ready, 19 failed;
+ * chr is the absolute index into the link's gattdb (-1 for link events). */
+void le_pex_event(int kind, const uint8_t *addr, int chr, const uint8_t *data, uint16_t len, int status)
+    __attribute__((weak));
+#define LE_PEX(...) do { if (le_pex_event) { le_pex_event(__VA_ARGS__); } } while (0)
 void le_on_disconnected(uint16_t con_handle);
 
 static btstack_packet_callback_registration_t adv_cb;
@@ -241,6 +250,7 @@ void le_central_tick(void) {
         gap_connect_cancel();
         s_connecting = false;
         api_emit("dev.connect_failed", "{\"reason\":\"timeout\"}");
+        LE_PEX(19, NULL, -1, NULL, 0, -1);
     }
     if (s_scanning && s_scan_until_ms && (int32_t)(now_ms() - s_scan_until_ms) >= 0) {
         gap_stop_scan();
@@ -494,6 +504,7 @@ static void discovery_failed(le_link_t *l, const char *reason, uint8_t att_statu
              l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4], l->addr[5],
              reason, att_status);
     api_emit("gatt.failed", ev);
+    LE_PEX(19, l->addr, -1, NULL, 0, att_status);
     l->disc_stage    = DISC_IDLE;
     l->disc_inflight = DISC_IN_NONE;
     l->disc_deadline_ms = 0;
@@ -588,6 +599,7 @@ static void discover_next(le_link_t *l) {
     n += gattdb_summary_json(db, tree + n, tree_sz - n);
     snprintf(tree + n, tree_sz - n, "}");
     api_emit("gatt.discovered", tree);
+    LE_PEX(18, l->addr, -1, NULL, 0, 0);
     printf("bt: discovery done, %u svc / %u chr / %u dsc, mtu %u%s\n",
            db->n_svc, db->n_chr, db->n_dsc, db->mtu, db->truncated ? " (TRUNCATED)" : "");
 }
@@ -847,6 +859,7 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
     lwait_link_up((uint8_t)link_index(l));
 #endif
     emit_device_event("dev.connected", addr);
+    LE_PEX(16, addr, -1, NULL, 0, 0);
 
     le_register_notifications(con_handle);
 
@@ -889,6 +902,7 @@ void le_on_disconnected(uint16_t con_handle) {
     }
 #endif
     emit_device_event("dev.disconnected", addr);
+    LE_PEX(17, addr, -1, NULL, 0, 0);
 }
 
 bool le_connect(const uint8_t *addr, uint8_t addr_type) {
@@ -1089,6 +1103,7 @@ static void emit_char_value(le_link_t *l, uint16_t value_handle,
             }
             snprintf(ev + n, sizeof(ev) - n, "\"}");
             api_emit("char.value", ev);
+            LE_PEX(source[0] == 'n' ? 1 : source[0] == 'i' ? 2 : 3, l->addr, ci, data, len, -1);
 #if CONFIG_LUA_ENABLE
             /* Reads are queued alongside notifications, tagged with which
              * they were. The websocket caller of a read already has its
@@ -1211,6 +1226,9 @@ static void op_pop(le_link_t *l) {
 /* bt.write(..., want_done): the outcome of a write, into the inbox as a
  * frame with source "write" (lbind turns status into ok/att_error/error). */
 static void write_done(le_link_t *l, const le_op_t *op, uint8_t att_status, uint8_t reason) {
+    if (op->kind == OP_WRITE && op->want_done) {
+        LE_PEX(4, l->addr, op->chr_i, NULL, 0, att_status | (reason << 8));
+    }
 #if CONFIG_LUA_ENABLE
     if (op->kind != OP_WRITE || !op->want_done) { return; }
     gattdb_t *db = &l->db;

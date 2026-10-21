@@ -5,6 +5,8 @@
 #include <string.h>
 
 uint32_t crumb_last, crumb_last_fault_pc;
+/* Weak: src/pex/pex_gw.c attributes a fault to a PEX module (pex/ is optional). */
+void crumb_fault_hook(const uint32_t *frame) __attribute__((weak));
 static crumb_rec_t prev;          /* the previous boot's record, if any */
 static int have_prev;
 
@@ -59,6 +61,7 @@ void crumb_hardfault_c(uint32_t *frame, uint32_t exc_lr) {
     r->bfar = *(volatile uint32_t *)0xE000ED38u;
     r->fault = 1;
     watchdog_hw->scratch[1] = frame[6] | 1u;
+    if (crumb_fault_hook) { crumb_fault_hook(frame); }   /* PEX: which module, persisted */
     for (;;) { __asm volatile("nop"); }
 }
 

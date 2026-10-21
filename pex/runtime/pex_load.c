@@ -626,6 +626,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     return m;
 
 undo:
+    if (pex__cfg.on_unload) { pex__cfg.on_unload(m); }
     unlink_mod(m);
     release(m);
     if (errp) { *errp = rc; }
@@ -742,6 +743,7 @@ int pex_unload(pex_mod_t *m) {
             return PEX_EBUSY;
         }
     }
+    if (pex__cfg.on_unload) { pex__cfg.on_unload(m); }
     uint32_t ntasks = pex__sched_cancel_owner(m);
     uint32_t nscr = pex__scratch_release_owner(m->id);
     uint32_t leak_bytes = 0, leak_blocks = m->long_blocks;

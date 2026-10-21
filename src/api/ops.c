@@ -45,6 +45,10 @@ extern const op_module_t op_module_mdns;
 extern const op_module_t op_module_net;
 #endif
 
+#if CONFIG_PEX
+extern const op_module_t op_module_pex;
+#endif
+
 static const op_module_t *const modules[] = {
     &op_module_sys,
 #if CONFIG_BT_LE
@@ -79,6 +83,9 @@ static const op_module_t *const modules[] = {
 #endif
 #if CONFIG_NET_FORWARD
     &op_module_net,
+#endif
+#if CONFIG_PEX
+    &op_module_pex,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

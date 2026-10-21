@@ -43,6 +43,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_LIST_DIR}/src/io/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/ota/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/Kconfig
+    ${CMAKE_CURRENT_LIST_DIR}/src/pex/Kconfig
     ${APP_DEFCONFIG})
 
 pico_sdk_init()
@@ -302,6 +303,47 @@ if(CONFIG_OTA)
         target_compile_definitions(btgw PRIVATE PICO_CRT0_IMAGE_TYPE_TBYB=1)
     endif()
     target_compile_definitions(btgw PRIVATE BTGW_VERSION_STR=\"${BTGW_VERSION_MAJOR}.${BTGW_VERSION_MINOR}\")
+endif()
+
+# PEX native modules (docs/pex-format.md): the standalone runtime in pex/,
+# the gateway's groups and ops in src/pex/, pexlua when there is Lua.
+if(CONFIG_PEX)
+    include(${CMAKE_CURRENT_LIST_DIR}/pex/runtime/pex_runtime.cmake)
+    pex_runtime_add(btgw GROUPS sys board bus fs net bt NO_PICO_PORT SIG_UECC)
+    target_sources(btgw PRIVATE ${CMAKE_CURRENT_LIST_DIR}/pex/runtime/port/pico/pex_port_pico.c
+        src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c)
+    if(CONFIG_NET_HTTP_CLIENT)
+        target_sources(btgw PRIVATE src/pex/pex_gw_net.c)
+    endif()
+    if(CONFIG_BT_LE)
+        target_sources(btgw PRIVATE src/pex/pex_gw_bt.c)
+    endif()
+    if(NOT CONFIG_LUA_ENABLE)
+        target_sources(btgw PRIVATE src/lua/lfile_path.c)
+    endif()
+    if(CONFIG_PEX_LUA)
+        include(${CMAKE_CURRENT_LIST_DIR}/pex/lua/pexlua.cmake)
+        pexlua_add(btgw)
+        target_sources(btgw PRIVATE src/pex/pex_gw_lua.c)
+    endif()
+    # micro-ecc: the OTA key checks module signatures (spec 10).
+    target_include_directories(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc)
+    set_property(SOURCE src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c
+        src/pex/pex_gw_net.c src/pex/pex_gw_bt.c src/pex/pex_gw_lua.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+    # Paying for PEX (~38 KB) in the 864 KiB slot, measured on the SD build
+    # (2026-10-21; it had ~8 KB left): code that is not on a hot path goes
+    # -Os. Lua's COMPILE-time half -- code generator, parser, lexer, (un)dump
+    # -- and its cold libraries (-31 KB): scripts run from cached bytecode, and
+    # the interpreter core (lvm, ldo, lgc, ltable, lapi, lstring, lobject, ltm)
+    # and the string library stay -O3. The HTTP server (-6 KB) is bound by TCP
+    # and flash, not by the CPU.
+    if(CONFIG_LUA_ENABLE)
+        foreach(_l lcode lparser llex ldump lundump lauxlib lbaselib lmathlib ltablib lutf8lib lcorolib ldebug)
+            set_property(SOURCE ${CMAKE_CURRENT_LIST_DIR}/third_party/lua/${_l}.c TARGET_DIRECTORY lua
+                APPEND PROPERTY COMPILE_OPTIONS -Os)
+        endforeach()
+    endif()
+    set_property(SOURCE src/net/http.c APPEND PROPERTY COMPILE_OPTIONS -Os)
 endif()
 
 if(CONFIG_NET_MDNS)

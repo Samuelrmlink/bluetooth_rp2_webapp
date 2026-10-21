@@ -68,6 +68,9 @@ typedef struct {
     volatile uint32_t *trace;   /* optional: holds the first word of the executing module's
                                    build id while module code runs (survives a reset: hang attribution) */
     uint32_t max_stack;         /* 0 = no check of the header's stack_hint */
+    /* Called at unload (also of a faulted module), after PEX_DEINIT, before its
+     * memory goes: host groups release what the module registered with them. */
+    void (*on_unload)(pex_mod_t *m);
     bool stack_scan;            /* debug option: also refuse unload when a word on the stack looks like a
                                    return address into the image. The trampoline's active count is the
                                    real check; live frames can hold STALE return addresses, so this
@@ -95,6 +98,8 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
 pex_mod_t *pex_load_mem(const void *buf, uint32_t len, const pex_load_opts_t *opts, int *err);
 /* Why the last load/unload/start failed, in words (names the symbol, group, ...). */
 const char *pex_errmsg(void);
+/* For host code that refuses on the runtime's behalf (shows up in pex_errmsg). */
+void pex_seterr(int code, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 const char *pex_strerror(int err);
 
 /* Check a file without loading it (prefix, header, target, api, CRC, signature). */
@@ -153,6 +158,9 @@ const char *pex_export_name(pex_mod_t *m, uint32_t i);   /* i < n_exports */
 int pex_pool_stats(pex_mem_stats_t *out);                /* the whole pool */
 int pex_list_json(char *dst, size_t cap);                /* [{"name":..,"state":..}, ...] */
 int pex_info_json(pex_mod_t *m, char *dst, size_t cap);
+
+/* Pool memory owned by the host (not by whichever module is executing). */
+void *pex_alloc_host(size_t size);
 
 /* ---- faults --------------------------------------------------------------- */
 typedef struct {

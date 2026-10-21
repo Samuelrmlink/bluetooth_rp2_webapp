@@ -96,6 +96,14 @@ void pex__err(int code, const char *fmt, ...) {
 
 const char *pex_errmsg(void) { return s_err; }
 
+void pex_seterr(int code, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(s_err, sizeof s_err, fmt, ap);
+    va_end(ap);
+    pex__errcode = code;
+}
+
 const char *pex_strerror(int e) {
     switch (e) {
     case PEX_OK: return "ok";

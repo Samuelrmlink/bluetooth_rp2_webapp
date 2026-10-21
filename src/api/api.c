@@ -31,6 +31,9 @@
 #include "net/cyw43_wait.h"
 #include "pico/time.h"
 #include "autoconf.h"
+#if CONFIG_PEX
+#include "pex/pex_gw.h"
+#endif
 #if CONFIG_LUA_ENABLE
 #include "lua/lbind.h"
 #endif
@@ -200,6 +203,11 @@ void api_handle_text(const char *text, api_reply_fn reply, void *ctx) {
     /* A script may have registered this name. Built-ins are checked first, and
      * ops.register refuses to shadow one, so a client can trust that sys.info
      * always means what the firmware says it means. */
+#if CONFIG_PEX
+    if (pex_gw_dispatch(op, params_of(text), reply, ctx, id)) {     /* ops of native modules */
+        return;
+    }
+#endif
     if (lbind_dispatch(op, params_of(text), reply, ctx, id)) {
         return;
     }

@@ -38,6 +38,10 @@
 #include "lua/lfile.h"
 #include "lua/lfile_path.h"
 #include "lua/lrt.h"
+#if CONFIG_PEX_LUA
+struct lua_State;
+void pex_gw_lua_open(struct lua_State *L);
+#endif
 #include "lua/lheap.h"
 #include "pico/time.h"
 
@@ -805,6 +809,9 @@ void lfile_open(lua_State *L) {
     lua_newtable(L);
     luaL_setfuncs(L, fns, 0);
     lua_setglobal(L, "file");
+#if CONFIG_PEX_LUA
+    pex_gw_lua_open(L);     /* the pex launcher table and require for .pex (src/pex/pex_gw_lua.c) */
+#endif
 }
 
 /* A script is going: its files close, and a job it was waiting for is let

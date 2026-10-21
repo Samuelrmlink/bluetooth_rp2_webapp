@@ -271,6 +271,7 @@ void *pex_alloc_ex(size_t size, uint32_t flags) {
     return pex__alloc((uint32_t)size, (flags & PEX_MEM_DMA) ? 32 : 8, pex__current_owner(), 0);
 }
 void pex_free(void *p) { pex__free(p); }
+void *pex_alloc_host(size_t size) { return pex__alloc((uint32_t)size, 8, PEX_OWNER_HOST, 0); }
 void *pex_malloc(size_t size) { return pex_alloc_long(size); }
 void *pex_calloc(size_t n, size_t size) {
     if (size && n > 0xFFFFFFFFu / size) { return NULL; }

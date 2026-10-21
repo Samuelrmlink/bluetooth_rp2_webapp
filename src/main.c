@@ -34,6 +34,10 @@
 #include "api/ops.h"
 #include "util/crumb.h"
 #include "util/stackmark.h"
+#include "autoconf.h"
+#if CONFIG_PEX
+#include "pex/pex_gw.h"
+#endif
 #if CONFIG_SPI_BUS
 #include "io/spibus.h"
 #endif
@@ -273,6 +277,10 @@ int main(void) {
 #if CONFIG_LUA_ENABLE
         crumb(CRUMB_LOOP_LUA);
         lrt_tick();
+#endif
+#if CONFIG_PEX
+        crumb(CRUMB_LOOP_PEX);
+        pex_gw_poll();
 #endif
 #if CONFIG_NET_UPLINK
         crumb(CRUMB_LOOP_UPLINK);

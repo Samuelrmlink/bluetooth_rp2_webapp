@@ -1,0 +1,45 @@
+menu "PEX native modules"
+
+config PEX
+    bool "PEX loader (native modules from LittleFS)"
+    default y
+    help
+      The PEX runtime (pex/runtime, docs/pex-format.md): load .pex modules
+      from LittleFS into RAM and run them -- apps on the main loop, native Lua
+      modules, ops for the web UI. It costs no RAM until a module is first
+      loaded: the pool is taken from the C heap then, after a headroom check.
+      Nothing runs at boot unless cfg/pex_autostart.json lists it.
+
+config PEX_POOL_KB
+    int "PEX pool (KB)"
+    depends on PEX
+    default 12
+    help
+      Code, data and the modules' memory (spec 7.2). Taken on first use from
+      the C heap: as much as this, but never leaving less than
+      PEX_HEAP_RESERVE_KB free (the SD build has ~18 KB of C heap once booted,
+      and pico_malloc panics when it runs out), and at least 6 KB.
+      The C heap is the only RAM PEX may take on this branch: the Lua arena
+      is re-initialised whole by a VM restart. The planned home for a larger
+      pool is RAM handed over from the Lua arena (CONFIG_LUA_HEAP_KB) once
+      the iTi backend runs natively.
+
+config PEX_HEAP_RESERVE_KB
+    int "C heap kept free when the pool is taken (KB)"
+    depends on PEX
+    default 6
+
+config PEX_ALLOW_UNSIGNED
+    bool "Load unsigned modules (development)"
+    depends on PEX
+    default n
+    help
+      Off: only modules signed with the OTA key (tools/ota_sign.py, pexlink
+      --sign) load. On: unsigned ones too, and pex.list says so.
+
+config PEX_LUA
+    bool "Lua launcher and require for PEX modules"
+    depends on PEX && LUA_ENABLE
+    default y
+
+endmenu

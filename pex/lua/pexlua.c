@@ -248,7 +248,7 @@ static int l_unload(lua_State *L) {
     lua_gc(L, LUA_GCCOLLECT, 0);
     pex_mod_t *m = pex_find(nm);
     if (!m) { lua_pushboolean(L, 1); return 1; }
-    pex_stop(m);
+    /* refused while it runs, as pex.unload over the API is: pex.stop first */
     if (pex_unload(m) != PEX_OK) { return fail(L, nm); }
     lua_pushboolean(L, 1);
     return 1;
