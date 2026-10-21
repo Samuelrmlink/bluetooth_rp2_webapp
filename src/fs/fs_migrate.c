@@ -47,7 +47,12 @@
 #define OLD_BLOCKS   (FS_REGION_SIZE / BLK)
 #define NEW_BLOCKS   (FS_SIZE / BLK)
 #define MARKER       "cfg/migrated.json"     /* on flash: this filesystem is a verified migration */
-#define INPROGRESS   "cfg/migrating.json"    /* on flash: a restore was started and not finished */
+/* On flash: a restore was started and not finished. In the root, so it is
+ * the FIRST thing a format is followed by (no mkdir before it: a cut after a
+ * "cfg" folder and before this file looked like a normal filesystem with no
+ * cfg/ in it -- found by the power-cut test). A dot name: the API cannot
+ * touch it (fs_valid_path). */
+#define INPROGRESS   ".migrating"
 #define MIG_DIR      ".lfs-migrate"
 #define STATE        MIG_DIR "/state"
 #define STATE_TMP    MIG_DIR "/state.tmp"
@@ -811,8 +816,7 @@ static bool restore_phase(bool fresh, uint32_t t0) {
         if (r < 0) { snprintf(err, sizeof err, "format failed (%d)", r); continue; }
         char ip[48];
         int n = snprintf(ip, sizeof ip, "{\"run\":%u}", s_st.run);
-        lfs_mkdir(fs_lfs(), "cfg");
-        lfs_put(INPROGRESS, ip, (size_t)n);
+        if (lfs_put(INPROGRESS, ip, (size_t)n) < 0) { snprintf(err, sizeof err, "flash write failed"); continue; }
         done = 0;
         err[0] = 0;
         if (restore_pass(s_st.run, true, &done, err, sizeof err) == 0 &&
