@@ -908,6 +908,21 @@ either (the pool is allocated on first use).
   as any image does.
 Proven in mcusim (`pex/test/gw_sim.py`, scenarios `fault`, `hang`).
 
+**Measured in mcusim** (the deploy image, SD + Wi-Fi + WireGuard + BLE up):
+the pool came out at 10 KB (contiguous room), leaving 8 KB of C heap.
+Testing on a real board: `pex/test/remote/mkremote.py` makes the upload set
+(signed with the OTA key; the fault modules are never in it) and
+`pex/tools/pex_remote_test.py --base http://<gateway> --files <set> [--sd]
+[--http-url URL --http-file-url URL] [--bt [UUID]]` uploads it, runs the ops,
+the refusals and the Lua launcher/require checks, prints a table and removes
+everything it uploaded. It never writes the autostart file, never reboots.
+
+Observation (not PEX): after any watchdog-driven reboot in mcusim the OTA
+group prints "no A/B partition table -- image group disabled (boot type 0)"
+(the ROM's partition table is not reloaded on mcusim's watchdog reset); worth
+checking on hardware, since SMP image commands would be disabled until a
+normal boot if that happened there too.
+
 **Signing**: signed-only by default; the OTA public key (`src/ota/ota_pubkey.h`)
 verifies modules signed by `pexlink --sign` with the OTA key.
 
