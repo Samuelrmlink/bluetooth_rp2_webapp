@@ -198,9 +198,16 @@ def op(name, params=None, timeout=20):
     return j.get("ok", False), j.get("result") if j.get("ok") else j.get("error")
 
 
-def put(path, data):
-    req = urllib.request.Request(f"http://{BIND}:{FWD}/api/fs/{path}", data=data, method="PUT")
-    return urllib.request.urlopen(req, timeout=30).status == 200
+def put(path, data, tries=3):
+    for t in range(tries):
+        req = urllib.request.Request(f"http://{BIND}:{FWD}/api/fs/{path}", data=data, method="PUT")
+        try:
+            return urllib.request.urlopen(req, timeout=30).status == 200
+        except Exception as e:          # say what the board does then, and try again
+            ok, r = op("pex.list", timeout=10)
+            print(f"  (PUT {path} failed: {e}; pex.list answers: {ok}{'' if ok else ' ' + str(r)[:80]}; try {t + 1})",
+                  flush=True)
+    return False
 
 
 def wait_http(timeout):
@@ -350,6 +357,30 @@ def xip_power_cuts(a, exe, toml, log, s):
     for n in ("hello", "big", "counter"):
         op("pex.uninstall", {"name": n})
     return s
+
+
+def put_stress(a, s, n=20):
+    """Diagnostics: sys.reboot, then n uploads of 1-41 KB; reports how many stalled (30 s timeouts)."""
+    op("sys.reboot")
+    time.sleep(8)
+    wait_http(240)
+    time.sleep(20)
+    stalls, t0 = 0, time.time()
+    files = [os.path.join(a.mods, "pexmods", m, f) for m in ("pic", "reloc") for f in ("big.m33.pex", "app.m33.pex", "arith.m33.pex")]
+    for i in range(n):
+        data = open(files[i % len(files)], "rb").read()
+        req = urllib.request.Request(f"http://{BIND}:{FWD}/api/fs/stress/f{i}.bin", data=data, method="PUT")
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+        except Exception:
+            stalls += 1
+    check(f"put stress after a reboot: {n} uploads", stalls == 0, f"{stalls} stalled, {time.time() - t0:.0f} s")
+    for i in range(n):
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"http://{BIND}:{FWD}/api/fs/stress/f{i}.bin", method="DELETE"),
+                                   timeout=10).read()
+        except Exception:
+            pass
 
 
 def lua_budget(a, s):
@@ -530,11 +561,17 @@ def main():
                     check("remote: " + m.group(2).strip(), m.group(1) == "PASS", m.group(3))
             check("pex_remote_test.py exit status 0", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else r.stderr[-200:])
 
+        if "putstress" in sc:
+            put_stress(a, s)
+
         if "budget" in sc:
             lua_budget(a, s)
 
         if "xip" in sc:
-            s = xip_power_cuts(a, exe, toml, log, s)
+            try:
+                s = xip_power_cuts(a, exe, toml, log, s)
+            except Exception as e:
+                check("xip scenario ran to the end", False, repr(e)[:200])
 
         for name, mod in (("fault", "crashapp"), ("hang", "hangapp")):
             if name not in sc:

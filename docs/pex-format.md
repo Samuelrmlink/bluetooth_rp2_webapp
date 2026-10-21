@@ -942,7 +942,16 @@ Observation (not PEX): after any watchdog-driven reboot in mcusim the OTA
 group prints "no A/B partition table -- image group disabled (boot type 0)"
 (the ROM's partition table is not reloaded on mcusim's watchdog reset); worth
 checking on hardware, since SMP image commands would be disabled until a
-normal boot if that happened there too.
+normal boot if that happened there too. (0.7: the same in mcusim for a
+SECOND flash-update boot -- slot B -> slot A, as the next OTA of the real
+board will be: the image comes up with "no A/B partition table ... boot type
+4" and cannot be bought; with the deployed 1.212 as the new image just the
+same, so it is not the new firmware. The real gateway has taken B -> A
+updates before (1.163 -> 1.180). `gw_sim.py --via` reproduces it.) Also
+in mcusim, after a reboot of a TBYB-booted image some HTTP uploads (PUT
+/api/fs) stall until the client's timeout while ops keep answering: 4 of 20
+with the deployed 1.212, 6 of 20 with 1.228 (`gw_sim.py --scenarios
+ota,putstress`); `gw_sim.py` retries an upload, as it retries SMP uploads.
 
 **Signing**: signed-only by default; the OTA public key (`src/ota/ota_pubkey.h`)
 verifies modules signed by `pexlink --sign` with the OTA key.
