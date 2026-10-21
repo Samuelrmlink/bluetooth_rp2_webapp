@@ -265,9 +265,15 @@ def main():
         boot1 = 0 if a.direct else len(s.lines)
 
         if "ota" in sc:
-            t0 = time.time()
-            r = smp("image", "upload", "--format", "any", rel, timeout=1800)
-            check("smpmgr image upload into slot B", r.returncode == 0, f"{time.time() - t0:.0f} s {r.stdout[-200:]} {r.stderr[-200:]}")
+            time.sleep(20)               # let Wi-Fi/WireGuard/BT finish coming up first
+            for attempt in range(3):     # an SMP upload can stall mid-way (seen over WireGuard too): retry
+                t0 = time.time()
+                r = smp("image", "upload", "--format", "any", rel, timeout=1800)
+                if r.returncode == 0:
+                    break
+                print(f"  (upload attempt {attempt + 1} failed after {time.time() - t0:.0f} s, retrying)", flush=True)
+            check("smpmgr image upload into slot B", r.returncode == 0,
+                  f"{time.time() - t0:.0f} s, attempt {attempt + 1} {r.stdout[-120:]} {r.stderr[-120:]}")
             r = smp("image", "state-read")
             slots = {int(sl): hx.lower() for sl, hx in
                      re.findall(r"slot=(\d+).*?HashBytes\(\s*'([0-9A-Fa-f]{64})'", r.stdout, re.S)}
@@ -352,8 +358,13 @@ def main():
                 check("hang: the module hangs the loop", j >= 0)
             k = s.wait(r"^main: REBOOTED BY WATCHDOG|^main: previous boot stopped", 120, max(j, mark))
             check(f"{name}: the watchdog reboots the board", k >= 0, s.lines[k] if k >= 0 else "")
-            b = s.wait(r"^ota: slot A .* booted %d" % (0 if a.direct else 1), 120, max(k, mark))
-            check(f"{name}: into the same image (slot {'A' if a.direct else 'B'})", b >= 0, s.lines[b] if b >= 0 else "")
+            # The OTA group's slot line is not printed after a watchdog reset in
+            # mcusim ("no A/B partition table ... boot type 0", after any
+            # reboot, not PEX-related), so "the same image" is checked as the
+            # image with PEX in it answering -- the old firmware has no pex.*.
+            b = s.wait(r"^main: init done", 300, max(k, mark))
+            okb = b >= 0 and wait_http(120) and op("pex.list")[0]
+            check(f"{name}: into the same image (the PEX firmware answers pex.list)", okb)
             why = "FAULTED in module crashapp" if name == "fault" else "was reset while running code"
             p = s.wait(r"^pex: the previous boot " + why, 120, max(b, mark))
             check(f"{name}: the next boot names it", p >= 0, s.lines[p] if p >= 0 else "")
