@@ -1,6 +1,6 @@
 # PEX — portable executable modules for microcontrollers (DRAFT 0.1)
 
-Status: **planning draft 0.4** (0.4: two code models, both relocatable to any address) -- format and loader not implemented yet; all of Q1-Q9 decided; the PEX flash partition exists on the gateway (§14, done 2026-10-21). Decisions marked **[D]**,
+Status: **planning draft 0.5** (0.4: two code models; 0.5: the memory model, §7.2) -- format and loader not implemented yet; all of Q1-Q9 decided; the PEX flash partition exists on the gateway (§14, done 2026-10-21). Decisions marked **[D]**,
 open questions **[Q]** (collected at the end).
 
 ## 1. Why
@@ -293,7 +293,7 @@ negative `PEX_E*` codes. Groups planned for v1:
 | group | covers | notes |
 |---|---|---|
 | `core` | version info, `sys_ms`/`us`, `sleep`/yield, log, panic-free asserts | |
-| `mem` | `malloc/free/realloc` from the PEX pool, `memcpy`-family | never the Lua arena |
+| `mem` | lifetime-scoped memory (§7.3): the module's long-term heap, per-call/per-job scratch arenas, fixed-size pools; `malloc/free` as a fallback; `memcpy`-family | never the Lua arena |
 | `sched` | cooperative tasks/timers on the main loop, deferred calls, events | the firmware is single-loop; no RTOS assumed |
 | `gpio` | pin claim/release (the existing `io` pin registry), dir, read/write, IRQ callback | refuses pins owned by SD/W5500/CYW43 |
 | `i2c`, `spi`, `uart` | bus claim, transfers (blocking-with-yield and async+callback) | shares the firmware's bus arbitration (`spibus`) |
@@ -311,7 +311,54 @@ Each group is its own `major.minor`; a module imports only the groups it uses,
 and a firmware may omit groups (a build without SD has no `sd_*` symbols: weak
 imports become 0 and the module checks `pex_has(group)`).
 
-### 7.2 Lua from native code: full C API, curated API, or both? **[D, Q5: option C]**
+### 7.2 Memory: separate by lifetime, no handles **[D]**
+
+Fragmentation on the gateway came from short-lived allocations landing between
+long-lived ones in one first-fit heap. The memory model therefore separates
+allocations **by lifetime** instead of making blocks movable.
+
+**Handles (pointer-to-pointer, movable blocks) are deliberately not part of
+v1.** They cannot help the Lua arena (Lua's collector never moves objects),
+everything DMA or an interrupt touches would have to stay pinned, and a raw
+pointer kept past an unlock corrupts memory silently at the next compaction --
+a worse failure than an honest "out of memory". A later `mem` minor version may
+add them for the rare large, long-lived, resizing buffer if a real module needs
+it.
+
+Regions (on the RP2350 gateway, all outside the Lua arena):
+
+| region | lifetime | how it is allocated and freed | who uses it |
+|---|---|---|---|
+| **module image RW** | the module's load | one block per instance (data+bss+GOT), freed whole at unload | every module (§6) |
+| **long-term heap** | until the module unloads (or forever for the firmware) | `pex_alloc_long(size)` / `pex_free`; allocated from the **top** of the PEX RW pool, growing down | tables, caches, buffers kept between calls |
+| **scratch arenas** | one call, one job, one request | `pex_scratch_begin(cap)` -> arena; `pex_scratch_alloc(a, size)` (bump pointer, no individual free); `pex_scratch_end(a)` frees all of it at once; allocated from the **bottom**, growing up | parsing, encoding, one transfer, one HTTP response |
+| **fixed-size pools** | per object | `pex_pool_new(obj_size, count)` then `pex_pool_get/put`; equal slots cannot fragment | records, list nodes, chunk buffers |
+| **malloc fallback** | any | `pex_malloc/free` from the long-term side | ported code that cannot be changed |
+
+Rules:
+
+- Long-term and short-term never interleave: long-term blocks come from one end
+  of the RW pool, scratch from the other, and scratch arenas are LIFO (nested
+  `begin`/`end` must end in reverse order -- checked, a violation is reported
+  with the module's name). A finished job leaves the scratch side empty again.
+- A module's long-term blocks are tagged with its id and all freed at unload,
+  so a leak cannot outlive the module.
+- Scratch arenas are also what a module hands to the host for temporary results
+  (`fs_read_into`, HTTP bodies), so host and module never trade ownership of
+  heap blocks.
+- DMA/IRQ buffers are long-term or pool blocks (never scratch that may end while
+  the hardware still writes) and are declared as such (`PEX_MEM_DMA`), which
+  also places them where the cache/bus rules require.
+- The same split applies inside the firmware: buffers kept for the system's life
+  (TLS record buffers, the module cache, radio and SD buffers) are reserved
+  early and kept; per-request buffers (HTTP bodies, TLS session state, SD job
+  buffers, module load buffers) come from a separate short-term region; the Lua
+  arena keeps long-lived objects (modules) and short-lived ones apart internally.
+- Accounting: `pex_mem_stats()` per module (long-term bytes, pool use, scratch
+  high-water mark) and for the pool as a whole (largest free run on each side),
+  exposed in `sys.info`.
+
+### 7.3 Lua from native code: full C API, curated API, or both? **[D, Q5: option C]**
 
 **A. Export the whole Lua C API** (`lua_*`, `luaL_*`, as `lua.h`/`lauxlib.h`)
 
@@ -457,7 +504,7 @@ without stranding modules.
   Non-secure behind the host API (real isolation, more work, CMSE veneers)?
 - ~~[Q5]~~ **[D: option C -- curated `pexlua` first, the raw API later as its own exact-match group]** The Lua C API is large and tied to `luaconf.h` (64-bit integers
   today). Export it whole, or a smaller curated `pexlua` API that survives a
-  later switch to 32-bit Lua numbers? -> trade-offs in §7.2; recommendation C
+  later switch to 32-bit Lua numbers? -> trade-offs in §7.3; recommendation C
   (curated `pexlua` first, raw API later as its own exact-match group).
 - ~~[Q6]~~ **[D: explicit unload, refused when on a stack (§8)]** Reference counting for unload: automatic via the host API, or
   modules are only unloaded at VM restart/reboot in v1?
