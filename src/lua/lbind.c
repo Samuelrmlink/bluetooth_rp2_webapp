@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 
 #include "lua.h"
@@ -515,57 +516,108 @@ static int l_sys_sleep(lua_State *L) {
 
 /* --- bt ------------------------------------------------------------------- */
 #if CONFIG_BT_LE
+/* One registry entry as a table, pushed on the stack. */
+static void push_device(lua_State *L, const bt_device_t *d) {
+    lua_createtable(L, 0, 9);
+    char addr[20];
+    snprintf(addr, sizeof(addr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             d->addr[0], d->addr[1], d->addr[2], d->addr[3], d->addr[4], d->addr[5]);
+    lua_pushstring(L, addr);              lua_setfield(L, -2, "addr");
+    lua_pushstring(L, bt_transport_name(d->transport)); lua_setfield(L, -2, "transport");
+    lua_pushinteger(L, d->rssi);          lua_setfield(L, -2, "rssi");
+    lua_pushboolean(L, d->connected);     lua_setfield(L, -2, "connected");
+    if (d->have_name) { lua_pushstring(L, d->name); lua_setfield(L, -2, "name"); }
+    /* The advertisement, which is what a profile matches on. Without this
+     * a script can only match on the name -- and a name is exactly what
+     * an Anker charger does not put its model in, so every match failed
+     * silently. */
+    if (d->have_mfg) {
+        char hex[2 * BT_MFG_MAX + 1];
+        for (uint8_t k = 0; k < d->mfg_len; k++) {
+            snprintf(hex + 2 * k, 3, "%02x", d->mfg[k]);
+        }
+        hex[2 * d->mfg_len] = 0;
+        lua_pushstring(L, hex);
+        lua_setfield(L, -2, "mfg_data");
+    }
+    {
+        /* 128-bit service UUIDs, from the raw advertisement and scan
+         * response, so a profile can match a vendor service. */
+        char u128[4][BT_UUID128_STR];
+        int k = bt_device_uuids128(d, u128, 4);
+        lua_createtable(L, k, 0);
+        for (int j = 0; j < k; j++) { lua_pushstring(L, u128[j]); lua_rawseti(L, -2, j + 1); }
+        lua_setfield(L, -2, "uuids128");
+    }
+    /* How long since the last advertising report: the table keeps
+     * entries for devices long gone, and this is how to tell. */
+    lua_pushinteger(L, (lua_Integer)(to_ms_since_boot(get_absolute_time()) - d->last_seen_ms));
+    lua_setfield(L, -2, "age_ms");
+    if (d->have_uuids) {
+        lua_createtable(L, d->n_uuid16, 0);
+        for (uint8_t k = 0; k < d->n_uuid16; k++) {
+            char u[8];
+            snprintf(u, sizeof u, "%04x", d->uuid16[k]);
+            lua_pushstring(L, u);
+            lua_rawseti(L, -2, k + 1);
+        }
+        lua_setfield(L, -2, "service_uuids");
+    }
+}
+
+/* Does the device pass bt.devices' filter (the table at `opts`)? `uuids128`:
+ * a list of 128-bit UUIDs, any of which it advertises; `name_prefixes`: a
+ * list, one of which its name starts with. Either matching is enough. */
+static bool device_matches(lua_State *L, int opts, const bt_device_t *d) {
+    bool any_rule = false;
+    if (lua_getfield(L, opts, "uuids128") == LUA_TTABLE) {
+        any_rule = true;
+        char u128[4][BT_UUID128_STR];
+        int k = bt_device_uuids128(d, u128, 4);
+        lua_Integer n = luaL_len(L, -1);
+        for (lua_Integer i = 1; i <= n && k > 0; i++) {
+            if (lua_geti(L, -1, i) == LUA_TSTRING) {
+                const char *want = lua_tostring(L, -1);
+                for (int j = 0; j < k; j++) {
+                    if (strcasecmp(want, u128[j]) == 0) { lua_pop(L, 2); return true; }
+                }
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+    if (lua_getfield(L, opts, "name_prefixes") == LUA_TTABLE) {
+        any_rule = true;
+        if (d->have_name) {
+            lua_Integer n = luaL_len(L, -1);
+            for (lua_Integer i = 1; i <= n; i++) {
+                if (lua_geti(L, -1, i) == LUA_TSTRING) {
+                    size_t pl = 0;
+                    const char *pre = lua_tolstring(L, -1, &pl);
+                    if (pl > 0 && strncmp(d->name, pre, pl) == 0) { lua_pop(L, 2); return true; }
+                }
+                lua_pop(L, 1);
+            }
+        }
+    }
+    lua_pop(L, 1);
+    return !any_rule;
+}
+
+/* bt.devices([opts]) -> every device the registry holds, or only those that
+ * pass opts {uuids128 = {...}, name_prefixes = {...}} (see device_matches):
+ * a script that wants a few devices among a crowd of advertisers then does
+ * not get -- and the collector does not have to sweep -- a table for each of
+ * up to 48 of them every time it looks. */
 static int l_bt_devices(lua_State *L) {
+    int opts = lua_istable(L, 1) ? 1 : 0;
     lua_newtable(L);
     int idx = 1;
     for (size_t i = 0; i < bt_registry_count(); i++) {
         bt_device_t *d = bt_registry_at(i);
         if (!d) { continue; }
-        lua_newtable(L);
-        char addr[20];
-        snprintf(addr, sizeof(addr), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 d->addr[0], d->addr[1], d->addr[2], d->addr[3], d->addr[4], d->addr[5]);
-        lua_pushstring(L, addr);              lua_setfield(L, -2, "addr");
-        lua_pushstring(L, bt_transport_name(d->transport)); lua_setfield(L, -2, "transport");
-        lua_pushinteger(L, d->rssi);          lua_setfield(L, -2, "rssi");
-        lua_pushboolean(L, d->connected);     lua_setfield(L, -2, "connected");
-        if (d->have_name) { lua_pushstring(L, d->name); lua_setfield(L, -2, "name"); }
-        /* The advertisement, which is what a profile matches on. Without this
-         * a script can only match on the name -- and a name is exactly what
-         * an Anker charger does not put its model in, so every match failed
-         * silently. */
-        if (d->have_mfg) {
-            char hex[2 * BT_MFG_MAX + 1];
-            for (uint8_t k = 0; k < d->mfg_len; k++) {
-                snprintf(hex + 2 * k, 3, "%02x", d->mfg[k]);
-            }
-            hex[2 * d->mfg_len] = 0;
-            lua_pushstring(L, hex);
-            lua_setfield(L, -2, "mfg_data");
-        }
-        {
-            /* 128-bit service UUIDs, from the raw advertisement and scan
-             * response, so a profile can match a vendor service. */
-            char u128[4][BT_UUID128_STR];
-            int k = bt_device_uuids128(d, u128, 4);
-            lua_createtable(L, k, 0);
-            for (int j = 0; j < k; j++) { lua_pushstring(L, u128[j]); lua_rawseti(L, -2, j + 1); }
-            lua_setfield(L, -2, "uuids128");
-        }
-        /* How long since the last advertising report: the table keeps
-         * entries for devices long gone, and this is how to tell. */
-        lua_pushinteger(L, (lua_Integer)(to_ms_since_boot(get_absolute_time()) - d->last_seen_ms));
-        lua_setfield(L, -2, "age_ms");
-        if (d->have_uuids) {
-            lua_createtable(L, d->n_uuid16, 0);
-            for (uint8_t k = 0; k < d->n_uuid16; k++) {
-                char u[8];
-                snprintf(u, sizeof u, "%04x", d->uuid16[k]);
-                lua_pushstring(L, u);
-                lua_rawseti(L, -2, k + 1);
-            }
-            lua_setfield(L, -2, "service_uuids");
-        }
+        if (opts && !device_matches(L, opts, d)) { continue; }
+        push_device(L, d);
         lua_seti(L, -2, idx++);
     }
     return 1;
@@ -579,6 +631,17 @@ static bool addr_from_lua(lua_State *L, int idx, uint8_t *out) {
     }
     for (int i = 0; i < 6; i++) { out[i] = (uint8_t)v[i]; }
     return true;
+}
+
+/* bt.device(addr) -> that device's entry (as in bt.devices), or nil: one
+ * lookup instead of a table for every device in range. */
+static int l_bt_device(lua_State *L) {
+    uint8_t a[6];
+    if (!addr_from_lua(L, 1, a)) { return luaL_error(L, "expected an address"); }
+    bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
+    if (!d) { lua_pushnil(L); return 1; }
+    push_device(L, d);
+    return 1;
 }
 
 static int l_bt_connect(lua_State *L) {
@@ -1621,7 +1684,7 @@ void lbind_open_all(lua_State *L) {
     set_table(L, "gatt_server", gs);
 
     static const luaL_Reg bt[] = {
-        { "devices", l_bt_devices }, { "connect", l_bt_connect },
+        { "devices", l_bt_devices }, { "device", l_bt_device }, { "connect", l_bt_connect },
         { "disconnect", l_bt_disconnect }, { "scan", l_bt_scan },
         { "write", l_bt_write }, { "subscribe", l_bt_subscribe },
         { "mtu", l_bt_mtu },

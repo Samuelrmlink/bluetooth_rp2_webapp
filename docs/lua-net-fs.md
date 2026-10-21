@@ -264,6 +264,14 @@ the file's new contents.
   `scan.list` WebSocket events.
 * `bt.mtu(addr)` -> the negotiated ATT MTU, or `nil` before the exchange (or
   when not connected).
+* `bt.devices{uuids128 = {...}, name_prefixes = {...}}`: only the devices that
+  advertise one of these 128-bit UUIDs (any case) or whose name starts with one
+  of these prefixes (either is enough; no options = every device, as before).
+  The registry holds up to 48 devices and each entry is a table with strings
+  and lists: a script looking for a few devices among a crowd of advertisers
+  otherwise makes, and the collector sweeps, ~48 tables every time it looks.
+* `bt.device(addr)` -> one device's entry (as in `bt.devices`), or `nil`: a
+  link check without a table for every device in range.
 * `bt.write(addr, path, hex, with_resp, want_done)`: with `want_done = true` the
   outcome arrives through `bt.await` / `bt.notify_take` as
   `{addr, id=path, source="write", ok=bool, att_error=n}` (no `value`), plus
