@@ -26,6 +26,9 @@ mcusim's virtual network and an iti-otap BLE peer.
          in the flash file) during installs and during an overlapping
          compaction: after each restart the index is the old or the new one
          and every installed module verifies and runs in place; a resumed move.
+  budget the Lua arena after boot, with the Pi Switch driver (iti_ble_lua)
+         compiled and running, with a PEX launcher script, after a VM restart
+         (reported: what the config sizes are chosen from).
   --via R   first OTA release R (the board's current one, 1.212) into slot B,
             then the new one into slot A -- the order the real board takes.
 Nothing leaves 127.0.0.1. Exit status 0 when everything passed.
@@ -340,6 +343,53 @@ def xip_power_cuts(a, exe, toml, log, s):
     return s
 
 
+def lua_budget(a, s):
+    """What Lua needs as a launcher: the arena after boot, with the Pi Switch
+    driver (iti_ble_lua) compiled and running, with a PEX launcher script,
+    and after a VM restart (bytecode from the cache). Reported, not judged:
+    the sizes in the configs come from these numbers."""
+    def heap(label):
+        ok, h = op("script.heap", timeout=30)
+        ok2, st = op("script.stats")
+        ar = (h or {}).get("arena", {}) if ok else {}
+        rt = (st or {}).get("runtime", {}) if ok2 else {}
+        row = {"live": ar.get("used"), "peak": rt.get("peak"), "largest_free": ar.get("largest_free"),
+               "capacity": ar.get("bytes"), "fails": rt.get("alloc_fails")}
+        check("lua budget: " + label, ok and ok2, json.dumps(row))
+        return row
+    rows = {"boot": heap("after boot (VM, bindings; no script)")}
+    files = []
+    for root, _, fs in os.walk(a.pi_switch):
+        for f in fs:
+            if f.endswith(".lua"):
+                rel = os.path.relpath(os.path.join(root, f), a.pi_switch)
+                put("lua/" + rel, open(os.path.join(root, f), "rb").read())
+                files.append(rel)
+    time.sleep(15)                       # the bytecode cache compiles changed modules on the next ticks
+    rows["compiled"] = heap(f"Pi Switch driver uploaded and compiled into the cache ({len(files)} files)")
+    ok, r = op("script.start", {"name": "pi_switch"})
+    time.sleep(25)
+    rows["pi_switch"] = heap("Pi Switch driver running (scanning)" + ("" if ok else f" -- start failed {r}"))
+    put("pex/app.m33.pex", open(os.path.join(a.mods, "pexmods", "pic", "app.m33.pex"), "rb").read())
+    put("lua/pexlaunch.lua", b'pex.load("app")\npex.start("app", { ticks = 100000, period = 500 })\n'
+                             b'while true do sys.sleep(1000) end\n')
+    ok, r = op("script.start", {"name": "pexlaunch"})
+    time.sleep(10)
+    rows["launcher"] = heap("+ a PEX launcher script (app started, script kept alive)" + ("" if ok else f" -- {r}"))
+    ok, r = op("script.vm_restart", timeout=30)
+    time.sleep(10)
+    op("script.start", {"name": "pi_switch"})
+    op("script.start", {"name": "pexlaunch"})
+    time.sleep(25)
+    rows["restarted"] = heap("after a VM restart, both started again (bytecode from the cache)")
+    for n in ("pexlaunch", "pi_switch"):
+        op("script.stop", {"name": n})
+    op("pex.stop", {"name": "app"})
+    op("pex.unload", {"name": "app"})
+    json.dump(rows, open(os.path.join(a.work, "lua_budget.json"), "w"), indent=1)
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--deploy", required=True, help="the TBYB build (btgw.elf, btgw.bin, wifi blob, picotool)")
@@ -349,11 +399,13 @@ def main():
     ap.add_argument("--mcusim", default=os.path.expanduser("~/Work/mcusim-agents/blegatt/target/release/mcusim"))
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/gwsim"))
     ap.add_argument("--scenarios", default="ota,quiet,suite,xip,fault,hang")
+    ap.add_argument("--pi-switch", default=os.path.expanduser("~/Work/iti_ble_lua/lua"),
+                    help="the Pi Switch driver's lua/ folder, for the 'budget' scenario")
     ap.add_argument("--via", help="first OTA this release (the board's current one) into slot B, then ours into slot A")
     ap.add_argument("--direct", help="development: boot this (non-TBYB) build's btgw.elf from slot A instead of "
                                      "the old firmware, and skip 'ota'")
     a = ap.parse_args()
-    for k in ("deploy", "old", "mods", "release", "mcusim", "direct", "via"):
+    for k in ("deploy", "old", "mods", "release", "mcusim", "direct", "via", "pi_switch"):
         if getattr(a, k):
             setattr(a, k, os.path.abspath(getattr(a, k)))
     sc = set(a.scenarios.split(","))
@@ -468,6 +520,9 @@ def main():
                 if m and m.group(1) != "skip":
                     check("remote: " + m.group(2).strip(), m.group(1) == "PASS", m.group(3))
             check("pex_remote_test.py exit status 0", r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else r.stderr[-200:])
+
+        if "budget" in sc:
+            lua_budget(a, s)
 
         if "xip" in sc:
             s = xip_power_cuts(a, exe, toml, log, s)

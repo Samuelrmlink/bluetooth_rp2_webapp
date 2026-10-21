@@ -108,6 +108,14 @@ static const pex_flash_t s_flash = {
 };
 
 const pex_flash_t *pex_gw_flash(void) {
+    /* Until the LittleFS migration has run, the partition is still INSIDE the
+     * old LittleFS (fs_legacy): writing it would destroy files. No XIP then
+     * -- modules load into RAM as before. */
+    if (fs_legacy() || !fs_mounted_size()) {
+        printf("pex: xip: off -- the PEX partition is %s\n", fs_legacy() ? "inside the old LittleFS until it migrates"
+                                                                         : "not known (no filesystem mounted)");
+        return NULL;
+    }
     pex_gw_xip_window();
     return &s_flash;
 }

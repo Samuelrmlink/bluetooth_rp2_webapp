@@ -132,12 +132,12 @@ def xip_test(gw, R, a, arch, installed):
     ok, inst = gw.op("pex.installed")
     if not R.add("xip.installed", ok and "modules" in inst, err_text(inst) if not ok else
                  f"{len(inst['modules'])} installed before, {inst['free'] // 1024} of {inst['size'] // 1024} KB free"):
-        return
+        return False
     foreign = [m["name"] for m in inst["modules"]]
     clash = [n for n in ("hello", "arith", "big", "counter") if n in foreign]
     if clash:
         R.add("xip (names already installed by someone else: skipped)", None, clash)
-        return
+        return False
 
     def install(params, label, check=None):
         t0 = time.time()
@@ -169,7 +169,7 @@ def xip_test(gw, R, a, arch, installed):
                 lambda r: r.get("signed") and r.get("model") == "pic" and r.get("size", 0) > 40000)
     install({"name": "counter"}, "xip.install counter")
     if not b:
-        return
+        return False
     ok, r = gw.op("pex.install", {"name": "big"})
     R.add("xip.same build again: nothing written", ok and r.get("offset") == b.get("offset"), err_text(r) if not ok else "")
     ok, v = gw.op("pex.verify", {"name": "big"})
@@ -252,19 +252,32 @@ def xip_test(gw, R, a, arch, installed):
     else:
         R.add("xip.sd:/ (needs --sd)", None)
 
-    if a.allow_reboot:
-        ok, _ = gw.op("sys.reboot")
-        time.sleep(8)
-        up = wait_http(gw, 240)
-        R.add("xip.reboot", ok and up)
-        if up:
-            ok, inst = gw.op("pex.installed")
-            names = {m["name"]: m for m in (inst or {}).get("modules", [])}
-            R.add("xip.installed modules persist", ok and "big" in names and "counter" in names, list(names))
-            R.add("xip.model A RW reserved after the boot", names.get("big", {}).get("xip_ready") is True, names.get("big"))
-            run_big("xip.model A in place after the reboot", True)
-    else:
-        R.add("xip.persist across a reboot (needs --allow-reboot)", None)
+    return True
+
+
+def xip_after_reboot(gw, R, arch):
+    """Last of all (it reboots the board): installed modules persist, and the
+    model A copy, whose RW address is reserved at mount, now runs in place."""
+    ok, _ = gw.op("sys.reboot")
+    time.sleep(8)
+    up = wait_http(gw, 240)
+    R.add("xip.reboot", ok and up)
+    if not up:
+        return
+    ok, inst = gw.op("pex.installed")
+    names = {m["name"]: m for m in (inst or {}).get("modules", [])}
+    R.add("xip.installed modules persist", ok and "big" in names and "counter" in names, list(names))
+    R.add("xip.model A RW reserved after the boot", names.get("big", {}).get("xip_ready") is True, names.get("big"))
+    ok, r = gw.op("pex.load", {"name": "big"})
+    if not ok:
+        R.add("xip.model A in place after the reboot", False, err_text(r))
+        return
+    _, c = gw.op("pex.call", {"name": "big", "fn": "big_check"})
+    _, ca = gw.op("pex.call", {"name": "big", "fn": "big_code_addr"})
+    addr = (ca or {}).get("result", 0) & 0xFFFFFFFF
+    R.add("xip.model A in place after the reboot", c.get("result") == 0 and r.get("xip") and
+          XIP_WINDOW[0] <= addr < XIP_WINDOW[1], f"xip={r.get('xip')} code @0x{addr:08x} check={c.get('result')}")
+    gw.op("pex.unload", {"name": "big"})
 
 
 def main():
@@ -285,6 +298,7 @@ def main():
     gw = GW(a.base)
     R = Run()
     uploaded = []
+    xip_ran = False
     installed = []          # what we installed into the PEX partition (removed at the end)
 
     print(f"PEX remote test against {gw.base}")
@@ -431,7 +445,7 @@ def main():
             gw.op("pex.unload", {"name": "bigram"})
 
         # ---- XIP (0.7): install into the PEX flash partition, run in place
-        xip_test(gw, R, a, arch, installed)
+        xip_ran = xip_test(gw, R, a, arch, installed)
 
         # ---- bus + json + sys: a module serving ops
         ok, r = gw.op("pex.load", {"name": "gwbus"})
@@ -510,6 +524,12 @@ def main():
                     R.add("lua." + x["name"], x["ok"], x.get("extra") or "")
             R.add("lua.finished", bool(res) and res[-1]["name"] == "done", "" if res else "no result file (script error?)")
             gw.op("script.stop", {"name": "pex_lua_test"})
+
+        # ---- last: a reboot (only when allowed): what is installed persists
+        if a.allow_reboot and xip_ran:
+            xip_after_reboot(gw, R, arch)
+        else:
+            R.add("xip.persist across a reboot (needs --allow-reboot)", None)
     finally:
         # ---- clean up: our modules, our files
         ours = {"hello", "arith", "arith_a", "counter", "counter2", "imports", "needboard", "app", "memtest", "bad",

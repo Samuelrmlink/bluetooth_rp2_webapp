@@ -81,7 +81,7 @@ static int sd_gate(void) {
     return PEX_EBUSY;
 }
 
-static int ls_err(int rc) {
+static int sdrc_err(int rc) {
     switch (rc) {
     case LS_ENOENT: return PEX_ENOENT;
     case LS_EEXIST: return PEX_EEXIST;
@@ -150,7 +150,7 @@ static void sd_step(void) {
         if (r->op == Q_LIST && r->each) {
             pex_call(r->mod, (uint32_t)(uintptr_t)r->each, (uint32_t)(uintptr_t)r->arg, 0, 0, 0);
         }
-        finish(r, ls_err(rc));
+        finish(r, sdrc_err(rc));
         return;
     }
     switch (r->op) {

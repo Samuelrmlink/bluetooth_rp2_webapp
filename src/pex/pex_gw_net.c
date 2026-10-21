@@ -46,13 +46,20 @@ typedef struct {
 static hslot_t s_h[HTTPC_MAX];
 
 #if CONFIG_LUA_ENABLE
+/* httpc's allocator is one setting for every user (lhttp sets the same kind
+ * at each Lua request): what one user's functions allocate, another's may
+ * free. So these mirror lhttp's -- lheap_free_any frees arena and scratch
+ * blocks, the scope is lheap's scratch -- except that a module's request
+ * body comes from the TLS pool (httpc frees pool blocks itself, whatever is
+ * set), so a native app's request costs the Lua arena nothing. */
 static void *arena_alloc(size_t n) {
-    void *p = lheap_alloc_high(n);
+    void *p = lheap_pool_alloc(n ? n : 1);
+    if (!p) { p = lheap_alloc_high(n); }
     if (!p) { lrt_collect(); p = lheap_alloc_high(n); }
-    if (!p && httpc_release_reserve()) { p = lheap_alloc_high(n); }
     if (p) { memset(p, 0, n); }
     return p;
 }
+static void *scope_use(void *scope) { return lheap_scratch_use(scope); }
 static void arena_stat(size_t *used, size_t *largest) {
     *used = lheap_used();
     *largest = lheap_largest_free();
@@ -138,7 +145,7 @@ int pex_http_start(const pex_http_req_t *q, pex_http_cb done, void *arg) {
     h->cap = q->buf_cap;
     h->res.total = -1;
 #if CONFIG_LUA_ENABLE
-    static const httpc_alloc_fns fns = { arena_alloc, lheap_free, arena_stat };
+    static const httpc_alloc_fns fns = { arena_alloc, lheap_free_any, arena_stat, scope_use };
     httpc_set_alloc(&fns);
 #endif
     httpc_opts_t o = { .method = q->method ? q->method : "GET", .url = q->url, .headers = q->headers,

@@ -1272,7 +1272,18 @@ def t_pex_host():
     rc, out = sh(f"python3 pex/tools/gen_host_api.py header pex/host_api.json {d}/pex_api.h && "
                  f"gcc -O1 -Wall -Wextra -Werror -Ipex/runtime -Ipex/sdk/include -I{d} pex/test/unit/pex_unit.c "
                  f"pex/runtime/groups/pex_json.c pex/runtime/pex_hash.c -o {d}/pex_unit && {d}/pex_unit")
-    return rc == 0, out.strip().splitlines()[-1][:90] if out.strip() else ""
+    if rc:
+        return False, out.strip().splitlines()[-1][:90] if out.strip() else ""
+    # XIP: install/uninstall/compaction over a simulated flash, a power cut at every operation
+    groups = ("core", "log", "mem", "sched", "pex", "json")
+    tables = " && ".join(f"python3 pex/tools/gen_host_api.py table pex/host_api.json {g} {d}/pex_host_{g}.c" for g in groups)
+    rt = " ".join(f"pex/runtime/{f}" for f in ("pex_core.c", "pex_load.c", "pex_mem.c", "pex_sched.c", "pex_hash.c",
+                                               "pex_xip.c", "groups/pex_json.c"))
+    rc, out2 = sh(f"{tables} && gcc -O1 -Wall -Wextra -DPEX_FORCE_TARGET=2 -DPEX_FORCE_FEATURES=5 -Ipex/runtime "
+                  f"-Ipex/sdk/include -I{d} pex/test/unit/pex_xip_unit.c {rt} "
+                  + " ".join(f"{d}/pex_host_{g}.c" for g in groups) + f" -o {d}/pex_xip_unit && {d}/pex_xip_unit")
+    last = [l for l in out2.strip().splitlines() if "checks passed" in l]
+    return rc == 0, (out.strip().splitlines()[-1][:40] + "; xip " + (last[-1] if last else out2.strip()[-60:]))[:90]
 
 
 def t_pex_sim():
