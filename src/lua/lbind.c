@@ -713,6 +713,11 @@ static int l_bt_write(lua_State *L) {
     const char *hex = luaL_checklstring(L, 3, &hexlen);
     bool with_resp = lua_isnoneornil(L, 4) ? true : lua_toboolean(L, 4);
     bool want_done = lua_toboolean(L, 5);
+    /* 6th argument true: `hex` is the bytes themselves, not hex text. An OTAP
+     * transfer writes ~1650 chunks; as hex each was a 290-character string
+     * built from a dozen pieces -- ~1.3 KB of garbage per chunk for the
+     * collector, and a sscanf per byte here. */
+    bool binary = lua_toboolean(L, 6);
 
     bt_device_t *d = bt_registry_find(a, BT_TRANSPORT_LE);
     if (!d || !d->connected) { lua_pushboolean(L, 0); lua_pushstring(L, "not connected"); return 2; }
@@ -722,11 +727,15 @@ static int l_bt_write(lua_State *L) {
         lua_pushboolean(L, 0); lua_pushstring(L, "no such characteristic"); return 2;
     }
     static uint8_t buf[512];
-    size_t n = hexlen / 2;
+    size_t n = binary ? hexlen : hexlen / 2;
     uint16_t mtu = le_mtu(d->addr);
-    if (n > (size_t)(mtu ? mtu : 23) - 3) { lua_pushnil(L); lua_pushstring(L, "too_long"); return 2; }
-    for (size_t i = 0; i < n; i++) {
-        unsigned b = 0; sscanf(hex + i * 2, "%2x", &b); buf[i] = (uint8_t)b;
+    if (n > (size_t)(mtu ? mtu : 23) - 3 || n > sizeof buf) { lua_pushnil(L); lua_pushstring(L, "too_long"); return 2; }
+    if (binary) {
+        memcpy(buf, hex, n);
+    } else {
+        for (size_t i = 0; i < n; i++) {
+            unsigned b = 0; sscanf(hex + i * 2, "%2x", &b); buf[i] = (uint8_t)b;
+        }
     }
     int rc = le_write(d->addr, si, ci, buf, (uint16_t)n, with_resp, want_done);
     if (rc == 0) { lua_pushboolean(L, 1); return 1; }
@@ -1699,6 +1708,11 @@ void lbind_open_all(lua_State *L) {
         { "on_pairing", l_bt_on_pairing }, { "pairing_state", l_bt_pairing_state },
         { NULL, NULL } };
     set_table(L, "bt", bt);
+    /* What a script can test for: bt.write takes raw bytes (6th argument). */
+    lua_getglobal(L, "bt");
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "write_binary");
+    lua_pop(L, 1);
     bond_set_pairing_hook(pairing_hook);
 #endif
 

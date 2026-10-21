@@ -278,6 +278,10 @@ the file's new contents.
   `error="timeout"` when the write never completed within the link's 5 s op
   deadline. With response it completes when the peer answers; without, when the
   controller takes it. Without `want_done` nothing changes.
+* `bt.write(addr, path, data, with_resp, want_done, true)`: with a 6th argument
+  `true`, `data` is the bytes themselves rather than hex text (no hex string to
+  build per write: an OTAP transfer's ~1650 chunks made ~2 MB of garbage that
+  way). `bt.write_binary` is `true` on a firmware that has it.
 * A write longer than `MTU-3` returns `nil, "too_long"` at once -- with or
   without response, since this stack does not do long writes. A full per-link
   queue now returns `false, "queue_full"` (it used to be a bare `false`).
