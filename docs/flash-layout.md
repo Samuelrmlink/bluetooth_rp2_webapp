@@ -101,6 +101,7 @@ filesystem (193 files, 30 folders, 680 KB) migrates in ~30 s of device time.
 | What | Result |
 |---|---|
 | no SD card / card does not mount within 5 s | *pending: no SD card*; old geometry mounted, board fully working |
+| card identifies but every read fails (e.g. a data line not driven) | *pending: SD card present but not readable (see /api/sd)*; RTT says which line (`sdio: CRC error ...; DAT3 high`) |
 | card too small | *pending: SD card full (needs N KB free)* |
 | a write, close or read-back fails during the copy, card pulled | *pending: SD copy failed: ...; nothing formatted* |
 | files would not fit 1776 KB | *pending: files need N KB ...* |
