@@ -338,8 +338,8 @@
       "name": "pex",
       "id": 5,
       "major": 1,
-      "minor": 0,
-      "doc": "the module's own handle, references (spec 8) and app control",
+      "minor": 1,
+      "doc": "the module's own handle, references (spec 8) and app control; 1.1: calling another loaded module (a driver module such as otap.m33.pex) by name, through the trampoline",
       "types": [
         "typedef struct pex_mod pex_mod_t;"
       ],
@@ -365,6 +365,24 @@
           "name": "pex_app_exit",
           "proto": "void pex_app_exit(int code)",
           "doc": "an app ends: its tasks are cancelled after the current callback returns; UNLOAD_ON_EXIT apps are then unloaded"
+        },
+        {
+          "name": "pex_find",
+          "proto": "pex_mod_t *pex_find(const char *name)",
+          "since": 1,
+          "doc": "a loaded module by instance name, or NULL (pex_ref it while using it)"
+        },
+        {
+          "name": "pex_sym",
+          "proto": "uint32_t pex_sym(pex_mod_t *m, const char *name)",
+          "since": 1,
+          "doc": "the address of one of m's EXPORTS (Thumb bit set), or 0"
+        },
+        {
+          "name": "pex_call",
+          "proto": "uint64_t pex_call(pex_mod_t *m, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3)",
+          "since": 1,
+          "doc": "call fn of module m through the trampoline (r9 = m's RW base, active count, executing-module stack); up to four word arguments, r0:r1 back; PEX_EFAULT if m faulted"
         }
       ]
     },
