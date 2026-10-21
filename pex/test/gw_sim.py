@@ -199,8 +199,10 @@ def main():
     ap.add_argument("--mcusim", default=os.path.expanduser("~/Work/mcusim-agents/blegatt/target/release/mcusim"))
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/gwsim"))
     ap.add_argument("--scenarios", default="ota,quiet,suite,fault,hang")
+    ap.add_argument("--direct", help="development: boot this (non-TBYB) build's btgw.elf from slot A instead of "
+                                     "the old firmware, and skip 'ota'")
     a = ap.parse_args()
-    for k in ("deploy", "old", "mods", "release", "mcusim"):
+    for k in ("deploy", "old", "mods", "release", "mcusim", "direct"):
         if getattr(a, k):
             setattr(a, k, os.path.abspath(getattr(a, k)))
     sc = set(a.scenarios.split(","))
@@ -249,16 +251,18 @@ def main():
     flash = os.path.join(w, "board.flash")
     toml = os.path.join(w, "board.toml")
     open(toml, "w").write(TOML.format(pt=pt, wifi=os.path.join(a.deploy, "btgw_wifi_firmware.bin"), lfs=lfs, flash=flash,
-                                      old=os.path.join(a.old, "btgw.elf"), card=card, fwd=FWD, time="3000s"))
+                                      old=os.path.join(a.direct or a.old, "btgw.elf"), card=card, fwd=FWD, time="3000s"))
+    if a.direct:
+        sc.discard("ota")
     srv = TS(("127.0.0.1", HTTP_PORT), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     log = os.path.join(w, "board.log")
     s = Sim(exe, toml, log)
     try:
         # ---- the old firmware first, as on the real board
-        check("old firmware (slot A) boots", s.wait(r"^main: init done", 300) >= 0)
+        check("slot A boots" + (" (direct)" if a.direct else " (the old firmware)"), s.wait(r"^main: init done", 300) >= 0)
         check("HTTP over USB-NCM", wait_http(180))
-        boot1 = len(s.lines)
+        boot1 = 0 if a.direct else len(s.lines)
 
         if "ota" in sc:
             t0 = time.time()
@@ -307,10 +311,10 @@ def main():
                 sd = json.load(urllib.request.urlopen(f"http://127.0.0.1:{FWD}/api/sd", timeout=10))
             except Exception:
                 sd = {}
-            if str(sd.get("card", sd.get("state", ""))) == "ok":
+            if sd.get("state") == "ok" and sd.get("mounted"):
                 break
             time.sleep(2)
-        check("SD card mounted", str(sd.get("card", sd.get("state", ""))) == "ok", json.dumps(sd)[:150])
+        check("SD card mounted", sd.get("state") == "ok" and sd.get("mounted"), json.dumps(sd)[:150])
 
         if "quiet" in sc:
             ok, lst = op("pex.list")
@@ -348,8 +352,8 @@ def main():
                 check("hang: the module hangs the loop", j >= 0)
             k = s.wait(r"^main: REBOOTED BY WATCHDOG|^main: previous boot stopped", 120, max(j, mark))
             check(f"{name}: the watchdog reboots the board", k >= 0, s.lines[k] if k >= 0 else "")
-            b = s.wait(r"^ota: slot A .* booted 1", 120, max(k, mark))
-            check(f"{name}: into the same image (slot B)", b >= 0, s.lines[b] if b >= 0 else "")
+            b = s.wait(r"^ota: slot A .* booted %d" % (0 if a.direct else 1), 120, max(k, mark))
+            check(f"{name}: into the same image (slot {'A' if a.direct else 'B'})", b >= 0, s.lines[b] if b >= 0 else "")
             why = "FAULTED in module crashapp" if name == "fault" else "was reset while running code"
             p = s.wait(r"^pex: the previous boot " + why, 120, max(b, mark))
             check(f"{name}: the next boot names it", p >= 0, s.lines[p] if p >= 0 else "")

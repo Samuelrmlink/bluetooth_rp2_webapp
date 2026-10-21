@@ -17,7 +17,7 @@ config PEX_POOL_KB
     help
       Code, data and the modules' memory (spec 7.2). Taken on first use from
       the C heap: as much as this, but never leaving less than
-      PEX_HEAP_RESERVE_KB free (the SD build has ~18 KB of C heap once booted,
+      PEX_HEAP_RESERVE_KB free (the SD build has ~19 KB of C heap once booted,
       and pico_malloc panics when it runs out), and at least 6 KB.
       The C heap is the only RAM PEX may take on this branch: the Lua arena
       is re-initialised whole by a VM restart. The planned home for a larger
@@ -27,7 +27,11 @@ config PEX_POOL_KB
 config PEX_HEAP_RESERVE_KB
     int "C heap kept free when the pool is taken (KB)"
     depends on PEX
-    default 6
+    default 8
+    help
+      pico_malloc panics on ANY failed allocation, so the rest of the
+      firmware keeps this much. The pool is taken with newlib's own malloc
+      (no panic) and shrinks to fit, down to 6 KB.
 
 config PEX_ALLOW_UNSIGNED
     bool "Load unsigned modules (development)"

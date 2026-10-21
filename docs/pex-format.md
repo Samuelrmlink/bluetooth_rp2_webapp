@@ -782,7 +782,9 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
   now (`pex/`), structured so they can become a separate submodule later.
 - **[Q10] (0.6) Where the gateway's PEX pool comes from.** The SD build has
   ~18 KB of C heap once booted and ~10 KB of its 864 KiB slot left. v1 takes
-  the pool lazily from the C heap (default up to 12 KB, keeping 6 KB free) --
+  the pool lazily from the C heap (default up to 12 KB, keeping 8 KB free --
+  pico_malloc panics on any failed allocation, so the pool is taken with
+  newlib's own `malloc` and shrinks to the contiguous room, found in mcusim) --
   enough for the test modules, not for the iTi backend. The Lua arena cannot
   lend it on this branch: a VM restart re-initialises the whole arena. Options:
   (a) shrink `CONFIG_LUA_HEAP_KB` and give that RAM to a static pool once the

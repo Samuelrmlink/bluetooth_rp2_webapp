@@ -96,13 +96,35 @@ static void on_unload(pex_mod_t *m) {
 #endif
 }
 
-/* C heap headroom, as fs_migrate.c measures it: pico_malloc panics on OOM. */
-static size_t heap_room(void) {
+/* C heap headroom, as fs_migrate.c measures it: what is left between the
+ * heap's top and the stack, plus the free chunks inside the heap. A block
+ * needs CONTIGUOUS room, which the sum overstates -- see take_pool(). */
+static size_t heap_top_gap(void) {
     extern char __StackLimit;
     char *brk = sbrk(0);
-    size_t top = (brk != (char *)-1 && brk < &__StackLimit) ? (size_t)(&__StackLimit - brk) : 0;
+    return (brk != (char *)-1 && brk < &__StackLimit) ? (size_t)(&__StackLimit - brk) : 0;
+}
+static size_t heap_room(void) {
     struct mallinfo mi = mallinfo();
-    return top + (size_t)mi.fordblks;
+    return heap_top_gap() + (size_t)mi.fordblks;
+}
+
+/* pico_malloc's malloc PANICS when it fails ("Out of memory": found in mcusim,
+ * with the SD card and BLE up the free space was there but not in one piece).
+ * __real_malloc is newlib's own, behind pico_malloc's --wrap: it returns NULL.
+ * Try the configured size, then smaller, never below 6 KB, always leaving the
+ * reserve free afterwards. */
+extern void *__real_malloc(size_t n);
+static uint8_t *take_pool(size_t want, size_t keep, size_t *got) {
+    for (size_t n = want & ~(size_t)1023; n >= 6 * 1024u; n -= 2048u) {
+        if (heap_room() < n + keep) { continue; }
+        uint8_t *p = __real_malloc(n);
+        if (!p) { continue; }
+        if (heap_room() < keep) { free(p); continue; }     /* it came from the top and took the reserve */
+        *got = n;
+        return p;
+    }
+    return NULL;
 }
 
 static void record_prev_fault(void);
@@ -112,18 +134,13 @@ bool pex_gw_ensure(void) {
     boot_record();
     size_t want = (size_t)CONFIG_PEX_POOL_KB * 1024u, keep = (size_t)CONFIG_PEX_HEAP_RESERVE_KB * 1024u;
     if (s_failed) { return false; }
-    size_t room = heap_room();
-    /* as much as configured, never leaving less than the reserve, at least 6 KB */
-    size_t need = room > keep ? room - keep : 0;
-    if (need > want) { need = want; }
-    need &= ~(size_t)1023;
-    if (need < 6 * 1024u) {
-        printf("pex: not starting: the C heap has %u KB free and %u KB must stay free\n",
-               (unsigned)(room / 1024), (unsigned)(keep / 1024));
+    size_t need = 0;
+    s_pool = take_pool(want, keep, &need);
+    if (!s_pool) {
+        printf("pex: not starting: no %u KB block in the C heap (%u KB free in all, %u KB must stay free)\n",
+               6u, (unsigned)(heap_room() / 1024), (unsigned)(keep / 1024));
         return false;
     }
-    s_pool = malloc(need);
-    if (!s_pool) { s_failed = true; return false; }
 #if CONFIG_OTA
     pex_sig_uecc_set_keys(&OTA_PUBKEY, 1);
 #endif
@@ -139,6 +156,8 @@ bool pex_gw_ensure(void) {
         .max_stack = 2048,
     };
     if (pex_init(&cfg) != PEX_OK) { free(s_pool); s_pool = NULL; s_failed = true; return false; }
+    printf("pex: pool %u KB from the C heap (%u KB left free, %u KB of it at the top)\n", (unsigned)(need / 1024),
+           (unsigned)(heap_room() / 1024), (unsigned)(heap_top_gap() / 1024));
     pex_register_group(&pex_group_sys);
     pex_register_group(&pex_group_board);
     pex_register_group(&pex_group_bus);
@@ -410,12 +429,12 @@ static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) 
     char pf[200];
     prev_fault_json(pf, sizeof pf);
     n += (size_t)snprintf(b + n, cap - n, "{\"runtime\":\"%s\",\"api\":\"%d.%d\",\"arch\":\"%s\",\"up\":%s,\"policy\":\"%s\","
-                          "\"pool\":{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"configured_kb\":%d},\"c_heap_free\":%lu,\"prev_fault\":%s,\"modules\":",
+                          "\"pool\":{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"configured_kb\":%d},\"c_heap_free\":%lu,\"c_heap_top\":%lu,\"prev_fault\":%s,\"modules\":",
                           PEX_RT_VERSION, PEX_API_MAJOR, PEX_API_MINOR, pex_gw_arch(), s_up ? "true" : "false",
                           (s_up ? pex_get_policy() : (ALLOW_UNSIGNED ? 1u : 0u)) & PEX_POLICY_ALLOW_UNSIGNED
                               ? "UNSIGNED ALLOWED (development)" : "signed-only",
                           (unsigned long)ps.pool_size, (unsigned long)ps.pool_free, (unsigned long)ps.pool_largest,
-                          CONFIG_PEX_POOL_KB, (unsigned long)heap_room(), pf);
+                          CONFIG_PEX_POOL_KB, (unsigned long)heap_room(), (unsigned long)heap_top_gap(), pf);
     if (s_up) {
         int k = pex_list_json(b + n, cap - n - 2);
         n += k > 0 ? (size_t)k : 0;
