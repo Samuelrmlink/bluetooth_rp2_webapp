@@ -222,6 +222,8 @@ void *lheap_alloc(size_t want) {
     return s_high ? lheap_alloc_high(want) : alloc_low(want);
 }
 
+void *lheap_alloc_low(size_t want) { return alloc_low(want); }
+
 void lheap_high_begin(void) { s_high++; }
 void lheap_high_end(void) { if (s_high > 0) { s_high--; } }
 
@@ -320,8 +322,11 @@ void *lheap_realloc(void *ptr, size_t osize, size_t nsize) {
         return ptr;
     }
 
-    /* Allocate before freeing -- see rule 2 in lheap.h. */
-    void *np = lheap_alloc(nsize);
+    /* Allocate before freeing -- see rule 2 in lheap.h. From the bottom even
+     * while high placement is open: a block that has to move to grow existed
+     * before (a thread's stack, the string table, a table's array) and lives
+     * on after the unit being loaded is dropped. */
+    void *np = alloc_low(nsize);
     if (!np) {
         return NULL;
     }

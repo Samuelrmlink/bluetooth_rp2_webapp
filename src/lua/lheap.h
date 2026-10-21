@@ -47,6 +47,11 @@ void *lheap_alloc_high(size_t want);
  * while it ran). lheap_init closes it. */
 void  lheap_high_begin(void);
 void  lheap_high_end(void);
+/* First fit from the bottom whatever the placement: for what a unit creates
+ * but does not own -- strings (interned, so a module's constant is the same
+ * object as the value some long-lived table holds), userdata, threads. A
+ * reallocation that has to move a block always goes here too. */
+void *lheap_alloc_low(size_t want);
 /* Bumped by every lheap_init (a Lua VM restart). A block from an older
  * generation is gone -- the arena was reset under it -- and must not be
  * passed to lheap_free. */

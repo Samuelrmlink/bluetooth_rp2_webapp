@@ -359,6 +359,23 @@ static void t_high_mode(void) {
     ck();
     lheap_check(&st, NULL);
     CHECK(st.blocks == 1 && lheap_used() == 0, "back to one block");
+    /* While high placement is open: lheap_alloc_low and a block that has to
+     * move to grow still come from the bottom. */
+    void *keep = lheap_alloc(64);
+    void *wall = lheap_alloc(64);       /* so `keep` cannot grow in place */
+    lheap_high_begin();
+    void *s1 = lheap_alloc_low(30);
+    CHECK((uint8_t *)s1 < (uint8_t *)lheap_base() + lheap_capacity() / 2, "alloc_low ignores high placement");
+    void *moved = lheap_realloc(keep, 64, 2000);
+    CHECK(moved && (uint8_t *)moved < (uint8_t *)lheap_base() + lheap_capacity() / 2,
+          "a block that moves to grow is placed from the bottom");
+    void *fresh = lheap_realloc(NULL, 5, 100);
+    CHECK((uint8_t *)fresh > (uint8_t *)lheap_base() + lheap_capacity() / 2, "a new block still from the top");
+    lheap_high_end();
+    lheap_free(s1); lheap_free(moved); lheap_free(fresh); lheap_free(wall);
+    ck();
+    lheap_check(&st, NULL);
+    CHECK(st.blocks == 1 && lheap_used() == 0, "back to one block");
     lheap_high_begin();
     lheap_init();
     void *lo = lheap_alloc(16);

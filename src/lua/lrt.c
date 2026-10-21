@@ -34,14 +34,29 @@
 static bool (*s_oom_hook)(void);
 void lrt_set_oom_hook(bool (*fn)(void)) { s_oom_hook = fn; }
 
+/* A new string, userdata or thread is placed from the bottom even while a
+ * module loads from the top (lheap_high_begin in l_require): strings are
+ * interned, so a module's constant "done" is the very object a long-lived
+ * table may still hold after the module is dropped -- placed with the code it
+ * would stay behind as an island in the space the module gave back (seen in
+ * mcusim: after four OTAP jobs the 22.5 KB the TLS buffers had used was in
+ * pieces, and the next catalog request failed "out of memory for TLS"). For a
+ * new block `osize` is the object's type tag (lmem.c). */
+static void *lrt_place(void *ptr, size_t osize, size_t nsize) {
+    if (!ptr && nsize && (osize == LUA_TSTRING || osize == LUA_TUSERDATA || osize == LUA_TTHREAD)) {
+        return lheap_alloc_low(nsize);
+    }
+    return lheap_realloc(ptr, osize, nsize);
+}
+
 static void *lrt_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     (void)ud;
-    void *p = lheap_realloc(ptr, osize, nsize);
+    void *p = lrt_place(ptr, osize, nsize);
     /* Out of arena even after Lua's emergency collection: memory the C side
      * keeps in reserve (the HTTP client's TLS record buffers) goes back
      * before a script is told "not enough memory". */
     if (!p && nsize && s_oom_hook && s_oom_hook()) {
-        p = lheap_realloc(ptr, osize, nsize);
+        p = lrt_place(ptr, osize, nsize);
     }
     return p;
 }
