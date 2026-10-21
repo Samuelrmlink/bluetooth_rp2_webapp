@@ -5,6 +5,7 @@
   gen_host_api.py table   <host_api.json> <group> <out pex_host_<group>.c>
   gen_host_api.py stubs   <host_api.json> <m33|m0p> <reloc|pic> <out .S>
   gen_host_api.py check   <host_api.json>          # collisions, duplicates
+  gen_host_api.py markdown <host_api.json>          # the spec's appendix A (stdout)
 
 One source (spec section 11): the module SDK header, the import veneers a
 module links against and the on-device lookup tables are all generated from
@@ -129,6 +130,29 @@ def stubs(api, target, model):
     return "\n".join(o) + "\n"
 
 
+def markdown(api):
+    o = [f"API {api['api']['major']}.{api['api']['minor']}. Generated from `pex/host_api.json` by "
+         "`pex/tools/gen_host_api.py markdown`; the JSON is authoritative.", ""]
+    for g in api["groups"]:
+        o.append(f"### A.{g['id']} `{g['name']}` -- group {g['id']}, v{g['major']}.{g['minor']}")
+        o.append("")
+        o.append(g.get("doc", ""))
+        o.append("")
+        types = [t for t in g.get("types", []) if not t.startswith("#include")]
+        if types:
+            o.append("```c")
+            o += types
+            o.append("```")
+            o.append("")
+        o.append("| symbol | FNV-1a | since | |")
+        o.append("|---|---|---|---|")
+        for f in g.get("functions", []):
+            cell = lambda x: x.replace("|", "\\|")
+            o.append(f"| `{cell(f['proto'])}` | `{fnv1a(f['name']):08x}` | {g['major']}.{f['since']} | {cell(f.get('doc', ''))} |")
+        o.append("")
+    return "\n".join(o)
+
+
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
@@ -139,6 +163,8 @@ def main():
         write(sys.argv[4], table(api, sys.argv[3]))
     elif cmd == "stubs":
         write(sys.argv[5], stubs(api, sys.argv[3], sys.argv[4]))
+    elif cmd == "markdown":
+        print(markdown(api))
     elif cmd == "check":
         n = sum(len(g.get("functions", [])) for g in api["groups"])
         print(f"host_api: api {api['api']['major']}.{api['api']['minor']}, "

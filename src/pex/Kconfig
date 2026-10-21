@@ -32,10 +32,12 @@ config PEX_HEAP_RESERVE_KB
 config PEX_ALLOW_UNSIGNED
     bool "Load unsigned modules (development)"
     depends on PEX
+    default y if !OTA
     default n
     help
       Off: only modules signed with the OTA key (tools/ota_sign.py, pexlink
-      --sign) load. On: unsigned ones too, and pex.list says so.
+      --sign) load. On: unsigned ones too, and pex.list says so. A build
+      without OTA has no key to check signatures with, so it defaults on.
 
 config PEX_LUA
     bool "Lua launcher and require for PEX modules"

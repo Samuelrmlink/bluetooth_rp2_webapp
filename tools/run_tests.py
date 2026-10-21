@@ -1261,6 +1261,30 @@ def t_lfs_migrate_sim():
     return rc == 0, f"{m.group(1)} checks" + (f", {m.group(2)} failed: {first[5:65]}" if rc else "")
 
 
+def t_pex_host():
+    """pex/: the host API source is consistent and the portable runtime parts
+    (json group, CRC-32, SHA-256) pass on the build host."""
+    rc, out = sh("python3 pex/tools/gen_host_api.py check pex/host_api.json")
+    if rc:
+        return False, out.strip()[-90:]
+    d = f"{BUILD_PREFIX}pexunit"
+    os.makedirs(d, exist_ok=True)
+    rc, out = sh(f"python3 pex/tools/gen_host_api.py header pex/host_api.json {d}/pex_api.h && "
+                 f"gcc -O1 -Wall -Wextra -Werror -Ipex/runtime -Ipex/sdk/include -I{d} pex/test/unit/pex_unit.c "
+                 f"pex/runtime/groups/pex_json.c pex/runtime/pex_hash.c -o {d}/pex_unit && {d}/pex_unit")
+    return rc == 0, out.strip().splitlines()[-1][:90] if out.strip() else ""
+
+
+def t_pex_sim():
+    """pex/test/run_sim.py: the runtime alone (no Lua) on RP2350 and RP2040 in
+    mcusim, both code models, plus pexlink's refusals."""
+    if not os.path.exists(os.path.expanduser("~/Work/mcusim/target/release/mcusim")):
+        return True, "skipped: no mcusim"
+    rc, out = sh(f"python3 pex/test/run_sim.py --work {BUILD_PREFIX}pexsim")
+    m = re.search(r"(\d+)/(\d+) passed", out)
+    return rc == 0, m.group(0) if m else (out.strip().splitlines() or ["no output"])[-1][:90]
+
+
 def t_ota_partition_layout():
     """partitions.json, fs.h and the linker script agree on the flash map.
 
@@ -1412,6 +1436,7 @@ def main():
     step(0, "SPI only through the bus layer", t_spi_only_through_spibus)
     step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
     step(0, "W5500 pins are reserved", t_w5500_pins_reserved)
+    step(0, "PEX: host API source + portable runtime parts (json, CRC, SHA-256)", t_pex_host)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:
@@ -1439,6 +1464,7 @@ def main():
         step(3, "Lua file/json/http/sys + /api/op in mcusim (USB-NCM)", t_lua_net_fs_sim(False))
         step(3, "Lua over Wi-Fi + BLE in mcusim: SNTP, DNS, uuids128", t_lua_net_fs_sim(True))
         step(3, "pre-PEX LittleFS migration in mcusim (SD copy, power cuts)", t_lfs_migrate_sim)
+        step(3, "PEX runtime without Lua in mcusim: RP2350 + RP2040, both code models", t_pex_sim)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)

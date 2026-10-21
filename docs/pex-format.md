@@ -1,7 +1,27 @@
-# PEX — portable executable modules for microcontrollers (DRAFT 0.1)
+# PEX — portable executable modules for microcontrollers (DRAFT 0.6)
 
-Status: **planning draft 0.5** (0.4: two code models; 0.5: the memory model, §7.2) -- format and loader not implemented yet; all of Q1-Q9 decided; the PEX flash partition exists on the gateway (§14, done 2026-10-21). Decisions marked **[D]**,
-open questions **[Q]** (collected at the end).
+Status: **draft 0.6 -- format 1.0 and the RAM-mode runtime are implemented**
+(`pex/` in this repository: SDK, `pexlink`, runtime, Lua layer, tests; the
+gateway integration in `src/pex/`). 0.4: two code models; 0.5: the memory
+model, §7.2; **0.6: what the implementation settled -- section payloads
+(§4.5), the CRC covering the whole file, INIT/FINI sections, reloc words as
+segment offsets, imports through generated veneers, the runtime independent
+of Lua (§7.5), the v1 host API with exact signatures (§7.4, appendix A), apps
+(`PEX_APP_RUN` config, `PEX_APP_STOP`), the gateway integration (§15), and
+what is left for XIP (§16); the full list of changes is §17.** All of Q1-Q9
+decided; Q10-Q12 new. The PEX flash partition exists on the gateway (§14,
+done 2026-10-21). Decisions marked **[D]**, open questions **[Q]** (collected
+at the end).
+
+**Design principle (0.6) [D]: native apps first; Lua is optional.** A PEX
+module does the work -- an app on the host's main loop serving its own ops and
+events (the iTi backend becomes `iti.m33.pex` + `otap.m33.pex`). The runtime
+needs no Lua: modules are loaded, started and stopped from C, from the
+firmware's ops (`pex.*`) and from `cfg/pex_autostart.json`. Where a firmware
+has Lua, it is a **launcher and glue** -- a three-line script can start an app
+(`pex.load`, `pex.start`) -- and, at lower priority, `require 'x'` returns a
+module's native functions (§9). Boards without the Lua VM use the same `.pex`
+files.
 
 ## 1. Why
 
@@ -50,6 +70,13 @@ between PEX files; running the same file on several architectures.
   identified by name hash, grouped and versioned (§7).
 - **Loader**: the firmware component that validates, places, relocates,
   links and starts a PEX.
+- **Runtime**: the loader plus the trampoline, the memory regions, the
+  scheduler and the core host-API groups -- `pex/runtime`, portable C11 and
+  one small assembly file per target (§7.5).
+- **Instance**: one load of a module: its own RW block, name and state; model B
+  instances of one build may share one copy of the code (§6.2).
+- **App**: a module started with `PEX_APP_RUN`; it runs while it has scheduled
+  tasks (§8).
 
 ## 4. File layout
 
@@ -74,22 +101,22 @@ major, target, size) before reading anything else.
 
 | Off | Size | Field | Notes |
 |---|---|---|---|
-| 16 | 4 | `target_features` | bits: FPU-SP, FPU-DP, DSP, CMSE-secure, Hazard3 Zcb/Zcmp, ... required by the code |
+| 16 | 4 | `target_features` | bits required by the code (0.6): 0 FPU-SP, 1 FPU-DP, 2 DSP, 3 CMSE; the loader refuses a bit its CPU lacks. `pexlink` sets FPU-SP\|DSP for `m33`, 0 for `m0p` |
 | 20 | 2 | `api_major` | host API major it was built against (§7) — must equal the firmware's |
 | 22 | 2 | `api_minor` | must be <= the firmware's |
-| 24 | 4 | `flags` | `PIC` (code model B, §6.2: text+ro are position-independent, RW is r9-relative), `XIP_OK` (code may run from flash), `RAM_ONLY`, `LUA_MODULE`, `APP`, `REENTRANT` (with `PIC`: several instances may share one copy of the code), `NEEDS_SIG` |
+| 24 | 4 | `flags` | bit 0 `PIC` (code model B, §6.2: text+ro are position-independent, RW is r9-relative), 1 `XIP_OK` (code may run from flash; set for every PIC file), 2 `RAM_ONLY`, 3 `LUA_MODULE`, 4 `APP`, 5 `REENTRANT` (with `PIC` only: several instances may share one copy of the code), 6 `NEEDS_SIG`, 7 `UNLOAD_ON_EXIT` (0.6) |
 | 28 | 4 | `module_version` | the module's own version, `major<<24 \| minor<<16 \| patch` |
 | 32 | 4 | `image_size` | bytes of the image as loaded (text + rodata + data, contiguous) |
 | 36 | 4 | `text_size` | executable part; starts at image offset 0 |
 | 40 | 4 | `ro_size` | read-only data, after text |
 | 44 | 4 | `data_size` | initialised RW data, after ro (copied to RAM even for XIP) |
 | 48 | 4 | `bss_size` | zeroed RW data, after data, not stored |
-| 52 | 4 | `stack_hint` | worst-case stack use of any entry (from `-fstack-usage`), for the loader's checks |
-| 56 | 4 | `entry` | image offset of the module entry (§8), Thumb bit set |
+| 52 | 4 | `stack_hint` | stack use, from `-fstack-usage`: in 1.0 the largest single frame (a lower bound -- `pexlink` has no call graph yet); a host may refuse a file above its limit |
+| 56 | 4 | `entry` | image offset of `pex_main` (§8), Thumb bit set; **0 = no entry** (a library of exports) |
 | 60 | 4 | `section_count` | entries in the section table |
 | 64 | 4 | `section_table_off` | file offset |
 | 68 | 4 | `image_off` | file offset of the image bytes |
-| 72 | 4 | `image_crc32` | quick integrity check (signature is the real one) |
+| 72 | 4 | `file_crc32` | **0.6: CRC-32 (IEEE, zlib's) of every byte of the file before `SIG`** (to `file_size` if unsigned) **with these 4 bytes taken as zero** -- header and sections are covered too, not only the image. Quick integrity; the signature is the real one |
 | 76 | 16 | `build_id` | first 16 bytes of SHA-256 of the image, for caches and logs |
 
 ### 4.3 Section table
@@ -106,8 +133,22 @@ Each entry: `u16 type, u16 flags, u32 offset, u32 size`. Types (v1):
 | 6 | `DEBUG` | optional: symbol map / line table; never loaded on device, read by tools and by the crash reporter on a host |
 | 0xF0 | `SIG` | signature block (§10); always last in the file |
 
-Unknown section types with the `OPTIONAL` flag are skipped; unknown types
-without it make the loader refuse the file.
+Unknown section types with the `OPTIONAL` flag (bit 0 of `flags`) are
+skipped; unknown types without it make the loader refuse the file. 0.6 adds:
+
+| Type | Name | Contents |
+|---|---|---|
+| 7 | `INIT` | constructors (`.init_array`), run in order before `PEX_INIT` |
+| 8 | `FINI` | destructors (`.fini_array`), run in reverse after `PEX_DEINIT` |
+
+They replace keeping `.init_array` inside the image: a table of code
+addresses in the image would need relocating (and is not ROPI-clean);
+`pexlink` reads the arrays at build time and stores image offsets instead.
+`DEPS` stays reserved: a 1.0 loader refuses a file that has one.
+
+Order in the file (as `pexlink` writes it; a loader must not depend on it,
+except that `SIG` is last): prefix + header, section table, the section
+payloads (each 4-aligned), the image (8-aligned), `SIG`.
 
 ### 4.4 Multi-target ("fat") files -- later **[D, Q8]**
 
@@ -117,6 +158,36 @@ of complete single-target PEX files. A loader then reads only the slice for
 the running architecture: **code for another architecture is never copied
 into executable memory or the XIP partition**, and the other slices are
 never read beyond their table entry.
+
+### 4.5 Section payloads (0.6)
+
+All little-endian, 4-aligned, and bounded by the section's `size`.
+
+- **RELOC**: `u32 n_ro, u32 n_rw`, then `n_ro` + `n_rw` words. An RO entry is
+  the image offset of a 32-bit word in text/ro; an RW entry the offset of a
+  word inside the RW block (data). **Bit 31 of either kind says the word
+  points into RW**, else into the code (text+ro). The stored word is the
+  target's **offset within its own segment** (`pexlink` rewrites RW targets
+  from their link address to RW offsets), and the loader adds that segment's
+  base: `*w += bit31 ? rw_base : code_base`. (0.5 had the bit on RW entries
+  only; model A code also holds literal-pool words that point at data.)
+- **IMPORTS**: `u16 n_groups, u16 n_imports`; `n_groups` x `{u16 id, u8
+  major, u8 minor}` (the newest minor of the group any import needs); then
+  `n_imports` x `{u32 name_hash, u16 group, u16 flags, u32 slot}` -- `slot` is
+  the RW offset of the import's GOT word, `flags` bit 0 `WEAK`.
+- **EXPORTS**: `u32 n`; `n` x `{u32 name_hash, u32 value, u16 kind, u16
+  name_len, u32 name_off}` (value = image offset, Thumb bit set; kind 1 =
+  function); then the names (NUL-terminated) the `name_off`s point into.
+- **INIT**, **FINI**: `u32 n`; `n` x `u32` image offsets (Thumb bit set).
+- **META**: TLV records `{u16 tag, u16 len, len bytes}`, each padded to 4.
+  Tags: 1 name, 2 description, 3 author, 4 url, 5 license, 6 Lua module name,
+  7 min RAM (u32), 8 version string, 9 tool. Strings are not NUL-terminated.
+- **DEBUG** (`OPTIONAL`): records `{u32 value, u16 kind, u16 len, len bytes}`
+  padded to 4: kind 1 = an import name (value = its hash: the loader names a
+  missing import from it), kind 2 = a function symbol (value = image offset;
+  a host tool symbolicates a fault offset with it).
+- **SIG**: `u16 alg` (1 = ECDSA P-256 over SHA-256), `u16 key_id`, 64 bytes
+  raw `r || s`; 68 bytes, last in the file, covering every byte before it.
 
 ## 5. Targets — one build per architecture **[D]**
 
@@ -169,7 +240,7 @@ address. The header's `PIC` flag says which one a file uses.
 | register cost | none | r9 reserved as the RW base (static base) |
 | code size / speed | best | ~3-8% larger, slightly slower (more on M0+: r9 is a high register) |
 | toolchain | GCC or clang | clang (`-fropi -frwpi`); GCC only where it is proven (see §11) |
-| restrictions | none beyond §6.1 | no static initialisers in RW that point into code/ro (pexlink reports them; initialise at run time) |
+| restrictions | none beyond §6.1 | no absolute address in text/ro: **a table of pointers cannot be `const`** -- declare it `PEX_PTR_TABLE` (§6.2); pexlink refuses one in rodata, naming it |
 | preferred for | RAM loading, GCC builds, hot code | modules installed into the PEX flash partition |
 
 ### 6.1 Model A: relocated at install
@@ -187,12 +258,23 @@ address. The header's `PIC` flag says which one a file uses.
   - turns references to host symbols into **GOT** entries (§7);
   - **refuses** anything else (`MOVW/MOVT` absolute pairs, `R_ARM_THM_CALL` to
     an undefined symbol, TLS, ...), with a message saying which compiler flag
-    avoids it (e.g. `-mslow-flash-data`).
-- `RELOC` holds two lists of `u32 image_offset` of 32-bit words to which the
-  loader adds a base: `RO` words (in text/ro, base = where the code is placed;
-  patched before the image is written to flash or RAM) and `RW` words (in
-  data, base = code base for pointers into code/ro, RW base for pointers into
-  data -- each entry carries which: bit 31 of the offset = "points into RW").
+    avoids it. (0.6 correction: `-mslow-flash-data` and `-mpure-code` are what
+    *produce* absolute MOVW/MOVT pairs -- the message says to drop them;
+    literal-pool words are what model A relocates. `-fPIC` GOT forms are
+    refused with "use MODEL pic".)
+- `RELOC` holds two lists of 32-bit words to which the loader adds a base:
+  `RO` words (in text/ro; patched before the image is written to flash or RAM)
+  and `RW` words (in data). **Either kind may point into the code or into RW**
+  -- bit 31 says which, and the stored word is an offset within that segment
+  (§4.5). Model A code is full of `RO` words pointing into RW: a literal-pool
+  word holding the address of a global.
+- In RAM mode the loader places code and RW **separately** (both from the
+  pool's long-term side), not contiguously: the same rule then serves XIP,
+  where they cannot be contiguous. (The link is contiguous; nothing in the
+  code reaches data PC-relatively -- pexlink refuses it if something does.)
+- Calls to libgcc helpers (division, 64-bit, soft float) are linked into the
+  module from the toolchain's `libgcc.a` for the target: they are pure code,
+  so they suit either model (measured: no absolute words, also under ROPI).
 
 ### 6.2 Model B: position-independent (ROPI + RWPI)
 
@@ -201,7 +283,10 @@ address. The header's `PIC` flag says which one a file uses.
   `--target=thumbv6m-none-eabi -mcpu=cortex-m0plus -fropi -frwpi` (M0+), same
   `-ffunction-sections -fdata-sections -fno-common`; linked with the PEX
   linker script for model B: text+ro from address 0, RW (data+bss+GOT) as a
-  separate segment also from address 0.
+  separate segment (0.6: linked at 0x40000000 -- any address works, the code
+  never contains it; two segments at 0 would overlap in the ELF). The static
+  base is the start of that segment (`__pex_rw_start`), which is how lld
+  resolves `R_ARM_SBREL32`/`MOVW_BREL`.
 - **ROPI**: code and read-only data reach each other PC-relative, so text+ro
   is valid at any address with **no patching** -- the `RO` reloc list must be
   empty (pexlink refuses the file otherwise).
@@ -216,11 +301,17 @@ address. The header's `PIC` flag says which one a file uses.
   an ordinary callee-saved register in AAPCS, so saving/restoring it is
   enough); host API functions called *from* a module must not depend on r9 and
   must preserve it (they are ordinary AAPCS functions: they do).
-- Restriction: a static initialiser in RW pointing into text/ro
-  (`static const char *names[] = {...}` that is not `const` itself,
-  `static void (*fn)(void) = handler;`) needs a run-time fix-up under ROPI;
-  clang emits it into an init routine or pexlink lists it in `RW` relocs --
-  either way it never touches flash.
+- Pointers in initialised data: a pointer in RW to code/ro or to RW
+  (`static void (*fn)(void) = handler;`, `int *p = &x;`) is an absolute word in
+  RW; clang leaves it to the linker, pexlink lists it in the `RW` relocs, and
+  the loader fixes it in the instance's RW block -- it never touches flash.
+- **0.6, measured: a `const` table of pointers is an absolute word in
+  rodata** (clang under `-fropi` keeps `static const char *const names[]` and
+  function tables in `.rodata` with `R_ARM_ABS32`), which ROPI code cannot
+  hold: pexlink refuses it and names the table. Worse, clang's optimiser
+  promotes a *never-written* non-const static table to rodata too. The SDK's
+  `PEX_PTR_TABLE` (`__attribute__((used))` under `__ARM_ROPI`, empty in model
+  A) keeps such a table in RW: `static PEX_PTR_TABLE pexlua_reg_t fns[] = {...};`.
 - The image's `build_id` and signature cover exactly the bytes that run, so an
   installed model-B module can be re-verified in place at any time.
 
@@ -265,21 +356,42 @@ address. The header's `PIC` flag says which one a file uses.
   (`core`, `lua`, `bt`, `net`, `fs`, `sd`, `crypto`, `io`), each with its own
   `major.minor`, plus an overall `api_major.api_minor` in the PEX header.
 - Identification: `IMPORTS` lists `u32 name_hash` (FNV-1a 32 of the symbol
-  name) + `u16 group` + `u16 flags` (`WEAK`: may be absent -> GOT entry 0).
-  The host table is sorted by hash; collisions are rejected at firmware build
-  time. Names are kept in `DEBUG` for tools/messages.
-- Linking: each import gets a GOT slot in the module's RW data; code calls
-  through the slot (`pexlink` emits a 2-instruction veneer per import:
-  `ldr r12, [pc, #got]` ... `bx r12`, or the compiler's
-  `-mlong-calls`/`__attribute__((pex_import))` form). The loader fills the slots.
+  name) + `u16 group` + `u16 flags` (`WEAK`: may be absent -> GOT entry 0) +
+  the slot (§4.5). The host table is sorted by hash per group; collisions are
+  rejected when the tables are generated (0.6: `gen_host_api.py`, across all
+  groups). Names are kept in `DEBUG` for tools/messages.
+- **Single source (0.6) [D]**: `pex/host_api.json` lists every group and
+  symbol (prototype, since-minor, implementation name). `pex/tools/
+  gen_host_api.py` generates from it the SDK header `pex_api.h`, the import
+  veneers a module links, and the host's lookup tables (`pex_host_<group>.c`,
+  one per group so a host compiles only the groups it implements). It is the
+  file to diff for API breaks. (0.5 had the firmware export it; it is the
+  other way round: the firmware builds from it.)
+- Linking (0.6, as implemented): the SDK links a generated **veneer per host
+  symbol**, each in its own section so `--gc-sections` keeps only those a
+  module calls, together with its GOT slot (`.pex.got.<name>`, placed at the
+  start of RW). The veneer loads the slot and jumps -- model A M33: `ldr r12,
+  =slot; ldr pc, [r12]`; model B: `ldr r12, =slot(sbrel); add r12, r9; ldr
+  pc, [r12]`; M0+ (no `ldr` to r12): `push {r0,r1}; ldr r0, =slot; [add r0,
+  r9;] ldr r0, [r0]; str r0, [sp, #4]; pop {r0, pc}` -- transparent to
+  arguments (incl. stack ones) and returns; M33 clobbers only r12 (IP, as any
+  veneer may). pexlink finds the slots by their `__pex_got_<name>` symbols. The
+  loader fills them.
+- **Weak imports are per symbol**: `PEX_WEAK_IMPORT(sym)` in the module; its
+  slot stays 0 when the host lacks it and `pex_avail(sym)` tests the slot. A
+  group the host lacks (or has with another major) is acceptable when every
+  import from it is weak; otherwise the load is refused naming the group and
+  the symbol. Per group the file records the newest minor any of its imports
+  needs, so a module using only old symbols loads on an older host.
 - Compatibility: a minor bump only **adds** symbols; a major bump may change
   or remove them. The firmware refuses `api_major` mismatches and
   `api_minor` > its own, and lists the missing symbol by name if `DEBUG` is
   present.
-- The **Lua C API** is the biggest group and the reason PEX exists; it is
-  exported as-is (Lua 5.4.8, the firmware's `luaconf.h`: 64-bit integers
-  today), so the `lua` group's major follows the Lua version and number
-  configuration. **[Q5]**
+- The **Lua C API** raw group (`lua54_*`, §7.3 option C) is not in v1; the
+  curated `lua` group (`pexlua_*`) is. (0.6 correction: the gateway's Lua is
+  built with `LUA_32BITS=1` -- 32-bit integers and floats -- not 64-bit; the
+  `pexlua` signatures use `int64_t`/`double` and the shim narrows, which is the
+  point of option C.)
 
 ### 7.1 Thin abstraction layers (the "HAL groups") **[D]**
 
@@ -310,6 +422,10 @@ negative `PEX_E*` codes. Groups planned for v1:
 Each group is its own `major.minor`; a module imports only the groups it uses,
 and a firmware may omit groups (a build without SD has no `sd_*` symbols: weak
 imports become 0 and the module checks `pex_has(group)`).
+
+0.6: the groups of v1 and their ids are in §7.4; `gpio`/`i2c`/`spi`/`uart`/
+`pio`/`dma`/`timer`/`pwm`/`adc`/`crypto` above are still planned. `sd` is not
+a group of its own: `fs` covers `sd:/` paths (the Lua `file` semantics).
 
 ### 7.2 Memory: separate by lifetime, no handles **[D]**
 
@@ -356,7 +472,22 @@ Rules:
   arena keeps long-lived objects (modules) and short-lived ones apart internally.
 - Accounting: `pex_mem_stats()` per module (long-term bytes, pool use, scratch
   high-water mark) and for the pool as a whole (largest free run on each side),
-  exposed in `sys.info`.
+  exposed in `sys.info`. (0.6: in `pex.list`/`pex.info`, not `sys.info`, whose
+  reply buffer is full.)
+
+As implemented (0.6): the pool is one block given to `pex_init()`. The
+long-term side holds, besides the modules' own blocks, each instance's
+**record, metadata, RW block and (RAM mode) code** -- all tagged with the
+instance, so unload frees them in one sweep with any leaks; a shared code
+copy (model B, `REENTRANT`) is owned by the runtime and reference-counted.
+Blocks are first-fit with coalescing, 8-aligned (`PEX_MEM_DMA`: 32-aligned,
+carved fresh). The loader's temporaries (header, import list) are a scratch
+arena that ends before any module code runs. Scratch arenas end in LIFO
+order; an out-of-order end is refused with `PEX_EORDER` and logged with the
+module's name; an arena left open at unload is released. A host may allocate
+from the pool for itself (`pex_alloc_host`, e.g. an event queue shared by
+several modules). Pools are one long-term block (header + slots, a free list
+through the free slots).
 
 ### 7.3 Lua from native code: full C API, curated API, or both? **[D, Q5: option C]**
 
@@ -399,87 +530,222 @@ clear message) by any other. v1 ships `pexlua` first; the raw group can come
 later if a real module needs it. This keeps the door open to 32-bit Lua numbers
 without stranding modules.
 
+### 7.4 The v1 groups (0.6) **[D]**
+
+| id | group | in | covers |
+|---|---|---|---|
+| 1 | `core` | runtime | API/group versions (`pex_has`), target, time (`pex_ms`, `pex_us`), `snprintf`, panic-free assert, the libc and `__aeabi_mem*` helpers compilers call implicitly |
+| 2 | `log` | runtime | the host's log, prefixed with the module's name; hex dumps |
+| 3 | `mem` | runtime | §7.2: long-term, DMA, malloc family, scratch arenas, pools, stats |
+| 4 | `sched` | runtime | cooperative tasks on the main loop: every / after / post / cancel |
+| 5 | `pex` | runtime | the module's handle, `pex_ref`/`pex_unref`, `pex_app_exit` |
+| 8 | `json` | runtime (portable) | path lookups on a JSON text (`"a.b.2.c"`) and a streaming writer |
+| 6 | `board` | host, optional | board name, CPU clock, unique id |
+| 7 | `sys` | gateway | wall clock (SNTP), host name, firmware version, memory (C heap, Lua arena, PEX pool, stack) |
+| 9 | `bus` | gateway | register ops (request JSON in, reply JSON out, synchronous) and emit events |
+| 10 | `fs` | gateway | `lfs:/` and `sd:/` files: open/read/write/seek/size/close/stat/list/mkdir/remove/rename/media |
+| 11 | `net` | gateway | the HTTP(S) client: start (into a buffer or a `lfs:/` file), status, cancel, completion callback |
+| 12 | `bt` | gateway | LE central: scan table (filter by name prefix / 128-bit UUID), connect, GATT lookup by service + characteristic UUID + instance, read, write with/without response with completion, notify/indicate, MTU; events through a listener |
+| 16 | `lua` | Lua layer, optional | `pexlua` (§7.3, §9) |
+
+Exact signatures: **appendix A** (generated from `host_api.json`).
+Asynchronous results (the card, HTTP, BLE) arrive as **callbacks from the
+host's main loop, through the trampoline** -- never from an interrupt and
+never from inside a radio stack's callback: the host queues and dispatches.
+Rule for calls that may complete later (fs on `sd:/`): the return value is
+the result when the call completes at once (LittleFS always does);
+`PEX_EPENDING` when the callback will deliver it; `PEX_EAGAIN` when it would
+block and no callback was given. Callback argument structs (`pex_bt_event_t`,
+`pex_http_res_t`, `pex_fs_entry_t`) are valid during the callback only.
+Whatever a module registers with a group (ops, listeners, open files,
+requests) is released when it unloads (the runtime's `on_unload` hook).
+
+### 7.5 The runtime without Lua: what a host provides (0.6) **[D]**
+
+The runtime (`pex/runtime`) has **no dependency on Lua, on the gateway or on
+any firmware subsystem**: C11, `<string.h>`/`<stdio.h>` (`vsnprintf`), and
+one assembly file (the trampoline). It builds into any pico-sdk firmware with
+`pex_runtime_add(<target>)` (`pex/runtime/pex_runtime.cmake`). A host provides:
+
+- **memory**: the pool, one 8-aligned block, in `pex_config_t`;
+- **the port** (`port/pex_port.h`; `port/pico/pex_port_pico.c` for the
+  pico-sdk): `pex_port_ms`, `pex_port_us`, `pex_port_log` (one line),
+  `pex_port_code_sync` (barriers after writing code), `pex_port_stack_bounds`;
+- **optionally**: a signature verifier (`port/pico/pex_sig_uecc.c` with
+  micro-ecc and a key table), a trace word that survives a reset (hang
+  attribution), an `on_unload` hook, more groups (`pex_register_group`);
+- **a main-loop call** to `pex_poll()` (tasks, deferred exits);
+- **a HardFault hook** calling `pex_fault_attribute(frame)` (§8).
+
+From C: `pex_load()`/`pex_load_mem()` (a random-access reader: memory, flash,
+a file), `pex_start(m, cfg_json)`, `pex_stop()`, `pex_unload()`, `pex_sym()` +
+`pex_call()`, `pex_info()`/`pex_list_json()`, `pex_errmsg()` (why a load or
+unload was refused, in words). The Lua layer (`pex/lua`, `pexlua_add()`) is
+compiled only into firmware that has Lua.
+
 ## 8. Entry points and lifecycle
 
 - Every call into a module goes through the host's **export trampoline**: it
   bumps the module's `active` count (§8 unload), and for a `PIC` module sets r9
   to that instance's RW base (§6.2) and restores the caller's r9 on return.
+  (0.6, as implemented: `pex_call(m, fn, a0..a3)` in C keeps the books --
+  `active`, the stack of executing modules that `pex_self()` and the
+  allocators' owner tag come from, the trace word -- and `pex_tramp` (asm,
+  M33 and M0+) swaps r9 and calls. Up to **four word arguments**; `r0:r1`
+  come back, so 64-bit results work; more arguments go in a struct. Model A
+  gets r9 = its RW base too, which it ignores.)
 - `entry` points to `int pex_main(const pex_host_t *host, uint32_t reason, void *arg)`:
-  - `reason = PEX_INIT` after linking, once per load: set up, register;
-  - `PEX_LUA_OPEN` for a Lua module: push the module table (like
-    `luaopen_<name>`), `arg` = `lua_State *`;
-  - `PEX_APP_RUN` for an app (runs on the firmware's cooperative loop: must
+  - `reason = PEX_INIT` (1) after linking, once per load: set up, register;
+    a negative return refuses the load (`PEX_EINIT`, the module is freed);
+  - `PEX_LUA_OPEN` (2) for a Lua module: push the module table (like
+    `luaopen_<name>`), `arg` = `lua_State *`, return 1;
+  - `PEX_APP_RUN` (3) for an app (runs on the firmware's cooperative loop: must
     return or yield through the host API, same rules as a Lua script: no
-    blocking, watchdog);
-  - `PEX_DEINIT` before unload: free everything, cancel callbacks.
+    blocking, watchdog). **0.6: `arg` = the app's configuration as JSON text**
+    (from `pex.start`, the autostart entry or `pex_start()`), or NULL. The app
+    schedules its work (`sched`) and returns; it is **running while it has
+    tasks**, and exits when the last one ends or it calls `pex_app_exit()`;
+  - `PEX_DEINIT` (4) before unload: free everything, cancel callbacks;
+  - **`PEX_APP_STOP` (5, new in 0.6)**: the host asks a running app to stop
+    (`pex.stop`); the runtime then cancels whatever tasks are left.
 - `.data` is copied and `.bss` zeroed by the loader before `PEX_INIT`; static
-  constructors (`.init_array`) run by the loader, in order, if present.
+  constructors (0.6: the `INIT` section) run by the loader, in order;
+  destructors (`FINI`) in reverse after `PEX_DEINIT`.
+- States (0.6): `loaded` -> `running` (has tasks) -> `exited` / `stopped`;
+  `faulted` from any. A faulted module is never entered again (calls return
+  `PEX_EFAULT`); it can only be unloaded, and its `DEINIT`/`FINI` are skipped.
 - **Unload is an explicit API** (`pex.unload(name)` from Lua, `pex_unload()`
   from C) **[D, Q6]**, and it is **refused while any of the module's code is
   on a call stack**, or while it still has live references:
   - *on a stack*: every call into a module goes through the host's export
     trampoline, which increments the module's `active` count on entry and
     decrements it on return; callbacks the module registered (timers, BLE,
-    HTTP sinks) go through the same trampoline. As a safety net the loader
-    also scans the stacks it knows (core0 main stack, each Lua coroutine's C
-    stack, core1 if it runs PEX code) for return addresses inside the image
-    and refuses if it finds one;
+    HTTP sinks) go through the same trampoline. **The count is the check.**
+    (0.6: the proposed safety-net scan of the stacks for return addresses
+    into the image is only a debug option, off by default -- live frames hold
+    *stale* return addresses, and in the test suite a perfectly idle module
+    was refused by it.) A `longjmp` out of module code (a Lua error raised
+    inside it, a recovered fault) leaves frames behind; `pex_unwind(depth)`
+    puts the books right, and the Lua layer does it for every call;
   - *references*: Lua closures/tables holding its C functions (a userdata
-    anchor with `__gc` per module), registered callbacks, a running app --
-    counted through `pex_ref/pex_unref` in the host API.
+    anchor with `__gc` per module), anything else holding a pointer into it --
+    counted through `pex_ref/pex_unref` in the host API;
+  - *a running app* (0.6): its scheduled tasks count; `pex.stop` first.
+  Ops, listeners, open files and requests it registered with host groups do
+  **not** block unload: the host releases them (`on_unload`), and leaked
+  long-term blocks, pools and open scratch arenas are reclaimed (and logged).
   A refused unload says why (which stack / which reference). A module loaded
   only to run once (an app) can be marked `UNLOAD_ON_EXIT`.
 - Faults: a HardFault with the PC inside a PEX image is reported as
   `module name + build_id + offset` (symbolicated on a host with the `DEBUG`
-  section), then the firmware's normal fault path.
+  section), then the firmware's normal fault path. (0.6: also when the PC is
+  in host code called from a module -- reported as "in host code called from
+  it" with the caller's offset -- and a call through a NULL weak import is
+  attributed by LR. A host that can resume (the test hosts do) unwinds and
+  keeps running; the gateway records the fault and reboots, §15.)
+- **Hangs** (0.6): while module code runs the trampoline keeps the first word
+  of its build id in a host-provided word that survives a reset; a watchdog
+  reset with it set names the module on the next boot.
 
-## 9. Lua integration
+## 9. Lua integration (optional, 0.6)
 
-- `require 'name'` searches, in order: `lua/name.lua`, `pex/name.pex`
-  (LittleFS), `sd:/pex/name.pex`; a PEX hit is loaded (or found already
-  installed by build id), linked, and `PEX_LUA_OPEN` returns the table.
-- The Lua module's memory: its code is not in the arena at all (XIP); its C
-  data is in the PEX pool; only the table and closures it pushes live in the
-  Lua arena.
-- Scripts keep working unchanged if a module ships as both `.lua` and `.pex`;
-  the loader prefers the PEX for the running target, and falls back to the
-  Lua source when no PEX for this target/API exists.
+Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
+
+1. **The launcher** -- a global `pex` table:
+   `pex.load(name [, path]) -> info | nil, err` (finds
+   `lfs:/pex/<name>.<arch>.pex`; `PEX_INIT` runs), `pex.start(name [, cfg])`
+   (cfg a table, encoded with `json.encode`, or a JSON string), `pex.stop`,
+   `pex.unload` (refused while running, like the op), `pex.list()`,
+   `pex.info(name)` (state, version, build id, model, code/RW sizes, sharing,
+   active/refs/tasks, memory, exports, fault), `pex.call(name, export, ...)`.
+   A module loaded this way **belongs to the firmware, not to the VM**: an app
+   keeps running when the script that started it ends, and survives a VM
+   restart. A three-line script starts an app:
+
+   ```lua
+   pex.load("iti")
+   pex.start("iti", { poll_ms = 500 })
+   ```
+2. **`require 'name'`** (0.6 correction: the PEX is tried **first**, the 0.5
+   order contradicted "prefers the PEX"): `lfs:/pex/<name>.<arch>.pex` if it
+   exists and loads for this target/API, else the firmware's own `require`
+   (`lua/name.lua` ...). `PEX_LUA_OPEN` builds the table with the `lua` group.
+   The global `require` becomes a small **Lua** function that tail-calls the
+   firmware's own: a C wrapper would hide the calling script's frame, which is
+   how the gateway's `require` finds the caller's environment (sandbox).
+   A module loaded by `require` **belongs to the VM**: every Lua function it
+   registers holds a reference through one anchor userdata; when the last is
+   collected (or the VM closes) it is unloaded. `pex.unload(name)` drops
+   `require`'s cache entry, collects, then unloads.
+3. Every call from Lua into a module runs under `lua_pcall`: a Lua error
+   raised inside module code (`pexlua_checkint` on a bad argument) unwinds to
+   the bridge, which fixes the trampoline's books and re-raises from host
+   code. Yielding across a module call is not supported.
+
+- `sd:/pex/` is not searched in this version (§16).
+- The Lua module's memory: its code is not in the arena at all (XIP later;
+  RAM mode: the PEX pool); its C data is in the PEX pool; only the table and
+  closures it pushes live in the Lua arena.
 - First candidates from the iTi backend: `otap` (transfer engine + hex),
-  `bleota`, `json`-shaping of catalog listings, `registry` index.
+  `bleota`, `json`-shaping of catalog listings, `registry` index -- now as
+  native apps (`iti.m33.pex`, `otap.m33.pex`) serving their own ops.
 
 ## 10. Integrity and trust
 
-- `image_crc32` catches corruption cheaply; `SIG` is authoritative.
+- `file_crc32` (0.6: the whole file before `SIG`, §4.2) catches corruption
+  cheaply; `SIG` is authoritative.
 - `SIG`: `u16 alg` (1 = ECDSA P-256 over SHA-256), `u16 key_id`, then the
-  signature over **every byte of the file before `SIG`**. Same key and tooling
-  as OTA releases (`tools/ota_sign.py`), so a firmware trusts what its owner
-  signs.
+  signature over **every byte of the file before `SIG`** (raw `r||s`, 64
+  bytes). Same key and tooling as OTA releases (`tools/ota_sign.py`: `pexlink
+  link --sign` / `pexlink sign` use its key handling -- `--key`, else
+  `$BTGW_OTA_KEY`, else `~/.config/btgw/ota-signing.pem`), so a firmware
+  trusts what its owner signs. `key_id` n selects the host's n-th key (1 =
+  the OTA key on the gateway). The CRC excludes `SIG`, so a damaged signature
+  is caught by the signature check alone (tested).
 - Policy (firmware config) **[D, Q7]**: `signed-only` for production builds,
   `allow-unsigned` for development builds (the UI says so loudly). An unsigned
   module is never installed into the XIP partition of a `signed-only` device.
+  A file with `NEEDS_SIG` is refused unsigned under either policy. (0.6: the
+  gateway defaults to **signed-only** (`CONFIG_PEX_ALLOW_UNSIGNED=n`);
+  `pex.list` reports the policy.)
 - No sandbox: a PEX can do anything the firmware can. Signing is the security
   boundary; say so in the UI.
 
 ## 11. Tooling
 
-- `pex-sdk/`: headers (`pex.h` with the host API prototypes generated from the
-  firmware's export table, `pex_host_t`, entry reasons), a linker script per
-  target, a CMake function `pex_add_module(name SOURCES ... TARGETS armv6m
-  armv8m-main-fp)` that builds one `.pex` per target.
-- Compilers: model A with the pico-sdk's arm-none-eabi-gcc (as the firmware);
-  model B with clang (`-fropi -frwpi`; the pico-sdk already ships clang
-  toolchain files). `pex_add_module(... MODEL pic|reloc)` picks one; pic is the
-  default for modules meant for the flash partition. GCC's
-  `-msingle-pic-base -mpic-register=r9 -mno-pic-data-is-text-relative` may be
-  accepted for model B once a test proves it yields the same ROPI/RWPI shape.
-- `pexlink` (Python, no device code): ELF in -> `.pex` out; checks relocation
-  types, emits GOT/veneers, writes header, sections, CRC, optional signature;
-  `pexlink --dump file.pex` prints everything.
-- The firmware build exports `host_api.json` (symbol, group, version, hash)
-  — the single source for the SDK header and the on-device table, and the
-  file CI diffs to catch accidental API breaks.
-- mcusim: a `.pex` loader test per target (load, relocate, call, unload, fault
-  attribution) before any device.
+- **`pex/sdk/`** (0.6: in this repo, `pex/`, ready to become a submodule):
+  `include/pex.h` (format constants, entry reasons, errors, `pex_host_t`,
+  `PEX_EXPORT`, `PEX_WEAK_IMPORT`/`pex_avail`, `PEX_META_STR`,
+  `PEX_PTR_TABLE`), the generated `pex_api.h` (the host API prototypes),
+  linker scripts per target and model (`ld/pex_<m33|m0p>_<reloc|pic>.ld`), and
+  **`cmake/pex.cmake`**:
+
+  ```cmake
+  pex_add_module(hello SOURCES hello.c TARGETS m33 m0p MODEL pic|reloc
+                 [KIND lib|app|lua] [VERSION 1.2.3] [DESCRIPTION ".."]
+                 [FLAGS reentrant,unload-on-exit,needs-sig] [OUTPUT_DIR d]
+                 [SIGN [KEY pem] [KEY_ID n]] [CFLAGS ..] [INCLUDES ..])
+  ```
+
+  builds `<name>.<target>.pex` per target with custom commands that call the
+  cross compilers directly -- so it works inside any CMake project, a
+  pico-sdk firmware included, without touching its toolchain.
+- Compilers: model A with the pico-sdk's arm-none-eabi-gcc (15.2); model B
+  with clang + ld.lld (22; `-fropi -frwpi`, `--target=thumbv8m.main-none-eabi`
+  / `thumbv6m-none-eabi`); both link the toolchain's `libgcc.a` for the
+  target. pic is the default. GCC's `-msingle-pic-base -mpic-register=r9
+  -mno-pic-data-is-text-relative` may be accepted for model B once a test
+  proves it yields the same ROPI/RWPI shape.
+- `pexlink` (Python, no device code): `link` (ELF -> `.pex`: classifies every
+  relocation the linker kept and refuses what the model cannot carry, with the
+  symbol and the flag to change; builds IMPORTS from the kept GOT slots,
+  EXPORTS, INIT/FINI, META, DEBUG; CRC; `--sign`), `sign` (sign an existing
+  file), `dump` (`--dump`; `--relocs`, `--verify-key`).
+- `pex/host_api.json` is the single source (§7); `pex/tools/gen_host_api.py`
+  makes the header, veneers, host tables and appendix A.
+- Tests: `pex/test/run_sim.py` (both test hosts in mcusim + pexlink refusals +
+  host unit tests), `pex/test/gw_sim.py` (the gateway firmware in mcusim),
+  `pex/tools/pex_remote_test.py` (a real gateway over HTTP).
 
 ## 12. Versioning summary
 
@@ -514,6 +780,23 @@ without stranding modules.
   (`otap.armv8m-main-fp.pex`)?
 - ~~[Q9]~~ **[D]** The format, SDK and `pexlink` live in this firmware repo for
   now (`pex/`), structured so they can become a separate submodule later.
+- **[Q10] (0.6) Where the gateway's PEX pool comes from.** The SD build has
+  ~18 KB of C heap once booted and ~10 KB of its 864 KiB slot left. v1 takes
+  the pool lazily from the C heap (default up to 12 KB, keeping 6 KB free) --
+  enough for the test modules, not for the iTi backend. The Lua arena cannot
+  lend it on this branch: a VM restart re-initialises the whole arena. Options:
+  (a) shrink `CONFIG_LUA_HEAP_KB` and give that RAM to a static pool once the
+  iTi backend is native (the arena's own users shrink with it); (b) an
+  `lheap` region that survives a VM restart (needs `lheap.c`, which another
+  branch is reworking -- its TLS pool is the same idea).
+- **[Q11] (0.6) Late op replies.** The firmware's ops reply synchronously (a
+  WebSocket reply context has no generation check; the HTTP one is gone when
+  the handler returns), so a native op replies at once and reports completion
+  with an event -- the pattern the built-in ops use. Add a reply token with a
+  connection generation if a module needs true async replies?
+- **[Q12] (0.6) Loading from the SD card.** v1 loads from LittleFS (and memory/
+  flash); a card read is an asynchronous job, so `sd:/pex/` needs either a
+  load that completes through a callback, or a copy to LittleFS first. Which?
 
 ## 14. Making room: the PEX flash partition (done 2026-10-21)
 
@@ -574,3 +857,471 @@ format the new geometry). The layout now:
 | 0x200000 | 1776 KB | LittleFS |
 | 0x3BC000 | **256 KB** | **PEX** (id `0x7065780000000000`, family `data`; reserved, reported in `sys.info.fs.pex`) |
 | 0x3FC000 | 16 KB | BTstack NVM (unpartitioned) |
+
+## 15. Gateway integration (0.6, implemented)
+
+The runtime and the groups are in the gateway firmware behind `CONFIG_PEX`
+(default y): `src/pex/` holds everything new; existing files get one hook each.
+
+**Hooks** (for merging with other branches -- each is a few lines, guarded):
+
+| file | hook |
+|---|---|
+| `CMakeLists.txt` | the `if(CONFIG_PEX)` block (runtime, groups, pexlua, -Os for Lua's compile-time half and the HTTP server: below) |
+| `Kconfig` | `source "src/pex/Kconfig"` |
+| `src/api/ops.c` | `&op_module_pex` in `modules[]` |
+| `src/api/api.c` | `pex_gw_dispatch()` tried after the built-in ops, before `lbind_dispatch` (native modules' ops) |
+| `src/main.c` | `crumb(CRUMB_LOOP_PEX); pex_gw_poll();` in the main loop |
+| `src/util/crumb.c/.h` | `CRUMB_LOOP_PEX`; a weak `crumb_fault_hook(frame)` called from the HardFault handler |
+| `src/bt/le/central.c` | a weak `le_pex_event()` called where values, write completions and link changes are already reported (no change without PEX) |
+| `src/lua/lfile.c` | `pex_gw_lua_open(L)` at the end of `lfile_open` (Lua builds with `CONFIG_PEX_LUA`) |
+
+Not touched: `src/lua/lheap.*`, `lrt.*`, `lbind.c`, `lhttp.c`, `configs/*`.
+
+**Ops** (WebSocket and `POST /api/op`): `pex.list` (runtime, policy, pool,
+C-heap headroom, the previous boot's fault, modules), `pex.info {name}`,
+`pex.load {name | path [, as]}`, `pex.start`/`pex.run {name [, cfg]}`
+(`cfg` an object or a JSON string), `pex.stop`, `pex.unload`, `pex.call {name,
+fn, args:[..4]}`, `pex.files` (lfs:/pex/), `pex.autostart [{set:{...}}]`,
+`pex.faults`, `pex.faults_clear`, `pex.ops` (ops registered by modules).
+Events `pex.*`.
+
+**Autostart**: `cfg/pex_autostart.json`, read 3 s after boot:
+`{"modules":[{"name":"app","path":"pex/app.m33.pex","start":true,"cfg":{..}}]}`
+(`path` defaults to `pex/<name>.<arch>.pex`; `start` applies to apps).
+**Nothing PEX runs at boot unless this file lists it** -- no pool is taken
+either (the pool is allocated on first use).
+
+**Remote safety** (the board is reached over WireGuard only):
+- a module fault is attributed (`PEX FAULT: module X build B offset O`) and
+  persisted in a 64-byte record next to the crumb record (SCRATCH_X, not
+  cleared by a reset); the board then takes its normal fault path -- the
+  watchdog reboots it into the **same** image;
+- a hang inside module code is caught by the trace word (the trampoline
+  keeps the executing module's build-id word there) -- after the watchdog
+  reset the next boot names it;
+- either way the next boot appends the build id to `var/pex_faults.json`, and
+  autostart **skips** every listed build until `pex.faults_clear`;
+- a TBYB image that faults before it is confirmed reverts to the previous slot,
+  as any image does.
+Proven in mcusim (`pex/test/gw_sim.py`, scenarios `fault`, `hang`).
+
+**Signing**: signed-only by default; the OTA public key (`src/ota/ota_pubkey.h`)
+verifies modules signed by `pexlink --sign` with the OTA key.
+
+**Budget** (pico2w_sd, 2026-10-21): the runtime ~15 KB, the gateway groups and
+ops ~11 KB, pexlua ~4 KB of flash; RAM ~3 KB of tables + the pool. The SD
+image had ~8 KB of its slot left, so code off the hot path went `-Os`: Lua's
+compile-time half and cold libraries (code generator, parser, lexer,
+(un)dump, auxlib, base/math/table/utf8/coroutine libs, ldebug: -31 KB; the
+interpreter core and the string library stay -O3) and the HTTP server (-6 KB,
+bound by TCP and flash). ~10 KB of the slot are left. Pool: see Q10.
+
+## 16. What is left for the XIP version
+
+- `pex_install()` (stubbed: `PEX_ENOTSUP`): write a module into the PEX flash
+  partition (0x3BC000, 256 KB) and keep the index there (build id -> offset,
+  size, flags, signature state); boot-time lookup so an installed module
+  loads with no copy; reinstall/remove; compaction (a plain copy for model B;
+  model A is re-relocated to its new address). Model A: apply the `RO` list
+  for the flash address *before* programming; model B: program as-is.
+- Flash writes through the firmware's flash-safe path (core 1 parked, XIP
+  paused), erase granularity 4 KB, power-fail safety of the index (two copies
+  + sequence numbers), and re-verifying the signature in place (model B: the
+  bytes that run are the signed bytes).
+- `pex_load` from an installed entry: code pointer into XIP, RW from the pool.
+- Loading from `sd:/` (Q12), a larger pool (Q10), async op replies (Q11).
+- `stack_hint` from a call graph; `DEPS`; fat files (§4.4); the raw `lua54_*`
+  group if a module needs it; the planned HAL groups (gpio, i2c, spi, uart,
+  pio, dma, timer, pwm, adc, crypto).
+
+## 17. Changes in 0.6 (implementation feedback)
+
+- §1: design principle -- native apps first, Lua optional (launcher/glue).
+- §4.2: `image_crc32` -> `file_crc32`, covering the whole file before `SIG`
+  with its own 4 bytes as zero (0.5's CRC left the header and sections
+  unprotected); `entry` 0 = none; `stack_hint` is a lower bound in 1.0;
+  feature and flag bits numbered; `UNLOAD_ON_EXIT` flag.
+- §4.3/§4.5: `INIT`/`FINI` sections instead of `.init_array` in the image;
+  exact payload layouts; IMPORTS carries a per-group minor and each slot's
+  offset; EXPORTS a name table; DEBUG names imports for messages.
+- §6: reloc entries of BOTH lists carry the "points into RW" bit, and the
+  stored word is an offset within its target segment; model A code and RW are
+  placed separately; libgcc in modules; the MOVW/MOVT advice was backwards;
+  const pointer tables are refused under ROPI -- `PEX_PTR_TABLE`.
+- §7: imports through generated per-symbol veneers + GOT slots; per-symbol
+  weak imports; `host_api.json` in `pex/` is the source the firmware builds
+  from; the v1 groups (§7.4, appendix A); the runtime without Lua (§7.5);
+  the gateway's Lua is 32-bit (`LUA_32BITS`).
+- §8: `pex_call` + asm trampoline, four word arguments; `PEX_APP_RUN` takes
+  the config JSON; `PEX_APP_STOP`; app = running while it has tasks; unload
+  rules (tasks block, host registrations are released, leaks reclaimed); the
+  stack scan demoted to a debug option; hang attribution.
+- §9: the launcher API first; `require` tries the PEX first; ownership by
+  firmware vs VM; protected calls.
+- §10, §11: key handling and tool paths as built.
+- §13: Q10-Q12. §15: the gateway. §16: the XIP version.
+
+## Appendix A. The v1 host API (generated)
+
+API 1.0. Generated from `pex/host_api.json` by `pex/tools/gen_host_api.py markdown`; the JSON is authoritative.
+
+### A.1 `core` -- group 1, v1.0
+
+version and capability queries, time, libc string/memory helpers the compilers call implicitly
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `uint32_t pex_api_version(void)` | `a52df75a` | 1.0 | api_major << 16 \| api_minor of the host |
+| `uint32_t pex_has(uint32_t group)` | `fc1e99b5` | 1.0 | group major << 16 \| minor if the host provides it, else 0 |
+| `uint32_t pex_target(void)` | `4edbd95a` | 1.0 | the host's target id (spec section 5) |
+| `uint32_t pex_ms(void)` | `fc9c0847` | 1.0 | milliseconds since boot (wraps) |
+| `uint64_t pex_us(void)` | `ec5fc4ef` | 1.0 | microseconds since boot |
+| `int pex_snprintf(char *dst, size_t cap, const char *fmt, ...)` | `91c115e5` | 1.0 |  |
+| `int pex_vsnprintf(char *dst, size_t cap, const char *fmt, va_list ap)` | `1bf013d1` | 1.0 |  |
+| `void pex_assert_fail(const char *expr, const char *file, int line)` | `67bfca02` | 1.0 | logs and returns: asserts never stop the host |
+| `void *memcpy(void *dst, const void *src, size_t n)` | `a45cec64` | 1.0 |  |
+| `void *memmove(void *dst, const void *src, size_t n)` | `01081b8b` | 1.0 |  |
+| `void *memset(void *dst, int c, size_t n)` | `cb80cc06` | 1.0 |  |
+| `int memcmp(const void *a, const void *b, size_t n)` | `af3caa0a` | 1.0 |  |
+| `size_t strlen(const char *s)` | `58ba3d97` | 1.0 |  |
+| `int strcmp(const char *a, const char *b)` | `9d367094` | 1.0 |  |
+| `int strncmp(const char *a, const char *b, size_t n)` | `9de3c256` | 1.0 |  |
+| `char *strchr(const char *s, int c)` | `892f9553` | 1.0 |  |
+| `void __aeabi_memcpy(void *dst, const void *src, size_t n)` | `19dfcf93` | 1.0 |  |
+| `void __aeabi_memcpy4(void *dst, const void *src, size_t n)` | `6253e3e5` | 1.0 |  |
+| `void __aeabi_memcpy8(void *dst, const void *src, size_t n)` | `6653ea31` | 1.0 |  |
+| `void __aeabi_memmove(void *dst, const void *src, size_t n)` | `d34e9bd2` | 1.0 |  |
+| `void __aeabi_memmove4(void *dst, const void *src, size_t n)` | `8abf6b12` | 1.0 |  |
+| `void __aeabi_memmove8(void *dst, const void *src, size_t n)` | `8ebf715e` | 1.0 |  |
+| `void __aeabi_memset(void *dst, size_t n, int c)` | `eabd7659` | 1.0 |  |
+| `void __aeabi_memset4(void *dst, size_t n, int c)` | `f5416d97` | 1.0 |  |
+| `void __aeabi_memset8(void *dst, size_t n, int c)` | `e9415ab3` | 1.0 |  |
+| `void __aeabi_memclr(void *dst, size_t n)` | `2afdff6a` | 1.0 |  |
+| `void __aeabi_memclr4(void *dst, size_t n)` | `0bd900fa` | 1.0 |  |
+| `void __aeabi_memclr8(void *dst, size_t n)` | `ffd8ee16` | 1.0 |  |
+
+### A.2 `log` -- group 2, v1.0
+
+the host's log (UART/RTT/console), prefixed with the module's name
+
+```c
+#define PEX_LOG_ERR 0
+#define PEX_LOG_WARN 1
+#define PEX_LOG_INFO 2
+#define PEX_LOG_DEBUG 3
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `void pex_log(int level, const char *fmt, ...)` | `45e3fe57` | 1.0 |  |
+| `void pex_logv(int level, const char *fmt, va_list ap)` | `26e90df3` | 1.0 |  |
+| `void pex_log_hex(int level, const char *what, const void *data, size_t len)` | `2e1204b5` | 1.0 |  |
+
+### A.3 `mem` -- group 3, v1.0
+
+lifetime-separated memory (spec 7.2): long-term from the top of the PEX pool, LIFO scratch arenas from the bottom, fixed-size pools; all of a module's long-term blocks are freed at unload
+
+```c
+typedef struct pex_arena pex_arena_t;
+typedef struct pex_pool pex_pool_t;
+#define PEX_MEM_DMA 1u
+typedef struct {
+    uint32_t long_bytes;     /* long-term bytes held (incl. pools, malloc) */
+    uint32_t long_blocks;
+    uint32_t scratch_bytes;  /* scratch bytes reserved right now */
+    uint32_t scratch_peak;   /* high-water mark of scratch_bytes */
+    uint32_t pool_free;      /* whole PEX pool: bytes free */
+    uint32_t pool_largest;   /* whole pool: largest free run between the two sides */
+    uint32_t pool_size;
+} pex_mem_stats_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `void *pex_alloc_long(size_t size)` | `b1274ac7` | 1.0 |  |
+| `void *pex_alloc_ex(size_t size, uint32_t flags)` | `9055bf54` | 1.0 | PEX_MEM_DMA: 32-byte aligned, never scratch |
+| `void pex_free(void *p)` | `ebbbcf95` | 1.0 |  |
+| `void *pex_malloc(size_t size)` | `35714a2f` | 1.0 |  |
+| `void *pex_calloc(size_t n, size_t size)` | `54556321` | 1.0 |  |
+| `void *pex_realloc(void *p, size_t size)` | `efd54c0f` | 1.0 |  |
+| `pex_arena_t *pex_scratch_begin(size_t cap)` | `4025d489` | 1.0 | reserve cap bytes from the scratch side; NULL if they do not fit |
+| `void *pex_scratch_alloc(pex_arena_t *a, size_t size)` | `83da6339` | 1.0 | bump allocation, 8-aligned; NULL when the arena is full |
+| `int pex_scratch_end(pex_arena_t *a)` | `d35d4129` | 1.0 | frees the whole arena; arenas end in reverse order (PEX_EORDER otherwise) |
+| `size_t pex_scratch_avail(void)` | `9bc2eaab` | 1.0 |  |
+| `pex_pool_t *pex_pool_new(size_t obj_size, uint32_t count)` | `9ab1cdb0` | 1.0 |  |
+| `void *pex_pool_get(pex_pool_t *p)` | `a15e0322` | 1.0 |  |
+| `void pex_pool_put(pex_pool_t *p, void *obj)` | `8dd9a8b3` | 1.0 |  |
+| `void pex_pool_delete(pex_pool_t *p)` | `dd1f0bc1` | 1.0 |  |
+| `int pex_mem_stats(pex_mem_stats_t *out)` | `77e73e20` | 1.0 | the calling module's accounting plus the pool's |
+
+### A.4 `sched` -- group 4, v1.0
+
+cooperative tasks on the host's main loop: no RTOS; callbacks must return quickly
+
+```c
+/* Return PEX_TASK_AGAIN to stay scheduled, PEX_TASK_DONE to end the task. */
+typedef int (*pex_task_fn)(void *arg);
+#define PEX_TASK_AGAIN 0
+#define PEX_TASK_DONE 1
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_sched_every(uint32_t period_ms, pex_task_fn fn, void *arg)` | `22f945e6` | 1.0 | task id > 0, or a negative PEX_E* code |
+| `int pex_sched_after(uint32_t delay_ms, pex_task_fn fn, void *arg)` | `1c6b07ab` | 1.0 | one shot |
+| `int pex_sched_post(pex_task_fn fn, void *arg)` | `b10ddd65` | 1.0 | run on the next main-loop pass |
+| `int pex_sched_cancel(int id)` | `a2a03565` | 1.0 |  |
+| `uint32_t pex_sched_count(void)` | `79d75482` | 1.0 | tasks the calling module has scheduled |
+
+### A.5 `pex` -- group 5, v1.0
+
+the module's own handle, references (spec 8) and app control
+
+```c
+typedef struct pex_mod pex_mod_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `pex_mod_t *pex_self(void)` | `1bb7ea19` | 1.0 |  |
+| `void pex_ref(pex_mod_t *m)` | `e7a65318` | 1.0 | a live reference blocks unload |
+| `void pex_unref(pex_mod_t *m)` | `226345e5` | 1.0 |  |
+| `const char *pex_name(pex_mod_t *m)` | `66d85c54` | 1.0 |  |
+| `void pex_app_exit(int code)` | `823fd857` | 1.0 | an app ends: its tasks are cancelled after the current callback returns; UNLOAD_ON_EXIT apps are then unloaded |
+
+### A.6 `board` -- group 6, v1.0
+
+board identity; optional (a host may leave it out: import it WEAK)
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `const char *pex_board_name(void)` | `85c90f1d` | 1.0 |  |
+| `uint32_t pex_board_cpu_hz(void)` | `6c793b1f` | 1.0 |  |
+| `int pex_board_uid(uint8_t *out, size_t cap)` | `83d497e4` | 1.0 | bytes written |
+
+### A.7 `sys` -- group 7, v1.0
+
+system facts: wall clock, host name, firmware version, memory
+
+```c
+typedef struct {
+    uint32_t c_heap_free;     /* C heap (malloc) headroom, bytes */
+    uint32_t lua_used, lua_size; /* the Lua arena, 0 without Lua */
+    uint32_t pex_free, pex_size; /* the PEX pool */
+    uint32_t stack_max;       /* deepest main stack seen */
+} pex_sys_mem_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int64_t pex_sys_time(void)` | `65eb6e08` | 1.0 | Unix seconds, 0 until the clock is set (SNTP) |
+| `const char *pex_sys_hostname(void)` | `33f8f0d0` | 1.0 |  |
+| `const char *pex_sys_version(void)` | `8251eb9b` | 1.0 | firmware version, e.g. "1.201" |
+| `int pex_sys_mem(pex_sys_mem_t *out)` | `bdaabc0a` | 1.0 |  |
+
+### A.8 `json` -- group 8, v1.0
+
+small JSON helpers so modules need no parser of their own: path lookups ("a.b.0.c") on a JSON text, and a streaming writer into a caller buffer. Portable: part of the runtime, any host can register it.
+
+```c
+typedef struct {
+    char *buf;
+    size_t cap, len;
+    uint32_t depth, first, arr; /* per depth: first element pending, is an array */
+    int err;                 /* PEX_ENOMEM once it overflowed */
+} pex_jw_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `const char *pex_json_find(const char *json, const char *path, size_t *len)` | `83267749` | 1.0 | the raw value at path (object, array, string with quotes, number, literal), or NULL |
+| `int pex_json_str(const char *json, const char *path, char *out, size_t cap)` | `726e0d21` | 1.0 | 1 = a string (unescaped into out), 0 = absent or not a string |
+| `int pex_json_int(const char *json, const char *path, int64_t *out)` | `06aefebf` | 1.0 |  |
+| `int pex_json_num(const char *json, const char *path, double *out)` | `07860bc6` | 1.0 |  |
+| `int pex_json_bool(const char *json, const char *path, int *out)` | `a0c7b922` | 1.0 |  |
+| `int pex_json_len(const char *json, const char *path)` | `01f30f15` | 1.0 | elements of the array/object at path, -1 if none |
+| `void pex_jw_init(pex_jw_t *w, char *buf, size_t cap)` | `c618b37b` | 1.0 |  |
+| `void pex_jw_obj(pex_jw_t *w, const char *key)` | `7a7a4662` | 1.0 | open an object (key NULL inside an array or at the top) |
+| `void pex_jw_arr(pex_jw_t *w, const char *key)` | `9a217980` | 1.0 |  |
+| `void pex_jw_end(pex_jw_t *w)` | `fde289e2` | 1.0 |  |
+| `void pex_jw_str(pex_jw_t *w, const char *key, const char *v)` | `b5d8b6d8` | 1.0 |  |
+| `void pex_jw_strn(pex_jw_t *w, const char *key, const char *v, size_t n)` | `fa27a082` | 1.0 |  |
+| `void pex_jw_int(pex_jw_t *w, const char *key, int64_t v)` | `39952966` | 1.0 |  |
+| `void pex_jw_num(pex_jw_t *w, const char *key, double v)` | `e1f5b1db` | 1.0 |  |
+| `void pex_jw_bool(pex_jw_t *w, const char *key, int v)` | `7d78f7c5` | 1.0 |  |
+| `void pex_jw_null(pex_jw_t *w, const char *key)` | `46c448ac` | 1.0 |  |
+| `void pex_jw_raw(pex_jw_t *w, const char *key, const char *json)` | `178bc5d9` | 1.0 | a value that is JSON already |
+| `void pex_jw_hex(pex_jw_t *w, const char *key, const void *data, size_t n)` | `b1e9a032` | 1.0 | bytes as a hex string |
+| `int pex_jw_finish(pex_jw_t *w)` | `3388bc0a` | 1.0 | length, or PEX_ENOMEM if it did not fit |
+
+### A.9 `bus` -- group 9, v1.0
+
+serve the web UI directly: register ops (request JSON in, reply JSON out, synchronous) and emit events; a module's ops go away at unload
+
+```c
+/* Write the reply (a JSON value) into reply[0..cap) and return its length;
+   or return a negative PEX_E* with an error message in reply. */
+typedef int (*pex_op_fn)(void *arg, const char *params_json, char *reply, size_t cap);
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_bus_op(const char *name, pex_op_fn fn, void *arg)` | `cc8e80ef` | 1.0 | register op "ns.name"; built-in and Lua op names are refused |
+| `int pex_bus_op_remove(const char *name)` | `6b573198` | 1.0 |  |
+| `int pex_bus_emit(const char *topic, const char *json)` | `56ffcf23` | 1.0 | broadcast {"evt":topic,"data":json} to every WebSocket client |
+
+### A.10 `fs` -- group 10, v1.0
+
+files on lfs:/ (LittleFS) and sd:/ (the SD card) with the Lua file module's semantics. LittleFS calls complete synchronously; the card is asynchronous: pass a callback (it runs from the main loop later). With cb == NULL a call is synchronous and sd:/ answers PEX_EAGAIN.
+
+```c
+#define PEX_FS_READ 0
+#define PEX_FS_WRITE 1   /* create/truncate, parents created */
+#define PEX_FS_APPEND 2
+typedef void (*pex_fs_cb)(void *arg, int rc);  /* rc: result (>= 0) or PEX_E* */
+typedef struct { char name[65]; uint8_t is_dir; uint32_t size; } pex_fs_entry_t;
+typedef void (*pex_fs_list_cb)(void *arg, const pex_fs_entry_t *e);  /* e == NULL: the end */
+typedef struct { int lfs_ok; uint32_t lfs_free, lfs_total; char sd_state[12]; uint64_t sd_free, sd_total; } pex_fs_media_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_fs_open(const char *path, int mode, pex_fs_cb cb, void *arg)` | `f52ecee1` | 1.0 | a file handle (>= 0) |
+| `int pex_fs_read(int fd, void *buf, size_t n, pex_fs_cb cb, void *arg)` | `ea91349d` | 1.0 | bytes read (0 = end) |
+| `int pex_fs_write(int fd, const void *buf, size_t n, pex_fs_cb cb, void *arg)` | `77a32654` | 1.0 | bytes written; buf is copied before the call returns |
+| `int pex_fs_seek(int fd, uint32_t pos, pex_fs_cb cb, void *arg)` | `611c3a19` | 1.0 |  |
+| `int32_t pex_fs_size(int fd)` | `71fd8cf4` | 1.0 |  |
+| `int pex_fs_close(int fd)` | `b1874acb` | 1.0 |  |
+| `int pex_fs_stat(const char *path, pex_fs_entry_t *out, pex_fs_cb cb, void *arg)` | `cf8bf4cf` | 1.0 |  |
+| `int pex_fs_list(const char *dir, pex_fs_list_cb each, void *arg)` | `ec48c919` | 1.0 | entries, then each(arg, NULL); sync on lfs:/, from the main loop on sd:/ |
+| `int pex_fs_mkdir(const char *path, pex_fs_cb cb, void *arg)` | `d4324570` | 1.0 |  |
+| `int pex_fs_remove(const char *path, pex_fs_cb cb, void *arg)` | `09a95415` | 1.0 |  |
+| `int pex_fs_rename(const char *from, const char *to, pex_fs_cb cb, void *arg)` | `453fb04b` | 1.0 |  |
+| `int pex_fs_media(pex_fs_media_t *out)` | `0f1a5e0b` | 1.0 |  |
+
+### A.11 `net` -- group 11, v1.0
+
+the firmware's HTTP(S) client: start, status, cancel; the body into a module buffer or straight into a file (lfs:/)
+
+```c
+typedef struct {
+    const char *method;      /* NULL = GET */
+    const char *url;
+    const char *headers;     /* "Name: value\r\n" lines, or NULL */
+    const void *body; size_t body_len;
+    uint32_t timeout_ms;     /* 0 = 30 s */
+    uint8_t follow;          /* redirects to follow */
+    uint8_t insecure;        /* skip certificate checks */
+    void *buf; size_t buf_cap; /* the body goes here (truncated past cap) ... */
+    const char *to_file;     /* ... or into this file (lfs:/...) */
+} pex_http_req_t;
+typedef struct { int status; int err; uint32_t bytes; int64_t total; uint8_t done, truncated; char msg[48]; } pex_http_res_t;
+typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)` | `1cb6ef04` | 1.0 | request id (> 0); done runs once from the main loop |
+| `int pex_http_status(int id, pex_http_res_t *out)` | `48b3c23a` | 1.0 |  |
+| `int pex_http_cancel(int id)` | `49e97eb2` | 1.0 |  |
+
+### A.12 `bt` -- group 12, v1.0
+
+Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop)
+
+```c
+typedef struct {
+    uint8_t addr[6]; uint8_t addr_type; int8_t rssi;
+    char name[31]; uint8_t connectable, connected, n_uuid16;
+    uint16_t uuid16[4];
+    uint8_t mfg_len; uint8_t mfg[31];
+    uint32_t age_ms;
+} pex_bt_dev_t;
+#define PEX_BT_NOTIFY 1
+#define PEX_BT_INDICATE 2
+#define PEX_BT_READ 3
+#define PEX_BT_WRITE 4      /* a write completed: status = att_error | reason << 8 (0 = ok) */
+#define PEX_BT_LINK_UP 16
+#define PEX_BT_LINK_DOWN 17
+#define PEX_BT_READY 18     /* GATT discovered: pex_bt_find works */
+#define PEX_BT_FAILED 19    /* connect or discovery failed */
+typedef struct {
+    uint8_t addr[6]; uint8_t kind; uint8_t pad;
+    int16_t chr; int16_t status;
+    uint16_t len; const uint8_t *data;
+} pex_bt_event_t;
+typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
+#define PEX_BT_DISCONNECTED 0
+#define PEX_BT_CONNECTING 1
+#define PEX_BT_CONNECTED 2
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_bt_scan(uint32_t duration_ms, int active)` | `28bd958f` | 1.0 | 0 = until pex_bt_scan_stop |
+| `void pex_bt_scan_stop(void)` | `55276ce8` | 1.0 |  |
+| `int pex_bt_scanning(void)` | `97771765` | 1.0 |  |
+| `int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128)` | `faf0eced` | 1.0 | the scan table, filtered (either rule matches; NULLs = all); count |
+| `int pex_bt_uuids128(const uint8_t *addr, char (*out)[37], int max)` | `587ac1fb` | 1.0 |  |
+| `int pex_bt_addr(const char *str, uint8_t *addr)` | `572b4ac9` | 1.0 | parse "AA:BB:.." |
+| `void pex_bt_addr_str(const uint8_t *addr, char *out)` | `ba7cf7e5` | 1.0 | 18 bytes |
+| `int pex_bt_connect(const uint8_t *addr)` | `8395a478` | 1.0 | asynchronous: PEX_BT_LINK_UP then PEX_BT_READY (or PEX_BT_FAILED) |
+| `int pex_bt_disconnect(const uint8_t *addr)` | `cd6cf5fc` | 1.0 |  |
+| `int pex_bt_state(const uint8_t *addr, int *ready)` | `8610e32f` | 1.0 |  |
+| `int pex_bt_mtu(const uint8_t *addr)` | `a11b2112` | 1.0 |  |
+| `int pex_bt_find(const uint8_t *addr, const char *svc_uuid, const char *chr_uuid, int instance)` | `38866cfd` | 1.0 | a characteristic id (>= 0) or PEX_ENOENT |
+| `int pex_bt_props(const uint8_t *addr, int chr)` | `2368de80` | 1.0 | ATT property bits |
+| `int pex_bt_read(const uint8_t *addr, int chr)` | `07700cc2` | 1.0 | the value comes as a PEX_BT_READ event |
+| `int pex_bt_write(const uint8_t *addr, int chr, const void *data, size_t len, int with_response, int want_done)` | `7c740ca5` | 1.0 | want_done: a PEX_BT_WRITE event reports completion |
+| `int pex_bt_subscribe(const uint8_t *addr, int chr, int mode)` | `ee8e0976` | 1.0 | 0 off, 1 notify, 2 indicate |
+| `int pex_bt_listen(const uint8_t *addr, pex_bt_fn fn, void *arg)` | `ffc11b85` | 1.0 | events of one device (addr NULL: all); id |
+| `int pex_bt_unlisten(int id)` | `1f584f1a` | 1.0 |  |
+
+### A.16 `lua` -- group 16, v1.0
+
+pexlua: the curated, Lua-version-independent bridge (spec 7.3 option C); only present on hosts built with Lua, so import it WEAK unless the module is Lua-only. Errors raised here unwind the module call safely (the bridge calls modules under protection).
+
+```c
+typedef struct lua_State lua_State;
+typedef int (*pexlua_fn)(lua_State *L);
+typedef struct { const char *name; pexlua_fn fn; } pexlua_reg_t;
+#define PEXLUA_TNONE (-1)
+#define PEXLUA_TNIL 0
+#define PEXLUA_TBOOLEAN 1
+#define PEXLUA_TLIGHTUSERDATA 2
+#define PEXLUA_TNUMBER 3
+#define PEXLUA_TSTRING 4
+#define PEXLUA_TTABLE 5
+#define PEXLUA_TFUNCTION 6
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pexlua_gettop(lua_State *L)` | `8f6df23a` | 1.0 |  |
+| `void pexlua_settop(lua_State *L, int idx)` | `9e0a5ed6` | 1.0 |  |
+| `void pexlua_pushvalue(lua_State *L, int idx)` | `8ca85f2e` | 1.0 |  |
+| `int pexlua_type(lua_State *L, int idx)` | `bd239d59` | 1.0 |  |
+| `int64_t pexlua_checkint(lua_State *L, int arg)` | `1ae1135c` | 1.0 |  |
+| `int64_t pexlua_optint(lua_State *L, int arg, int64_t def)` | `dd7beeaf` | 1.0 |  |
+| `double pexlua_checknum(lua_State *L, int arg)` | `7d95d561` | 1.0 |  |
+| `const char *pexlua_checkstr(lua_State *L, int arg, size_t *len)` | `21284fea` | 1.0 |  |
+| `const char *pexlua_optstr(lua_State *L, int arg, const char *def, size_t *len)` | `ab744fd1` | 1.0 |  |
+| `int pexlua_toboolean(lua_State *L, int idx)` | `d014ab2c` | 1.0 |  |
+| `void pexlua_checktype(lua_State *L, int arg, int type)` | `1abbda8b` | 1.0 |  |
+| `void pexlua_pushint(lua_State *L, int64_t v)` | `6071fae2` | 1.0 |  |
+| `void pexlua_pushnum(lua_State *L, double v)` | `6f920caf` | 1.0 |  |
+| `void pexlua_pushstr(lua_State *L, const char *s)` | `a484c1fc` | 1.0 |  |
+| `void pexlua_pushbytes(lua_State *L, const void *p, size_t len)` | `894d2d38` | 1.0 |  |
+| `void pexlua_pushbool(lua_State *L, int b)` | `1ffb6761` | 1.0 |  |
+| `void pexlua_pushnil(lua_State *L)` | `6eae8d30` | 1.0 |  |
+| `void pexlua_newtable(lua_State *L, int narr, int nrec)` | `610cd697` | 1.0 |  |
+| `void pexlua_setfield(lua_State *L, int idx, const char *k)` | `5f43e0a9` | 1.0 | t[k] = top, pops it |
+| `int pexlua_getfield(lua_State *L, int idx, const char *k)` | `01dc255d` | 1.0 | pushes t[k], returns its type |
+| `void pexlua_seti(lua_State *L, int idx, int64_t i)` | `4f894c3a` | 1.0 |  |
+| `int pexlua_geti(lua_State *L, int idx, int64_t i)` | `1b0eb17e` | 1.0 |  |
+| `size_t pexlua_rawlen(lua_State *L, int idx)` | `d4ce40c4` | 1.0 |  |
+| `void pexlua_register(lua_State *L, const pexlua_reg_t *fns, uint32_t n)` | `f63d32fc` | 1.0 | adds n functions to the table on top; each call enters the module through the trampoline and holds a reference until collected |
+| `int pexlua_error(lua_State *L, const char *msg)` | `b1415ad5` | 1.0 | raises a Lua error; does not return |
+| `int pexlua_argerror(lua_State *L, int arg, const char *msg)` | `9334d3fb` | 1.0 |  |
+

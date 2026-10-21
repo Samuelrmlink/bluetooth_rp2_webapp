@@ -200,6 +200,9 @@ def main():
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/gwsim"))
     ap.add_argument("--scenarios", default="ota,quiet,suite,fault,hang")
     a = ap.parse_args()
+    for k in ("deploy", "old", "mods", "release", "mcusim"):
+        if getattr(a, k):
+            setattr(a, k, os.path.abspath(getattr(a, k)))
     sc = set(a.scenarios.split(","))
     w = os.path.abspath(a.work)
     shutil.rmtree(w, ignore_errors=True)
@@ -262,12 +265,12 @@ def main():
             r = smp("image", "upload", "--format", "any", rel, timeout=1800)
             check("smpmgr image upload into slot B", r.returncode == 0, f"{time.time() - t0:.0f} s {r.stdout[-200:]} {r.stderr[-200:]}")
             r = smp("image", "state-read")
-            m = re.findall(r"hash[^0-9a-fA-F]*([0-9a-fA-F]{64})", r.stdout)
-            hashes = [x.lower() for x in m]
-            check("state-read lists two images", len(hashes) >= 2, r.stdout[-300:])
-            new_hash = hashes[1] if len(hashes) >= 2 else ""
-            r = smp("image", "state-write", "--hash", new_hash) if new_hash else None
-            check("state-write --hash (test slot B)", r is not None and r.returncode == 0, r and (r.stdout + r.stderr)[-200:])
+            slots = {int(sl): hx.lower() for sl, hx in
+                     re.findall(r"slot=(\d+).*?HashBytes\(\s*'([0-9A-Fa-f]{64})'", r.stdout, re.S)}
+            check("state-read lists both slots", 0 in slots and 1 in slots, r.stdout[-300:])
+            new_hash = slots.get(1, "")
+            r = smp("image", "state-write", new_hash) if new_hash else None
+            check("state-write <hash> (test slot B)", r is not None and r.returncode == 0, r and (r.stdout + r.stderr)[-200:])
             mark = len(s.lines)
             smp("os", "reset", timeout=60)
             i = s.wait(r"^ota: slot A .* booted 1", 300, mark)
