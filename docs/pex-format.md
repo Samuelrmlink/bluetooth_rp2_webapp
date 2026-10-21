@@ -1,6 +1,6 @@
 # PEX — portable executable modules for microcontrollers (DRAFT 0.1)
 
-Status: **planning draft, nothing implemented.** Decisions marked **[D]**,
+Status: **planning draft 0.2, nothing implemented** (0.2: the owner's answers to Q1-Q9 folded in). Decisions marked **[D]**,
 open questions **[Q]** (collected at the end).
 
 ## 1. Why
@@ -23,7 +23,7 @@ the firmware's own exported API, and calls. Typical uses:
 - **moving optional features out of the firmware image**: the SD build has
   ~22 KB left in its 864 KB slot.
 
-Non-goals (v1): sandboxing (a PEX runs with the firmware's full privilege —
+Non-goals (v1): RISC-V targets (ids reserved, ARM only for now); sandboxing (a PEX runs with the firmware's full privilege —
 trust comes from signatures, §10); C++ exceptions/RTTI; dynamic linking
 between PEX files; running the same file on several architectures.
 
@@ -109,6 +109,15 @@ Each entry: `u16 type, u16 flags, u32 offset, u32 size`. Types (v1):
 Unknown section types with the `OPTIONAL` flag are skipped; unknown types
 without it make the loader refuse the file.
 
+### 4.4 Multi-target ("fat") files -- later **[D, Q8]**
+
+v1 files hold one target. A later minor revision may add a container -- a
+fixed prefix with `target = 0xFFFF` and a slice table (`target, offset, size`)
+of complete single-target PEX files. A loader then reads only the slice for
+the running architecture: **code for another architecture is never copied
+into executable memory or the XIP partition**, and the other slices are
+never read beyond their table entry.
+
 ## 5. Targets — one build per architecture **[D]**
 
 | id | Target | CPU / ISA | ABI | Chips |
@@ -122,9 +131,23 @@ without it make the loader refuse the file.
 
 Rules:
 
-- A module targets the **lowest** ISA it needs: an `armv6m` module is accepted
-  by an M33 firmware too (Thumb-1 runs on v8-M Mainline) if the firmware opts
-  in; the reverse is refused. **[Q1]**
+- **The target must match exactly** **[D, Q1]**: an M33 firmware loads only
+  `armv8m-main-fp` modules, an RP2040 firmware only `armv6m` ones -- no
+  "Thumb-1 runs on v8-M too" fallback.
+- **v1 is ARM only** **[D, Q2]**: the RISC-V ids stay reserved.
+- The short arch name is part of the file name **[D]**:
+  `<module>.<arch>.pex`, e.g. `otap.m33.pex`, `otap.m0p.pex`.
+
+| target id | short name (file name) |
+|---|---|
+| `armv6m` | `m0p` |
+| `armv8m-main-fp` | `m33` |
+| `armv8m-base` | `m23` |
+| `armv7em-fp` | `m4f` |
+| `rv32imac`, `rv32imac-zcb-zcmp` | `rv32`, `rv32zc` (reserved) |
+
+  The header's `target` field is authoritative; the name only lets a loader
+  pick the right file without opening the others.
 - FP across the host API is always passed in core registers (softfp/soft) so
   the API is identical for M0+, M33 and M4 builds. **[D]**
 - Chip-specific code (PIO, DMA channels, ...) goes through the host API, not
@@ -169,13 +192,16 @@ just as relocatable for a loader that places it once.
 - XIP needs a flash region the loader owns: on the gateway's 4 MB part there
   is none free today (Main A/B 864 KB each, Wi-Fi 256 KB, LittleFS 2032 KB), so
   **carve a `PEX` partition out of LittleFS** (e.g. 256 KB) in
-  `partitions.json`. **[Q3]** The loader keeps an index there (build id ->
+  `partitions.json` **[D, Q3]** -- after a full backup, see §14. The loader keeps an index there (build id ->
   placement), so a module installed once boots from flash with no copy.
 - Code is linked for address 0 and relocated to its flash address when
   installed; reinstall/compaction rewrites it. Flash writes stop XIP briefly
   (the firmware already handles this for LittleFS and OTA).
-- RP2350: code in SRAM needs the region executable (ACCESSCTRL/MPU allow it by
-  default for Secure); keep XN on the Lua arena regardless. **[Q4]**
+- RP2350: **PEX code runs in the Secure world, like the rest of the firmware**
+  **[D, Q4]** (a later format revision may move it to Non-secure behind CMSE
+  veneers -- the `target_features` CMSE bit is there for that). Code in SRAM
+  needs the region executable (ACCESSCTRL/MPU allow it by default for Secure);
+  keep XN on the Lua arena regardless.
 - The RW pool is separate from the Lua arena (so PEX data never fragments
   Lua) and sized in the firmware config.
 
@@ -203,6 +229,77 @@ just as relocatable for a loader that places it once.
   today), so the `lua` group's major follows the Lua version and number
   configuration. **[Q5]**
 
+### 7.1 Thin abstraction layers (the "HAL groups") **[D]**
+
+As with the Flipper's `furi`/`furi_hal`, a module never calls the pico-sdk or
+pokes registers: it calls **thin, chip-neutral wrappers** the firmware
+exports, each a small versioned group. Thin = a direct call into the existing
+firmware code with stable, plain-C types (fixed-width ints, `const uint8_t *`
++ length, opaque handles), no allocation behind the module's back, errors as
+negative `PEX_E*` codes. Groups planned for v1:
+
+| group | covers | notes |
+|---|---|---|
+| `core` | version info, `sys_ms`/`us`, `sleep`/yield, log, panic-free asserts | |
+| `mem` | `malloc/free/realloc` from the PEX pool, `memcpy`-family | never the Lua arena |
+| `sched` | cooperative tasks/timers on the main loop, deferred calls, events | the firmware is single-loop; no RTOS assumed |
+| `gpio` | pin claim/release (the existing `io` pin registry), dir, read/write, IRQ callback | refuses pins owned by SD/W5500/CYW43 |
+| `i2c`, `spi`, `uart` | bus claim, transfers (blocking-with-yield and async+callback) | shares the firmware's bus arbitration (`spibus`) |
+| `pio`, `dma` | claim a state machine/channel, load a program, FIFOs, IRQs | RP2040/RP2350 only; absent on other chips (weak imports) |
+| `timer`, `pwm`, `adc` | | |
+| `fs` | LittleFS + SD with the `file` semantics of the Lua API (`lfs:/`, `sd:/`) | |
+| `net` | the HTTP(S) client, sockets later | |
+| `bt` | the same operations as Lua's `bt.*` (scan table, connect, GATT, notify) | |
+| `crypto` | SHA-256, AES, ECDSA verify, RNG | |
+| `bus` | publish `profile.*` events, register ops (the Lua `bus`/`ops` equivalents) | so a native module can serve the web UI directly |
+| `lua` | see 7.2 | |
+| `pex` | load/unload/ref, introspection | |
+
+Each group is its own `major.minor`; a module imports only the groups it uses,
+and a firmware may omit groups (a build without SD has no `sd_*` symbols: weak
+imports become 0 and the module checks `pex_has(group)`).
+
+### 7.2 Lua from native code: full C API, curated API, or both? **[Q5 -- analysis]**
+
+**A. Export the whole Lua C API** (`lua_*`, `luaL_*`, as `lua.h`/`lauxlib.h`)
+
++ any existing C Lua library builds with no change; nothing to design;
++ zero overhead: a module calls straight into Lua;
+- the module's binary compiles in **this firmware's `luaconf.h`**: the size of
+  `lua_Integer` (64-bit today), `lua_Number` (double), `LUAL_BUFFERSIZE` and
+  the layout of `luaL_Buffer` (lives on the module's stack), the stack limits,
+  and every macro in `lua.h` (`lua_tonumber`, `lua_pop`, `lua_newtable`, ...
+  expand into calls with this Lua's internals). So:
+  - **switching the firmware to 32-bit Lua numbers** (the biggest single memory
+    saving left: roughly a third of the arena) breaks every module -> new
+    `lua` major, rebuild all;
+  - **a Lua upgrade** (5.4 -> 5.5) breaks every module the same way;
+- ~150 symbols in the host table (~1.2 KB of flash for the table; the
+  functions are in the firmware anyway);
+- a module can corrupt the Lua stack/state as easily as any C code can.
+
+**B. A curated `pexlua` API** (~30-40 functions)
+
++ fixed-width types in the signatures (`int64_t`, `double` explicitly, or
+  `int32_t` where that suffices), no macros that bake in internals, no
+  `luaL_Buffer` on the module's stack -> **survives a switch to 32-bit numbers
+  and a Lua upgrade** unchanged (the firmware's shim adapts);
++ can do what plain Lua C API cannot, cheaply: hand a Lua string's bytes to the
+  module without a copy, build a byte string straight from a module buffer,
+  register a whole function table in one call, check arguments with one call;
++ a smaller surface to keep stable and to document;
+- has to be designed and maintained; each call is one more indirection (a few
+  cycles -- noise next to what the module does);
+- existing C Lua libraries need porting to it.
+
+**C. Both** (recommended): `pexlua` as the normal, stable path that every
+module should use, and the raw API as a separate group `lua54_<numbers>` (e.g.
+`lua54_i64d`) for the rare module that needs something `pexlua` lacks -- a
+module importing it is tied to that exact Lua build and is refused (with a
+clear message) by any other. v1 ships `pexlua` first; the raw group can come
+later if a real module needs it. This keeps the door open to 32-bit Lua numbers
+without stranding modules.
+
 ## 8. Entry points and lifecycle
 
 - `entry` points to `int pex_main(const pex_host_t *host, uint32_t reason, void *arg)`:
@@ -215,9 +312,21 @@ just as relocatable for a loader that places it once.
   - `PEX_DEINIT` before unload: free everything, cancel callbacks.
 - `.data` is copied and `.bss` zeroed by the loader before `PEX_INIT`; static
   constructors (`.init_array`) run by the loader, in order, if present.
-- Unload is refused while the module has live references: a Lua table/closure
-  holding its functions, a registered callback, a running app. The loader
-  counts these through the host API (`pex_ref/pex_unref`). **[Q6]**
+- **Unload is an explicit API** (`pex.unload(name)` from Lua, `pex_unload()`
+  from C) **[D, Q6]**, and it is **refused while any of the module's code is
+  on a call stack**, or while it still has live references:
+  - *on a stack*: every call into a module goes through the host's export
+    trampoline, which increments the module's `active` count on entry and
+    decrements it on return; callbacks the module registered (timers, BLE,
+    HTTP sinks) go through the same trampoline. As a safety net the loader
+    also scans the stacks it knows (core0 main stack, each Lua coroutine's C
+    stack, core1 if it runs PEX code) for return addresses inside the image
+    and refuses if it finds one;
+  - *references*: Lua closures/tables holding its C functions (a userdata
+    anchor with `__gc` per module), registered callbacks, a running app --
+    counted through `pex_ref/pex_unref` in the host API.
+  A refused unload says why (which stack / which reference). A module loaded
+  only to run once (an app) can be marked `UNLOAD_ON_EXIT`.
 - Faults: a HardFault with the PC inside a PEX image is reported as
   `module name + build_id + offset` (symbolicated on a host with the `DEBUG`
   section), then the firmware's normal fault path.
@@ -243,8 +352,9 @@ just as relocatable for a loader that places it once.
   signature over **every byte of the file before `SIG`**. Same key and tooling
   as OTA releases (`tools/ota_sign.py`), so a firmware trusts what its owner
   signs.
-- Policy (firmware config): `signed-only` (default for production),
-  `allow-unsigned` (development; the UI says so loudly). **[Q7]**
+- Policy (firmware config) **[D, Q7]**: `signed-only` for production builds,
+  `allow-unsigned` for development builds (the UI says so loudly). An unsigned
+  module is never installed into the XIP partition of a `signed-only` device.
 - No sandbox: a PEX can do anything the firmware can. Signing is the security
   boundary; say so in the UI.
 
@@ -273,25 +383,67 @@ just as relocatable for a loader that places it once.
 | `module_version` | header | the module's author releases |
 | `build_id` | header | any byte of the image changes |
 
+## 14. Making room: the PEX flash partition (plan)
+
+Flash today (4 MB): table 64 KB | Main A 864 KB | Main B 864 KB | Wi-Fi 256 KB |
+LittleFS 2032 KB | BTstack NVM 16 KB. The PEX partition comes out of LittleFS.
+
+Why this is risky: the gateway's **WireGuard keys and Wi-Fi/Ethernet
+config live in LittleFS** (`cfg/`), and today WireGuard is the only way to
+reach the board. littlefs cannot shrink a mounted filesystem (it can only grow
+it), so resizing means reformatting -- if that goes wrong remotely, the board
+comes up without network config and is unreachable.
+
+Steps:
+
+0. **Backups** (done 2026-10-20, over HTTP, read-only):
+   `~/Work/btgw-backups/2026-10-20_2018-10.255.255.23/` -- `littlefs.tar`
+   (whole LittleFS via `/api/tar`: `cfg/` incl. `wireguard.json`,
+   `anker.json`, `wifi.json`, `eth.json`, `bt.json`; `lua/`, `cache/`, web
+   assets; 223 entries) + its SHA-256, and `sd/` (all SD files, 139 files,
+   16.8 MB). **Not covered yet**: the BTstack NVM (bonds, 16 KB at the end of
+   flash) and a raw image of the whole flash -- take both over SWD
+   (`picotool save -a` / OpenOCD `dump_image`) once the board is on the
+   debugger, right before step 3.
+1. Decide the size (e.g. 256 KB) and where: at the **end** of the LittleFS
+   region (before the BTstack NVM), so LittleFS keeps its start offset.
+2. Firmware support, in this order, each its own OTA-able release:
+   a. a **migration** in the firmware: when the partition table says LittleFS
+      got smaller, mount the old LittleFS, copy every file to the SD card
+      (`sd:/.lfs-migrate/`) and keep `cfg/` also in RAM, format the new smaller
+      LittleFS, copy everything back, verify (sizes + hashes), and only then
+      write a "migrated" marker; on any failure, keep running from the copy and
+      say so at `/api/fs`. With a card present this makes the resize
+      recoverable without a person;
+   b. `partitions.json` + `fs.h` + linker check updated together (as
+      `tools/run_tests.py` already enforces), the `PEX` partition declared.
+3. **First time: with the debugger attached** (the owner's call for this
+   board, 2026-10-20): flash the new partition table + firmware over SWD, watch
+   the migration over RTT, check WireGuard comes back, then restore anything
+   missing from `littlefs.tar` if needed.
+4. Afterwards, other boards can take the same release over OTA, because the
+   migration in 2a is proven.
+
 ## 13. Open questions
 
-- **[Q1]** Accept `armv6m` modules on M33 firmware (one build for both chips,
+- ~~[Q1]~~ **[D: exact target match]** Accept `armv6m` modules on M33 firmware (one build for both chips,
   slower code), or always require the exact target?
-- **[Q2]** RISC-V (Hazard3) as a first-class target now, or reserve the ids
+- ~~[Q2]~~ **[D: ARM only for now]** RISC-V (Hazard3) as a first-class target now, or reserve the ids
   and do ARM only in v1?
-- **[Q3]** Size of the `PEX` flash partition (carved from LittleFS: 256 KB?),
+- ~~[Q3]~~ **[D: carve a PEX partition after a full backup (§14)]** Size of the `PEX` flash partition (carved from LittleFS: 256 KB?),
   and whether XIP is the default from v1 or RAM-only first (simpler: no flash
   writes, but costs RAM — the thing we are short of).
-- **[Q4]** RP2350 Secure/Non-secure: run PEX code Secure like the firmware, or
+- ~~[Q4]~~ **[D: Secure world for now]** RP2350 Secure/Non-secure: run PEX code Secure like the firmware, or
   Non-secure behind the host API (real isolation, more work, CMSE veneers)?
 - **[Q5]** The Lua C API is large and tied to `luaconf.h` (64-bit integers
   today). Export it whole, or a smaller curated `pexlua` API that survives a
-  later switch to 32-bit Lua numbers?
-- **[Q6]** Reference counting for unload: automatic via the host API, or
+  later switch to 32-bit Lua numbers? -> trade-offs in §7.2; recommendation C
+  (curated `pexlua` first, raw API later as its own exact-match group).
+- ~~[Q6]~~ **[D: explicit unload, refused when on a stack (§8)]** Reference counting for unload: automatic via the host API, or
   modules are only unloaded at VM restart/reboot in v1?
-- **[Q7]** Signing required always, or `allow-unsigned` in development builds?
-- **[Q8]** Fat files (several targets in one `.pex`, Mach-O-universal style)
+- ~~[Q7]~~ **[D: unsigned allowed in development builds]** Signing required always, or `allow-unsigned` in development builds?
+- ~~[Q8]~~ **[D: fat files later; only the running slice is copied (§4.4)]** Fat files (several targets in one `.pex`, Mach-O-universal style)
   later, or always one file per target with a naming rule
   (`otap.armv8m-main-fp.pex`)?
-- **[Q9]** Where the format lives: this firmware repo, or a small separate
-  repo (`pex`) shared by the gateway, km003c and the mcusim loader tests?
+- ~~[Q9]~~ **[D]** The format, SDK and `pexlink` live in this firmware repo for
+  now (`pex/`), structured so they can become a separate submodule later.
