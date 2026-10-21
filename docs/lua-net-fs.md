@@ -300,6 +300,13 @@ the file's new contents.
   arena is in pieces. `alloc_fails` counts requests that found no block (Lua
   then collects and retries, so most are not errors). One walk of the arena.
 
+* `sys.restart_vm()` -> `true`: the Lua VM is rebuilt on the next main-loop
+  pass (not during the call -- yield after it): every script stopped, the arena
+  reset, the scripts that were running started again; Wi-Fi and Bluetooth stay
+  up (open links are dropped). Lua never moves an object, so this is the one
+  way to put a long-running set of scripts' arena back in one piece; nothing
+  in the arena survives it, so save what must (a file) first.
+
 ## 8. The Lua arena
 
 `src/lua/lheap.c`: one static block (`CONFIG_LUA_HEAP_KB`, 176 KB), address-
