@@ -1,6 +1,6 @@
 # PEX — portable executable modules for microcontrollers (DRAFT 0.1)
 
-Status: **planning draft 0.2, nothing implemented** (0.2: the owner's answers to Q1-Q9 folded in). Decisions marked **[D]**,
+Status: **planning draft 0.3** -- format and loader not implemented yet; all of Q1-Q9 decided; the PEX flash partition exists on the gateway (§14, done 2026-10-21). Decisions marked **[D]**,
 open questions **[Q]** (collected at the end).
 
 ## 1. Why
@@ -383,7 +383,31 @@ without stranding modules.
 | `module_version` | header | the module's author releases |
 | `build_id` | header | any byte of the image changes |
 
-## 14. Making room: the PEX flash partition (plan)
+## 13. Open questions
+
+- ~~[Q1]~~ **[D: exact target match]** Accept `armv6m` modules on M33 firmware (one build for both chips,
+  slower code), or always require the exact target?
+- ~~[Q2]~~ **[D: ARM only for now]** RISC-V (Hazard3) as a first-class target now, or reserve the ids
+  and do ARM only in v1?
+- ~~[Q3]~~ **[D: carve a PEX partition after a full backup (§14)]** Size of the `PEX` flash partition (carved from LittleFS: 256 KB?),
+  and whether XIP is the default from v1 or RAM-only first (simpler: no flash
+  writes, but costs RAM — the thing we are short of).
+- ~~[Q4]~~ **[D: Secure world for now]** RP2350 Secure/Non-secure: run PEX code Secure like the firmware, or
+  Non-secure behind the host API (real isolation, more work, CMSE veneers)?
+- ~~[Q5]~~ **[D: option C -- curated `pexlua` first, the raw API later as its own exact-match group]** The Lua C API is large and tied to `luaconf.h` (64-bit integers
+  today). Export it whole, or a smaller curated `pexlua` API that survives a
+  later switch to 32-bit Lua numbers? -> trade-offs in §7.2; recommendation C
+  (curated `pexlua` first, raw API later as its own exact-match group).
+- ~~[Q6]~~ **[D: explicit unload, refused when on a stack (§8)]** Reference counting for unload: automatic via the host API, or
+  modules are only unloaded at VM restart/reboot in v1?
+- ~~[Q7]~~ **[D: unsigned allowed in development builds]** Signing required always, or `allow-unsigned` in development builds?
+- ~~[Q8]~~ **[D: fat files later; only the running slice is copied (§4.4)]** Fat files (several targets in one `.pex`, Mach-O-universal style)
+  later, or always one file per target with a naming rule
+  (`otap.armv8m-main-fp.pex`)?
+- ~~[Q9]~~ **[D]** The format, SDK and `pexlink` live in this firmware repo for
+  now (`pex/`), structured so they can become a separate submodule later.
+
+## 14. Making room: the PEX flash partition (done 2026-10-21)
 
 Flash today (4 MB): table 64 KB | Main A 864 KB | Main B 864 KB | Wi-Fi 256 KB |
 LittleFS 2032 KB | BTstack NVM 16 KB. The PEX partition comes out of LittleFS.
@@ -424,26 +448,21 @@ Steps:
 4. Afterwards, other boards can take the same release over OTA, because the
    migration in 2a is proven.
 
-## 13. Open questions
+**Done on the gateway, 2026-10-21** (firmware 1.195, `feature/lfs-migrate`;
+details in `docs/flash-layout.md`): over SWD with the debugger attached, after a
+raw 4 MB dump incl. the BTstack NVM. The migration copied 193 files (681,571 B)
+to the SD card, verified them, formatted LittleFS to 1776 KB and restored all
+223 entries in 32 s; 222 byte-identical to the pre-migration backup (the 223rd,
+`var/wg_epoch.bin`, is WireGuard's boot counter), `cfg/` identical, WireGuard
+came back with the restored keys. Slot B was erased (pre-change firmware would
+format the new geometry). The layout now:
 
-- ~~[Q1]~~ **[D: exact target match]** Accept `armv6m` modules on M33 firmware (one build for both chips,
-  slower code), or always require the exact target?
-- ~~[Q2]~~ **[D: ARM only for now]** RISC-V (Hazard3) as a first-class target now, or reserve the ids
-  and do ARM only in v1?
-- ~~[Q3]~~ **[D: carve a PEX partition after a full backup (§14)]** Size of the `PEX` flash partition (carved from LittleFS: 256 KB?),
-  and whether XIP is the default from v1 or RAM-only first (simpler: no flash
-  writes, but costs RAM — the thing we are short of).
-- ~~[Q4]~~ **[D: Secure world for now]** RP2350 Secure/Non-secure: run PEX code Secure like the firmware, or
-  Non-secure behind the host API (real isolation, more work, CMSE veneers)?
-- ~~[Q5]~~ **[D: option C -- curated `pexlua` first, the raw API later as its own exact-match group]** The Lua C API is large and tied to `luaconf.h` (64-bit integers
-  today). Export it whole, or a smaller curated `pexlua` API that survives a
-  later switch to 32-bit Lua numbers? -> trade-offs in §7.2; recommendation C
-  (curated `pexlua` first, raw API later as its own exact-match group).
-- ~~[Q6]~~ **[D: explicit unload, refused when on a stack (§8)]** Reference counting for unload: automatic via the host API, or
-  modules are only unloaded at VM restart/reboot in v1?
-- ~~[Q7]~~ **[D: unsigned allowed in development builds]** Signing required always, or `allow-unsigned` in development builds?
-- ~~[Q8]~~ **[D: fat files later; only the running slice is copied (§4.4)]** Fat files (several targets in one `.pex`, Mach-O-universal style)
-  later, or always one file per target with a naming rule
-  (`otap.armv8m-main-fp.pex`)?
-- ~~[Q9]~~ **[D]** The format, SDK and `pexlink` live in this firmware repo for
-  now (`pex/`), structured so they can become a separate submodule later.
+| offset | size | partition |
+|---|---|---|
+| 0x000000 | 64 KB | partition table |
+| 0x010000 | 864 KB | Main A |
+| 0x0E8000 | 864 KB | Main B |
+| 0x1C0000 | 256 KB | Wi-Fi firmware |
+| 0x200000 | 1776 KB | LittleFS |
+| 0x3BC000 | **256 KB** | **PEX** (id `0x7065780000000000`, family `data`; reserved, reported in `sys.info.fs.pex`) |
+| 0x3FC000 | 16 KB | BTstack NVM (unpartitioned) |
