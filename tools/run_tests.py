@@ -1239,6 +1239,28 @@ def _fs_h_defines():
     return defs
 
 
+def t_lfs_migrate_sim():
+    """test/sim/lfs_migrate.py: the pre-PEX LittleFS migration in mcusim
+    (happy path, no card, full card, write errors, power cuts, TBYB). Needs a
+    build of a firmware from before the PEX partition: BTGW_OLD_BUILD=<dir>
+    (e.g. feature/lua-net-fs~4 = 1.180, pico2w_sd, -DBTGW_TBYB=OFF)."""
+    old = os.environ.get("BTGW_OLD_BUILD")
+    if not os.path.exists(os.path.expanduser("~/Work/mcusim/target/release/mcusim")):
+        return True, "skipped: no mcusim"
+    if not old or not os.path.exists(os.path.join(old, "btgw.elf")):
+        return True, "skipped: set BTGW_OLD_BUILD to a pre-PEX firmware build"
+    new = f"{BUILD_PREFIX}pico2w_sd"
+    if not os.path.exists(os.path.join(new, "btgw.elf")):
+        return False, "pico2w_sd not built (run with --tier 1)"
+    rc, out = sh(f"python3 test/sim/lfs_migrate.py --old {old} --new {new} "
+                 f"--work {BUILD_PREFIX}lfsmig --scenarios happy,nocard,full,writefail,powercut")
+    m = re.search(r"(\d+) checks, (\d+) failed", out)
+    if not m:
+        return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+    first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+    return rc == 0, f"{m.group(1)} checks" + (f", {m.group(2)} failed: {first[5:65]}" if rc else "")
+
+
 def t_ota_partition_layout():
     """partitions.json, fs.h and the linker script agree on the flash map.
 
@@ -1416,6 +1438,7 @@ def main():
         step(3, "SD builds in mcusim: identify/fail/retry, slices, /api/sd", t_sd_gateway_sim)
         step(3, "Lua file/json/http/sys + /api/op in mcusim (USB-NCM)", t_lua_net_fs_sim(False))
         step(3, "Lua over Wi-Fi + BLE in mcusim: SNTP, DNS, uuids128", t_lua_net_fs_sim(True))
+        step(3, "pre-PEX LittleFS migration in mcusim (SD copy, power cuts)", t_lfs_migrate_sim)
 
     if a.tier >= 2:
         step(2, "webapp renders and panes can be selected", t_webapp_dom)
