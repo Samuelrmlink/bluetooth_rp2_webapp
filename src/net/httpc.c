@@ -417,6 +417,17 @@ static bool header_is(const char *line, const char *name) {
     return strncasecmp(line, name, n) == 0 && line[n] == ':';
 }
 
+/* Whether the caller's header block (CRLF lines) has a header of this name. */
+static bool headers_have(const char *h, const char *name) {
+    while (h && *h) {
+        if (header_is(h, name)) { return true; }
+        const char *e = strstr(h, "\r\n");
+        if (!e) { break; }
+        h = e + 2;
+    }
+    return false;
+}
+
 static bool build_request(req_t *r, bool same_host) {
     const char *m = r->method;
     bool with_body = r->body_len > 0 || !strcmp(m, "POST") || !strcmp(m, "PUT") || !strcmp(m, "PATCH");
@@ -428,9 +439,11 @@ static bool build_request(req_t *r, bool same_host) {
     size_t cap = strlen(m) + r->u.path_len + strlen(hostport) + hl + 160;
     char *t = palloc(cap);
     if (!t) { return false; }
-    int n = snprintf(t, cap, "%s %.*s HTTP/1.1\r\nHost: %s\r\nUser-Agent: btgw\r\n"
+    /* "User-Agent: btgw" unless the caller names its own (sent below, with its headers) */
+    int n = snprintf(t, cap, "%s %.*s HTTP/1.1\r\nHost: %s\r\n%s"
                      "Accept-Encoding: identity\r\nConnection: close\r\n",
-                     m, (int)r->u.path_len, r->u.path, hostport);
+                     m, (int)r->u.path_len, r->u.path, hostport,
+                     headers_have(r->headers, "user-agent") ? "" : "User-Agent: btgw\r\n");
     /* The caller's headers, minus what we own -- and minus credentials when
      * a redirect has taken us to another host. */
     for (const char *h = r->headers; h && *h; ) {
