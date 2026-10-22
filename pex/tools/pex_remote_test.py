@@ -4,7 +4,7 @@ pex.* ops and a Lua launcher/require check, check the refusal cases, print a
 pass/fail table, and clean up after itself.
 
   pex/tools/pex_remote_test.py --base http://10.255.255.23 --files DIR
-        [--sd] [--http-url URL --http-file-url URL] [--bt [UUID]] [--keep]
+        [--sd] [--http-url URL --http-file-url URL] [--bt UUID --bt-chr UUID] [--keep]
 
 DIR is made by pex/test/remote/mkremote.py (the modules signed with the OTA
 key). What it does to the board: PUTs files under lfs:/pex/, lfs:/pextest_bad/
@@ -17,8 +17,9 @@ SMP, and reboots only with --allow-reboot.
 
   --sd        also the card part of the fs test (writes and removes sd:/pextest.txt)
   --http-url  a URL the gateway can fetch (net group test; skipped without it)
-  --bt        scan for a device advertising UUID (default: the iTi OTAP service),
-              connect, read, subscribe, write one ignored byte, disconnect
+  --bt        scan for a device advertising service UUID; with --bt-chr, a
+              notify/indicate + write characteristic of it to subscribe and write,
+              connect, read 180a/2a24, subscribe, write one byte (an echo is noted)
 
 The PEX flash partition (0.7): installs hello, arith, big and counter (and,
 from Lua, hello), runs them in place, compacts, replaces big with its model A
@@ -33,7 +34,6 @@ Exit status 0 when everything run passed.
 import argparse, json, os, sys, time, urllib.error, urllib.request
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "skip"
-OTAP = "49646561-7346-6c6f-6174-40882af10000"
 
 
 class GW:
@@ -288,7 +288,8 @@ def main():
     ap.add_argument("--sd", action="store_true")
     ap.add_argument("--http-url")
     ap.add_argument("--http-file-url")
-    ap.add_argument("--bt", nargs="?", const=OTAP)
+    ap.add_argument("--bt", metavar="SERVICE_UUID")
+    ap.add_argument("--bt-chr", metavar="CHAR_UUID")
     ap.add_argument("--keep", action="store_true")
     ap.add_argument("--allow-reboot", action="store_true",
                     help="reboot once (sys.reboot) to check that installed modules persist and model A runs in place")
@@ -493,16 +494,16 @@ def main():
             R.add("net (needs --http-url)", None)
 
         # ---- bt
-        if a.bt:
+        if a.bt and a.bt_chr:
             ok, r = gw.op("pex.load", {"name": "gwbt"})
             if R.add("bt.load", ok, err_text(r) if not ok else ""):
-                ok, r = gw.op("pex.start", {"name": "gwbt", "cfg": {"uuid": a.bt, "timeout": 40000}})
+                ok, r = gw.op("pex.start", {"name": "gwbt", "cfg": {"uuid": a.bt, "chr": a.bt_chr, "timeout": 40000}})
                 res = wait_op(gw, "pextest.bt", lambda x: x["result"] != "pending", 60)
-                R.add("bt.scan/connect/read/indicate/write", res and res["result"].startswith("ok"), res and res["result"])
+                R.add("bt.scan/connect/read/subscribe/write", res and res["result"].startswith("ok"), res and res["result"])
                 gw.op("pex.stop", {"name": "gwbt"})
                 gw.op("pex.unload", {"name": "gwbt"})
         else:
-            R.add("bt (needs --bt)", None)
+            R.add("bt (needs --bt and --bt-chr)", None)
 
         # ---- Lua: launcher + require
         gw.delete("pex_lua_result.json")

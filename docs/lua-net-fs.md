@@ -323,7 +323,7 @@ the file's new contents.
 ordered first fit with boundary tags. Each block starts with one word (its size
 and two flags: free, previous block free); a free block also has a footer and
 the links of an address-ordered free list. A live block costs 4 bytes (the
-first version's header was 16: on the iTi backend's ~1300 objects that was
+first version's header was 16: on a large BLE application's ~1300 objects that was
 21 KB of headers), free coalesces with both neighbours in O(1), and an
 allocation scans only the free blocks, lowest address first, so live data packs
 at the bottom and the free space stays in one piece above it.

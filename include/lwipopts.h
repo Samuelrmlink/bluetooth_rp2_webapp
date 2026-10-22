@@ -156,7 +156,7 @@ void sntp_time_set_us(uint32_t sec, uint32_t us);
    The defconfigs had drifted back to 48KB, and the Lua scripts then needed
    the room: the HTTP client's TLS session moved out of the Lua arena into a
    40KB pool of its own (CONFIG_NET_TLS_POOL_KB), and the arena could not
-   lose all of that -- the iTi updater backend peaks at ~150KB of arena
+   lose all of that -- a BLE firmware-update backend peaks at ~150KB of arena
    during an OTAP transfer. Measured in mcusim over an hour of that backend
    (HTTPS catalog refreshes and 237KB downloads to SD, OTAP, the web API
    polled every few seconds): MEM_SIZE peaks at 16.8KB and pbuf_pool at 6

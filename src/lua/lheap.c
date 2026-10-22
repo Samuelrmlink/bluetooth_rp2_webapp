@@ -16,7 +16,7 @@
  *
  *   - a live block costs one word (4 bytes on the RP2350) rather than the
  *     16-byte header of the first version, which on a heap of ~1300 Lua
- *     objects was 21 KB of the 176 KB arena (measured in mcusim with the iTi
+ *     objects was 21 KB of the 176 KB arena (measured in mcusim with a large BLE
  *     backend's two scripts running);
  *   - free coalesces with both neighbours in O(1) (the flags and the
  *     footer say where they are), instead of walking every block in the

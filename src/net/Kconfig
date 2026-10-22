@@ -86,8 +86,8 @@ config NET_TLS_POOL_KB
       text copies). An https:// request that finds the session taken waits
       for it before it connects.
 
-      Sized from measurement (mcusim, the iTi backend against Firebase and
-      Supabase, both verified): a session peaks at about 31-33 KB. Before
+      Sized from measurement (mcusim, a BLE firmware-update backend against cloud storage and
+      a REST database, both verified): a session peaks at about 31-33 KB. Before
       this pool the session came from the Lua arena, where a long-running
       script's objects left no 17 KB hole for the receive buffer and HTTPS
       failed "out of memory" with plenty of bytes free. In the shipped

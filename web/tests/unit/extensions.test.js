@@ -7,9 +7,9 @@ const { extensionNames, loadExtensions, EXT_DIR } = await import('../../js/exten
 
 test('extensions: folders only, safe names, in order', () => {
   assert.deepEqual(extensionNames([
-    { name: 'pi-switch', dir: true }, { name: 'readme.txt', size: 3 }, { name: 'a_b', dir: true },
+    { name: 'my-window', dir: true }, { name: 'readme.txt', size: 3 }, { name: 'a_b', dir: true },
     { name: '../x', dir: true }, { name: 'sp ace', dir: true }, null,
-  ]), ['a_b', 'pi-switch']);
+  ]), ['a_b', 'my-window']);
   assert.deepEqual(extensionNames(undefined), []);
 });
 

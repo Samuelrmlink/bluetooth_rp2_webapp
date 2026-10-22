@@ -703,7 +703,7 @@ static const char *fs_reader(lua_State *Ls, void *ud, size_t *size) {
  * not hold it.
  *
  * Streamed from flash (fs_reader), not read whole into src_buf first: that
- * needed one free block the size of the bytecode (up to ~7 KB for the iTi
+ * needed one free block the size of the bytecode (up to ~7 KB for a large
  * hub) on top of what the loaded code takes, and in an arena that had run
  * for a while there often was no such block -- "module '...': not enough
  * memory to load it" with tens of KB free in smaller pieces. */
@@ -2133,7 +2133,7 @@ void lrt_init(void) {
     /* Collect close behind the scripts. Lua's default (pause 200%) starts a
      * cycle only once the heap has DOUBLED since the last one: with ~80 KB
      * live in a 176 KB arena that let garbage fill the arena to the brim
-     * between cycles (mcusim, the iTi backend: 139 KB "used" of which 30 KB
+     * between cycles (mcusim, a BLE firmware-update backend: 139 KB "used" of which 30 KB
      * was dead, alloc failures and emergency collections every few seconds),
      * and every object made meanwhile was placed above the garbage instead of
      * in the holes it would have left. Pause 110% / step multiplier 400% /

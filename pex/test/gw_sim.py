@@ -11,14 +11,14 @@ The board is laid out as the real gateway is since 2026-10-21: partition
 table with LittleFS 1776 KB + PEX 256 KB, the old firmware (feature/lfs-
 migrate, 1.195) in slot A, slot B erased, a LittleFS holding cfg/ (Wi-Fi for
 mcusim's AP, a throwaway WireGuard key), an SD card (exFAT), the CYW43 with
-mcusim's virtual network and an iti-otap BLE peer.
+mcusim's virtual network and a generic BLE peer (an echo service, pex-test UUIDs).
 
   ota    smpmgr uploads the signed release into slot B, tests it, resets: the
          TBYB image must boot from slot B, then 'state-write --confirm' buys
          it. Checks LittleFS/SD/Wi-Fi/WireGuard came up and sys.info has fs.
   quiet  nothing PEX ran at boot (no pool taken, no module, no pex log).
   suite  pex/tools/pex_remote_test.py with --sd, --http-url (a server on the
-         PC) and --bt (the iti-otap peer).
+         PC) and --bt (the echo peer).
   fault  cfg/pex_autostart.json starts crashapp: the fault is attributed, the
          board reboots into the SAME image, the next boot skips the module.
   hang   the same with hangapp: a watchdog reset, the module named next boot.
@@ -26,8 +26,8 @@ mcusim's virtual network and an iti-otap BLE peer.
          in the flash file) during installs and during an overlapping
          compaction: after each restart the index is the old or the new one
          and every installed module verifies and runs in place; a resumed move.
-  budget the Lua arena after boot, with the Pi Switch driver (iti_ble_lua)
-         compiled and running, with a PEX launcher script, after a VM restart
+  budget the Lua arena after boot, with a BLE driver script (--driver-lua DIR,
+         --driver-script NAME) compiled and running, with a PEX launcher script, after a VM restart
          (reported: what the config sizes are chosen from).
   --via R   first OTA release R (the board's current one, 1.212) into slot B,
             then the new one into slot A -- the order the real board takes.
@@ -51,7 +51,8 @@ FWD = 18782
 # the board's forwards listen here: a loopback address of our own (SMP is udp 1337, fixed);
 # GWSIM_BIND / GWSIM_HTTP_PORT let two runs share the PC
 BIND = os.environ.get("GWSIM_BIND", "127.0.0.77")
-OTAP = "49646561-7346-6c6f-6174-40882af10000"
+BT_SVC = "7065782d-7465-7374-0000-000000000001"   # "pex-test": the peer's echo service
+BT_CHR = "7065782d-7465-7374-0000-000000000002"   # read/write/indicate, echoes writes
 FS_OFF, FS_BLOCKS = 0x200000, 444
 
 RESULTS = []
@@ -115,12 +116,23 @@ kind = "sim"
 dns_upstream = "none"
 backend = {{ kind = "mock", service = [] }}
 [[device.ble_peer]]
-profile = "iti-otap"
+profile = "generic"
 addr = "c0:11:22:33:44:55"
 random = true
-name = "FE_1234"
-model = "CRT"
+name = "PEXTEST"
+uuids = ["{bt_svc}"]
 rssi = -50
+[[device.ble_peer.service]]
+uuid = "180a"
+[[device.ble_peer.service.char]]
+uuid = "2a24"
+text = "PEX test peer"
+[[device.ble_peer.service]]
+uuid = "{bt_svc}"
+[[device.ble_peer.service.char]]
+uuid = "{bt_chr}"
+props = "read,write,indicate"
+echo = true
 [[device]]
 type = "sdcard"
 mode = "sdio"
@@ -384,8 +396,8 @@ def put_stress(a, s, n=20):
 
 
 def lua_budget(a, s):
-    """What Lua needs as a launcher: the arena after boot, with the Pi Switch
-    driver (iti_ble_lua) compiled and running, with a PEX launcher script,
+    """What Lua needs as a launcher: the arena after boot, with a BLE driver
+    script (--driver-lua, --driver-script) compiled and running, with a PEX launcher script,
     and after a VM restart (bytecode from the cache). Reported, not judged:
     the sizes in the configs come from these numbers."""
     def heap(label):
@@ -399,17 +411,17 @@ def lua_budget(a, s):
         return row
     rows = {"boot": heap("after boot (VM, bindings; no script)")}
     files = []
-    for root, _, fs in os.walk(a.pi_switch):
+    for root, _, fs in os.walk(a.driver_lua):
         for f in fs:
             if f.endswith(".lua"):
-                rel = os.path.relpath(os.path.join(root, f), a.pi_switch)
+                rel = os.path.relpath(os.path.join(root, f), a.driver_lua)
                 put("lua/" + rel, open(os.path.join(root, f), "rb").read())
                 files.append(rel)
     time.sleep(15)                       # the bytecode cache compiles changed modules on the next ticks
-    rows["compiled"] = heap(f"Pi Switch driver uploaded and compiled into the cache ({len(files)} files)")
-    ok, r = op("script.start", {"name": "pi_switch"})
+    rows["compiled"] = heap(f"the driver script uploaded and compiled into the cache ({len(files)} files)")
+    ok, r = op("script.start", {"name": a.driver_script})
     time.sleep(25)
-    rows["pi_switch"] = heap("Pi Switch driver running (scanning)" + ("" if ok else f" -- start failed {r}"))
+    rows["driver"] = heap("the driver script running" + ("" if ok else f" -- start failed {r}"))
     put("pex/app.m33.pex", open(os.path.join(a.mods, "pexmods", "pic", "app.m33.pex"), "rb").read())
     put("lua/pexlaunch.lua", b'pex.load("app")\npex.start("app", { ticks = 100000, period = 500 })\n'
                              b'while true do sys.sleep(1000) end\n')
@@ -418,11 +430,11 @@ def lua_budget(a, s):
     rows["launcher"] = heap("+ a PEX launcher script (app started, script kept alive)" + ("" if ok else f" -- {r}"))
     ok, r = op("script.vm_restart", timeout=30)
     time.sleep(10)
-    op("script.start", {"name": "pi_switch"})
+    op("script.start", {"name": a.driver_script})
     op("script.start", {"name": "pexlaunch"})
     time.sleep(25)
     rows["restarted"] = heap("after a VM restart, both started again (bytecode from the cache)")
-    for n in ("pexlaunch", "pi_switch"):
+    for n in ("pexlaunch", a.driver_script):
         op("script.stop", {"name": n})
     op("pex.stop", {"name": "app"})
     op("pex.unload", {"name": "app"})
@@ -439,13 +451,13 @@ def main():
     ap.add_argument("--mcusim", default=os.path.expanduser("~/Work/mcusim-agents/blegatt/target/release/mcusim"))
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/gwsim"))
     ap.add_argument("--scenarios", default="ota,quiet,suite,xip,fault,hang")
-    ap.add_argument("--pi-switch", default=os.path.expanduser("~/Work/iti_ble_lua/lua"),
-                    help="the Pi Switch driver's lua/ folder, for the 'budget' scenario")
+    ap.add_argument("--driver-lua", help="a BLE driver's lua/ folder, for the 'budget' scenario")
+    ap.add_argument("--driver-script", default="driver", help="the script in it to start (budget)")
     ap.add_argument("--via", help="first OTA this release (the board's current one) into slot B, then ours into slot A")
     ap.add_argument("--direct", help="development: boot this (non-TBYB) build's btgw.elf from slot A instead of "
                                      "the old firmware, and skip 'ota'")
     a = ap.parse_args()
-    for k in ("deploy", "old", "mods", "release", "mcusim", "direct", "via", "pi_switch"):
+    for k in ("deploy", "old", "mods", "release", "mcusim", "direct", "via", "driver_lua"):
         if getattr(a, k):
             setattr(a, k, os.path.abspath(getattr(a, k)))
     sc = set(a.scenarios.split(","))
@@ -495,7 +507,7 @@ def main():
     toml = os.path.join(w, "board.toml")
     open(toml, "w").write(TOML.format(pt=pt, wifi=os.path.join(a.deploy, "btgw_wifi_firmware.bin"), lfs=lfs, flash=flash,
                                       old=os.path.join(a.direct or a.old, "btgw.elf"), card=card, fwd=FWD, bind=BIND,
-                                      time="3000s"))
+                                      bt_svc=BT_SVC, bt_chr=BT_CHR, time="3000s"))
     if a.direct:
         sc.discard("ota")
     srv = TS(("127.0.0.1", HTTP_PORT), H)
@@ -553,7 +565,7 @@ def main():
         if "suite" in sc:
             r = run([sys.executable, os.path.join(PEX, "tools", "pex_remote_test.py"), "--base", f"http://{BIND}:{FWD}",
                      "--files", files, "--sd", "--http-url", f"http://{PC_IP}:{HTTP_PORT}/small.json",
-                     "--http-file-url", f"http://{PC_IP}:{HTTP_PORT}/big", "--bt", OTAP, "--allow-reboot"], timeout=2400)
+                     "--http-file-url", f"http://{PC_IP}:{HTTP_PORT}/big", "--bt", BT_SVC, "--bt-chr", BT_CHR, "--allow-reboot"], timeout=2400)
             open(os.path.join(w, "remote_test.log"), "w").write(r.stdout + r.stderr)
             for line in r.stdout.splitlines():
                 m = re.match(r"\s+(PASS|FAIL|skip) (.{34}) ?(.*)", line)
@@ -565,7 +577,10 @@ def main():
             put_stress(a, s)
 
         if "budget" in sc:
-            lua_budget(a, s)
+            if a.driver_lua:
+                lua_budget(a, s)
+            else:
+                check("lua budget (needs --driver-lua)", True, "skipped")
 
         if "xip" in sc:
             try:

@@ -22,7 +22,7 @@ at the end).
 
 **Design principle (0.6) [D]: native apps first; Lua is optional.** A PEX
 module does the work -- an app on the host's main loop serving its own ops and
-events (the iTi backend becomes `iti.m33.pex` + `otap.m33.pex`). The runtime
+events (a BLE firmware-update app becomes `app.m33.pex` + `otap.m33.pex`). The runtime
 needs no Lua: modules are loaded, started and stopped from C, from the
 firmware's ops (`pex.*`) and from `cfg/pex_autostart.json`. Where a firmware
 has Lua, it is a **launcher and glue** -- a three-line script can start an app
@@ -32,7 +32,7 @@ files.
 
 ## 1. Why
 
-Lua on the gateway is out of RAM. The iTi Updater backend alone keeps ~55 KB of
+Lua on the gateway is out of RAM. One BLE firmware-update backend alone keeps ~55 KB of
 bytecode resident in a 176 KB arena, and its code is loaded and dropped per
 job — which fragments the arena. The same logic as Thumb machine code would
 be a fraction of the size, would run 20-100x faster, and could execute **in
@@ -676,8 +676,8 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
    restart. A three-line script starts an app:
 
    ```lua
-   pex.load("iti")
-   pex.start("iti", { poll_ms = 500 })
+   pex.load("app")
+   pex.start("app", { poll_ms = 500 })
    ```
    0.7: `pex.install(name | path) -> info | nil, err` (into the flash
    partition, §16), `pex.installed() -> { info, ... }`, `pex.uninstall(name)`;
@@ -704,9 +704,9 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
 - The Lua module's memory: its code is not in the arena at all (installed:
   flash; RAM mode: the PEX pool); its C data is in the PEX pool; only the
   table and closures it pushes live in the Lua arena.
-- First candidates from the iTi backend: `otap` (transfer engine + hex),
-  `bleota`, `json`-shaping of catalog listings, `registry` index -- now as
-  native apps (`iti.m33.pex`, `otap.m33.pex`) serving their own ops.
+- First candidates from a BLE firmware-update backend: `otap` (transfer engine + hex),
+  image-header parsing, `json`-shaping of catalog listings, a registry index -- now as
+  native apps (`app.m33.pex`, `otap.m33.pex`) serving their own ops.
 
 ## 10. Integrity and trust
 
@@ -804,10 +804,10 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
   the pool lazily from the C heap (default up to 12 KB, keeping 8 KB free --
   pico_malloc panics on any failed allocation, so the pool is taken with
   newlib's own `malloc` and shrinks to the contiguous room, found in mcusim) --
-  enough for the test modules, not for the iTi backend. The Lua arena cannot
+  enough for the test modules, not for a full native app. The Lua arena cannot
   lend it on this branch: a VM restart re-initialises the whole arena. Options:
   (a) shrink `CONFIG_LUA_HEAP_KB` and give that RAM to a static pool once the
-  iTi backend is native (the arena's own users shrink with it); (b) an
+  large backend is native (the arena's own users shrink with it); (b) an
   `lheap` region that survives a VM restart (needs `lheap.c`, which another
   branch is reworking -- its TLS pool is the same idea).
 - **[Q11] (0.6, still open in 0.7) Late op replies.** The firmware's ops reply synchronously (a
@@ -971,7 +971,7 @@ lwIP trim came with feature/lua-net-fs):
 
 | region | 0.6 (fw 1.212) | 0.7 | what decides it |
 |---|---|---|---|
-| Lua arena (`CONFIG_LUA_HEAP_KB`) | 176 KB | **116 KB** | the launcher + the Pi Switch driver + a few scripts, measured below |
+| Lua arena (`CONFIG_LUA_HEAP_KB`) | 176 KB | **116 KB** | the launcher + a BLE driver script + a few scripts, measured below |
 | PEX pool (`CONFIG_PEX_POOL_KB`) | 10 KB from the C heap, on first use | **48 KB static** | module RW, their memory, RAM-loaded code (a 41 KB module loads into RAM) |
 | TLS pool (`CONFIG_NET_TLS_POOL_KB`) | -- (in the arena) | 40 KB | one TLS session, measured 31-33 KB (lua-net-fs) |
 | lwIP `MEM_SIZE` / pbuf pool | 48 KB / 24 | 32 KB / 16 | measured peaks 16.8 KB / 6 (lua-net-fs) |
@@ -983,8 +983,8 @@ Wi-Fi, WireGuard, SD and BLE up; `script.heap` after a full collection):
 | state | Lua live | Lua peak | largest free (116 KB arena) |
 |---|---|---|---|
 | after boot (VM + bindings, no script) | 19.7 KB | 38 KB | 91 KB |
-| Pi Switch driver uploaded, compiled into the bytecode cache | 19.7 KB | **93 KB** | 53 KB |
-| Pi Switch driver running (scanning) | 73.5 KB | 93 KB | 21 KB |
+| a BLE driver script uploaded, compiled into the bytecode cache | 19.7 KB | **93 KB** | 53 KB |
+| the BLE driver script running (scanning) | 73.5 KB | 93 KB | 21 KB |
 | + a PEX launcher script (`pex.load`/`pex.start`, kept alive) | 75 KB | 93 KB | 21 KB |
 | after a VM restart, both started again from the cache | 75 KB | 83 KB | 27 KB |
 

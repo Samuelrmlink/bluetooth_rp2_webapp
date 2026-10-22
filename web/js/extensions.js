@@ -8,8 +8,8 @@
 //
 // The manifest is the firmware's own directory listing (GET /api/fs/js/ext),
 // so adding or removing a module is an upload, never a change here. Another
-// project ships its window by uploading js/ext/<name>/... (iti_ble_lua's Pi
-// Switch does). A module sits two folders below js/, so it imports the app's
+// project ships its window by uploading js/ext/<name>/... (as an add-on
+// project does). A module sits two folders below js/, so it imports the app's
 // shared code as '../../controls/kit.js' and the like.
 //
 // A module that fails to load or register is reported in the Console and
