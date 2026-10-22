@@ -666,7 +666,7 @@
         {
           "name": "pex_http_start",
           "proto": "int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)",
-          "doc": "request id (> 0); done runs once from the main loop"
+          "doc": "request id (> 0); done runs once from the main loop. A User-Agent line in headers replaces the firmware's own (fw 1.231+)"
         },
         {
           "name": "pex_http_status",
@@ -746,7 +746,7 @@
         {
           "name": "pex_bt_connect",
           "proto": "int pex_bt_connect(const uint8_t *addr)",
-          "doc": "asynchronous: PEX_BT_LINK_UP then PEX_BT_READY (or PEX_BT_FAILED)"
+          "doc": "asynchronous: PEX_BT_LINK_UP then PEX_BT_READY (or PEX_BT_FAILED: also a connect the controller reports as failed or cancelled -- no link is made, fw 1.234+)"
         },
         {
           "name": "pex_bt_disconnect",
@@ -778,7 +778,7 @@
         {
           "name": "pex_bt_write",
           "proto": "int pex_bt_write(const uint8_t *addr, int chr, const void *data, size_t len, int with_response, int want_done)",
-          "doc": "want_done: a PEX_BT_WRITE event reports completion"
+          "doc": "want_done: a PEX_BT_WRITE event reports completion; len at most MTU - 3 and 252 (PEX_EINVAL beyond; 244 before fw 1.233)"
         },
         {
           "name": "pex_bt_subscribe",

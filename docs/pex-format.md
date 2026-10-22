@@ -1452,7 +1452,7 @@ typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);
 
 | symbol | FNV-1a | since | |
 |---|---|---|---|
-| `int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)` | `1cb6ef04` | 1.0 | request id (> 0); done runs once from the main loop |
+| `int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)` | `1cb6ef04` | 1.0 | request id (> 0); done runs once from the main loop. A User-Agent line in headers replaces the firmware's own (fw 1.231+) |
 | `int pex_http_status(int id, pex_http_res_t *out)` | `48b3c23a` | 1.0 |  |
 | `int pex_http_cancel(int id)` | `49e97eb2` | 1.0 |  |
 
@@ -1496,14 +1496,14 @@ typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
 | `int pex_bt_uuids128(const uint8_t *addr, char (*out)[37], int max)` | `587ac1fb` | 1.0 |  |
 | `int pex_bt_addr(const char *str, uint8_t *addr)` | `572b4ac9` | 1.0 | parse "AA:BB:.." |
 | `void pex_bt_addr_str(const uint8_t *addr, char *out)` | `ba7cf7e5` | 1.0 | 18 bytes |
-| `int pex_bt_connect(const uint8_t *addr)` | `8395a478` | 1.0 | asynchronous: PEX_BT_LINK_UP then PEX_BT_READY (or PEX_BT_FAILED) |
+| `int pex_bt_connect(const uint8_t *addr)` | `8395a478` | 1.0 | asynchronous: PEX_BT_LINK_UP then PEX_BT_READY (or PEX_BT_FAILED: also a connect the controller reports as failed or cancelled -- no link is made, fw 1.234+) |
 | `int pex_bt_disconnect(const uint8_t *addr)` | `cd6cf5fc` | 1.0 |  |
 | `int pex_bt_state(const uint8_t *addr, int *ready)` | `8610e32f` | 1.0 |  |
 | `int pex_bt_mtu(const uint8_t *addr)` | `a11b2112` | 1.0 |  |
 | `int pex_bt_find(const uint8_t *addr, const char *svc_uuid, const char *chr_uuid, int instance)` | `38866cfd` | 1.0 | a characteristic id (>= 0) or PEX_ENOENT |
 | `int pex_bt_props(const uint8_t *addr, int chr)` | `2368de80` | 1.0 | ATT property bits |
 | `int pex_bt_read(const uint8_t *addr, int chr)` | `07700cc2` | 1.0 | the value comes as a PEX_BT_READ event |
-| `int pex_bt_write(const uint8_t *addr, int chr, const void *data, size_t len, int with_response, int want_done)` | `7c740ca5` | 1.0 | want_done: a PEX_BT_WRITE event reports completion |
+| `int pex_bt_write(const uint8_t *addr, int chr, const void *data, size_t len, int with_response, int want_done)` | `7c740ca5` | 1.0 | want_done: a PEX_BT_WRITE event reports completion; len at most MTU - 3 and 252 (PEX_EINVAL beyond; 244 before fw 1.233) |
 | `int pex_bt_subscribe(const uint8_t *addr, int chr, int mode)` | `ee8e0976` | 1.0 | 0 off, 1 notify, 2 indicate |
 | `int pex_bt_listen(const uint8_t *addr, pex_bt_fn fn, void *arg)` | `ffc11b85` | 1.0 | events of one device (addr NULL: all); id |
 | `int pex_bt_unlisten(int id)` | `1f584f1a` | 1.0 |  |
