@@ -14,6 +14,11 @@ LAN address, or 10.255.255.23 through WireGuard):
   smpmgr --ip <addr> image state-read              # confirmed: true
 
 or in one go: smpmgr --ip <addr> --mtu 1200 upgrade <release>
+
+Over a lossy link (WireGuard): tools/smp_upload.py --ip <addr> <release> instead
+of `smpmgr image upload` -- smpmgr sends each UDP request once and gives up on
+the first lost packet; smp_upload.py sends it again (1.234 over the tunnel:
+1888 requests, 6 resent, 275 s), then the same state-write / reset / confirm.
 """
 import pathlib, re, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
