@@ -168,6 +168,16 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
             if (hci_event_gap_meta_get_subevent_code(pkt) == GAP_SUBEVENT_LE_CONNECTION_COMPLETE) {
                 bd_addr_t peer;
                 gap_subevent_le_connection_complete_get_peer_address(pkt, peer);
+                uint8_t st = gap_subevent_le_connection_complete_get_status(pkt);
+                if (st != ERROR_CODE_SUCCESS) {
+                    /* A connect that did not happen -- cancelled after its
+                     * timeout (0x02), or never established (0x3E). Taking it
+                     * for a connection left a phantom link: the device stayed
+                     * "connected" on a dead handle and no later connect to it
+                     * was ever tried. */
+                    le_on_connect_failed(st, peer);
+                    break;
+                }
                 le_on_connected(gap_subevent_le_connection_complete_get_connection_handle(pkt),
                                 peer,
                                 gap_subevent_le_connection_complete_get_peer_address_type(pkt));

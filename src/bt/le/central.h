@@ -46,6 +46,7 @@ gattdb_t *le_db_for_addr(const uint8_t *addr);
 void le_central_tick(void);
 
 /* Called by the HCI event handler in bt.c. */
+void le_on_connect_failed(uint8_t status, const uint8_t *addr);
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
 void le_on_disconnected(uint16_t con_handle);
 

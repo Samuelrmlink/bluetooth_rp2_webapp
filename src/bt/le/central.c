@@ -835,6 +835,21 @@ static void op_tick(void) {
     }
 }
 
+/* Called from bt.c's HCI handler: an LE Connection Complete with an error
+ * status (the controller's answer to gap_connect_cancel, or a connection that
+ * was never established). Nothing was connected; say so as the timeout does. */
+void le_on_connect_failed(uint8_t status, const uint8_t *addr) {
+    bool was_ours = s_connecting;
+    s_connecting = false;
+    char ev[96];
+    snprintf(ev, sizeof ev, "{\"addr\":\"%s\",\"reason\":\"hci status 0x%02x\"}", bd_addr_to_str((uint8_t *)addr), status);
+    /* a cancel after our own timeout was reported already (le_central_tick) */
+    if (was_ours || status != ERROR_CODE_UNKNOWN_CONNECTION_IDENTIFIER) {
+        api_emit("dev.connect_failed", ev);
+        LE_PEX(19, addr, -1, NULL, 0, -1);
+    }
+}
+
 /* Called from bt.c's HCI handler. */
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type) {
     s_connecting = false;
@@ -933,7 +948,13 @@ bool le_disconnect(const uint8_t *addr) {
     if (!d || !d->connected) {
         return false;
     }
-    gap_disconnect(d->con_handle);
+    if (gap_disconnect(d->con_handle) == ERROR_CODE_UNKNOWN_CONNECTION_IDENTIFIER) {
+        /* The controller has no such connection: a link we believed in that
+         * is gone (or never was). Tear it down here -- no event will. */
+        printf("bt: %s: handle 0x%04x unknown to the controller; dropping the link\n",
+               bd_addr_to_str((uint8_t *)addr), d->con_handle);
+        le_on_disconnected(d->con_handle);
+    }
     return true;
 }
 
