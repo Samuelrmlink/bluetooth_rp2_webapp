@@ -288,7 +288,8 @@ void le_central_tick(void) {
  * merely unlikely.
  */
 #define OP_QUEUE_DEPTH 4
-#define OP_DATA_MAX    244      /* an ATT_MTU 247 write, less the 3-byte header */
+#define OP_DATA_MAX    252      /* the LE build's ATT MTU ceiling (255, btstack_config.h) less the 3-byte header:
+                                 * a peer that negotiates 250 and writes 244-byte OTAP chunks + 2 needs 246 */
 #define OP_TIMEOUT_MS  5000     /* covers queued time AND time in flight */
 
 #define OP_READ      1
