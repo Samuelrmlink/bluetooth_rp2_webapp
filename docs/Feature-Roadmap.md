@@ -6,9 +6,9 @@ The board that is running today is firmware 1.239. Several items below are alrea
 
 ## How to change this list
 
-Add an item by copying the template at the bottom into Now, Next, Later, or Parked. Give it the next `R` number. Fill in why it belongs to a layer, what has to exist before it can ship, and the condition that ticks the box.
+Add an item by copying the template at the bottom into Now, Next, Later, or Parked. Fill in why it belongs to a layer, what has to exist before it can ship, and the condition that ticks the box.
 
-Move an item between headings to change its priority. Tick the box when the done condition is met, then move the whole entry under Done and add the date. Leave the entry there so the reason is still readable.
+The `R` number is the order of implementation. Now is the front of that order, then Next, then Later. An item that cuts in line takes the lower number, and each item it passes moves up one. Tick the box when the done condition is met, then move the whole entry under Done and add the date. Leave the entry there so the reason is still readable.
 
 The work for an item is committed on a feature branch. How those branches reach `dev` is in [Development.md](Development.md).
 
@@ -22,19 +22,19 @@ These are part of the architecture. They are not tasks.
 
 ## Now
 
-- [ ] **R3 — Build while a module is running, and keep a verified copy on the card**
+- [ ] **R1 — Build while a module is running, and keep a verified copy on the card**
   - Layer: 4 writes the candidate. Layer 1 accepts it into the PEX partition only after unload.
-  - Why: A new build of a module that is still running should finish. The executable partition is the copy the board is running, so the new file stays on the SD card until that module is unloaded. The card also keeps the last version marked verified, so a bad install can be put back. This is the first item to implement. It does not wait on R1 or R2.
-  - Needs: The build writes `sd/projects/<name>/build/<name>.<arch>.pex` whether or not that module is loaded. The page holds those bytes only until that write finishes. It does not copy the file to LittleFS `pex/` and it does not call `pex.install` while the module is loaded. `pex_install` already returns busy when the module runs from its installed copy. If it is loaded or running, the page asks to unload and replace it, or to leave it running. Unload is stop, then unload, including `pex.on_unload`. Install reads the candidate from the SD path, and only after unload succeeds. A failed unload leaves the running module and leaves the candidate on the card. If the module is not loaded, install proceeds from that SD file. "Mark verified" copies the candidate to `sd/pex/good/<name>.<arch>.pex` and writes a note beside it with the build id, the size, and when it was marked. The previous verified file stays until that copy finishes. "Restore verified" installs that file through the same unload-first gate. On a signed-only image the marked file is the signed bytes. An unsigned candidate can sit on the card, and install still refuses it until `pexlink sign`. A RAM run does not write the partition, and it does not start a second copy of a module that is already running. Replacing a module that Lua still holds needs the R1 image. Uploading these pages onto firmware 1.239 can unload the signed Anker module that is running, because that module has no Lua reference and unload already succeeds there.
+  - Why: A new build of a module that is still running should finish. The executable partition is the copy the board is running, so the new file stays on the SD card until that module is unloaded. The card also keeps the last version marked verified, so a bad install can be put back. This is the first item to implement. It does not wait on R2 or R3.
+  - Needs: The build writes `sd/projects/<name>/build/<name>.<arch>.pex` whether or not that module is loaded. The page holds those bytes only until that write finishes. It does not copy the file to LittleFS `pex/` and it does not call `pex.install` while the module is loaded. `pex_install` already returns busy when the module runs from its installed copy. If it is loaded or running, the page asks to unload and replace it, or to leave it running. Unload is stop, then unload, including `pex.on_unload`. Install reads the candidate from the SD path, and only after unload succeeds. A failed unload leaves the running module and leaves the candidate on the card. If the module is not loaded, install proceeds from that SD file. "Mark verified" copies the candidate to `sd/pex/good/<name>.<arch>.pex` and writes a note beside it with the build id, the size, and when it was marked. The previous verified file stays until that copy finishes. "Restore verified" installs that file through the same unload-first gate. On a signed-only image the marked file is the signed bytes. An unsigned candidate can sit on the card, and install still refuses it until `pexlink sign`. A RAM run does not write the partition, and it does not start a second copy of a module that is already running. Replacing a module that Lua still holds needs the R2 image. Uploading these pages onto firmware 1.239 can unload the signed Anker module that is running, because that module has no Lua reference and unload already succeeds there.
   - Done when: A build of a running module leaves the partition untouched and the new file on the card. The prompt installs only after unload succeeds. A file marked verified can be restored after a later candidate was installed.
 
-- [ ] **R1 — The running board matches the unload contract**
+- [ ] **R2 — The running board matches the unload contract**
   - Layer: 2 and 3, driven from layer 4.
   - Why: The README says Stop unloads a module, and that Lua gets `pex.on_unload` first. Firmware 1.239 refuses `pex.unload` while Lua still holds a reference, and the pages on the board only stop.
   - Needs: The hook in `pex/lua/pexlua.c` and the editor Stop path (`pex.stop`, then `pex.unload`) are in the tree. Shipping them is two separate steps. A new try-before-you-buy image carries the Lua half. Uploading the editor pages before that image is confirmed makes Stop unload the signed Anker module that is running, and the charger ops disappear until the next load and start. The signed file stays.
   - Done when: A confirmed image logs the Lua unload lines, the editor on the board says it stopped and unloaded, and a call into a module after that raises `PEX module '<name>' was unloaded`.
 
-- [ ] **R2 — One way for the editor to hear that a file changed**
+- [ ] **R3 — One way for the editor to hear that a file changed**
   - Layer: 1 notifies layer 4.
   - Why: Two browsers, or a phone that reconnects, do not share an editor buffer. LittleFS has no mtime, and the SD card's timestamps are fixed, so the page hashes open text files on a timer.
   - Needs: A `fs.changed` event `{path, op, size, hash}` for editor paths on the SD card and on LittleFS, from a second callback beside the one Lua already owns. `fs.stat` for up to 32 paths, for the reconnect case. Files over 256 KB send path, op, and size, and skip the hash. The poll in the editor goes away once those events arrive. This rides in the same image as R4. It does not merge two unsaved copies of one file.
