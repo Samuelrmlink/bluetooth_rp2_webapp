@@ -104,11 +104,11 @@ These are part of the architecture. They are not tasks.
   - Needs: R15. The option brings up BNEP and NAP. The netif joins the existing uplink choice (Wi-Fi, Ethernet, USB-NCM, WireGuard) instead of a second stack. Off in the default image.
   - Done when: A phone NAP connection can open the web app, and, when that uplink is selected, WireGuard comes up over it. The option is off unless the defconfig turns it on.
 
-- [ ] **R17 — A BLE peripheral a PEX module or Lua can reshape**
+- [ ] **R17 — BLE Peripheral**
   - Layer: 1, with the database filled from layer 2 or layer 3. New Kconfig option, default off.
-  - Why: `BT_LE` is the central: it scans and connects out. The local ATT database is a 1024-byte buffer Lua can rebuild with `gatt_server.begin`, `service`, `characteristic`, and `commit` (`src/bt/le/gattserver.h`). A commit swaps the buffer and signals Service Changed. PEX cannot build that database. SMP is UDP port 1337 only, so a phone cannot send `smpmgr` over BLE.
-  - Needs: The new option advertises a peripheral a peer can connect to, beside the central. A PEX module, and Lua, can replace the service and characteristic list while the board is running. One of those services can be MCUmgr's SMP service, so an OTA image can arrive over BLE as well as over UDP 1337. The central path to Anker and Pinecil stays. The default image leaves the option off.
-  - Done when: A PEX module and a Lua script can each publish a service a phone can read, change it without a reflash, and the BLE SMP service accepts an image upload. `BT_LE` central behavior is unchanged when the option is off.
+  - Why: The board should be able to act as a BLE peripheral. A phone connects to it, it can stand in for another device, and it can take an OTA image. `BT_LE` today is the central: it scans and connects out to Anker and Pinecil. The local ATT database is a 1024-byte buffer Lua can rebuild with `gatt_server.begin`, `service`, `characteristic`, and `commit` (`src/bt/le/gattserver.h`). A commit swaps the buffer and signals Service Changed. PEX cannot build that database. SMP is UDP port 1337 only, so a phone cannot send `smpmgr` over BLE.
+  - Needs: The new option advertises a peripheral beside the central. A PEX module, and Lua, can replace the service and characteristic list while the board is running. One of those services can be MCUmgr's SMP service, so an image can arrive over BLE as well as over UDP 1337. The central path stays. The default image leaves the option off.
+  - Done when: A PEX module and a Lua script can each publish a service a phone can read, change it without a reflash, and the BLE SMP service accepts an image upload. Central behavior is unchanged when the option is off.
 
 - [ ] **R18 — Wi-Fi link recovery**
   - Layer: 1.
