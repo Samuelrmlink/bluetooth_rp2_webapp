@@ -13,8 +13,9 @@ config PROTO_ANKER
       protects the generic Bluetooth core -- src/bt, src/ops, src/api,
       src/lua -- so the gateway stays useful for any peripheral. A byte codec
       that has been stable across three independent implementations is a
-      primitive, not a policy. Everything that actually churns (opcodes, field
-      dictionaries, the handshake, the keystream constants) is in lua/.
+      primitive, not a policy. The opcodes, field dictionaries, handshake and
+      keystream constants live in the Anker PEX module (and in lua/profiles,
+      which is the behavior spec that module was ported from).
 
       Turn this off for a build that will never talk to Anker hardware and
       reclaim the flash. The Lua bindings disappear with it.

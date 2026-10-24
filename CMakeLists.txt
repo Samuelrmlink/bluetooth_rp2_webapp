@@ -66,6 +66,7 @@ add_executable(btgw
     src/util/crumb.c
     src/util/libc_slim.c
     src/util/stackmark.c
+    src/launch.c
 )
 
 # Runs once per board (the pre-PEX filesystem move, fs_migrate.h): size over speed.
@@ -204,10 +205,18 @@ endif()
 # it is on a hot path a script can feel (a handshake is dominated by the
 # elliptic-curve and RSA arithmetic, which -Os barely slows).
 if(CONFIG_NET_HTTP_CLIENT)
-    target_sources(btgw PRIVATE src/net/httpc.c src/net/httpc_parse.c src/lua/lhttp.c)
+    target_sources(btgw PRIVATE src/net/httpc.c src/net/httpc_parse.c)
+    # lhttp.c is the Lua binding. The client itself does not call Lua, so a
+    # build without the runtime can still fetch.
+    if(CONFIG_LUA_ENABLE)
+        target_sources(btgw PRIVATE src/lua/lhttp.c)
+    endif()
     # Not on any hot path either: the client moves at most a few hundred KB/s.
-    set_property(SOURCE src/net/httpc.c src/net/httpc_parse.c src/lua/lhttp.c
+    set_property(SOURCE src/net/httpc.c src/net/httpc_parse.c
                  APPEND PROPERTY COMPILE_OPTIONS -Os)
+    if(CONFIG_LUA_ENABLE)
+        set_property(SOURCE src/lua/lhttp.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+    endif()
     if(CONFIG_NET_HTTP_TLS)
         target_link_libraries(btgw pico_mbedtls)
         foreach(_lib crypto x509 tls)
@@ -309,9 +318,16 @@ endif()
 # the gateway's groups and ops in src/pex/, pexlua when there is Lua.
 if(CONFIG_PEX)
     include(${CMAKE_CURRENT_LIST_DIR}/pex/runtime/pex_runtime.cmake)
-    pex_runtime_add(btgw GROUPS sys board bus fs net bt NO_PICO_PORT SIG_UECC)
+    set(_pex_groups sys board bus fs net bt)
+    if(CONFIG_PROTO_ANKER_CRYPTO)
+        list(APPEND _pex_groups codec)
+    endif()
+    pex_runtime_add(btgw GROUPS ${_pex_groups} NO_PICO_PORT SIG_UECC)
     target_sources(btgw PRIVATE ${CMAKE_CURRENT_LIST_DIR}/pex/runtime/port/pico/pex_port_pico.c
         src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c)
+    if(CONFIG_PROTO_ANKER_CRYPTO)
+        target_sources(btgw PRIVATE src/pex/pex_gw_codec.c)
+    endif()
     if(CONFIG_NET_HTTP_CLIENT)
         target_sources(btgw PRIVATE src/pex/pex_gw_net.c)
     endif()

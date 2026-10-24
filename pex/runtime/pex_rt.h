@@ -85,6 +85,19 @@ typedef struct {
     /* Called at unload (also of a faulted module), after PEX_DEINIT, before its
      * memory goes: host groups release what the module registered with them. */
     void (*on_unload)(pex_mod_t *m);
+    /* Outermost pex_call budget, milliseconds. 0: no slice (a stuck callback
+     * runs until the watchdog resets the board). When set, a call that runs
+     * longer is aborted: that module, and any module it had called into, is
+     * marked faulted, its tasks are cancelled, and the main loop continues.
+     * The port implements it (a timer IRQ). The watchdog still resets the
+     * board if the module runs with interrupts masked, because the timer
+     * cannot preempt that. */
+    uint32_t slice_ms;
+    /* After a slice abort, once per module that was faulted. Thread mode,
+     * after the books are unwound. Typically the same releases as on_unload
+     * (idempotent) plus a faults-file record. NULL if the host has nowhere
+     * to record it. */
+    void (*on_slice)(pex_mod_t *m);
     const pex_flash_t *flash;   /* NULL: no XIP partition (RAM mode only) */
     bool stack_scan;            /* debug option: also refuse unload when a word on the stack looks like a
                                    return address into the image. The trampoline's active count is the
@@ -186,6 +199,7 @@ typedef struct {
     uint32_t pc, lr;
     uint32_t offset;             /* of the faulting PC in the image (or of LR, in_host) */
     bool in_host;                /* PC was in host code called from the module */
+    bool hang;                   /* a slice abort, not a HardFault */
 } pex_fault_t;
 /* From a HardFault handler: frame = the stacked r0-r3,r12,lr,pc,xpsr. If the
  * fault belongs to a module (PC in an image, or a module on the call stack),

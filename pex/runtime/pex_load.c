@@ -3,6 +3,7 @@
  * unload, introspect, attribute faults. RAM mode: code and RW both come from
  * the long-term side of the PEX pool; temporary buffers from the scratch side.
  */
+#include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 #include "pex_internal.h"
@@ -259,12 +260,110 @@ static const void *lookup(const pex_group_t *g, uint32_t hash) {
     return NULL;
 }
 
+/* ---- slice: abort one outermost call that runs too long ------------------- */
+static jmp_buf s_slice_jb;
+static volatile uint8_t s_slice_on;
+static pex_mod_t *volatile s_slice_mod;
+static volatile uint32_t s_slice_pc, s_slice_lr;
+
+void pex_slice_note_disarmed(void) { s_slice_on = 0; }
+bool pex_slice_active(void) { return s_slice_on != 0; }
+
+static void __attribute__((noreturn, used)) pex_slice_resume(void) {
+#if defined(__ARM_FP) && (__ARM_FP & 4)
+    /* Drop a lazy FP frame the module owned. Exception return usually clears
+     * this already; clearing it here means the next host FP op cannot fault
+     * on a frame we are about to abandon. */
+    *(volatile uint32_t *)0xE000EF34u &= ~(1u << 0); /* FPCCR.LSPACT */
+#endif
+    longjmp(s_slice_jb, 1);
+}
+
+bool pex_slice_preempt(uint32_t *frame, uint32_t exc_return) {
+    if (!s_slice_on || !frame) { return false; }
+    if ((exc_return & 8u) == 0) { return false; } /* interrupted a handler, not the module */
+    s_slice_pc = frame[6];
+    s_slice_lr = frame[5];
+    s_slice_on = 0;
+    frame[6] = (uint32_t)(uintptr_t)pex_slice_resume & ~1u;
+    frame[7] = (frame[7] & (1u << 9)) | (1u << 24); /* keep the align bit, Thumb */
+    return true;
+}
+
+static void slice_fault(pex_mod_t *m, uint32_t pc, uint32_t lr, uint32_t off, bool in_host) {
+    pex_fault_t f;
+    memset(&f, 0, sizeof f);
+    f.valid = true;
+    f.hang = true;
+    memcpy(f.name, m->name, sizeof f.name);
+    memcpy(f.build_id, m->build_id, 16);
+    f.pc = pc;
+    f.lr = lr;
+    f.offset = off;
+    f.in_host = in_host;
+    s_fault = f;
+    char bid[33];
+    for (int i = 0; i < 16; i++) { snprintf(bid + 2 * i, 3, "%02x", m->build_id[i]); }
+    pex__logf(PEX_LOG_ERR,
+              "PEX HANG: module %s build %s ran past %lu ms %s offset 0x%lx (pc 0x%08lx); "
+              "it is faulted and its tasks are cancelled",
+              m->name, bid, (unsigned long)pex__cfg.slice_ms, in_host ? "in host code called from it, caller" : "at",
+              (unsigned long)off, (unsigned long)pc);
+}
+
+/* longjmp lands here. Memory writes the call made (depth, active, trace) are
+ * still in place; unwind puts them back. The jmp_buf is static, so a module
+ * that only pushes its own frames cannot overwrite it. */
+static uint64_t slice_recover(void) {
+    uint32_t pc = s_slice_pc, lr = s_slice_lr;
+    pex_mod_t *mods[PEX_MAX_DEPTH + 1];
+    uint32_t n = 0;
+    if (s_slice_mod) { mods[n++] = s_slice_mod; }
+    for (uint32_t i = 0; i < pex__depth && n < PEX_MAX_DEPTH + 1; i++) {
+        pex_mod_t *m = pex__stack[i];
+        bool seen = false;
+        for (uint32_t k = 0; k < n; k++) { if (mods[k] == m) { seen = true; } }
+        if (!seen) { mods[n++] = m; }
+    }
+    uint32_t off = 0;
+    bool in_host = false;
+    pex_mod_t *who = pex_mod_at(pc, &off);
+    if (!who) {
+        uint32_t loff = 0;
+        pex_mod_t *by_lr = pex_mod_at(lr & ~1u, &loff);
+        if (by_lr) { who = by_lr; off = loff; in_host = true; }
+        else if (n) { who = mods[n - 1]; in_host = true; }
+    }
+    pex_unwind(0);
+    for (uint32_t i = 0; i < n; i++) {
+        if (!is_mod(mods[i])) { continue; }
+        mods[i]->state = PEX_ST_FAULTED;
+        pex__sched_cancel_owner(mods[i]);
+    }
+    if (who && is_mod(who)) { slice_fault(who, pc, lr, off, in_host); }
+    if (pex__cfg.on_slice) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (is_mod(mods[i])) { pex__cfg.on_slice(mods[i]); }
+        }
+    }
+    return (uint64_t)(int64_t)PEX_EFAULT;
+}
+
 /* ---- calls ---------------------------------------------------------------- */
 uint64_t pex_call(pex_mod_t *m, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
     if (!m || m->state == PEX_ST_FAULTED || !fn) { return (uint64_t)(int64_t)PEX_EFAULT; }
     if (pex__depth >= PEX_MAX_DEPTH) {
         pex__logf(PEX_LOG_ERR, "pex: call depth %u exceeded calling %s", PEX_MAX_DEPTH, m->name);
         return (uint64_t)(int64_t)PEX_EBUSY;
+    }
+    /* One budget for the whole outermost call, including modules it calls.
+     * Nested pex_calls share it: the timer is already running. */
+    bool guard = pex__depth == 0 && pex__cfg.slice_ms != 0;
+    if (guard) {
+        s_slice_mod = m;
+        if (setjmp(s_slice_jb) != 0) { return slice_recover(); }
+        s_slice_on = 1;
+        pex_port_slice_arm(pex__cfg.slice_ms);
     }
     pex__stack[pex__depth++] = m;
     m->active++;
@@ -277,6 +376,9 @@ uint64_t pex_call(pex_mod_t *m, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t 
     if (pex__cfg.trace) { *pex__cfg.trace = prev; }
     m->active--;
     pex__depth--;
+    /* Outermost call only. Nested calls return while depth is still > 0 and
+     * leave the one budget running. */
+    if (s_slice_on && pex__depth == 0) { pex_port_slice_disarm(); }
     return r;
 }
 
@@ -288,6 +390,9 @@ void pex_unwind(uint32_t depth) {
         if (m->active > 0) { m->active--; }
     }
     if (pex__cfg.trace) { *pex__cfg.trace = pex__depth ? rd32(pex__stack[pex__depth - 1]->build_id) : 0; }
+    /* A HardFault longjmp leaves the slice armed. Disarm once the books are
+     * back at the outermost call, before anything else is entered. */
+    if (depth == 0 && s_slice_on) { pex_port_slice_disarm(); }
 }
 
 int pex_entry(pex_mod_t *m, uint32_t reason, void *arg) {
@@ -873,8 +978,9 @@ static size_t mod_json(pex_mod_t *m, char *dst, size_t cap, bool full) {
         for (uint32_t i = 0; i < m->n_exports; i++) { APPEND("%s\"%s\"", i ? "," : "", pex_export_name(m, i)); }
         APPEND("]");
         if (s_fault.valid && strcmp(s_fault.name, m->name) == 0) {
-            APPEND(",\"fault\":{\"offset\":%lu,\"pc\":%lu,\"lr\":%lu,\"in_host\":%s}", (unsigned long)s_fault.offset,
-                   (unsigned long)s_fault.pc, (unsigned long)s_fault.lr, s_fault.in_host ? "true" : "false");
+            APPEND(",\"fault\":{\"offset\":%lu,\"pc\":%lu,\"lr\":%lu,\"in_host\":%s,\"hang\":%s}",
+                   (unsigned long)s_fault.offset, (unsigned long)s_fault.pc, (unsigned long)s_fault.lr,
+                   s_fault.in_host ? "true" : "false", s_fault.hang ? "true" : "false");
         }
     }
     APPEND("}");

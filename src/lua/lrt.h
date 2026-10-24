@@ -45,6 +45,7 @@ size_t lrt_collect(void);
  * A draft that fails to load falls back to the tier beneath and reports, so a
  * bad edit never leaves nothing running. */
 bool lrt_start(const char *name, const char **err);
+bool lrt_script_running(const char *name);
 bool lrt_stop(const char *name);
 bool lrt_reload(const char *name, const char **err);
 
@@ -75,9 +76,8 @@ bool lrt_eval(const char *name, const char *chunk, char *out, size_t cap);
 
 size_t lrt_list_json(char *dst, size_t cap);
 
-/* cfg/autostart.json ({"scripts":[...]}, started once per boot a few
- * seconds after the runtime): add (enabled) or remove a name. `out` gets the
- * file's new JSON. */
+/* cfg/autostart.json ({"scripts":[...]}): add (enabled) or remove a name.
+ * `out` gets the file's new JSON. Starting the names is src/launch.c. */
 bool lrt_autostart_set(const char *name, bool enabled, char *out, size_t cap, const char **err);
 size_t lrt_stats_json(char *dst, size_t cap);
 /* sys.restart_vm(): the VM is rebuilt on the next lrt_tick, the running

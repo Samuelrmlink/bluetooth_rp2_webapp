@@ -502,8 +502,13 @@ static void op_dev_connect(const char *params, api_reply_fn reply, void *ctx, lo
     }
     /* addr_type comes from the scan record. Assuming public produces a connect
      * that simply never completes against a random-address peripheral. */
+    if (le_bringup_busy()) {
+        api_reply_err(reply, ctx, id, "busy",
+                      "a connection or its service discovery is still in progress");
+        return;
+    }
     if (!le_connect(d->addr, d->addr_type)) {
-        api_reply_err(reply, ctx, id, "busy", "another connect is already in flight");
+        api_reply_err(reply, ctx, id, "busy", "the radio is not taking connections yet");
         return;
     }
     api_reply_ok(reply, ctx, id, "{\"connecting\":true}");

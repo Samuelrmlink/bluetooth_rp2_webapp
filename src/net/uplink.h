@@ -43,6 +43,8 @@ void uplink_reselect(void);
 
 /* Is any uplink usable (an interface with a gateway)? WireGuard waits for it. */
 bool uplink_any_up(void);
+/* The active uplink's last ICMP probe was a reply. */
+bool uplink_ping_recent(void);
 struct netif *uplink_active(void);
 
 size_t uplink_status_json(char *dst, size_t cap);
@@ -73,6 +75,7 @@ static inline void uplink_init(void) {}
 static inline void uplink_tick(void) {}
 static inline void uplink_reselect(void) {}
 static inline bool uplink_any_up(void) { return false; }
+static inline bool uplink_ping_recent(void) { return false; }
 static inline struct netif *uplink_active(void) { return NULL; }
 
 #endif

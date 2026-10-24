@@ -23,6 +23,7 @@
 #include "api/api.h"
 #include "util/crumb.h"
 #include "util/stackmark.h"
+#include "launch.h"
 #include "api/ops.h"
 #include "fs/fs.h"
 #include "fs/fs_migrate.h"
@@ -168,7 +169,13 @@ void api_reply_err(api_reply_fn reply, void *ctx, long id, const char *code, con
     reply(out_buf, ctx);
 }
 
+/* central.c defines this when BLE is linked. A profile telemetry report is
+ * the host-visible end of an application handshake. On a build with no LE
+ * central the symbol stays null. */
+void le_on_profile_telemetry(const char *topic, const char *json) __attribute__((weak));
+
 void api_emit(const char *topic, const char *json) {
+    if (le_on_profile_telemetry) { le_on_profile_telemetry(topic, json); }
     /* Static and full-size: a gatt.discovered for a device with a real service
      * set runs to several kilobytes, and a 1 KB stack buffer here silently
      * truncated it mid-string -- which reaches the browser as a JSON parse
@@ -264,10 +271,10 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
 #if CONFIG_LUA_ENABLE
     lrt_mem_json(memj, sizeof memj);
 #endif
-    static char result[1536];
+    static char result[1664];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
-             "\"watchdog_reboot\":%s,\"radio_wait_max_us\":%lu,"
+             "\"watchdog_reboot\":%s,\"safe_mode\":%s,\"radio_wait_max_us\":%lu,"
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
@@ -277,6 +284,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
               * because a device reached over WireGuard has no RTT, and a
               * wedge that silently reboots is a wedge nobody learns about. */
              boot_after_watchdog ? "true" : "false",
+             launch_safe_mode() ? "true" : "false",
              /* The one wedge seen was inside the cyw43 ioctl wait. A single
               * wait of more than a few ms means the radio stopped answering,
               * which is the shape of that failure. */

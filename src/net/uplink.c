@@ -321,6 +321,12 @@ void uplink_init(void) {
     wg_set_uplink(uplink_active());
 }
 
+bool uplink_ping_recent(void) {
+    if (active < 0 || active >= N_CANDS) return false;
+    const upl_cand_t *m = &cands[active].m;
+    return m->answered && m->consec_loss == 0;
+}
+
 bool uplink_any_up(void) {
     for (int i = 0; i < N_CANDS; i++) {
         struct netif *n = cands[i].get();

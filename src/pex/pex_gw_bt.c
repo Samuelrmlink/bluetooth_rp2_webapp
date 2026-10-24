@@ -16,7 +16,13 @@
 
 #define LISTENERS 8
 #define QDEPTH 8
-#define QDATA 244
+/* ATT value ceiling on this build: HCI_ACL_PAYLOAD_SIZE minus the 4-byte
+ * L2CAP header minus the 3-byte ATT header, which is 252. The C1000's
+ * report fragments are that long. A 244-byte slot clipped them, the
+ * checksum failed, and the frame was dropped, so the station never
+ * published telemetry and its window never opened. The A2687's reports
+ * are 218 and were unaffected. */
+#define QDATA 252
 
 typedef struct { int id; pex_mod_t *mod; pex_bt_fn fn; void *arg; uint8_t addr[6]; bool any; } listener_t;
 typedef struct { pex_bt_event_t ev; uint8_t data[QDATA]; } qent_t;

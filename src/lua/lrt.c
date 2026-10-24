@@ -36,7 +36,7 @@
  * interned, so a module's constant "done" is the very object a long-lived
  * table may still hold after the module is dropped -- placed with the code it
  * would stay behind as an island in the space the module gave back (seen in
- * mcusim: after four OTAP jobs the 22.5 KB the TLS buffers had used was in
+ * mcusim: after four image-transfer jobs the 22.5 KB the TLS buffers had used was in
  * pieces, and the next catalog request failed "out of memory for TLS"). For a
  * new block `osize` is the object's type tag (lmem.c). */
 static void *lrt_place(void *ptr, size_t osize, size_t nsize) {
@@ -1135,6 +1135,12 @@ static bool load_tier(script_t *s, const char *src, size_t len, const char *tier
     return true;
 }
 
+bool lrt_script_running(const char *name) {
+    if (!s_ready || !name || !name[0]) return false;
+    script_t *s = find(name);
+    return s && s->running;
+}
+
 bool lrt_start(const char *name, const char **err) {
     if (!s_ready) { *err = "lua runtime is not up"; return false; }
     script_t *s = alloc_script(name);
@@ -1385,13 +1391,11 @@ size_t lrt_source_read(const char *name, size_t offset, char *dst, size_t cap,
 
 /* --- the scheduler -------------------------------------------------------- */
 /* --- autostart ------------------------------------------------------------
- * cfg/autostart.json = {"scripts":["name", ...]}: started once per boot,
- * AUTOSTART_DELAY_MS after the runtime came up (the network and Bluetooth
- * are still settling before that), in order. Not again after a VM restart:
- * script.vm_restart {resume=true} is what brings scripts back then. A name
- * that fails to start is logged and the rest still start. */
+ * cfg/autostart.json = {"scripts":["name", ...]} is still the file
+ * script.autostart reads and writes. Starting it is src/launch.c, which
+ * uses this file only while cfg/launch.json is absent. Not again after a
+ * VM restart: script.vm_restart {resume=true} is what brings scripts back. */
 #define AUTOSTART_PATH "cfg/autostart.json"
-#define AUTOSTART_DELAY_MS 3000
 #define AUTOSTART_MAX 2048
 static uint32_t s_autostart_at;       /* 0 = done, or not scheduled */
 static bool s_autostart_scheduled;
@@ -2167,11 +2171,10 @@ void lrt_init(void) {
     s_cache_scan = true;
 
     s_ready = true;
-    if (!s_autostart_scheduled) {
-        s_autostart_scheduled = true;     /* once per boot, not per VM */
-        s_autostart_at = to_ms_since_boot(get_absolute_time()) + AUTOSTART_DELAY_MS;
-        if (!s_autostart_at) { s_autostart_at = 1; }
-    }
+    /* Boot start belongs to src/launch.c. The old 3 s timer started every
+     * name in cfg/autostart.json in one pass, beside the PEX timer. */
+    s_autostart_scheduled = true;
+    s_autostart_at = 0;
     printf("lua: 5.4.8 up, %u KB arena, %d-instruction slice\n",
            CONFIG_LUA_HEAP_KB, CONFIG_LUA_HOOK_BUDGET);
 }

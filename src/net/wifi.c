@@ -38,6 +38,7 @@
  * interface (dhcpserver.c), and hold timers between radio transitions.
  */
 #include "net/wifi.h"
+#include "launch.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -1046,10 +1047,17 @@ bool wifi_is_up(void) { return state == ST_UP; }
  * BT and WireGuard onto the one CYW43 at once intermittently wedged it.
  */
 #define WIFI_BT_GRACE_MS 60000
-bool wifi_bt_hold(void) {
+bool wifi_bt_hold_base(void) {
     if (wifi_is_off()) return false;
     if (wifi_is_up())  return false;
     return !timed_out(now_ms(), boot_start, WIFI_BT_GRACE_MS);
+}
+
+bool wifi_bt_hold(void) {
+    /* WireGuard launch: hold BLE until the tunnel is confirmed and a ping
+     * has come back. Launch now and a skipped boot do not. */
+    if (launch_radio_hold()) return true;
+    return wifi_bt_hold_base();
 }
 
 const char *wifi_ip(void) { return ip_str; }
