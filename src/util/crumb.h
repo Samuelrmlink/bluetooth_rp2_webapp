@@ -5,7 +5,9 @@
  * and -- on a HardFault -- the fault registers and stacked frame.
  *
  * The last crumb and the faulting PC live in WATCHDOG SCRATCH0/1 (the ROM and
- * SDK use 4..7, a flash-update reboot may use 2..3). A fuller record -- a ring
+ * SDK use 4..7, a flash-update reboot may use 2..3). A panic (panic_caller.c)
+ * stores its caller's return address in scratch[0] first, so after a revert
+ * last_crumb is that address rather than 0. A fuller record -- a ring
  * of the last crumbs and the fault frame -- lives at a fixed address in
  * SCRATCH_X RAM, which this firmware never uses (core1 is not started) and
  * which no boot in between clears. The next boot reports it (sys.fault, and

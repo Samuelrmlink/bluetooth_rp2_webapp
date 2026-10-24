@@ -67,6 +67,7 @@ add_executable(btgw
     src/config/config.c
     src/util/crumb.c
     src/util/libc_slim.c
+    src/util/panic_caller.c
     src/util/stackmark.c
     src/launch.c
 )
@@ -99,7 +100,8 @@ target_link_libraries(btgw
 # and records how long the driver waited. See that file for why tud_task() is
 # safe to call there and usb_ncm_poll() is not.
 target_link_options(btgw PRIVATE
-    -Wl,--wrap=cyw43_await_background_or_timeout_us)
+    -Wl,--wrap=cyw43_await_background_or_timeout_us
+    -Wl,--wrap=panic)
 
 if(CONFIG_BT_LE)
     target_sources(btgw PRIVATE src/bt/bt.c src/bt/registry.c src/bt/le/central.c src/bt/le/gattdb.c src/bt/le/bond.c src/bt/le/gattserver.c)
