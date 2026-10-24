@@ -2,7 +2,7 @@
 
 Checks that need a real device. The feature list is [Feature-Roadmap.md](Feature-Roadmap.md). A box here is ticked after a session on the hardware, with the date and what was seen. A host test, the mock page, or a reading of the source does not tick it.
 
-Do not start the Lua Anker stack beside the PEX Anker app. Do not uninstall `iti` or `otap`, and do not replace the signed Anker module, as part of one of these checks.
+Do not start the Lua Anker stack beside the PEX Anker app, and do not replace the signed Anker module, as part of one of these checks.
 
 ## Devices
 

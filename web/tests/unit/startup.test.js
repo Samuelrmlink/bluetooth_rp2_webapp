@@ -23,10 +23,10 @@ test('meshtastic is stored as a gate that is not met', () => {
 
 test('the list moves, refuses a second copy of a name, and drops a row', () => {
   const rows = [
-    { kind: 'pex', name: 'iti', enabled: true },
+    { kind: 'pex', name: 'sample', enabled: true },
     { kind: 'lua', name: 'pinecil', enabled: true },
   ];
-  assert.deepEqual(moveEntry(rows, 1, -1).map((e) => e.name), ['pinecil', 'iti']);
+  assert.deepEqual(moveEntry(rows, 1, -1).map((e) => e.name), ['pinecil', 'sample']);
   assert.equal(moveEntry(rows, 0, -1), rows);
   const added = addEntry(rows, 'lua', 'pinecil');
   assert.match(added.error, /already/);

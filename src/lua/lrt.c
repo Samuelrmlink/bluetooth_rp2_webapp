@@ -39,7 +39,7 @@ void pexlua_close(void);
  * interned, so a module's constant "done" is the very object a long-lived
  * table may still hold after the module is dropped -- placed with the code it
  * would stay behind as an island in the space the module gave back (seen in
- * mcusim: after four OTAP jobs the 22.5 KB the TLS buffers had used was in
+ * mcusim: after four image-transfer jobs the 22.5 KB the TLS buffers had used was in
  * pieces, and the next catalog request failed "out of memory for TLS"). For a
  * new block `osize` is the object's type tag (lmem.c). */
 static void *lrt_place(void *ptr, size_t osize, size_t nsize) {

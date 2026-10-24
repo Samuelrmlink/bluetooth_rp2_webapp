@@ -19,7 +19,7 @@ tree.
 The signed app file is lfs:/pex/anker.m33.pex. When build/pex-signed/anker.m33.pex
 exists it is the file deployed; otherwise pass --module. An unsigned file is
 refused. A different build that is already installed is left in place unless
---replace is given. iti is never uninstalled. cfg/ is never written. Lua is
+--replace is given. Only anker is uninstalled, and only then. cfg/ is never written. Lua is
 never started. The board is not rebooted.
 
 A file whose bytes already match the device is not sent again.
@@ -326,7 +326,7 @@ def deploy_module(base: str, data: bytes | None, replace: bool, dry: bool) -> No
         ok, gone = op(base, "pex.uninstall", {"name": "anker"})
         if not ok:
             raise SystemExit(f"pex.uninstall anker: {gone.get('code')}: {gone.get('message')}")
-        print("uninstalled anker (iti left installed)")
+        print("uninstalled anker")
     ok, inst = op(base, "pex.install", {"name": "anker"})
     if not ok:
         raise SystemExit(f"pex.install anker: {inst.get('code')}: {inst.get('message')}")

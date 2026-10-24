@@ -57,7 +57,7 @@ These are part of the architecture. They are not tasks.
 - [ ] **R6 — One Anker source tree**
   - Layer: 2.
   - Why: The sources the editor builds are `sd/projects/anker/src/`. An older copy is still at `sd/pex/`. The signed module in the PEX partition is a third artifact, and it is the one that is running.
-  - Needs: A project build that reads `sd/projects/anker/` and writes a `.pex`. That has not happened yet: the last build reached the link and stopped on the digest bug in R5. After a build has read the new tree, deleting `sd/pex/` is a separate decision. Nothing here replaces the signed module, uninstalls `iti` or `otap`, or starts a second Anker.
+  - Needs: A project build that reads `sd/projects/anker/` and writes a `.pex`. That has not happened yet: the last build reached the link and stopped on the digest bug in R5. After a build has read the new tree, deleting `sd/pex/` is a separate decision. Nothing here replaces the signed module or starts a second Anker.
   - Done when: The card has one Anker source directory, the editor builds from it, and the running module is still the signed one until a signed replacement is deliberately installed.
 
 ## Later

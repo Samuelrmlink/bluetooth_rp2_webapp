@@ -39,7 +39,7 @@ test('pexRunningPaths maps every state, and skips a second instance', () => {
     modules: [
       { name: 'anker', state: 'running' },
       { name: 'pinecil', state: 'stopped' },
-      { name: 'otap', state: 'loaded' },
+      { name: 'sample', state: 'loaded' },
       { name: 'old', state: 'exited' },
       { name: 'bad', state: 'faulted' },
       { name: 'anker#2', state: 'running' },
@@ -47,7 +47,7 @@ test('pexRunningPaths maps every state, and skips a second instance', () => {
   }), {
     'pex/anker.m33.pex': 'running',
     'pex/pinecil.m33.pex': 'stopped',
-    'pex/otap.m33.pex': 'loaded',
+    'pex/sample.m33.pex': 'loaded',
     'pex/old.m33.pex': 'exited',
     'pex/bad.m33.pex': 'faulted',
   });

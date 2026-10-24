@@ -72,7 +72,7 @@ test('Start is offered when the file is present and the driver is not running', 
 
 test('manifests are read from pex/ and lua/profiles, and one id is kept once', async () => {
   const files = {
-    pex: [{ name: 'anker.driver.json' }, { name: 'anker.m33.pex' }, { name: 'iti.m33.pex' }],
+    pex: [{ name: 'anker.driver.json' }, { name: 'anker.m33.pex' }, { name: 'sample.m33.pex' }],
     'lua/profiles': [{ name: 'anker', dir: true }, { name: 'pinecil', dir: true }, { name: 'pinecil.lua' }],
     lua: [{ name: 'pinecil.lua' }, { name: 'anker.lua' }],
   };
@@ -88,6 +88,6 @@ test('manifests are read from pex/ and lua/profiles, and one id is kept once', a
   const r = await loadDriverManifests(fs);
   assert.deepEqual(r.manifests.map((m) => m.id), ['anker', 'pinecil']);
   assert.equal(r.manifests[0].title, 'Anker SOLIX / Prime');
-  assert.ok(r.pexFiles.has('pex/anker.m33.pex') && r.pexFiles.has('pex/iti.m33.pex'));
+  assert.ok(r.pexFiles.has('pex/anker.m33.pex') && r.pexFiles.has('pex/sample.m33.pex'));
   assert.ok(r.luaFiles.has('lua/pinecil.lua'));
 });

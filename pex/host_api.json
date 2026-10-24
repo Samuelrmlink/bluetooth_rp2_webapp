@@ -339,7 +339,7 @@
       "id": 5,
       "major": 1,
       "minor": 1,
-      "doc": "the module's own handle, references (spec 8) and app control; 1.1: calling another loaded module (a driver module such as otap.m33.pex) by name, through the trampoline",
+      "doc": "the module's own handle, references (spec 8) and app control; 1.1: calling another loaded module (a driver module such as driver.m33.pex) by name, through the trampoline",
       "types": [
         "typedef struct pex_mod pex_mod_t;"
       ],

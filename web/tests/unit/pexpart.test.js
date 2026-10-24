@@ -5,7 +5,7 @@ import { PEX_PART, SECTOR, partitionModel } from '../../js/editor/pexpart.js';
 const live = {
   mounted: true, size: 262144, free: 0, largest: 0, seq: 42, moves: 0, rw_area: 23488,
   modules: [
-    { name: 'iti', version: '1.0.0', model: 'pic', offset: 8192, size: 84896, code: 74060, rw: 7640, signed: true, loaded: false, xip_ready: true },
+    { name: 'sample', version: '1.0.0', model: 'pic', offset: 8192, size: 84896, code: 74060, rw: 7640, signed: true, loaded: false, xip_ready: true },
     { name: 'anker', version: '1.0.0', model: 'reloc', offset: 94208, size: 164596, code: 136400, rw: 23488, signed: true, loaded: true, xip_ready: true },
   ],
 };
@@ -24,11 +24,11 @@ test('a full partition: index, then the two modules, and no free cell', () => {
   assert.equal(m.fragmented, false);
   assert.equal(m.cells.filter((c) => c.kind === 'index').length, 2);
   assert.equal(m.cells.filter((c) => c.kind === 'free').length, 0);
-  assert.equal(m.cells[2].name, 'iti');
-  assert.equal(m.cells[22].name, 'iti');
+  assert.equal(m.cells[2].name, 'sample');
+  assert.equal(m.cells[22].name, 'sample');
   assert.equal(m.cells[23].name, 'anker');
   assert.equal(m.cells[63].name, 'anker');
-  assert.deepEqual(m.modules.map((x) => x.name), ['iti', 'anker']);
+  assert.deepEqual(m.modules.map((x) => x.name), ['sample', 'anker']);
 });
 
 test('free space in more than one piece is fragmented', () => {
