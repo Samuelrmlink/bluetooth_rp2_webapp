@@ -723,6 +723,7 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
 - The Lua module's memory: its code is not in the arena at all (installed:
   flash; RAM mode: the PEX pool); its C data is in the PEX pool; only the
   table and closures it pushes live in the Lua arena.
+
 ## 10. Integrity and trust
 
 - `file_crc32` (0.6: the whole file before `SIG`, §4.2) catches corruption
