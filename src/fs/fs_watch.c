@@ -5,12 +5,17 @@
  * queued and emitted from fs_watch_poll. The Lua listener stays the first
  * fs_on_change hook and is not given this work.
  *
- * The tables below are the RAM budget for this feature. The product image
- * had about 6 KB free before them, and core0's stack is 2 KB, so the stat
- * JSON is built in api_scratch (the main loop is the only caller) and each
- * row stores one path. A card path is "sd/" plus the card-relative name;
- * the worker opens path+3. 131 covers a LittleFS name (128) and "sd/" plus
- * a job path (128).
+ * The stat JSON is built in api_scratch (the main loop is the only caller).
+ * A card path is "sd/" plus the card-relative name; the worker opens
+ * path+3. 131 covers a LittleFS name (128) and "sd/" plus a job path (128).
+ *
+ * These tables must not sit in BSS. The C heap is whatever is left under
+ * 0x20080000, and cyw43_driver_init mallocs a 4 KB work area during boot
+ * (pico_malloc panics when that fails). With both tables in BSS the gap
+ * was 2536 bytes, 1.249 called panic() before the first crumb, and the
+ * trial image reverted. Most stat paths therefore live in scratch, under
+ * the stack paint (see STACKMARK_PAINT_FROM). The 1.245 watermark stopped
+ * at 0x200810E8, about 780 bytes above this block.
  */
 #include "fs/fs_watch.h"
 
@@ -19,6 +24,7 @@
 
 #include "api/api.h"
 #include "autoconf.h"
+#include "util/stackmark.h"
 
 #if CONFIG_SD
 #include "sd/sd_store.h"
@@ -37,7 +43,6 @@ typedef struct {
 } note_t;
 
 typedef struct {
-    char path[WATCH_PATH + 1];
     uint32_t size;
     uint32_t hash;
     uint8_t has_hash;
@@ -47,7 +52,17 @@ typedef struct {
 } row_t;
 
 _Static_assert(sizeof(note_t) == 152, "note queue size is part of the RAM budget");
-_Static_assert(sizeof(row_t) == 144, "stat table size is part of the RAM budget");
+_Static_assert(sizeof(row_t) == 12, "stat row size is part of the RAM budget");
+
+/* 23 of the 32 stat paths live in scratch so the C heap can still satisfy
+ * the radio's 4 KB boot allocation. The rest stay in BSS. */
+#define WATCH_SCRATCH_PATHS 23
+#define WATCH_PATH_AT 0x20080200u
+#define WATCH_PATH_BYTES (WATCH_PATH + 1)
+_Static_assert(WATCH_SCRATCH_PATHS < FS_STAT_MAX, "scratch paths");
+_Static_assert(WATCH_PATH_AT >= 0x20080200u, "paths overlap the PEX boot record");
+_Static_assert(WATCH_PATH_AT + WATCH_SCRATCH_PATHS * WATCH_PATH_BYTES <= STACKMARK_PAINT_FROM,
+               "stat paths overlap the stack paint");
 
 static note_t s_q[Q];
 static uint8_t s_h, s_t, s_n;
@@ -138,12 +153,20 @@ static void emit_one(const note_t *n) {
 /* ---- fs.stat ------------------------------------------------------------ */
 
 static row_t s_rows[FS_STAT_MAX];
+static char s_path_bss[(FS_STAT_MAX - WATCH_SCRATCH_PATHS) * WATCH_PATH_BYTES];
 static int s_rows_n;
 static int s_stat; /* 0 idle, 1 card, 2 ready */
 
-static void fill_lfs(row_t *r) {
+static char *row_path(int i) {
+    if (i < WATCH_SCRATCH_PATHS) {
+        return (char *)(WATCH_PATH_AT + (unsigned)i * WATCH_PATH_BYTES);
+    }
+    return s_path_bss + (i - WATCH_SCRATCH_PATHS) * WATCH_PATH_BYTES;
+}
+
+static void fill_lfs(row_t *r, const char *path) {
     size_t sz = 0;
-    if (!fs_stat(r->path, &sz)) {
+    if (!fs_stat(path, &sz)) {
         r->missing = 1;
         r->done = 1;
         return;
@@ -151,7 +174,7 @@ static void fill_lfs(row_t *r) {
     r->size = (uint32_t)sz;
     if (sz <= FS_HASH_MAX) {
         uint32_t h = 0;
-        if (lfs_hash(r->path, &h)) {
+        if (lfs_hash(path, &h)) {
             r->hash = h;
             r->has_hash = 1;
         }
@@ -186,12 +209,12 @@ int fs_watch_stat_begin(const char *params) {
         if (*p == '"') { p++; }
         if (!i) { continue; }
         if (n >= FS_STAT_MAX) { over = true; continue; }
-        memcpy(s_rows[n].path, tmp, i + 1);
+        memcpy(row_path(n), tmp, i + 1);
         if (strncmp(tmp, "sd/", 3) == 0) {
             s_rows[n].sd = 1;
             need_sd = true;
         } else {
-            fill_lfs(&s_rows[n]);
+            fill_lfs(&s_rows[n], row_path(n));
         }
         n++;
     }
@@ -214,7 +237,7 @@ bool fs_watch_stat_json(char *dst, size_t cap) {
         const row_t *r = &s_rows[i];
         if (i && !append(dst, cap, &n, ",")) { return false; }
         if (!append(dst, cap, &n, "{\"path\":\"")) { return false; }
-        n += api_json_escape(dst + n, cap - n, r->path);
+        n += api_json_escape(dst + n, cap - n, row_path(i));
         char tail[64];
         if (r->missing) {
             snprintf(tail, sizeof tail, "\",\"missing\":true}");
@@ -280,7 +303,7 @@ bool fs_watch_sd_slice(void) {
         if (!s_rows[i].sd || s_rows[i].done) { continue; }
         uint32_t size = 0, hash = 0;
         bool has = false;
-        if (!note_open(s_rows[i].path + 3, &size, &hash, &has)) {
+        if (!note_open(row_path(i) + 3, &size, &hash, &has)) {
             s_rows[i].missing = 1;
         } else {
             s_rows[i].size = size;

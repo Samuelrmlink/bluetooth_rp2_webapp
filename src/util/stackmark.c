@@ -1,9 +1,8 @@
 #include "util/stackmark.h"
 
 #define PAINT 0x5AC4C0DEu
-/* Paint from just above the crumb record (0x20080100 + its size) up to near
- * the live stack pointer. */
-#define PAINT_FROM 0x20080200u
+/* Above the file-watch paths. See STACKMARK_PAINT_FROM. */
+#define PAINT_FROM STACKMARK_PAINT_FROM
 
 extern uint32_t __StackTop;
 

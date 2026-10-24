@@ -46,8 +46,9 @@ int pexlua_before_unload(pex_mod_t *m);
 #define FAULTS_MAX 1024
 
 /* ---- the record that survives a reset (SCRATCH_X, after crumb_rec_t) ------
- * 0x20080100..0x20080184 is the crumb record; stackmark paints from
- * 0x20080200. This 64-byte record sits in the gap. */
+ * 0x20080100..0x20080184 is the crumb record. This 64-byte record sits in
+ * the gap under the file-watch paths at 0x20080200. stackmark paints from
+ * 0x20080E00, above those paths. */
 typedef struct {
     uint32_t magic;
     uint32_t trace;              /* first build-id word of the module executing (0 = none) */
