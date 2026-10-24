@@ -1,6 +1,7 @@
 #include "ota/ota_slot.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "pico/bootrom.h"
 #include "pico/flash.h"
@@ -178,9 +179,24 @@ static inline uint32_t primask(void) {
     return v;
 }
 
+/* The ROM work area for explicit_buy. It used to be a static 4 KB buffer.
+ * That left the C heap (BSS end .. 0x20080000) at 5572 bytes. newlib turns
+ * the radio's malloc(4096) in cyw43_driver_init into an 8192-byte sbrk, so
+ * 1.249 .. 1.252 panicked in check_alloc before the first crumb. The buffer
+ * is taken from that heap once the radio's own malloc has been freed, and
+ * held so a later confirm does not depend on whatever else has allocated. */
+static uint8_t *buy_buf;
+
+void ota_reserve_buy_buf(void) {
+    if (buy_buf) return;
+    buy_buf = malloc(4096);
+    if (!buy_buf) printf("ota: no buy buffer\n");
+}
+
 int ota_buy(void) {
     if (!ota_buy_pending()) return 0;
-    static uint8_t __attribute__((aligned(4))) workarea[4096];
+    if (!buy_buf) ota_reserve_buy_buf();
+    if (!buy_buf) return -1;
     watchdog_update();
     /* NOT inside our own flash_safe_execute(): since SDK 2.3.0
      * rom_explicit_buy() is a wrapper that runs the ROM call under
@@ -194,7 +210,7 @@ int ota_buy(void) {
      * pending; root-caused through the probe). The same nesting is what
      * "rom_flash_op() took the USB-NCM link down" was, below. */
     uint64_t t0 = time_us_64();
-    int rc = rom_explicit_buy(workarea, sizeof workarea);
+    int rc = rom_explicit_buy(buy_buf, 4096);
     uint32_t took_us = (uint32_t)(time_us_64() - t0);
     if (rc == 0) {
         bought = true;

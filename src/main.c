@@ -123,6 +123,9 @@ int main(void) {
     if (cyw43_arch_init()) {
         printf("cyw43: init failed -- no Wi-Fi and no Bluetooth this boot\n");
     } else {
+        /* Before bt_init / wifi: the radio just freed its 4 KB work area,
+         * and the buy buffer has to come from that heap. See ota_slot.c. */
+        ota_reserve_buy_buf();
         printf("cyw43: up\n");
 #if CONFIG_BT_LE
         bt_init();

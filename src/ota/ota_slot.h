@@ -31,6 +31,7 @@ const uint8_t *ota_slot_bytes(int which);
 uint8_t ota_boot_type(void);                 /* BOOT_TYPE_* from the ROM */
 bool ota_buy_pending(void);                  /* TBYB image not yet bought */
 bool ota_bought(void);                       /* this boot bought itself */
+void ota_reserve_buy_buf(void);              /* hold the 4 KB ROM work area */
 int  ota_buy(void);                          /* rom_explicit_buy, once */
 
 /* The VERSION item of the picobin block at the start of a slot. */

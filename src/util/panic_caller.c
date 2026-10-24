@@ -7,11 +7,12 @@
  *
  *     push {r4, lr}     ; [sp] = requested size, [sp+4] = caller
  *
- * with nothing else pushed (the mutex is compiled out). This reads those
- * two words. scratch[0] becomes last_crumb (the malloc caller). The size
- * is ring[0] of the crumb record, which the hardfault handler does not
- * clear and the next boot prints in sys.fault. Scratch 2 and 3 belong
- * to the ROM; scratch[1] is the fault PC.
+ * with nothing else pushed (the mutex is compiled out). The size stays in
+ * r4 (the stacked word is the caller's r4, not the size: 1.252's ring was
+ * 1). scratch[0] becomes last_crumb (the malloc caller). The size is
+ * ring[0] of the crumb record, which the hardfault handler does not clear
+ * and the next boot prints in sys.fault. Scratch 2 and 3 belong to the
+ * ROM; scratch[1] is the fault PC.
  *
  * Re-check that prologue on the elf before flashing. A different frame
  * stores garbage.
@@ -23,7 +24,7 @@ void __attribute__((noreturn)) __real_panic(const char *fmt, ...);
 void __attribute__((naked, noreturn)) __wrap_panic(const char *fmt, ...) {
     __asm volatile(
         "stmdb sp!, {r2, r3, r12}\n"
-        "ldr   r2,  [sp, #12]\n"          /* saved r4: requested size */
+        "mov   r2,  r4\n"                 /* live r4: requested size */
         "ldr   r3,  [sp, #16]\n"          /* saved lr: malloc's caller */
         "movw  r12, #0x8000\n"
         "movt  r12, #0x400d\n"            /* watchdog base 0x400d8000 */
