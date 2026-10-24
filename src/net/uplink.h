@@ -59,7 +59,7 @@ bool uplink_force(const char *iface, const char **why);
 typedef struct {
     const char *name, *kind, *state;
     bool active;
-    char ip[16], gw[16];
+    char ip[16], mask[16], gw[16];
     long rtt_ms, jitter_ms, metric;
     int loss_pct;
 } uplink_info_t;

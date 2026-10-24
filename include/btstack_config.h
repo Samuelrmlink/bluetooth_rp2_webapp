@@ -47,8 +47,12 @@
 #define MAX_NR_RFCOMM_MULTIPLEXERS 1
 #define MAX_NR_RFCOMM_SERVICES 1
 #define MAX_NR_SERVICE_RECORD_ITEMS 4
-/* Classic wants the full 1691-byte ACL payload; LE alone does not. */
-#define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
+/* One Ethernet frame (1514) plus the L2CAP header and the 15-byte BNEP
+ * header that bnep.c subtracts. 1691, the full Classic ACL size, does not
+ * fit: the radio malloc needs 8192 bytes between __end__ and __HeapLimit.
+ * The BNEP defconfig pays for this buffer by lowering the lwIP heap. */
+#define HCI_ACL_PAYLOAD_SIZE 1536
+#define HCI_HOST_ACL_PACKET_LEN HCI_ACL_PAYLOAD_SIZE
 #define MAX_NR_L2CAP_SERVICES  5
 #define MAX_NR_L2CAP_CHANNELS  (CONFIG_BT_MAX_LINKS + 4)
 #else
@@ -80,7 +84,9 @@
 #define MAX_NR_CONTROLLER_ACL_BUFFERS 3
 #define MAX_NR_CONTROLLER_SCO_PACKETS 3
 #define ENABLE_HCI_CONTROLLER_TO_HOST_FLOW_CONTROL
+#ifndef HCI_HOST_ACL_PACKET_LEN
 #define HCI_HOST_ACL_PACKET_LEN 1024
+#endif
 #define HCI_HOST_ACL_PACKET_NUM 3
 #define HCI_HOST_SCO_PACKET_LEN 120
 #define HCI_HOST_SCO_PACKET_NUM 3

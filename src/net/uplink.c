@@ -431,6 +431,7 @@ bool uplink_info(int i, uplink_info_t *o) {
     o->active = i == active;
     if (c->nif) {
         ip4addr_ntoa_r(netif_ip4_addr(c->nif), o->ip, sizeof o->ip);
+        ip4addr_ntoa_r(netif_ip4_netmask(c->nif), o->mask, sizeof o->mask);
         ip4addr_ntoa_r(netif_ip4_gw(c->nif), o->gw, sizeof o->gw);
     }
     bool k = upl_known(&c->m);
@@ -455,20 +456,21 @@ size_t uplink_status_json(char *dst, size_t cap) {
         !probing ? "none" : ip4_addr_isany_val(probe_cfg) ? "wireguard" : "configured",
         (unsigned long)switches, switches ? (long)(now_ms() - last_switch_ms) : -1L,
         last_from, last_to, last_reason);
-    for (int i = 0; i < N_CANDS && n + 260 < cap; i++) {
+    for (int i = 0; i < N_CANDS && n + 300 < cap; i++) {
         cand_t *c = &cands[i];
-        char ip[16] = "", gw[16] = "";
+        char ip[16] = "", mask[16] = "", gw[16] = "";
         if (c->nif) {
             ip4addr_ntoa_r(netif_ip4_addr(c->nif), ip, sizeof ip);
+            ip4addr_ntoa_r(netif_ip4_netmask(c->nif), mask, sizeof mask);
             ip4addr_ntoa_r(netif_ip4_gw(c->nif), gw, sizeof gw);
         }
         const char *state = state_of(c);
         int32_t metric = upl_metric(&c->m);
         n += (size_t)snprintf(dst + n, cap - n,
-            "%s{\"name\":\"%s\",\"kind\":\"%s\",\"ip\":\"%s\",\"gw\":\"%s\",\"state\":\"%s\","
+            "%s{\"name\":\"%s\",\"kind\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\",\"state\":\"%s\","
             "\"active\":%s,\"rtt_ms\":%ld,\"jitter_ms\":%ld,\"loss_pct\":%d,\"metric\":%ld,"
             "\"samples\":%lu,\"sent\":%lu,\"replies\":%lu}",
-            i ? "," : "", c->name, c->kind, ip, gw, state, i == active ? "true" : "false",
+            i ? "," : "", c->name, c->kind, ip, mask, gw, state, i == active ? "true" : "false",
             upl_known(&c->m) ? (long)upl_rtt(&c->m) : -1L,
             upl_known(&c->m) ? (long)upl_jitter(&c->m) : -1L,
             upl_loss_pct(&c->m), metric >= INT32_MAX - 1 ? -1L : (long)metric,

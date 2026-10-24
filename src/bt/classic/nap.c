@@ -7,13 +7,17 @@
 
 #include "api/ops.h"
 #include "btstack.h"
+#include "config/config.h"
 #include "lwip/dhcp.h"
 #include "lwip/etharp.h"
+#include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
 #include "netif/ethernet.h"
 #include "net/mdns.h"
 #include "net/uplink.h"
+
+#define NAP_CFG "cfg/nap.json"
 
 #define NAP_FRAME 1514
 
@@ -26,6 +30,7 @@ static int s_tx_armed;
 static int s_dhcp;
 static struct pbuf *s_tx;
 static uint8_t s_frame[NAP_FRAME];
+static char s_addr[18];
 
 static void arm_tx(void) {
     if (s_in || s_tx_armed || !s_tx || !s_cid) { return; }
@@ -140,7 +145,36 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     if (!s_in) { arm_tx(); }
 }
 
+static void remember(const char *addr) {
+    snprintf(s_addr, sizeof s_addr, "%s", addr);
+    char body[48];
+    snprintf(body, sizeof body, "{\"addr\":\"%s\"}\n", s_addr);
+    cfg_file_write(NAP_CFG, body);
+}
+
+static void load_addr(void) {
+    char buf[64];
+    if (!cfg_file_read(NAP_CFG, buf, sizeof buf)) { return; }
+    api_json_str(buf, "addr", s_addr, sizeof s_addr);
+}
+
+static void reply_status(api_reply_fn reply, void *ctx, long id) {
+    const char *st = s_cid ? "up" : s_connecting ? "connecting" : "down";
+    char ip[16] = "0.0.0.0", mask[16] = "0.0.0.0", gw[16] = "0.0.0.0";
+    if (s_added) {
+        ip4addr_ntoa_r(netif_ip4_addr(&s_nif), ip, sizeof ip);
+        ip4addr_ntoa_r(netif_ip4_netmask(&s_nif), mask, sizeof mask);
+        ip4addr_ntoa_r(netif_ip4_gw(&s_nif), gw, sizeof gw);
+    }
+    char *b = api_scratch();
+    snprintf(b, api_scratch_size(),
+             "{\"state\":\"%s\",\"addr\":\"%s\",\"ip\":\"%s\",\"mask\":\"%s\",\"gw\":\"%s\"}",
+             st, s_addr, ip, mask, gw);
+    api_reply_ok(reply, ctx, id, b);
+}
+
 void nap_init(void) {
+    load_addr();
     bnep_init();
     if (!s_added) {
         if (!netif_add(&s_nif, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4,
@@ -159,6 +193,13 @@ struct netif *nap_uplink_netif(void) {
 }
 
 void op_classic_nap(const char *params, api_reply_fn reply, void *ctx, long id) {
+    char addr[24];
+    addr[0] = 0;
+    if (params) { api_json_str(params, "addr", addr, sizeof addr); }
+    if (!addr[0]) {
+        reply_status(reply, ctx, id);
+        return;
+    }
     if (!s_added) {
         api_reply_err(reply, ctx, id, "failed", "NAP netif is not up");
         return;
@@ -167,17 +208,12 @@ void op_classic_nap(const char *params, api_reply_fn reply, void *ctx, long id) 
         api_reply_err(reply, ctx, id, "busy", "a NAP link is up");
         return;
     }
-    char addr[24];
-    addr[0] = 0;
-    if (!params || !api_json_str(params, "addr", addr, sizeof addr) || !addr[0]) {
-        api_reply_err(reply, ctx, id, "bad_request", "need \"addr\"");
-        return;
-    }
     bd_addr_t peer;
     if (!sscanf_bd_addr(addr, peer)) {
         api_reply_err(reply, ctx, id, "bad_request", "addr is AA:BB:CC:DD:EE:FF");
         return;
     }
+    remember(addr);
     int err = bnep_connect(packet_handler, peer, BLUETOOTH_PSM_BNEP,
                            BLUETOOTH_SERVICE_CLASS_PANU, BLUETOOTH_SERVICE_CLASS_NAP);
     if (err) {

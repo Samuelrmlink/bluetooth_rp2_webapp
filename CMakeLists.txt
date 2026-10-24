@@ -108,8 +108,14 @@ if(CONFIG_BT_LE)
     target_link_libraries(btgw pico_btstack_ble pico_btstack_cyw43 pico_btstack_flash_bank)
 endif()
 if(CONFIG_BT_CLASSIC)
-    target_sources(btgw PRIVATE src/bt/classic/spp.c)
-    target_link_libraries(btgw pico_btstack_classic)
+    # RFCOMM and SDP only. pico_btstack_classic also compiles A2DP, AVRCP,
+    # HFP, HSP, HID, OBEX and PBAP, and that set does not fit this image.
+    target_sources(btgw PRIVATE
+        src/bt/classic/spp.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/rfcomm.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_client.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_client_rfcomm.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_util.c)
 endif()
 if(CONFIG_BT_CLASSIC_NAP)
     # bnep.c only. pico_btstack_bnep_lwip also compiles the FreeRTOS

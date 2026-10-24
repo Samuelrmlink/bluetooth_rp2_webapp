@@ -294,7 +294,9 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              (unsigned long)cyw43_wait_max_asked_us(),
              (unsigned long)cyw43_wait_usb_max_us(),
              (unsigned long)(cyw43_wait_total_us() / 1000u),
-#if CONFIG_BT_CLASSIC
+#if CONFIG_BT_CLASSIC_NAP
+             ",\"classic\",\"bnep\"",
+#elif CONFIG_BT_CLASSIC
              ",\"classic\"",
 #else
              "",

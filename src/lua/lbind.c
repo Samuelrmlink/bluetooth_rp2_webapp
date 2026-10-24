@@ -1513,7 +1513,7 @@ static void lbind_release_net(int slot) {
 
 /* --- net -----------------------------------------------------------------
  *   net.uplinks() -> { {name='w0', kind='wifi', state='ok', active=true,
- *                       ip=..., gw=..., rtt_ms=21, jitter_ms=3, loss_pct=0,
+ *                       ip=..., mask=..., gw=..., rtt_ms=21, jitter_ms=3, loss_pct=0,
  *                       metric=27}, ... }, policy
  * rtt/jitter/metric are nil until measured. See src/net/uplink.h. */
 #if CONFIG_NET_UPLINK
@@ -1528,12 +1528,13 @@ static int l_net_uplinks(lua_State *L) {
     for (int i = 0; i < n; i++) {
         uplink_info_t u;
         if (!uplink_info(i, &u)) { continue; }
-        lua_createtable(L, 0, 10);
+        lua_createtable(L, 0, 11);
         lua_pushstring(L, u.name);  lua_setfield(L, -2, "name");
         lua_pushstring(L, u.kind);  lua_setfield(L, -2, "kind");
         lua_pushstring(L, u.state); lua_setfield(L, -2, "state");
         lua_pushboolean(L, u.active); lua_setfield(L, -2, "active");
         lua_pushstring(L, u.ip);    lua_setfield(L, -2, "ip");
+        lua_pushstring(L, u.mask);  lua_setfield(L, -2, "mask");
         lua_pushstring(L, u.gw);    lua_setfield(L, -2, "gw");
         set_num_or_nil(L, "rtt_ms", u.rtt_ms);
         set_num_or_nil(L, "jitter_ms", u.jitter_ms);

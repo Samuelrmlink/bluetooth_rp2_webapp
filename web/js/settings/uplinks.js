@@ -13,6 +13,16 @@ const STATE_TEXT = {
   unprobed: 'up, not measured (no probe target)',
 };
 
+export function uplinkLabel(u) {
+  let s = `${u.name} (${u.kind})`;
+  if (u.ip && u.ip !== '0.0.0.0') {
+    s += ` ${u.ip}`;
+    if (u.mask && u.mask !== '0.0.0.0') s += ` / ${u.mask}`;
+  }
+  if (u.gw && u.gw !== '0.0.0.0') s += ` gw ${u.gw}`;
+  return s;
+}
+
 export function uplinkLine(u) {
   const parts = [STATE_TEXT[u.state] || u.state];
   if (u.rtt_ms >= 0) parts.push(`${u.rtt_ms} ms ±${u.jitter_ms}`);
@@ -104,7 +114,7 @@ export class UplinksSection extends PolledSection {
       ['Probe target', s.probe_ip ? `${s.probe_ip} (${s.probe_source})` : 'none — configure WireGuard or a probe target'],
       ['Switches', switchText(s)],
     ]);
-    kvRows(this._list, ups.map((u) => [`${u.name} (${u.kind})${u.ip && u.ip !== '0.0.0.0' ? ` ${u.ip}` : ''}`, uplinkLine(u)]));
+    kvRows(this._list, ups.map((u) => [uplinkLabel(u), uplinkLine(u)]));
     // "Use now" buttons and the policy options follow the interfaces this
     // build has; rebuilt only when that set changes so focus is kept.
     const names = ups.map((u) => u.name).join(',');
