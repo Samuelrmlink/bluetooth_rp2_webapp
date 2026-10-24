@@ -1,3 +1,4 @@
+-- Behavior spec for the Pinecil protocol. The live driver is the pinecil PEX module.
 --[[
 Pine64 Pinecil V2 (IronOS) -- a second device, to show the profile mechanism
 is not an Anker-shaped hole.

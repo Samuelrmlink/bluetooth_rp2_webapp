@@ -4,9 +4,9 @@ config LUA_ENABLE
     bool "Lua runtime"
     default n
     help
-      NOT IMPLEMENTED YET (phase 6). Device protocols are meant to live in Lua
-      on LittleFS so they can be changed without a program/erase cycle; only
-      the stable pieces (crypto, checksums, TLV primitives) stay in C.
+      The Lua runtime. Device profiles can live on LittleFS and be changed
+      without a program/erase cycle. It is optional: PEX apps run with this
+      off, and the editor's Run button is the part of the UI that needs it.
 
 config LUA_HEAP_KB
     int "Lua arena (KB)"

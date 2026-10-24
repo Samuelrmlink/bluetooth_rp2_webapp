@@ -33,8 +33,28 @@ bool le_scanning(void);
  */
 bool le_radio_busy(void);
 
+/* True while a connect is outstanding, or any live link is still walking
+ * GATT. A link whose database is ready does not count, and neither does a
+ * link whose discovery already failed: the application handshake after a
+ * ready database is le_negotiation_pending(), and le_connect does not look
+ * at that. Anker's second slot connects only after its own handshake
+ * releases, which is after discovery and before the first telemetry report.
+ * Holding le_connect across that window would refuse the slot and the
+ * driver would count the refusal as a failed attempt. */
+bool le_bringup_busy(void);
+
+/* True for a few tens of seconds after a link's database becomes ready,
+ * until that link drops, a profile telemetry report names it, or the hold
+ * expires. The launcher uses this. le_connect does not. */
+bool le_negotiation_pending(void);
+
+/* api_emit calls this for every event. A profile.*.telemetry report ends
+ * the negotiation hold for the device it names. */
+void le_on_profile_telemetry(const char *topic, const char *json);
+
 /* Connect by address. addr_type comes from the scan table -- you cannot assume
- * public, and guessing produces a connect that never completes. */
+ * public, and guessing produces a connect that never completes. Returns false
+ * while another connect or a GATT discovery is still in progress. */
 bool le_connect(const uint8_t *addr, uint8_t addr_type);
 bool le_disconnect(const uint8_t *addr);
 

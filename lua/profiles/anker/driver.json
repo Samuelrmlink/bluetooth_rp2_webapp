@@ -1,0 +1,10 @@
+{
+  "id": "anker",
+  "title": "Anker SOLIX / Prime",
+  "kind": "pex",
+  "file": "pex/anker.m33.pex",
+  "note": "Company ffff and service ff09. The charger's advertised name is its serial, so a name rule would miss it.",
+  "match": [
+    { "all": [ { "mfg_company": "ffff" }, { "uuid16": "ff09" } ] }
+  ]
+}

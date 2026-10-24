@@ -34,6 +34,7 @@
 #include "api/ops.h"
 #include "util/crumb.h"
 #include "util/stackmark.h"
+#include "launch.h"
 #include "autoconf.h"
 #if CONFIG_PEX
 #include "pex/pex_gw.h"
@@ -83,6 +84,7 @@ int main(void) {
     printf("\n--- bluetooth_rp2_webapp ---\n");
 
     boot_after_watchdog = watchdog_caused_reboot();
+    launch_boot();
     if (crumb_last || crumb_last_fault_pc) {
         printf("main: previous boot stopped at crumb 0x%04lx, fault pc 0x%08lx\n",
                (unsigned long)crumb_last, (unsigned long)crumb_last_fault_pc);
@@ -269,6 +271,9 @@ int main(void) {
         cyw43_arch_poll();
 #endif
 
+        /* Before Bluetooth, so a WireGuard launch gate is already holding
+         * the radio when the controller would otherwise power on. */
+        launch_poll();
 #if CONFIG_BT_LE
         crumb(CRUMB_LOOP_BT);
         bt_power_on_tick();   /* deferred controller power-on; staggers BT behind WiFi at boot */

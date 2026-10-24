@@ -67,8 +67,12 @@ bool wifi_ap_up(void);
 
 /* True while Bluetooth should defer scanning/connecting so WiFi can bring the
  * shared radio up first (see wifi.c). False once WiFi is up, past the grace
- * window, or in mode "off". */
+ * window, or in mode "off". A launch list waiting on WireGuard extends it
+ * (launch_radio_hold) with no timeout of its own. */
 bool wifi_bt_hold(void);
+/* The grace window alone, without that extension. The launch gate uses this
+ * so it does not recurse through wifi_bt_hold(). */
+bool wifi_bt_hold_base(void);
 
 /* For uplink selection (src/net/uplink.c), which owns the default route. */
 struct netif;

@@ -1261,6 +1261,32 @@ def t_lfs_migrate_sim():
     return rc == 0, f"{m.group(1)} checks" + (f", {m.group(2)} failed: {first[5:65]}" if rc else "")
 
 
+def t_pex_lua_unload():
+    """A Lua-held module can be unloaded, and a later call is an error."""
+    d = f"{BUILD_PREFIX}pexlua"
+    os.makedirs(d, exist_ok=True)
+    names = ("lapi.c lauxlib.c lbaselib.c lcode.c lcorolib.c lctype.c ldebug.c "
+             "ldo.c ldump.c lfunc.c lgc.c llex.c lmathlib.c lmem.c lobject.c "
+             "lopcodes.c lparser.c lstate.c lstring.c lstrlib.c ltable.c "
+             "ltablib.c ltm.c lundump.c lutf8lib.c lvm.c lzio.c").split()
+    lua = " ".join(f"{ROOT}/third_party/lua/{s}" for s in names)
+    rc, out = sh(
+        f"rm -f *.o pex_lua_unload && "
+        f"python3 {ROOT}/pex/tools/gen_host_api.py header {ROOT}/pex/host_api.json pex_api.h && "
+        f"gcc -O1 -w -I{ROOT}/third_party/lua -c {lua} && "
+        f"gcc -O1 -Wall -Wextra -Werror -std=c11 "
+        f"-I{ROOT}/pex/lua -I{ROOT}/pex/runtime -I{ROOT}/pex/sdk/include "
+        f"-I{ROOT}/third_party/lua -I. "
+        f"{ROOT}/pex/lua/pexlua.c {ROOT}/pex/test/unit/pex_lua_unload.c *.o -lm "
+        f"-o pex_lua_unload && ./pex_lua_unload",
+        cwd=d)
+    if rc:
+        lines = [l for l in out.splitlines() if l.strip()]
+        return False, (lines[-1] if lines else "no output")[:90]
+    last = [l for l in out.splitlines() if "checks" in l]
+    return True, (last[-1] if last else "ok")[:90]
+
+
 def t_pex_host():
     """pex/: the host API source is consistent and the portable runtime parts
     (json group, CRC-32, SHA-256) pass on the build host."""
@@ -1448,6 +1474,7 @@ def main():
     step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
     step(0, "W5500 pins are reserved", t_w5500_pins_reserved)
     step(0, "PEX: host API source + portable runtime parts (json, CRC, SHA-256)", t_pex_host)
+    step(0, "PEX: Lua unload notifies, detaches, and errors on use after", t_pex_lua_unload)
 
     if a.tier >= 1:
         # Both configs, because a compile gate that is never exercised rots:

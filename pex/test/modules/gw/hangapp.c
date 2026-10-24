@@ -1,5 +1,7 @@
 /* hangapp: an app that never returns from a callback {"delay":ms} after it
- * starts -- the watchdog resets the board and the next boot names the module. */
+ * starts. Interrupts stay on, so the slice faults this module and the rest
+ * of the firmware keeps running. A spin with interrupts masked is hangmask.c;
+ * that one still falls through to the watchdog. */
 #include "pex.h"
 static int later(void *arg) {
     pex_log(PEX_LOG_WARN, "hanging now (on purpose)");

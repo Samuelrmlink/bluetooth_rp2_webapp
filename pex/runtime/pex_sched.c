@@ -1,7 +1,10 @@
 /*
  * The sched group: cooperative tasks on the host's main loop (spec 7.1). The
  * firmware is one loop with no RTOS; pex_poll() runs whatever is due, each
- * callback through the trampoline of the module that registered it. A task
+ * callback through the trampoline of the module that registered it. A
+ * callback that does not return within the host's slice (pex_config_t.slice_ms)
+ * is aborted inside pex_call: that module is faulted and this pass moves on
+ * to the next task. A task
  * counts as a reference of its module (an app is "running" while it has one),
  * so unload is refused until the app ends or is stopped.
  */

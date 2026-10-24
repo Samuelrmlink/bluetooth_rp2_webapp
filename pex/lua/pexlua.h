@@ -24,8 +24,20 @@
  *     the table it returns. Functions registered with pexlua_register() run
  *     the module through the trampoline under lua_pcall, so a Lua error raised
  *     inside module code unwinds safely. A module loaded by require belongs to
- *     the VM: it is unloaded when the last of its functions is collected
- *     (pex.unload(name) drops require's cache entry first).
+ *     the VM: it is unloaded when the last of its functions is collected.
+ *
+ * Manual unload (pex.unload, or the gateway's pex.unload op) notifies Lua
+ * first. Assign a global function:
+ *
+ *     function pex.on_unload(name) ... end
+ *
+ * It runs while the module is still loaded, so the script can drop its own
+ * copies. The anchor is then released and the module unloads even if a
+ * closure is still reachable. A later call through that closure raises
+ * "PEX module '<name>' was unloaded" and the firmware logs that once.
+ * With no handler, and Lua holding the module, the log says so.
+ * A module that still has tasks, or that is on a call stack, is left alone;
+ * pex_unload then reports why. pex.stop does not unload.
  */
 #ifndef PEXLUA_H
 #define PEXLUA_H
@@ -51,5 +63,14 @@ extern const pex_group_t pex_group_lua;
  * table and wraps the global `require`. Call after the state's own globals
  * (incl. require) exist; call again for a new state after a VM restart. */
 void pexlua_open(lua_State *L, const pexlua_host_t *host);
+
+/* The state from pexlua_open is closed. Call before lua_close. */
+void pexlua_close(void);
+
+/* Notify pex.on_unload(name) and drop this state's anchor so pex_unload can
+ * proceed. Returns 1 when an anchor was released, 0 when there was nothing
+ * to drop or the module is busy (tasks or active). Safe to call with no Lua
+ * state. Does not itself unload. */
+int pexlua_before_unload(pex_mod_t *m);
 
 #endif

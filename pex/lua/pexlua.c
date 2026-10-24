@@ -6,6 +6,8 @@
 #include "pexlua.h"
 
 static const pexlua_host_t *s_host;
+static lua_State *s_L;
+static int s_detaching;
 
 #define ANCHOR_MT "pex.anchor"
 #define ANCHORS "_PEXANCHORS"      /* registry: lightuserdata(mod) -> anchor (weak values) */
@@ -45,7 +47,17 @@ int pexlua_argerror(lua_State *L, int arg, const char *msg) { return luaL_argerr
 /* ---- anchors: one per module instance, holding a pex_ref while any Lua
  * function of the module is alive. Owned (require'd) modules are unloaded
  * when the anchor is collected. */
-typedef struct { pex_mod_t *m; int owned; } anchor_t;
+typedef struct {
+    pex_mod_t *m;
+    int owned;
+    int warned;       /* one log line per anchor after unload */
+    char name[24];
+} anchor_t;
+
+static void anchor_set_name(anchor_t *a, pex_mod_t *m) {
+    const char *n = pex_name(m);
+    snprintf(a->name, sizeof a->name, "%s", n ? n : "");
+}
 
 static bool mod_alive(pex_mod_t *m) {
     for (pex_mod_t *x = pex_first(); x; x = pex_next(x)) {
@@ -75,7 +87,16 @@ static void push_anchor(lua_State *L, pex_mod_t *m, int owned) {
     lua_pushlightuserdata(L, m);
     if (lua_rawget(L, -2) == LUA_TUSERDATA) {
         anchor_t *a = lua_touserdata(L, -1);
-        if (owned) { a->owned = 1; }
+        if (a->m && mod_alive(a->m)) {
+            if (owned) { a->owned = 1; }
+        } else {
+            /* Detached, or the record was freed and this address came back. */
+            a->m = m;
+            a->owned = owned;
+            a->warned = 0;
+            anchor_set_name(a, m);
+            pex_ref(m);
+        }
         lua_remove(L, -2);
         return;
     }
@@ -83,6 +104,8 @@ static void push_anchor(lua_State *L, pex_mod_t *m, int owned) {
     anchor_t *a = lua_newuserdatauv(L, sizeof *a, 0);
     a->m = m;
     a->owned = owned;
+    a->warned = 0;
+    anchor_set_name(a, m);
     pex_ref(m);
     luaL_setmetatable(L, ANCHOR_MT);
     lua_pushlightuserdata(L, m);
@@ -106,8 +129,16 @@ static int inner(lua_State *L) {
 }
 
 static int thunk(lua_State *L) {
-    pex_mod_t *m = lua_touserdata(L, lua_upvalueindex(1));
-    if (!mod_alive(m)) { return luaL_error(L, "PEX module unloaded"); }
+    anchor_t *a = lua_touserdata(L, lua_upvalueindex(3));
+    pex_mod_t *m = a ? a->m : NULL;
+    if (!m || !mod_alive(m)) {
+        const char *nm = (a && a->name[0]) ? a->name : "module";
+        if (a && !a->warned) {
+            a->warned = 1;
+            printf("pexlua: Lua used %s after it was unloaded\n", nm);
+        }
+        return luaL_error(L, "PEX module '%s' was unloaded", nm);
+    }
     int n = lua_gettop(L);
     uint32_t depth = pex_depth();
     lua_pushvalue(L, lua_upvalueindex(1));
@@ -238,19 +269,93 @@ static int l_stop(lua_State *L) {
     return 1;
 }
 
+/* Tell Lua, then drop the anchor. The module stays loaded. A nested
+ * pex.unload from the handler returns true and does not run again: this
+ * call is already unloading it. */
+static int detach(lua_State *L, pex_mod_t *m) {
+    if (!L || !m || s_detaching) { return 0; }
+    pex_info_t in;
+    if (pex_info(m, &in) != PEX_OK) { return 0; }
+    if (in.tasks > 0 || in.active > 0) { return 0; }
+
+    char name[24];
+    const char *nm = pex_name(m);
+    snprintf(name, sizeof name, "%s", nm ? nm : "");
+
+    int top = lua_gettop(L);
+    s_detaching = 1;
+    int had_handler = 0;
+    int had_anchor = 0;
+
+    if (lua_getglobal(L, "pex") == LUA_TTABLE) {
+        if (lua_getfield(L, -1, "on_unload") == LUA_TFUNCTION) {
+            had_handler = 1;
+            lua_pushstring(L, name);
+            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+                const char *e = lua_tostring(L, -1);
+                printf("pexlua: pex.on_unload(%s): %s\n", name, e ? e : "error");
+                lua_pop(L, 1);
+            }
+        } else {
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    lua_getfield(L, LUA_REGISTRYINDEX, REQCACHE);
+    if (lua_type(L, -1) == LUA_TTABLE) {
+        lua_pushnil(L);
+        lua_setfield(L, -2, name);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, ANCHORS);
+    if (lua_type(L, -1) == LUA_TTABLE) {
+        lua_pushlightuserdata(L, m);
+        if (lua_rawget(L, -2) == LUA_TUSERDATA) {
+            anchor_t *a = lua_touserdata(L, -1);
+            if (a && a->m) {
+                had_anchor = 1;
+                snprintf(a->name, sizeof a->name, "%s", name);
+                pex_unref(a->m);
+                a->m = NULL;
+                a->owned = 0;
+            }
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    if (had_anchor && !had_handler) {
+        printf("pexlua: no pex.on_unload handler for %s\n", name);
+    }
+    if (had_anchor && pex_info(m, &in) == PEX_OK && in.refs > 0) {
+        printf("pexlua: Lua was detached from %s but %d reference%s remain%s\n",
+               name, in.refs, in.refs == 1 ? "" : "s", in.refs == 1 ? "s" : "");
+    }
+    lua_settop(L, top);
+    s_detaching = 0;
+    return had_anchor;
+}
+
 static int l_unload(lua_State *L) {
     const char *nm = luaL_checkstring(L, 1);
-    /* a require'd module: drop the cache entry, collect, then the anchor's
-     * __gc unloads it -- or the explicit unload below reports why not */
-    lua_getfield(L, LUA_REGISTRYINDEX, REQCACHE);
-    lua_pushnil(L);
-    lua_setfield(L, -2, nm);
-    lua_pop(L, 1);
-    lua_gc(L, LUA_GCCOLLECT, 0);
+    if (s_detaching) { lua_pushboolean(L, 1); return 1; }
     pex_mod_t *m = pex_find(nm);
     if (!m) { lua_pushboolean(L, 1); return 1; }
+    int detached = detach(L, m);
+    lua_gc(L, LUA_GCCOLLECT, 0);
+    m = pex_find(nm);
+    if (!m) { lua_pushboolean(L, 1); return 1; }
     /* refused while it runs, as pex.unload over the API is: pex.stop first */
-    if (pex_unload(m) != PEX_OK) { return fail(L, nm); }
+    if (pex_unload(m) != PEX_OK) {
+        if (detached) {
+            printf("pexlua: Lua was detached from %s but unload failed: %s\n", nm, pex_errmsg());
+        }
+        return fail(L, nm);
+    }
     lua_pushboolean(L, 1);
     return 1;
 }
@@ -372,6 +477,16 @@ static const char REQUIRE_WRAPPER[] =
     "  return orig(name)\n"
     "end\n";
 
+void pexlua_close(void) {
+    s_L = NULL;
+    s_detaching = 0;
+}
+
+int pexlua_before_unload(pex_mod_t *m) {
+    if (!s_L) { return 0; }
+    return detach(s_L, m);
+}
+
 void pexlua_open(lua_State *L, const pexlua_host_t *host) {
     static bool registered;
     if (!registered) {
@@ -379,6 +494,7 @@ void pexlua_open(lua_State *L, const pexlua_host_t *host) {
         registered = true;
     }
     s_host = host;
+    s_L = L;
     luaL_newmetatable(L, ANCHOR_MT);
     lua_pushcfunction(L, anchor_gc);
     lua_setfield(L, -2, "__gc");

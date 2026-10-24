@@ -1,9 +1,11 @@
 /* The sys and board groups on the gateway: thin calls into existing code. */
 #include <malloc.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include "autoconf.h"
 #include "pex/pex_gw.h"
+#include "fs/fs.h"
 #include "pico/unique_id.h"
 #include "hardware/clocks.h"
 #include "net/mdns.h"
@@ -43,6 +45,45 @@ int pex_sys_mem(pex_sys_mem_t *o) {
     o->pex_size = ps.pool_size;
     o->stack_max = stackmark_max_used();
     return PEX_OK;
+}
+
+/* One top-level string from cfg/<name>.json. Same rule as Lua sys.secret:
+ * the name cannot steer the path, escapes are not decoded, and there is no
+ * write. The scan buffer is static, so this is main-loop only, as the Lua
+ * binding is. */
+int pex_sys_secret(const char *name, const char *key, char *out, size_t cap) {
+    if (!name || !name[0] || !key || !out || cap == 0) { return PEX_EINVAL; }
+    for (const char *p = name; *p; p++) {
+        if (*p == '/' || *p == '\\' || *p == '.') { return PEX_EINVAL; }
+    }
+    char path[48];
+    snprintf(path, sizeof path, "cfg/%s.json", name);
+    static char buf[1024];
+    size_t sz = 0;
+    if (!fs_stat(path, &sz) || sz == 0 || sz >= sizeof buf) { return PEX_ENOENT; }
+    int h = fs_begin_read(path, NULL);
+    if (h < 0) { return PEX_ENOENT; }
+    int n = fs_read(h, (uint8_t *)buf, sz);
+    fs_end_read(h);
+    if (n < 0) { return PEX_EIO; }
+    buf[n] = 0;
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\"", key);
+    const char *k = strstr(buf, needle);
+    if (!k) { return PEX_ENOENT; }
+    const char *v = strchr(k + strlen(needle), ':');
+    if (!v) { return PEX_ENOENT; }
+    v++;
+    while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') { v++; }
+    if (*v != '"') { return PEX_ENOENT; }
+    v++;
+    const char *end = strchr(v, '"');
+    if (!end) { return PEX_ENOENT; }
+    size_t len = (size_t)(end - v);
+    if (len + 1 > cap) { return PEX_ENOSPC; }
+    memcpy(out, v, len);
+    out[len] = 0;
+    return (int)len;
 }
 
 const char *pex_board_name(void) { return PICO_BOARD; }

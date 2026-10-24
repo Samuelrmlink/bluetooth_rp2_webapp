@@ -47,6 +47,19 @@ h = nil
 ok("require.unload", pex.unload("hello"), select(2, pex.unload("hello")))
 ok("require.gone", pex.info("hello") == nil)
 
+-- Manual unload while Lua still holds a function. Needs the firmware that
+-- calls pex.on_unload and then drops the anchor. A build without that
+-- refuses the unload (the function is a live ref).
+local h2 = require("hello")
+local greet = h2.greet
+local noted = nil
+function pex.on_unload(name) noted = name end
+local uok, uerr = pex.unload("hello")
+ok("unload.handler", uok == true and noted == "hello", tostring(noted) .. " / " .. tostring(uerr))
+local bad, be = pcall(greet, "pex")
+ok("unload.use_after", bad == false and tostring(be):find("was unloaded", 1, true) ~= nil, be)
+ok("unload.gone", pex.info("hello") == nil)
+
 -- XIP from Lua (0.7): install, list, require finds the installed copy, uninstall
 if pex.install then
   local xi, xe = pex.install("hello")

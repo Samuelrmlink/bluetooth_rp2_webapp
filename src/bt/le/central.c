@@ -343,6 +343,11 @@ typedef struct le_link {
      * afterwards -- and if that were taken at face value it would complete
      * whichever op had since reached the head. Swallow that many first. */
     uint8_t  op_stale;
+
+    /* Application handshake window. Set when the database becomes ready.
+     * Cleared on disconnect (the slot is zeroed), on a profile telemetry
+     * report for this address, or when this moment passes. 0 means none. */
+    uint32_t neg_until_ms;
 } le_link_t;
 
 /* What the tick should re-issue for a link whose last attempt was refused. */
@@ -364,6 +369,10 @@ typedef struct le_link {
  * because a real peripheral with 65 characteristics takes a couple of seconds
  * and a busy radio can stretch that. */
 #define DISC_TIMEOUT_MS 15000
+
+/* How long a ready link still counts as negotiating. Matches the driver's
+ * own handshake ceiling. The first telemetry report usually ends it sooner. */
+#define LE_NEG_HOLD_MS 45000
 
 static le_link_t links[CONFIG_BT_MAX_LINKS];
 
@@ -411,6 +420,67 @@ bool le_radio_busy(void) {
         if (links[i].active) { return true; }
     }
     return false;
+}
+
+/* Discovery still running: a deadline, an outstanding query, or a retry
+ * stage. A failed cascade clears all three and leaves ready false, and that
+ * link must not block the driver's own retry once it has disconnected. */
+static bool link_discovering(const le_link_t *l) {
+    return l->disc_deadline_ms || l->disc_inflight || l->disc_stage != DISC_IDLE;
+}
+
+bool le_bringup_busy(void) {
+    if (s_connecting) { return true; }
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        const le_link_t *l = &links[i];
+        if (l->active && !l->db.ready && link_discovering(l)) { return true; }
+    }
+    return false;
+}
+
+bool le_negotiation_pending(void) {
+    uint32_t now = now_ms();
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        le_link_t *l = &links[i];
+        uint32_t u = l->neg_until_ms;
+        if (!l->active || !u) { continue; }
+        if ((int32_t)(now - u) >= 0) { l->neg_until_ms = 0; continue; }
+        return true;
+    }
+    return false;
+}
+
+static bool json_addr(const char *json, uint8_t addr[BT_ADDR_LEN]) {
+    const char *p = json ? strstr(json, "\"addr\"") : NULL;
+    if (!p) { return false; }
+    p += 6;
+    while (*p == ' ' || *p == '\t') { p++; }
+    if (*p != ':') { return false; }
+    p++;
+    while (*p == ' ' || *p == '\t') { p++; }
+    if (*p != '"') { return false; }
+    p++;
+    unsigned v[6];
+    if (sscanf(p, "%2x:%2x:%2x:%2x:%2x:%2x",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) {
+        return false;
+    }
+    for (int i = 0; i < 6; i++) { addr[i] = (uint8_t)v[i]; }
+    return true;
+}
+
+void le_on_profile_telemetry(const char *topic, const char *json) {
+    if (!topic || strncmp(topic, "profile.", 8) != 0) { return; }
+    size_t n = strlen(topic);
+    if (n < 11 || memcmp(topic + n - 11, ".telemetry", 11) != 0) { return; }
+    uint8_t addr[BT_ADDR_LEN];
+    bool named = json_addr(json, addr);
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        le_link_t *l = &links[i];
+        if (!l->active || !l->neg_until_ms) { continue; }
+        if (named && memcmp(l->addr, addr, BT_ADDR_LEN) != 0) { continue; }
+        l->neg_until_ms = 0;
+    }
 }
 
 static le_link_t *link_by_handle(uint16_t h) {
@@ -590,6 +660,8 @@ static void discover_next(le_link_t *l) {
     l->disc_inflight = DISC_IN_NONE;
     l->disc_deadline_ms = 0;
     db->ready = true;
+    l->neg_until_ms = now_ms() + LE_NEG_HOLD_MS;
+    if (!l->neg_until_ms) { l->neg_until_ms = 1; }
     gatt_client_get_mtu(l->con_handle, &db->mtu);
 
     char *tree = api_scratch();
@@ -755,6 +827,7 @@ static void start_discovery(le_link_t *l) {
     l->disc_err = 0;
     l->disc_inflight = DISC_IN_PRIMARY;
     l->disc_deadline_ms = now_ms() + DISC_TIMEOUT_MS;
+    l->neg_until_ms = 0;
 
     /* Guarded like the value operations are (see le_read/le_write), because
      * this is called straight out of le_on_connected and that handle's client
@@ -924,7 +997,10 @@ void le_on_disconnected(uint16_t con_handle) {
 bool le_connect(const uint8_t *addr, uint8_t addr_type) {
     /* Reachable straight from a script (bt.connect) on a boot with no BTstack. */
     if (!bt_stack_up()) { return false; }
-    if (s_connecting) {
+    /* One attempt at a time, through GATT discovery. A ready link does not
+     * hold this: the next device (the other slot of the same driver) is
+     * allowed to connect while the first one negotiates. */
+    if (le_bringup_busy()) {
         return false;
     }
 #if CONFIG_NET_WIFI

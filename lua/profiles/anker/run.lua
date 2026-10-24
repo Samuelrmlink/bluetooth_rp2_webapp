@@ -1,3 +1,4 @@
+-- Behavior spec for the Anker protocol. The live driver is the anker PEX module.
 --[[
 The Anker driver, as a module so more than one device can be driven at once.
 

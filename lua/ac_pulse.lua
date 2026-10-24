@@ -11,8 +11,8 @@ while Bluetooth holds the radio.
 
   {"op":"script.start","params":{"name":"ac_pulse"}}
 
-Needs the Anker driver running (lua/anker.lua): the C1000 link and the setter
-queue are the driver's, reached through profiles.anker.control.
+Needs the Anker driver running. The native PEX module is preferred when it is
+loaded; otherwise the setter queue is profiles.anker.control from lua/anker.lua.
 
 Rules it keeps:
   - Acts only when the outlet is reported ON, from fresh telemetry.
@@ -42,7 +42,20 @@ local function note(s)
 end
 
 local function device()
-  for a, d in pairs(control.devices) do return a, d end   -- the one C1000
+  -- Prefer the native driver. Check pex.info before require: a missing .pex
+  -- must not fall through into the Lua launcher.
+  if pex and pex.info and pex.info('anker') then
+    local api = require 'anker'
+    local a = api.device()
+    if not a then return nil end
+    local d = {
+      set = function(field, value) return api.set(a, field, value) end,
+      at = sys.ms() - (api.age_ms(a) or 1e9),
+    }
+    d.sample = setmetatable({}, { __index = function(_, k) return api.get(a, k) end })
+    return a, d
+  end
+  for a, d in pairs(control.devices) do return a, d end
 end
 
 -- Wait for a telemetry sample, newer than `since`, reporting FIELD == v.

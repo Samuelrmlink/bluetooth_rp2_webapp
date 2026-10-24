@@ -1,26 +1,14 @@
---[[
-Anker devices, identified from their advertisement.
-
-  {"op":"script.start","params":{"script":"anker"}}
-
-This is a launcher; the driver is profiles/anker/run.lua, which is shared so
-that a second device costs a second two-line launcher rather than a second
-copy of the code. To watch two at once, start lua/anker2.lua as well: each
-takes a device the other does not hold, and each works without the other.
-
-CREDENTIALS ARE NOT IN THIS FILE AND MUST NOT BE. They come from
-cfg/anker.json, which is git-ignored and which the HTTP filesystem API will
-not serve:
-
-  { "user_id": "<40 chars>", "private_key": "<64 hex>",
-    "tz": "CST6CDT,M3.2.0,M11.1.0", "tz_offset_sec": "-21600",
-    "target": "B105" }
-
-Only private_key is needed to reach a session; user_id authorises it and is
-required before most devices will report. "target" is optional and pins which
-device this launcher takes when several are in range -- an address or a
-productType.
-]]
-
-local run = require 'profiles.anker.run'
-run(sys.secret('anker', 'target'), 'anker')
+-- Start the Anker PEX driver. Credentials stay in cfg/anker.json.
+-- One app owns both devices. Starting this or anker2 starts slot 0 and,
+-- when target2 is set, slot 1. A second pex.start fails with "already running".
+local info = pex.info('anker')
+if info and info.state == 'running' then
+  log.info('anker: already running')
+  return
+end
+if not info then
+  local m, err = pex.load('anker')
+  if not m then log.error('anker: ' .. tostring(err)); return end
+end
+local ok, err = pex.start('anker')
+if not ok then log.error('anker: ' .. tostring(err)) end

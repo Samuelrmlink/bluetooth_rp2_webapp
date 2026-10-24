@@ -6,6 +6,7 @@ _deps/
 node_modules/
 staged/
 web-dist/
+web/.pex-cc/
 keys/
 *.pem
 

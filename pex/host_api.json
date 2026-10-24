@@ -412,8 +412,8 @@
       "name": "sys",
       "id": 7,
       "major": 1,
-      "minor": 0,
-      "doc": "system facts: wall clock, host name, firmware version, memory",
+      "minor": 1,
+      "doc": "system facts: wall clock, host name, firmware version, memory, credential files",
       "types": [
         "typedef struct {",
         "    uint32_t c_heap_free;     /* C heap (malloc) headroom, bytes */",
@@ -440,6 +440,12 @@
         {
           "name": "pex_sys_mem",
           "proto": "int pex_sys_mem(pex_sys_mem_t *out)"
+        },
+        {
+          "name": "pex_sys_secret",
+          "since": 1,
+          "proto": "int pex_sys_secret(const char *name, const char *key, char *out, size_t cap)",
+          "doc": "one top-level string from cfg/<name>.json (no slash or dot in name); length, or a negative PEX_E*. The HTTP filesystem does not serve cfg/. Same rule as Lua sys.secret"
         }
       ]
     },
@@ -793,6 +799,134 @@
         {
           "name": "pex_bt_unlisten",
           "proto": "int pex_bt_unlisten(int id)"
+        }
+      ]
+    },
+    {
+      "name": "codec",
+      "id": 13,
+      "major": 1,
+      "minor": 1,
+      "doc": "The firmware's Anker frame, TLV and session crypto, the same C Lua's frame, tlv and crypto tables call. Present only when the firmware is built with PROTO_ANKER_CRYPTO. A module must not link uECC or tiny-AES. GCM decrypt does not check the tag.",
+      "types": [
+        "#define PEX_CODEC_REASM_SIZE 680",
+        "#define PEX_CODEC_TLV_STRING 0",
+        "#define PEX_CODEC_TLV_U8 1",
+        "#define PEX_CODEC_TLV_U16 2",
+        "#define PEX_CODEC_TLV_U32 3",
+        "#define PEX_CODEC_TLV_F32 4",
+        "#define PEX_CODEC_TLV_BYTES 5",
+        "#define PEX_CODEC_TLV_UNKNOWN 6",
+        "#define PEX_CODEC_ENC_STRING 0",
+        "#define PEX_CODEC_ENC_U8 1",
+        "#define PEX_CODEC_ENC_U16 2",
+        "#define PEX_CODEC_ENC_U32 3",
+        "#define PEX_CODEC_ENC_F32 4",
+        "#define PEX_CODEC_ENC_BYTES 5",
+        "typedef struct {",
+        "    uint8_t version, slave_id, function_type;",
+        "    uint8_t encrypted, fragmented, is_response;",
+        "    uint8_t frag_index, frag_count, checksum_ok, length_ok;",
+        "    uint16_t opcode, payload_len;",
+        "    const uint8_t *payload; /* into the caller's buffer, after a frag header */",
+        "} pex_codec_frame_t;",
+        "typedef struct {",
+        "    uint8_t tag, type;       /* type is PEX_CODEC_TLV_* */",
+        "    int16_t type_byte;       /* -1 when the item has none */",
+        "    uint16_t raw_len, val_len;",
+        "    int64_t ival;",
+        "    const uint8_t *raw;      /* charging: includes the type byte; negotiation: the value */",
+        "    const uint8_t *val;",
+        "} pex_codec_tlv_t;",
+        "typedef struct {",
+        "    uint8_t tag, enc;        /* enc is PEX_CODEC_ENC_*; not the type byte */",
+        "    int16_t type_byte;       /* -2 omit, -1 default for enc, >= 0 explicit */",
+        "    int64_t ival;",
+        "    const uint8_t *data;",
+        "    uint16_t data_len;",
+        "} pex_codec_spec_t;"
+      ],
+      "functions": [
+        {
+          "name": "pex_codec_frame_parse",
+          "proto": "int pex_codec_frame_parse(const uint8_t *buf, size_t len, pex_codec_frame_t *out)",
+          "doc": "1 if the buffer is an FF09 frame (checksum_ok is separate), 0 if not, or a negative PEX_E*"
+        },
+        {
+          "name": "pex_codec_frame_build",
+          "proto": "int pex_codec_frame_build(uint8_t function_type, uint16_t opcode, int encrypted, uint8_t slave_id, const uint8_t *payload, size_t n, uint8_t *out, size_t cap)",
+          "doc": "frame length, or a negative PEX_E*"
+        },
+        {
+          "name": "pex_codec_reasm_reset",
+          "proto": "void pex_codec_reasm_reset(void *st)",
+          "doc": "st is PEX_CODEC_REASM_SIZE bytes, owned by the caller"
+        },
+        {
+          "name": "pex_codec_reasm_push",
+          "proto": "int pex_codec_reasm_push(void *st, const pex_codec_frame_t *f, const uint8_t **out, size_t *outlen)",
+          "doc": "0 while a fragmented frame is incomplete; else the payload length. *out points at the caller's frame or into st: copy it before returning"
+        },
+        {
+          "name": "pex_codec_tlv_next",
+          "proto": "int pex_codec_tlv_next(const uint8_t **body, size_t *len, pex_codec_tlv_t *out)",
+          "doc": "one charging-dialect item; advances *body. 1, or 0 at the end. raw includes the type byte"
+        },
+        {
+          "name": "pex_codec_tlv_neg",
+          "proto": "int pex_codec_tlv_neg(const uint8_t **body, size_t *len, pex_codec_tlv_t *out)",
+          "doc": "one negotiation-dialect item (no type byte). raw is the value"
+        },
+        {
+          "name": "pex_codec_tlv_build",
+          "proto": "int pex_codec_tlv_build(const pex_codec_spec_t *specs, size_t n, uint8_t *out, size_t cap)",
+          "doc": "bytes written. type_byte -2 omits the type byte, so a u8 0x21 is tag, len 1, 0x21"
+        },
+        {
+          "name": "pex_codec_pubkey",
+          "proto": "int pex_codec_pubkey(const uint8_t *d, uint8_t *xy)",
+          "doc": "d is 32 bytes, xy is X||Y 64 bytes; 64 or a negative PEX_E*. The private scalar is the caller's"
+        },
+        {
+          "name": "pex_codec_ecdh",
+          "proto": "int pex_codec_ecdh(const uint8_t *d, const uint8_t *peer, size_t peer_len, uint8_t *Z)",
+          "doc": "Z is the 32-byte X coordinate. peer is 04||X||Y or bare X||Y. About 40 ms. 32 or a negative PEX_E*"
+        },
+        {
+          "name": "pex_codec_gcm_encrypt",
+          "proto": "int pex_codec_gcm_encrypt(const uint8_t *key, size_t keylen, const uint8_t *iv12, const uint8_t *aad, size_t aad_len, const uint8_t *pt, size_t n, uint8_t *out, size_t cap)",
+          "doc": "ciphertext || tag; returns n + 16"
+        },
+        {
+          "name": "pex_codec_gcm_decrypt",
+          "proto": "int pex_codec_gcm_decrypt(const uint8_t *key, size_t keylen, const uint8_t *iv12, const uint8_t *body, size_t n, uint8_t *out, size_t cap)",
+          "doc": "does NOT check the tag. body is ciphertext || tag. plaintext length"
+        },
+        {
+          "name": "pex_codec_gcm_tag",
+          "since": 1,
+          "proto": "void pex_codec_gcm_tag(const uint8_t *key, size_t keylen, const uint8_t *iv12, const uint8_t *aad, size_t aad_len, const uint8_t *ct, size_t ct_len, uint8_t *tag)",
+          "doc": "the 16-byte tag a conforming implementation would produce. Decrypt never checks one. Same C as Lua crypto.gcm_tag"
+        },
+        {
+          "name": "pex_codec_cbc",
+          "proto": "int pex_codec_cbc(int encrypt, const uint8_t *key, size_t keylen, const uint8_t *iv, const uint8_t *in, size_t n, uint8_t *out, size_t cap, size_t *outlen)",
+          "doc": "AES-CBC. Encrypt PKCS7-pads. Decrypt unpads leniently. iv is 16 bytes. byte count or a negative PEX_E*"
+        },
+        {
+          "name": "pex_codec_kdf",
+          "proto": "int pex_codec_kdf(const uint8_t *Z, uint8_t *out, size_t outlen)",
+          "doc": "Anker ECIES KDF. outlen bytes, or a negative PEX_E*"
+        },
+        {
+          "name": "pex_codec_account_key",
+          "proto": "int pex_codec_account_key(const char *id, uint8_t *key, uint8_t *iv)",
+          "doc": "AesConferV1: key is the id padded to 32, iv is 16 zero bytes. 32 or a negative PEX_E*"
+        },
+        {
+          "name": "pex_codec_ghash",
+          "proto": "void pex_codec_ghash(const uint8_t *H, const uint8_t *aad, size_t aad_len, const uint8_t *ct, size_t ct_len, uint8_t *out)",
+          "doc": "GHASH(H, aad, ct) -> 16 bytes. The negotiation tag is this XOR a recovered E(J0); the constants stay in the module"
         }
       ]
     },

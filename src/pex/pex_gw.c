@@ -20,12 +20,19 @@ int pex_sig_uecc_verify(uint16_t alg, uint16_t key_id, const uint8_t digest[32],
 void pex_sig_uecc_set_keys(const uint8_t (*keys)[64], uint32_t n);
 #if CONFIG_PEX_LUA
 extern const pex_group_t pex_group_lua;
+int pexlua_before_unload(pex_mod_t *m);
 #endif
 
 #if CONFIG_PEX_ALLOW_UNSIGNED
 #define ALLOW_UNSIGNED 1
 #else
 #define ALLOW_UNSIGNED 0
+#endif
+
+/* A .config generated before this option still gets the recovery. 0 in
+ * Kconfig is an explicit "watchdog only". */
+#ifndef CONFIG_PEX_SLICE_MS
+#define CONFIG_PEX_SLICE_MS 500
 #endif
 
 #if CONFIG_PEX_POOL_KB > 0
@@ -36,7 +43,6 @@ extern const pex_group_t pex_group_lua;
 
 #define AUTOSTART_PATH "cfg/pex_autostart.json"
 #define FAULTS_PATH "var/pex_faults.json"
-#define AUTOSTART_DELAY_MS 3000u
 #define FAULTS_MAX 1024
 
 /* ---- the record that survives a reset (SCRATCH_X, after crumb_rec_t) ------
@@ -67,7 +73,6 @@ static uint32_t s_pool_size;
 static uint8_t s_static_pool[CONFIG_PEX_POOL_KB * 1024u] __attribute__((aligned(8)));
 #endif
 static uint32_t s_boot_ms;
-static bool s_autostart_done;
 
 static void boot_record(void) {
     static bool done;
@@ -107,6 +112,42 @@ static void on_unload(pex_mod_t *m) {
 #if CONFIG_BT_LE
     pex_gw_bt_unload(m);
 #endif
+}
+
+/* Append one record to var/pex_faults.json. Autostart skips that build.
+ * Static on purpose: this also runs from a slice abort, which may have
+ * landed inside malloc, and taking the heap lock again would wedge the loop
+ * the slice just saved. */
+static void faults_append(const char *name, const char *bid, const char *why, unsigned long offset) {
+    static char buf[FAULTS_MAX + 160];
+    if (!cfg_file_read(FAULTS_PATH, buf, FAULTS_MAX) || pex_json_len(buf, "faults") < 0) {
+        strcpy(buf, "{\"faults\":[]}");
+    }
+    size_t n = strlen(buf);
+    char *end = strrchr(buf, ']');
+    if (end && n < FAULTS_MAX - 10) {
+        char item[160];
+        snprintf(item, sizeof item, "%s{\"name\":\"%s\",\"build\":\"%s\",\"why\":\"%s\",\"offset\":%lu}",
+                 pex_json_len(buf, "faults") > 0 ? "," : "", name, bid, why, offset);
+        memmove(end + strlen(item), end, strlen(end) + 1);
+        memcpy(end, item, strlen(item));
+        fs_mkdir("var");
+        cfg_file_write(FAULTS_PATH, buf);
+    }
+}
+
+/* The slice stopped this module. Release what it registered (same as unload,
+ * and idempotent there) and remember the build so the next boot does not
+ * autostart it. The module stays loaded, faulted, until pex.unload. */
+static void on_slice(pex_mod_t *m) {
+    on_unload(m);
+    pex_info_t in;
+    if (pex_info(m, &in) != PEX_OK || !in.build_id) { return; }
+    char bid[33];
+    for (int i = 0; i < 16; i++) { snprintf(bid + 2 * i, 3, "%02x", in.build_id[i]); }
+    const pex_fault_t *f = pex_last_fault();
+    unsigned long off = (f && strcmp(f->name, in.name) == 0) ? f->offset : 0;
+    faults_append(in.name, bid, "hang", off);
 }
 
 /* C heap headroom, as fs_migrate.c measures it: what is left between the
@@ -174,6 +215,8 @@ bool pex_gw_ensure(void) {
         .host_name = "btgw",
         .trace = &PEX_REC->trace,
         .on_unload = on_unload,
+        .on_slice = on_slice,
+        .slice_ms = CONFIG_PEX_SLICE_MS,
         .max_stack = 2048,
         .flash = pex_gw_flash(),
     };
@@ -200,6 +243,9 @@ bool pex_gw_ensure(void) {
 #endif
 #if CONFIG_BT_LE
     pex_register_group(&pex_group_bt);
+#endif
+#if CONFIG_PROTO_ANKER_CRYPTO
+    pex_register_group(&pex_group_codec);
 #endif
 #if CONFIG_PEX_LUA
     pex_register_group(&pex_group_lua);
@@ -296,25 +342,8 @@ static void record_prev_fault(void) {
     printf("pex: the previous boot %s in module %s (build %s, offset 0x%lx): autostart will skip it\n",
            s_prev.fault ? "FAULTED" : "was reset while running code", s_prev.fault ? s_prev.name : "?", bid,
            (unsigned long)s_prev.offset);
-    /* append to var/pex_faults.json: {"faults":[{"name","build","why","offset"}...]} */
-    char *buf = malloc(FAULTS_MAX + 160);
-    if (!buf) { return; }
-    if (!cfg_file_read(FAULTS_PATH, buf, FAULTS_MAX) || pex_json_len(buf, "faults") < 0) {
-        strcpy(buf, "{\"faults\":[]}");
-    }
-    size_t n = strlen(buf);
-    char *end = strrchr(buf, ']');
-    if (end && n < FAULTS_MAX - 10) {
-        char item[150];
-        snprintf(item, sizeof item, "%s{\"name\":\"%s\",\"build\":\"%s\",\"why\":\"%s\",\"offset\":%lu}",
-                 pex_json_len(buf, "faults") > 0 ? "," : "", s_prev.fault ? s_prev.name : "?", bid,
-                 s_prev.fault ? "fault" : "hang", (unsigned long)s_prev.offset);
-        memmove(end + strlen(item), end, strlen(end) + 1);
-        memcpy(end, item, strlen(item));
-        fs_mkdir("var");
-        cfg_file_write(FAULTS_PATH, buf);
-    }
-    free(buf);
+    faults_append(s_prev.fault ? s_prev.name : "?", bid, s_prev.fault ? "fault" : "hang",
+                  (unsigned long)s_prev.offset);
 }
 
 /* Is this build id (hex) in var/pex_faults.json? */
@@ -349,84 +378,86 @@ static bool file_build_id(const char *rel, uint8_t *bid) {
     return true;
 }
 
-/* ---- autostart: cfg/pex_autostart.json ----------------------------------------
- * {"modules":[{"name":"app","path":"pex/app.m33.pex","start":true,"cfg":{...}}, ...]}
- * "path" defaults to pex/<name>.<arch>.pex, "start" to true (if it is an app). */
-static void autostart(void) {
-    size_t sz;
-    if (!fs_stat(AUTOSTART_PATH, &sz) || sz == 0) { return; }
-    if (sz > 4096) { printf("pex: %s is over 4 KB, ignored\n", AUTOSTART_PATH); return; }
-    if (!pex_gw_ensure()) { return; }
-    pex_arena_t *a = pex_scratch_begin(sz + 1 + 1024 + 256);
-    char *buf = a ? pex_scratch_alloc(a, sz + 1) : NULL;
-    char *cfgbuf = a ? pex_scratch_alloc(a, 1024) : NULL;
-    char *path = a ? pex_scratch_alloc(a, 128) : NULL;
-    if (!buf || !cfgbuf || !path) { if (a) { pex_scratch_end(a); } return; }
-    if (!cfg_file_read(AUTOSTART_PATH, buf, sz + 1)) { pex_scratch_end(a); return; }
-    int n = pex_json_len(buf, "modules");
-    if (n < 0) { printf("pex: %s: no \"modules\" array\n", AUTOSTART_PATH); }
-    for (int i = 0; i < n; i++) {
-        char key[40], name[24];
-        snprintf(key, sizeof key, "modules.%d.name", i);
-        if (!pex_json_str(buf, key, name, sizeof name)) { continue; }
-        snprintf(key, sizeof key, "modules.%d.path", i);
-        if (!pex_json_str(buf, key, path, 128)) { pex_gw_find(name, path, 128); }
-        uint8_t bid[16];
-        int ign = 0;
-        pex_installed_t xin;
-        bool xip = strncmp(path, "xip:", 4) == 0 && pex_installed_find(path + 4, &xin) >= 0;
-        if (xip) { memcpy(bid, xin.build_id, 16); }
-        const char *rel = xip ? path : lfs_rel(path, &ign);
-        if (!xip && (!rel || !file_build_id(rel, bid))) {
-            printf("pex: autostart %s: %s not found\n", name, path);
-            continue;
-        }
-        if (faulted_before(bid)) {
-            printf("pex: autostart %s: SKIPPED -- this build faulted before (var/pex_faults.json; pex.faults_clear)\n", name);
-            api_emit("pex.autostart_skipped", "{\"reason\":\"faulted before\"}");
-            continue;
-        }
-        int err;
-        pex_mod_t *m = pex_gw_load_path(path, name, &err);
-        if (!m) {
-            printf("pex: autostart %s: %s\n", name, pex_errmsg());
-            continue;
-        }
-        int start = 1;
-        snprintf(key, sizeof key, "modules.%d.start", i);
-        pex_json_bool(buf, key, &start);
+/* One app, for src/launch.c. The old all-at-once pass lived here. */
+int pex_gw_launch_one(const char *name, const char *path_opt, const char *cfg_opt) {
+    if (!name || !name[0]) return 2;
+    if (!pex_gw_ensure()) {
+        printf("pex: launch %s: the pool could not be taken\n", name);
+        return -1;
+    }
+    pex_mod_t *m = pex_find(name);
+    if (m) {
         pex_info_t in;
         pex_info(m, &in);
-        if (start && (in.flags & PEX_F_APP)) {
-            snprintf(key, sizeof key, "modules.%d.cfg", i);
-            size_t cl = 0;
-            const char *c = pex_json_find(buf, key, &cl);
-            const char *arg = NULL;
-            if (c && *c == '"') {
-                pex_json_str(buf, key, cfgbuf, 1024);
-                arg = cfgbuf;
-            } else if (c && cl < 1024) {
-                memcpy(cfgbuf, c, cl);
-                cfgbuf[cl] = 0;
-                arg = cfgbuf;
-            }
-            if (pex_start(m, arg) != PEX_OK) { printf("pex: autostart %s: %s\n", name, pex_errmsg()); }
+        if (in.state == PEX_ST_RUNNING || in.tasks > 0) {
+            printf("pex: launch %s: already running\n", name);
+            return 1;
         }
+        if (!(in.flags & PEX_F_APP)) {
+            printf("pex: launch %s: not an app\n", name);
+            return 2;
+        }
+        if (pex_start(m, (cfg_opt && cfg_opt[0]) ? cfg_opt : NULL) != PEX_OK) {
+            printf("pex: launch %s: %s\n", name, pex_errmsg());
+            return -1;
+        }
+        printf("pex: launch %s\n", name);
+        return 0;
     }
-    pex_scratch_end(a);
+    char pathbuf[128];
+    const char *path = (path_opt && path_opt[0]) ? path_opt : NULL;
+    if (!path) {
+        if (!pex_gw_find(name, pathbuf, sizeof pathbuf)) {
+            printf("pex: launch %s: not found\n", name);
+            return 2;
+        }
+        path = pathbuf;
+    }
+    uint8_t bid[16];
+    int ign = 0;
+    pex_installed_t xin;
+    bool xip = strncmp(path, "xip:", 4) == 0 && pex_installed_find(path + 4, &xin) >= 0;
+    if (xip) { memcpy(bid, xin.build_id, 16); }
+    const char *rel = xip ? path : lfs_rel(path, &ign);
+    if (!xip && (!rel || !file_build_id(rel, bid))) {
+        printf("pex: launch %s: %s not found\n", name, path);
+        return 2;
+    }
+    if (faulted_before(bid)) {
+        printf("pex: launch %s: skipped, this build faulted before (var/pex_faults.json; pex.faults_clear)\n", name);
+        api_emit("pex.autostart_skipped", "{\"reason\":\"faulted before\"}");
+        return 2;
+    }
+    int err = 0;
+    m = pex_gw_load_path(path, name, &err);
+    if (!m) {
+        printf("pex: launch %s: %s\n", name, pex_errmsg());
+        return -1;
+    }
+    pex_info_t in;
+    pex_info(m, &in);
+    if (!(in.flags & PEX_F_APP)) {
+        printf("pex: launch %s: not an app\n", name);
+        return 2;
+    }
+    if (pex_start(m, (cfg_opt && cfg_opt[0]) ? cfg_opt : NULL) != PEX_OK) {
+        printf("pex: launch %s: %s\n", name, pex_errmsg());
+        return -1;
+    }
+    printf("pex: launch %s\n", name);
+    return 0;
+}
+
+void pex_gw_record_boot_fault(void) {
+    if (s_boot_ms) return;
+    boot_record();
+    s_boot_ms = to_ms_since_boot(get_absolute_time());
+    if (!s_boot_ms) { s_boot_ms = 1; }
+    record_prev_fault();
 }
 
 void pex_gw_poll(void) {
-    if (!s_boot_ms) {
-        boot_record();
-        s_boot_ms = to_ms_since_boot(get_absolute_time());
-        if (!s_boot_ms) { s_boot_ms = 1; }
-    }
-    if (!s_autostart_done && to_ms_since_boot(get_absolute_time()) - s_boot_ms > AUTOSTART_DELAY_MS) {
-        s_autostart_done = true;
-        record_prev_fault();
-        autostart();
-    }
+    pex_gw_record_boot_fault();
     if (!s_up) { return; }
     pex_poll();
     pex_gw_fs_poll();
@@ -677,8 +708,22 @@ static void op_stop(const char *params, api_reply_fn reply, void *ctx, long id) 
 static void op_unload(const char *params, api_reply_fn reply, void *ctx, long id) {
     pex_mod_t *m = named(params, reply, ctx, id);
     if (!m) { return; }
+    /* Lua may hold the only ref. Tell it, drop that ref, then unload.
+     * A module that is still running or on a call stack is left held, and
+     * pex_unload reports that. */
+#if CONFIG_PEX_LUA
+    int detached = pexlua_before_unload(m);
+#else
+    int detached = 0;
+#endif
     int rc = pex_unload(m);
-    if (rc != PEX_OK) { reply_err_pex(reply, ctx, id, rc); return; }
+    if (rc != PEX_OK) {
+        if (detached) {
+            printf("pexlua: Lua was detached from %s but unload failed: %s\n", pex_name(m), pex_errmsg());
+        }
+        reply_err_pex(reply, ctx, id, rc);
+        return;
+    }
     api_reply_ok(reply, ctx, id, "{\"unloaded\":true}");
 }
 
@@ -734,8 +779,10 @@ static void op_faults(const char *params, api_reply_fn reply, void *ctx, long id
     int n = snprintf(b, api_scratch_size(), "{\"prev_boot\":%s,\"last\":", pf);
     const pex_fault_t *f = s_up ? pex_last_fault() : NULL;
     if (f) {
-        n += snprintf(b + n, api_scratch_size() - (size_t)n, "{\"name\":\"%s\",\"offset\":%lu,\"pc\":%lu,\"in_host\":%s}",
-                      f->name, (unsigned long)f->offset, (unsigned long)f->pc, f->in_host ? "true" : "false");
+        n += snprintf(b + n, api_scratch_size() - (size_t)n,
+                      "{\"name\":\"%s\",\"offset\":%lu,\"pc\":%lu,\"in_host\":%s,\"hang\":%s}",
+                      f->name, (unsigned long)f->offset, (unsigned long)f->pc, f->in_host ? "true" : "false",
+                      f->hang ? "true" : "false");
     } else {
         n += snprintf(b + n, api_scratch_size() - (size_t)n, "null");
     }

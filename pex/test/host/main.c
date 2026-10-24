@@ -354,6 +354,34 @@ static void suite(const char *model) {
         result("fault.unload", pex_unload(m) == PEX_OK, "%s", pex_errmsg());
     }
 
+    /* slice: one call never returns. It is faulted; a cooperative app keeps ticking. */
+    {
+        pex_mod_t *buddy = load(p_of(model, "app", TGT), NULL, &err);
+        pex_mod_t *sp = load(p_of(model, "spin", TGT), NULL, &err);
+        if (buddy && sp) {
+            int rc = pex_start(buddy, "{\"ticks\":100000,\"period\":20}");
+            poll_for(40);
+            int before = (int)pex_call0(buddy, sym(buddy, "app_ticks"));
+            uint32_t t0 = to_ms_since_boot(get_absolute_time());
+            uint32_t r = pex_call0(sp, sym(sp, "spin_forever"));
+            uint32_t dt = to_ms_since_boot(get_absolute_time()) - t0;
+            pex_info_t is;
+            pex_info(sp, &is);
+            poll_for(80);
+            int after = (int)pex_call0(buddy, sym(buddy, "app_ticks"));
+            const pex_fault_t *f = pex_last_fault();
+            result("slice.recovered", r == (uint32_t)PEX_EFAULT && is.state == PEX_ST_FAULTED && is.active == 0 &&
+                                       is.tasks == 0 && dt >= 30 && dt < 500,
+                   "rc %lu dt %lu state %s", (unsigned long)r, (unsigned long)dt, pex_state_name(is.state));
+            result("slice.named", f && f->hang && !f->in_host && strcmp(f->name, is.name) == 0, "%s", f ? f->name : "");
+            result("slice.others_run", rc == PEX_OK && after > before, "ticks %d -> %d", before, after);
+            result("slice.unload", pex_stop(buddy) == PEX_OK && pex_unload(buddy) == PEX_OK && pex_unload(sp) == PEX_OK,
+                   "%s", pex_errmsg());
+        } else {
+            result("slice.load", false, "%s", pex_errmsg());
+        }
+    }
+
     /* the other architecture's file */
     m = load(p_of(model, "hello", OTHER_TGT), NULL, &err);
     result("wrong_arch.refused", !m && err == PEX_ETARGET, "%s", pex_errmsg());
@@ -650,6 +678,7 @@ int main(void) {
     pex_config_t cfg = {
         .pool = s_pool, .pool_size = sizeof s_pool, .policy = PEX_POLICY_ALLOW_UNSIGNED,
         .verify = pex_sig_uecc_verify, .host_name = "pex-test", .flash = &s_part,
+        .slice_ms = 50,
     };
     int rc = pex_init(&cfg);
     result("init", rc == 0, NULL);

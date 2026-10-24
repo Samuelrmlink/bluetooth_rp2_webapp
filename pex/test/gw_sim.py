@@ -5,7 +5,7 @@ paths that must never be tried on the real board.
 
   pex/test/gw_sim.py --deploy <TBYB build> --old <slot-A build> --mods <module build>
                      [--release FILE.smp.bin] [--mcusim PATH] [--work DIR]
-                     [--scenarios ota,suite,quiet,fault,hang]
+                     [--scenarios ota,suite,quiet,fault,hang,hangmask]
 
 The board is laid out as the real gateway is since 2026-10-21: partition
 table with LittleFS 1776 KB + PEX 256 KB, the old firmware (feature/lfs-
@@ -21,7 +21,10 @@ mcusim's virtual network and a generic BLE peer (an echo service, pex-test UUIDs
          PC) and --bt (the echo peer).
   fault  cfg/pex_autostart.json starts crashapp: the fault is attributed, the
          board reboots into the SAME image, the next boot skips the module.
-  hang   the same with hangapp: a watchdog reset, the module named next boot.
+  hang   hangapp spins with interrupts enabled: the slice faults that module,
+         the board stays up, pex.faults records it, and the next boot skips it.
+  hangmask  the same spin with interrupts masked: the slice cannot preempt it,
+         so the watchdog resets the board and the next boot names the module.
   xip    power cuts (SIGKILL of the simulator: every flash operation is already
          in the flash file) during installs and during an overlapping
          compaction: after each restart the index is the old or the new one
@@ -450,7 +453,7 @@ def main():
     ap.add_argument("--release", help="the signed release (default: deploy/btgw-*.smp.bin)")
     ap.add_argument("--mcusim", default=os.path.expanduser("~/Work/mcusim-agents/blegatt/target/release/mcusim"))
     ap.add_argument("--work", default=os.path.expanduser("~/Work/pexwork/gwsim"))
-    ap.add_argument("--scenarios", default="ota,quiet,suite,xip,fault,hang")
+    ap.add_argument("--scenarios", default="ota,quiet,suite,xip,fault,hang,hangmask")
     ap.add_argument("--driver-lua", help="a BLE driver's lua/ folder, for the 'budget' scenario")
     ap.add_argument("--driver-script", default="driver", help="the script in it to start (budget)")
     ap.add_argument("--via", help="first OTA this release (the board's current one) into slot B, then ours into slot A")
@@ -588,7 +591,7 @@ def main():
             except Exception as e:
                 check("xip scenario ran to the end", False, repr(e)[:200])
 
-        for name, mod in (("fault", "crashapp"), ("hang", "hangapp")):
+        for name, mod in (("fault", "crashapp"), ("hang", "hangapp"), ("hangmask", "hangmask")):
             if name not in sc:
                 continue
             put(f"pex/{mod}.m33.pex", open(os.path.join(a.mods, "pexmods", "gw-faults", f"{mod}.m33.pex"), "rb").read())
@@ -598,14 +601,33 @@ def main():
             op("sys.reboot")
             i = s.wait(r"^main: init done", 300, mark)
             check(f"{name}: reboots", i >= 0)
-            if name == "fault":
+            if name == "hang":
+                j = s.wait(r"PEX HANG: module hangapp", 120, mark)
+                check("hang: the slice stops the module", j >= 0, s.lines[j] if j >= 0 else "")
+                check("hang: still answers", wait_http(30))
+                watched = any(re.search(r"REBOOTED BY WATCHDOG", ln) for ln in s.lines[max(j, mark):])
+                check("hang: the board stays up", j >= 0 and not watched)
+                ok, info = op("pex.info", {"name": "hangapp"})
+                check("hang: module is faulted", ok and isinstance(info, dict) and info.get("state") == "faulted",
+                      str(info)[:150])
+                ok, f = op("pex.faults")
+                recs = ((f.get("skip") or {}).get("faults") or []) if ok else []
+                check("hang: pex.faults records it",
+                      any(isinstance(x, dict) and x.get("why") == "hang" and x.get("name") == "hangapp" for x in recs),
+                      json.dumps(f)[:150] if ok else str(f))
+                mark = len(s.lines)
+                op("sys.reboot")
+                k = mark                       # the checks below want the next boot, not a watchdog
+            elif name == "fault":
                 j = s.wait(r"^PEX FAULT: module crashapp build [0-9a-f]{32} at offset", 120, mark)
                 check("fault: attributed (module, build id, offset)", j >= 0, s.lines[j] if j >= 0 else "")
+                k = s.wait(r"^main: REBOOTED BY WATCHDOG|^main: previous boot stopped", 120, max(j, mark))
+                check(f"{name}: the watchdog reboots the board", k >= 0, s.lines[k] if k >= 0 else "")
             else:
-                j = s.wait(r"hanging now", 120, mark)
-                check("hang: the module hangs the loop", j >= 0)
-            k = s.wait(r"^main: REBOOTED BY WATCHDOG|^main: previous boot stopped", 120, max(j, mark))
-            check(f"{name}: the watchdog reboots the board", k >= 0, s.lines[k] if k >= 0 else "")
+                j = s.wait(r"masking irqs and hanging", 120, mark)
+                check("hangmask: the module hangs with interrupts masked", j >= 0, s.lines[j] if j >= 0 else "")
+                k = s.wait(r"^main: REBOOTED BY WATCHDOG|^main: previous boot stopped", 120, max(j, mark))
+                check("hangmask: the watchdog reboots the board", k >= 0, s.lines[k] if k >= 0 else "")
             # The OTA group's slot line is not printed after a watchdog reset in
             # mcusim ("no A/B partition table ... boot type 0", after any
             # reboot, not PEX-related), so "the same image" is checked as the
@@ -613,9 +635,14 @@ def main():
             b = s.wait(r"^main: init done", 300, max(k, mark))
             okb = b >= 0 and wait_http(120) and op("pex.list")[0]
             check(f"{name}: into the same image (the PEX firmware answers pex.list)", okb)
-            why = "FAULTED in module crashapp" if name == "fault" else "was reset while running code"
-            p = s.wait(r"^pex: the previous boot " + why, 120, max(b, mark))
-            check(f"{name}: the next boot names it", p >= 0, s.lines[p] if p >= 0 else "")
+            if name == "hang":
+                # Named when the slice fired, on the boot that stayed up. The
+                # faults file is what makes the next boot skip it.
+                p = b
+            else:
+                why = "FAULTED in module crashapp" if name == "fault" else "was reset while running code"
+                p = s.wait(r"^pex: the previous boot " + why, 120, max(b, mark))
+                check(f"{name}: the next boot names it", p >= 0, s.lines[p] if p >= 0 else "")
             q = s.wait(r"^pex: autostart %s: SKIPPED" % mod, 60, max(p, mark))
             check(f"{name}: and does not autostart it again", q >= 0)
             check(f"{name}: board reachable afterwards", wait_http(120))

@@ -30,6 +30,8 @@ uint64_t pex_port_us(void) { return 0; }
 void pex_port_log(int level, const char *line) { if (!s_quiet || level == PEX_LOG_ERR) { printf("  | %s\n", line); } }
 void pex_port_code_sync(void *p, uint32_t n) { (void)p; (void)n; }
 int pex_port_stack_bounds(uintptr_t *lo, uintptr_t *hi) { (void)lo; (void)hi; return 0; }
+void pex_port_slice_arm(uint32_t ms) { (void)ms; }
+void pex_port_slice_disarm(void) {}
 uint64_t pex_tramp(uint32_t sb, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) {
     (void)sb; (void)fn; (void)a0; (void)a1; (void)a2; (void)a3;
     return 0;

@@ -8,7 +8,7 @@ config PEX
       from LittleFS into RAM and run them -- apps on the main loop, native Lua
       modules, ops for the web UI. It costs no RAM until a module is first
       loaded: the pool is taken from the C heap then, after a headroom check.
-      Nothing runs at boot unless cfg/pex_autostart.json lists it.
+      Nothing runs at boot unless the launch list says so.
 
 config PEX_POOL_KB
     int "PEX pool, static (KB; 0 = take a small one from the C heap)"
@@ -70,5 +70,19 @@ config PEX_LUA
     bool "Lua launcher and require for PEX modules"
     depends on PEX && LUA_ENABLE
     default y
+
+config PEX_SLICE_MS
+    int "Abort a PEX call that runs longer than this (ms)"
+    depends on PEX
+    range 0 4000
+    default 500
+    help
+      Every module shares the main loop. A call into a module that does not
+      return within this many milliseconds is stopped: that module is marked
+      faulted, its tasks are cancelled, the event is recorded in
+      var/pex_faults.json, and the loop continues with the other modules and
+      the rest of the firmware. 0 leaves only the watchdog, which resets the
+      whole board. The watchdog still does that if the module runs with
+      interrupts masked, because the slice is a timer interrupt.
 
 endmenu
