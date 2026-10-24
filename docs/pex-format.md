@@ -22,7 +22,7 @@ at the end).
 
 **Design principle (0.6) [D]: native apps first; Lua is optional.** A PEX
 module does the work -- an app on the host's main loop serving its own ops and
-events (a BLE firmware-update app becomes `app.m33.pex` + `otap.m33.pex`). The runtime
+events (a BLE firmware-update app becomes `app.m33.pex` + `driver.m33.pex`). The runtime
 needs no Lua: modules are loaded, started and stopped from C, from the
 firmware's ops (`pex.*`) and from `cfg/pex_autostart.json`. Where a firmware
 has Lua, it is a **launcher and glue** -- a three-line script can start an app
@@ -43,9 +43,9 @@ equivalent of an `.exe`/`.so`, in the spirit of the Flipper Zero's `.fap` —
 that a firmware loads at run time from LittleFS or the SD card, links against
 the firmware's own exported API, and calls. Typical uses:
 
-- **native Lua modules**: `require 'otap'` returns a table of C functions;
+- **native Lua modules**: `require 'driver'` returns a table of C functions;
   the Lua scripts keep the policy, the module carries the byte-heavy work
-  (codecs, OTAP, JSON shaping, crypto, parsers);
+  (codecs, JSON shaping, crypto, parsers);
 - **native scripts/apps** with no Lua at all (a protocol driver, a profile);
 - **moving optional features out of the firmware image**: the SD build has
   ~22 KB left in its 864 KB slot.
@@ -214,7 +214,7 @@ Rules:
   "Thumb-1 runs on v8-M too" fallback.
 - **v1 is ARM only** **[D, Q2]**: the RISC-V ids stay reserved.
 - The short arch name is part of the file name **[D]**:
-  `<module>.<arch>.pex`, e.g. `otap.m33.pex`, `otap.m0p.pex`.
+  `<module>.<arch>.pex`, e.g. `driver.m33.pex`, `driver.m0p.pex`.
 
 | target id | short name (file name) |
 |---|---|
@@ -704,9 +704,6 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
 - The Lua module's memory: its code is not in the arena at all (installed:
   flash; RAM mode: the PEX pool); its C data is in the PEX pool; only the
   table and closures it pushes live in the Lua arena.
-- First candidates from a BLE firmware-update backend: `otap` (transfer engine + hex),
-  image-header parsing, `json`-shaping of catalog listings, a registry index -- now as
-  native apps (`app.m33.pex`, `otap.m33.pex`) serving their own ops.
 
 ## 10. Integrity and trust
 
@@ -795,7 +792,7 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
 - ~~[Q7]~~ **[D: unsigned allowed in development builds]** Signing required always, or `allow-unsigned` in development builds?
 - ~~[Q8]~~ **[D: fat files later; only the running slice is copied (§4.4)]** Fat files (several targets in one `.pex`, Mach-O-universal style)
   later, or always one file per target with a naming rule
-  (`otap.armv8m-main-fp.pex`)?
+  (`driver.armv8m-main-fp.pex`)?
 - ~~[Q9]~~ **[D]** The format, SDK and `pexlink` live in this firmware repo for
   now (`pex/`), structured so they can become a separate submodule later.
 - ~~[Q10]~~ **[D, 0.7: (a) -- a static pool of 48 KB, the Lua arena 164 ->
@@ -1303,7 +1300,7 @@ typedef int (*pex_task_fn)(void *arg);
 
 ### A.5 `pex` -- group 5, v1.1
 
-the module's own handle, references (spec 8) and app control; 1.1: calling another loaded module (a driver module such as otap.m33.pex) by name, through the trampoline
+the module's own handle, references (spec 8) and app control; 1.1: calling another loaded module (a driver module such as driver.m33.pex) by name, through the trampoline
 
 ```c
 typedef struct pex_mod pex_mod_t;

@@ -743,7 +743,7 @@ static int l_bt_write(lua_State *L) {
     const char *hex = luaL_checklstring(L, 3, &hexlen);
     bool with_resp = lua_isnoneornil(L, 4) ? true : lua_toboolean(L, 4);
     bool want_done = lua_toboolean(L, 5);
-    /* 6th argument true: `hex` is the bytes themselves, not hex text. An OTAP
+    /* 6th argument true: `hex` is the bytes themselves, not hex text. An image
      * transfer writes ~1650 chunks; as hex each was a 290-character string
      * built from a dozen pieces -- ~1.3 KB of garbage per chunk for the
      * collector, and a sscanf per byte here. */
