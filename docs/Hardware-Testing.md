@@ -17,24 +17,24 @@ Add a row when a session uses another unit.
 ## Checks
 
 - [ ] **H1 — Anker PEX on the A2687**
-  - Gates: [R13](Feature-Roadmap.md) in the feature roadmap.
+  - Gates: [R14](Feature-Roadmap.md) in the feature roadmap.
   - The running driver is the signed Anker PEX module. `lua/profiles/anker/` is still the spec.
   - See: the link comes up, telemetry arrives, `anker.set` applies a value the setters list allows, `anker.history` returns records, and `anker.screensaver` runs on this model.
   - Seen:
 
 - [ ] **H2 — Anker PEX on the C1000 (A1761)**
-  - Gates: R13.
+  - Gates: R14.
   - Same module, the other product. Screensaver is an A2687 behavior. This check is the C1000 session: link, telemetry, and a setter the A1761 profile allows.
   - Seen:
 
 - [ ] **H3 — Pinecil PEX on a Pinecil V2**
-  - Gates: [R12](Feature-Roadmap.md) and R13.
+  - Gates: [R13](Feature-Roadmap.md) and R14.
   - The module polls the 56-byte live characteristic and registers `pinecil.set_temp`. The profile is `lua/profiles/pinecil.lua`.
   - See: identity (build string), live telemetry, and a setpoint write the iron accepts. A setting the profile marks unconfirmed is not a failure of this check.
   - Seen:
 
 - [ ] **H4 — Wi-Fi recovery against hostapd**
-  - Gates: [R18](Feature-Roadmap.md).
+  - Gates: [R19](Feature-Roadmap.md).
   - An access point on a Linux PC or a Raspberry Pi, run with hostapd. Drop the AP and bring it back while a BLE link is up, and again while Bluetooth is idle.
   - See: the station gets an address again without a power cycle, and the shared radio still serves the open BLE link.
   - Seen:
