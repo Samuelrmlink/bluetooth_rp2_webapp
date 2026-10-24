@@ -2,7 +2,7 @@
 
 The target is the five layers in [../README.md](../README.md). An item on this list changes one of those layers, or removes a second way of doing the same job. A bugfix that leaves the layers alone does not belong here.
 
-The board that is running today is firmware 1.239. Several items below are already written in the tree and are not on that image. A checkbox is ticked when the behavior is true of the image and the pages the board is actually serving, or when a decision is written down and the code matches it. A check that needs a device on the bench is [Hardware-Testing.md](Hardware-Testing.md), not a box on this list.
+The board that is running today is firmware 1.253. Several items below are already written in the tree and are not on that image. A checkbox is ticked when the behavior is true of the image and the pages the board is actually serving, or when a decision is written down and the code matches it. A check that needs a device on the bench is [Hardware-Testing.md](Hardware-Testing.md), not a box on this list.
 
 ## How to change this list
 
@@ -33,32 +33,23 @@ These are part of the architecture. They are not tasks.
   - Why: The README says Stop unloads a module, and that Lua gets `pex.on_unload` first. Firmware 1.239 refuses `pex.unload` while Lua still holds a reference, and the pages on the board only stop.
   - Needs: The hook in `pex/lua/pexlua.c` and the editor Stop path (`pex.stop`, then `pex.unload`) are in the tree. Shipping them is two separate steps. A new try-before-you-buy image carries the Lua half. Uploading the editor pages before that image is confirmed makes Stop unload the signed Anker module that is running, and the charger ops disappear until the next load and start. The signed file stays.
   - Done when: A confirmed image logs the Lua unload lines, the editor on the board says it stopped and unloaded, and a call into a module after that raises `PEX module '<name>' was unloaded`.
-
-- [ ] **R3 — One way for the editor to hear that a file changed**
-  - Layer: 1 notifies layer 4.
-  - Why: Two browsers, or a phone that reconnects, do not share an editor buffer. LittleFS has no mtime, and the SD card's timestamps are fixed, so the page hashes open text files on a timer.
-  - Needs: A `fs.changed` event `{path, op, size, hash}` for editor paths on the SD card and on LittleFS, from a second callback beside the one Lua already owns. `fs.stat` for up to 32 paths, for the reconnect case. Files over 256 KB send path, op, and size, and skip the hash. The poll in the editor goes away once those events arrive. This rides in the same image as R4. It does not merge two unsaved copies of one file.
-  - Done when: A write from one session updates a clean buffer in another, a dirty buffer is asked before it is replaced, and the five-second poll is gone.
+  - 2026-10-24: not met on 1.253. The installed Anker is signed and was left unloaded. `pex.load` of that copy asks for 136400 bytes of code in the 48 KB pool and is refused. The partition has no free space to relocate that model A image for this firmware, so Stop was not run.
 
 ## Next
-
-- [ ] **R4 — The page knows which board answered**
-  - Layer: 1 tells layer 4. Layer 2 build selection uses it.
-  - Why: A `Pexfile` can hold several targets. `pex.list` reports the CPU (`m33` on this board) and does not report the board name, so two targets for different boards with the same CPU cannot be told apart.
-  - Needs: `"board":"pico2_w"` on `sys.info`, from `PICO_BOARD`. No new op. The editor keeps targets whose board and arch both match, and says so on the Build button. A target chosen for a different board is dropped on the next connect.
-  - Done when: `sys.info` on a Pico 2 W image includes `"board":"pico2_w"`, and the Build button names that board.
 
 - [ ] **R5 — A PEX build finishes, and signing stays on the host**
   - Layer: 2, produced from layer 4, accepted by layer 1.
   - Why: The product image loads signed modules. The host cmake build and the in-browser `pexcc` build both emit unsigned files. The browser build also stops at the SHA-256 of the image, because `crypto.subtle` is missing on plain `http://`. The page cannot hold the OTA key.
   - Needs: A SHA-256 in the page, so the browser build writes `<out>/<name>.m33.pex` and `build.log` on the SD card. Signing stays `pexlink sign` with the OTA key on the host. The product defconfig keeps `CONFIG_PEX_ALLOW_UNSIGNED` off. `configs/pico2w_pexcc_defconfig` remains the image that loads unsigned modules.
   - Done when: A `Pexfile` build on the board's own HTTP page writes the `.pex`, and that file loads on the product image only after `pexlink sign`.
+  - 2026-10-24: a Build of `sd/projects/anker/Pexfile` on the board's page wrote `sd/projects/anker/build/anker.m33.pex` (168836 bytes) and said a signed-only board refuses it until `pexlink sign`. That file was not loaded and not installed. The box stays open until a signed copy of it is the one that loads.
 
 - [ ] **R6 — One Anker source tree**
   - Layer: 2.
-  - Why: The sources the editor builds are `sd/projects/anker/src/`. An older copy is still at `sd/pex/`. The signed module in the PEX partition is a third artifact, and it is the one that is running.
-  - Needs: A project build that reads `sd/projects/anker/` and writes a `.pex`. That has not happened yet: the last build reached the link and stopped on the digest bug in R5. After a build has read the new tree, deleting `sd/pex/` is a separate decision. Nothing here replaces the signed module or starts a second Anker.
+  - Why: The sources the editor builds are `sd/projects/anker/src/`. An older copy is still at `sd/pex/`. The signed module in the PEX partition is a third artifact.
+  - Needs: A project build that reads `sd/projects/anker/` and writes a `.pex`. After a build has read the new tree, deleting `sd/pex/` is a separate decision. Nothing here replaces the signed module or starts a second Anker.
   - Done when: The card has one Anker source directory, the editor builds from it, and the running module is still the signed one until a signed replacement is deliberately installed.
+  - 2026-10-24: that build read `sd/projects/anker/src/` and wrote the `.pex`, the map, and the disassembly under `sd/projects/anker/build/`. The signed module in the partition was not replaced. `sd/pex/` is still on the card, so this box stays open.
 
 ## Later
 
@@ -146,6 +137,20 @@ R9 is unused. Classic moved to R16 and R17.
   - Considered and rejected for now. R7 is the part that stays in scope. Patching disassembly to insert breakpoints, and debugging over the network, are out of scope.
 
 ## Done
+
+- [x] **R3 — One way for the editor to hear that a file changed** (2026-10-24)
+  - Layer: 1 notifies layer 4.
+  - Why: Two browsers, or a phone that reconnects, do not share an editor buffer. LittleFS has no mtime, and the SD card's timestamps are fixed, so the page hashes open text files on a timer.
+  - Needs: A `fs.changed` event `{path, op, size, hash}` for editor paths on the SD card and on LittleFS, from a second callback beside the one Lua already owns. `fs.stat` for up to 32 paths, for the reconnect case. Files over 256 KB send path, op, and size, and skip the hash. The poll in the editor goes away once those events arrive. This rides in the same image as R4. It does not merge two unsaved copies of one file.
+  - Done when: A write from one session updates a clean buffer in another, a dirty buffer is asked before it is replaced, and the five-second poll is gone.
+  - On 1.253, with the pages this image is serving: a write of `sd/projects/fresh-check.txt` from another client updated a clean editor buffer in 523 ms (`Updated sd/projects/fresh-check.txt from another device.`). A dirty buffer was asked (`changed on another device. Reload it and discard your edits?`) and replaced only after that was accepted. The five-second poll was not running (`eventsLive` true). The check file was removed.
+
+- [x] **R4 — The page knows which board answered** (2026-10-24)
+  - Layer: 1 tells layer 4. Layer 2 build selection uses it.
+  - Why: A `Pexfile` can hold several targets. `pex.list` reports the CPU (`m33` on this board) and does not report the board name, so two targets for different boards with the same CPU cannot be told apart.
+  - Needs: `"board":"pico2_w"` on `sys.info`, from `PICO_BOARD`. No new op. The editor keeps targets whose board and arch both match, and says so on the Build button. A target chosen for a different board is dropped on the next connect.
+  - Done when: `sys.info` on a Pico 2 W image includes `"board":"pico2_w"`, and the Build button names that board.
+  - On 1.253, `sys.info` includes `"board":"pico2_w"`. With `sd/projects/anker/Pexfile` open, the Build button reads `Build anker · pico2_w — this board (pico2_w)`.
 
 - [x] **R0 — Write the layers down** (2026-10-23)
   - [README.md](../README.md) is the layer map and the short build commands. [Development.md](Development.md) is the procedure. SMP is UDP port 1337. UART is not an SMP transport.
