@@ -138,8 +138,8 @@ export const BINDINGS = [
   // Deliberately the main list's keys: help is for where you are.
   { id: 'editor-help', group: 'Editor', section: 'Help', overrides: 'help', keys: 'Alt+/ / ?', combos: ['Mod+Slash', '?'], when: ['editor', 'editor-files'], label: 'This list: the editor\'s own keys (also the ? button in its toolbar). From any other window, Alt+/ is the main list' },
   { id: 'editor-save', group: 'Editor', section: 'Save and run', keys: 'Ctrl+S', combos: ['Ctrl+KeyS'], when: 'editor', label: 'Save the file to the device (a .gz file is saved compressed; a web file keeps the old one as .bak)' },
-  { id: 'editor-run', group: 'Editor', section: 'Save and run', keys: 'F5', combos: ['F5'], when: 'editor', label: 'Run the script from the buffer (a draft: nothing is written to flash)' },
-  { id: 'editor-stop', group: 'Editor', section: 'Save and run', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the script' },
+  { id: 'editor-run', group: 'Editor', section: 'Save and run', keys: 'F5', combos: ['F5'], when: 'editor', label: 'Run: a Lua script from the buffer (a draft, nothing written to flash), or the PEX app when a .pex file is open' },
+  { id: 'editor-stop', group: 'Editor', section: 'Save and run', keys: 'Shift+F5', combos: ['Shift+F5'], when: 'editor', label: 'Stop the Lua script, or the PEX app when a .pex file is open' },
   { id: 'editor-undo', group: 'Editor', section: 'Editing', keys: 'Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y', combos: [], when: 'editor', label: 'Undo / redo (each tab keeps its own history)' },
   { id: 'editor-tab-key', group: 'Editor', section: 'Editing', keys: 'Tab', combos: [], when: 'editor', label: 'Insert two spaces (Tab is text inside the editor)' },
   { id: 'editor-esc', group: 'Editor', section: 'Editing', keys: 'Esc', combos: [], when: 'editor', label: 'Leave the text (vim: insert → normal first, then leave); after that Alt+H J K L move between windows' },

@@ -8,6 +8,17 @@ test('a folder: new file, upload, refresh, rename', () => {
   assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'mkdir', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename', 'delete']);
 });
 
+test('a Pexfile lists its build actions before Open', () => {
+  const builds = [
+    { id: 'pex-build', target: 'pico2_w', label: 'Build pico2_w' },
+    { id: 'pex-brun', target: 'pico2_w', label: 'Build and run pico2_w' },
+    { id: 'pex-build-all', label: 'Build all' },
+  ];
+  const m = fileMenuItems({ dir: false, path: 'sd/projects/blink/Pexfile', name: 'Pexfile' }, { builds });
+  assert.deepEqual(ids(m).slice(0, 4), ['pex-build', 'pex-brun', 'pex-build-all', 'open']);
+  assert.equal(m[0].label, 'Build pico2_w');
+});
+
 test('a plain file: open, download, rename, delete (last, marked)', () => {
   const m = fileMenuItems({ dir: false, path: 'cfg/bt.json' });
   assert.deepEqual(ids(m), ['open', 'download', 'rename', 'delete']);
@@ -18,6 +29,16 @@ test('a script gets start / stop / commit / revert; the open file no Open', () =
   const m = fileMenuItems({ dir: false, path: 'lua/anker.lua' }, { isOpen: true, script: 'anker' });
   assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'compress', 'rename', 'delete']);
   assert.equal(m[0].label, 'Start anker');
+});
+
+test('a PEX app gets start / stop / install, and uninstall only when it is in the partition', () => {
+  const m = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker' });
+  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-partition', 'download', 'rename', 'delete']);
+  assert.equal(m.find((i) => i.id === 'pex-start').label, 'Start anker');
+  assert.equal(m.find((i) => i.id === 'pex-stop').label, 'Stop anker');
+  const installed = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker', installed: true });
+  assert.ok(ids(installed).includes('pex-uninstall'));
+  assert.equal(installed.find((i) => i.id === 'pex-uninstall').label, 'Uninstall anker');
 });
 
 import { bytes, fileInfo, dirInfo, folderSize, sizeInfo } from '../../js/editor/filemenu.js';
@@ -61,6 +82,13 @@ test('compressed files: Store uncompressed; plain ones Store compressed; never c
   assert.ok(!cfg.includes('compress') && !cfg.includes('decompress'));
   const jpg = ids(fileMenuItems({ dir: false, path: 'ss/a.jpg' }));
   assert.ok(!jpg.includes('compress') && !jpg.includes('decompress'));
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'css/app.css' })).includes('compress'));
+  assert.ok(!ids(fileMenuItems({ dir: false, path: 'notes.txt' })).includes('compress'));
+  assert.ok(!ids(fileMenuItems({ dir: false, path: 'src/main.c' })).includes('compress'));
+  assert.ok(!ids(fileMenuItems({ dir: false, path: 'lua/profiles/x.lua' })).includes('compress'));
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'pex/anker.m33.pex.gz' })).includes('decompress'));
+  assert.ok(ids(fileMenuItems({ dir: false, path: 'notes.txt.gz' })).includes('decompress'));
+  assert.ok(!ids(fileMenuItems({ dir: false, path: 'ss/a.jpg.gz' })).includes('decompress'));
 });
 
 test('Restore .bak only when there is one', () => {

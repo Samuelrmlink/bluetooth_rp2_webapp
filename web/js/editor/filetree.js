@@ -165,6 +165,16 @@ export class FileTree {
             : 'Loaded in the Lua arena, but the file has changed since (or it runs from a draft)';
           badges.appendChild(b);
         }
+        if (m.pex) {
+          const b = document.createElement('span');
+          const cls = m.pex === 'running' ? 'ft-loaded' : m.pex === 'faulted' ? 'ft-stale' : 'ft-idle';
+          b.className = `ft-arena ${cls}`;
+          b.textContent = 'L';
+          b.title = m.pex === 'running' ? 'PEX app is running'
+            : m.pex === 'faulted' ? 'PEX app faulted'
+            : `PEX app is ${m.pex}`;
+          badges.appendChild(b);
+        }
         if (m.dirty) {
           const d = document.createElement('span');
           d.className = 'ft-dot';

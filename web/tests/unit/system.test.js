@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { heapRows, fetchArena, restartText } from '../../js/settings/system.js';
+import { heapRows, fetchArena, restartText, REBOOT_CONFIRM } from '../../js/settings/system.js';
 
 const heap = {
   arena: { bytes: 163840, used: 18016, peak: 133768, free_bytes: 145824, largest_free: 55120,
@@ -27,6 +27,12 @@ test('the arena is fetched 1 KB at a time, in order', async () => {
   assert.deepEqual(calls, [0, 1024, 2048]);
   assert.equal(a.hex.length, 5000);
   assert.deepEqual([a.base, a.header, a.size], [7, 16, 2500]);
+});
+
+test('reboot confirm says a normal boot is what starts the list', () => {
+  assert.match(REBOOT_CONFIRM, /normal one/);
+  assert.match(REBOOT_CONFIRM, /watchdog reboot/);
+  assert.match(REBOOT_CONFIRM, /double reset/);
 });
 
 test('what a VM rebuild did, in words', () => {

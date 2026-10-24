@@ -4,7 +4,11 @@
 //   file     Open (if it is not the open one), Download, Store compressed /
 //            uncompressed, Restore .bak (when there is one), Rename / move…,
 //            Delete…; a script (lua/x.lua or staged/x.lua) also Start, Stop,
-//            Commit to lua/, Revert to the next tier
+//            Commit to lua/, Revert to the next tier; a PEX app
+//            (pex/<name>.<arch>.pex) also Start, Stop, Install, Uninstall
+//            (only when that name is in the PEX partition), and PEX
+//            partition…. Start calls pex.start. Stop calls pex.stop and then
+//            pex.unload, not Lua.
 //   folder   New file here…, Upload here…, Upload archive here…, Download
 //            as .tar, Calculate size, Refresh, Rename / move…, and Delete…
 //            once it is known to be empty
@@ -14,7 +18,7 @@ import { isGz, canCompress, imageKind } from '../gz.js';
 
 const onSd = (p) => /^sd(\/|$)/.test(p || '');
 
-export function fileMenuItems(node, { isOpen = false, script = null, empty = false, hasBak = false, card = false } = {}) {
+export function fileMenuItems(node, { isOpen = false, script = null, pex = null, empty = false, hasBak = false, card = false, installed = false, builds = null } = {}) {
   if (node.dir) {
     // card: the SD card's own top-level folder (the editor knows it from fs.js)
     const out = [
@@ -38,12 +42,22 @@ export function fileMenuItems(node, { isOpen = false, script = null, empty = fal
     return out;
   }
   const out = [];
+  // A Pexfile lists Build, Build and run, and Build all before Open.
+  for (const it of builds || []) out.push(it);
   if (!isOpen) out.push({ id: 'open', label: 'Open' });
   if (script) {
     out.push({ id: 'start', label: `Start ${script}` });
     out.push({ id: 'stop', label: `Stop ${script}` });
     out.push({ id: 'commit', label: 'Commit to lua/' });
     out.push({ id: 'revert', label: 'Revert to the next tier' });
+  } else if (pex) {
+    out.push({ id: 'pex-start', label: `Start ${pex}` });
+    out.push({ id: 'pex-stop', label: `Stop ${pex}` });
+    out.push({ id: 'pex-install', label: `Install ${pex}` });
+    // Uninstall only this name, and only when the partition already has it.
+    // A running copy answers busy; the item stays so that answer is visible.
+    if (installed) out.push({ id: 'pex-uninstall', label: `Uninstall ${pex}` });
+    out.push({ id: 'pex-partition', label: 'PEX partition…' });
   }
   out.push({ id: 'download', label: 'Download' });
   if (canCompress(node.path)) out.push({ id: 'compress', label: 'Store compressed (.gz)' });

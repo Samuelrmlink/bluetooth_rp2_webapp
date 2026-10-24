@@ -98,6 +98,10 @@ def _seed_fs():
     fs["www/logo.svg.gz"] = _gz.compress(b'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">'
                                           b'<rect width="40" height="20" fill="#4fd07f"/></svg>\n', mtime=0)
     fs["www/dot.png"] = _png(3, 2)
+    # Placeholder apps so the editor's Run / Stop can be exercised. The bytes
+    # are not a real module; pex.load on the mock only checks the file is there.
+    fs["pex/anker.m33.pex"] = b"PEX-anker"
+    fs["pex/pinecil.m33.pex"] = b"PEX-pinecil"
     return fs
 
 def _mime(path):
@@ -343,6 +347,31 @@ def _sd_status():
     return out
 
 STATE = {}
+def _seed_pexcc(sd):
+    """Copy web/.pex-cc into the mock card as pex-cc/ so Build can fetch it.
+    Missing cache is fine (the button then reports a missing file). Format
+    still wipes the card; only a reset restores these files."""
+    cache = os.path.join(WEB, ".pex-cc")
+    if not os.path.isdir(cache):
+        return
+    for dirpath, _dirs, filenames in os.walk(cache):
+        rel = os.path.relpath(dirpath, cache).replace(os.sep, "/")
+        if rel == ".":
+            rel = ""
+        for fn in filenames:
+            if fn == "pexcc-host":
+                continue
+            path = f"{rel}/{fn}" if rel else fn
+            card = "pex-cc/" + path
+            if len(card) >= 96:
+                continue
+            with open(os.path.join(dirpath, fn), "rb") as f:
+                sd["files"][card] = f.read()
+            parts = card.split("/")
+            for i in range(1, len(parts)):
+                sd["dirs"].add("/".join(parts[:i]))
+
+
 def reset_state():
     STATE.clear()
     STATE["fs"] = _seed_fs()
@@ -355,6 +384,7 @@ def reset_state():
     STATE["c1000"] = dict(C1000_BASE)
     STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
+    STATE["pex"] = {}          # name -> {state}
     STATE["eth"] = json.loads(json.dumps(ETH_BASE))
     STATE["uplink"] = json.loads(json.dumps(UPLINK_BASE))
     STATE["sd"] = {"state": "ok", "fs": "fat32", "files": {"logs/2026-10-01.csv": b"t,v\n0,1\n", "readme.txt": b"on the card\n"},
@@ -362,6 +392,7 @@ def reset_state():
                    "format": {"available": True, "state": "idle", "phase": "", "done": 0, "total": 0, "fs": "", "cluster": 0, "error": ""},
                    "bench": {"state": "idle", "mb": 0, "chunk": 4096, "done_kb": 0, "write_kBps": 0, "read_kBps": 0,
                              "card_busy_max_us": 0, "error": ""}}
+    _seed_pexcc(STATE["sd"])
     MOCK_VALUES.clear(); MOCK_VALUES.update(MOCK_VALUES_BASE)
 reset_state()
 
@@ -613,9 +644,62 @@ class MockGateway:
             return STATE["eth"]
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
+        if op.startswith("pex."):
+            return self._pex_op(op, p)
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \
                 or op in ("anker.set", "anker.setters", "anker.history", "anker.screensaver", "test.reset"):
             return self._script_op(op, p)
+        raise ApiError("unknown_op", op)
+
+    # --- PEX apps, as far as the editor's Run / Stop buttons see them ------
+    def _pex_op(self, op, p):
+        name = p.get("name") or ""
+        mods = STATE.setdefault("pex", {})
+        if op == "pex.list":
+            return {"arch": "m33", "policy": "signed-only",
+                    "modules": [{"name": n, "state": s["state"]} for n, s in mods.items()]}
+        if op == "pex.info":
+            s = mods.get(name)
+            if not s:
+                raise ApiError("not_loaded", name or "not loaded")
+            return {"name": name, "state": s["state"]}
+        if op == "pex.load":
+            path = f"pex/{name}.m33.pex"
+            if path not in STATE["fs"]:
+                raise ApiError("not_found", "not installed, and no lfs:/pex/<name>.<arch>.pex")
+            mods[name] = {"state": "loaded"}
+            return {"name": name, "state": "loaded"}
+        if op == "pex.start":
+            s = mods.get(name)
+            if not s:
+                raise ApiError("not_loaded", name or "not loaded")
+            if s["state"] == "running":
+                raise ApiError("wrong state", f"{name} is already running")
+            s["state"] = "running"
+            return {"started": True}
+        if op == "pex.stop":
+            s = mods.get(name)
+            if not s:
+                raise ApiError("not_loaded", name or "not loaded")
+            s["state"] = "stopped"
+            return {"stopped": True}
+        if op == "pex.unload":
+            s = mods.get(name)
+            if not s:
+                raise ApiError("not_loaded", name or "not loaded")
+            if s["state"] == "running":
+                raise ApiError("busy", f"{name} is running: stop it first")
+            del mods[name]
+            return {"unloaded": True}
+        if op == "pex.install":
+            path = f"pex/{name}.m33.pex"
+            if path not in STATE["fs"]:
+                raise ApiError("not_found", path)
+            mods[name] = {"state": "installed", "xip_ready": True}
+            return {"name": name, "xip_ready": True, "signed": False, "offset": 8192}
+        if op == "pex.installed":
+            return {"modules": [{"name": n, "xip_ready": True} for n, s in mods.items() if s.get("state") == "installed"],
+                    "free": 0, "size": 262144}
         raise ApiError("unknown_op", op)
 
     # --- the Lua runtime, as far as the web app sees it ---------------------

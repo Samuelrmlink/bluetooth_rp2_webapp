@@ -40,7 +40,14 @@ test('what may be stored compressed', () => {
   assert.equal(canCompress('cfg/wifi.json'), false);
   assert.equal(canCompress('staged/x.lua'), false);
   assert.equal(canCompress('ss/a.jpg'), false);
+  assert.equal(canCompress('pex/anker.m33.pex'), false);
   assert.equal(canCompress('js/x.js.gz.bak'), false);
+  assert.equal(canCompress('css/app.css'), true);
+  assert.equal(canCompress('index.html'), true);
+  assert.equal(canCompress('notes.txt'), false);
+  assert.equal(canCompress('src/main.c'), false);
+  assert.equal(canCompress('lua/profiles/anker/run.lua'), false);
+  assert.equal(canCompress('pex/anker.m33.pex.gz'), false);
 });
 
 test('plain wins: the .gz twin is shadowed', () => {

@@ -34,15 +34,20 @@ export function isWebAsset(path) {
   return !DEVICE_DIRS.test(path) && /\.(js|mjs|css|html?|svg|json|webmanifest)$/i.test(plainName(path));
 }
 
-// May this file be stored compressed? Not cfg/ (read at boot, and too small
-// to gain: the evaluation in the 1.95 notes), not staged/ (being edited; the
-// firmware reads it plain), not the device's own state, not a backup, and
-// not a format that is compressed already.
+// May this file be stored compressed? The board interprets a gzipped file
+// only for the web UI (served as static bytes) and for a top-level Lua
+// script (lua/x.lua.gz runs as lua/x.lua). Anything else — a PEX image, a
+// nested module, a note, a C source — would be unreadable once gzipped, so
+// it stays plain. cfg/ is read at boot and is too small to gain (the 1.95
+// notes); staged/ is what the editor is writing and the firmware reads it
+// plain. A .gz of a type refused here can still be stored uncompressed:
+// the file menu offers that for any gzip that is not a bitmap.
 export function canCompress(path) {
   if (/^sd(\/|$)/.test(path)) return false;      // the card serves nothing: no point
   if (isGz(path) || /^(staged|cfg|var|cache|ota)\//.test(path) || /\.bak$/i.test(path)) return false;
-  if (/\.(png|jpe?g|gif|webp|gz|zip|bin|luac)$/i.test(path)) return false;
-  return true;
+  if (/\.(png|jpe?g|gif|webp|gz|zip|bin|luac|pex)$/i.test(plainName(path))) return false;
+  if (isWebAsset(path)) return true;
+  return /^lua\/[^/]+\.lua$/i.test(plainName(path));
 }
 
 // The plain/compressed twin a file would be shadowed by, given its folder's

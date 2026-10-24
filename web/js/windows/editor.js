@@ -19,6 +19,7 @@
 
 import * as fs from '../fs.js';
 import { fnv1a } from '../fnv.js';
+import { freshnessAction, FRESH_MS, nextFreshDelay } from '../editor/freshness.js';
 import { ScriptIO } from '../scriptio.js';
 import { EditorCore } from '../editor/core.js';
 import { FileTree } from '../editor/filetree.js';
@@ -28,6 +29,9 @@ import { initialState, handle as vimHandle, modeLabel, clampNormal, searchMatche
 import { copyText } from '../clipboard.js';
 import { openCellMenu } from '../controls/cellmenu.js';
 import { fileMenuItems, fileInfo, dirInfo, folderSize, sizeInfo } from '../editor/filemenu.js';
+import { pexNameOf, pexRunningPaths, isPexFile, startPex, stopPex } from '../editor/pexrun.js';
+import { PexPartition, PEX_PART } from '../editor/pexpart.js';
+import { buildButtonState, projectBuildItems } from '../editor/pexfile.js';
 import { LongPress } from '../editor/longpress.js';
 import { RestoreDialog } from '../editor/restore.js';
 import { ImagePreview } from '../editor/preview.js';
@@ -41,6 +45,8 @@ import { planDrop, dropDir, moveDest, treeOf, deleteTree, isVital, dropEntries, 
 import { badPath } from '../tar.js';
 
 const ARENA_POLL_MS = 3000;
+
+const NO_SD = 'The compiler lives on the SD card and this firmware has no SD.';
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
 
 const TABS_KEY = 'btgw.editor.tabs';
@@ -63,9 +69,28 @@ export class EditorWindow {
     this.tabs = new TabState();
     this.views = new Map();         // group id -> view
     this.marks = new Map();         // path -> { state, tier, hash } (editor/status.js)
+    this.pexStates = {};            // pex/<name>.<arch>.pex -> pex.list state
+    this.pexInstalled = new Set();  // names pex.installed reports
+    this.pexPart = null;            // last pex.installed reply, for the partition tab
+    this.pexArch = 'm33';
+    this._pexFocus = null;          // module the partition tab describes when the tree has not selected one
+    this._partSig = '';
     this.runtime = null;            // script.list's runtime block
     this.notice = '';
     this._pollTimer = 0;
+    this._freshTimer = 0;
+    this._freshFlight = null;
+    this._freshIx = 0;
+    this._freshWait = 0;
+    this._freshNext = 0;
+    this._freshSkip = '';
+    this._freshAsking = false;
+    this._proj = null;
+    this._projGen = 0;
+    this._buildPin = new Map();
+    this._building = false;
+    this.pexPool = null;
+    this.pexPolicy = '';
 
     el.innerHTML = `
       <div class="ed-titlebar">
@@ -77,6 +102,8 @@ export class EditorWindow {
         <button type="button" class="tool-btn ed-b-save" title="Save to the device (Ctrl+S)" aria-label="Save">${icon('save')}</button>
         <button type="button" class="tool-btn ed-b-run" title="Run as a draft — nothing is written to flash (F5)" aria-label="Run">${icon('run')}</button>
         <button type="button" class="tool-btn ed-b-stop" title="Stop the script (Shift+F5)" aria-label="Stop">${icon('stop')}</button>
+        <button type="button" class="tool-btn ed-b-build" title="This file is not in a project" aria-label="Build" disabled><span class="ed-build-label">Build</span></button>
+        <button type="button" class="tool-btn ed-b-brun" title="Build and run" aria-label="Build and run" disabled>and run</button>
         <button type="button" class="tool-btn ed-b-new" title="New file" aria-label="New file">${icon('new')}</button>
         <button type="button" class="tool-btn ed-b-upload" title="Upload files from this computer" aria-label="Upload">${icon('upload')}</button>
         <button type="button" class="tool-btn ed-b-download" title="Download this file" aria-label="Download">${icon('download')}</button>
@@ -98,6 +125,14 @@ export class EditorWindow {
         </aside>
         <div class="ed-groups"></div>
       </div>
+      <div class="ed-log" hidden>
+        <div class="ed-log-bar">
+          <span class="ed-log-title">Build log</span>
+          <span class="spacer"></span>
+          <button type="button" class="tool-btn ed-log-hide" aria-label="Hide build log">Hide</button>
+        </div>
+        <pre class="ed-log-body"></pre>
+      </div>
       <div class="ed-status">
         <span class="ed-s-mode"></span>
         <span class="ed-s-path dim"></span>
@@ -115,6 +150,7 @@ export class EditorWindow {
         <button type="button" class="pane-btn" data-act="rename">Rename / move…</button>
         <button type="button" class="pane-btn" data-act="delete">Delete…</button>
         <button type="button" class="pane-btn" data-act="reload">Reload from the device</button>
+        <button type="button" class="pane-btn" data-act="pexpart">PEX partition…</button>
         <hr>
         <button type="button" class="pane-btn" data-act="split">Split / unsplit the editor (Alt+\\)</button>
         <button type="button" class="pane-btn" data-act="flip">Side by side ↔ one above the other (Alt+Shift+\\)</button>
@@ -151,6 +187,9 @@ export class EditorWindow {
     this._splitter.title = 'Drag to resize · double-click: even halves · Alt+> / Alt+< / Alt+.';
     this._setupSplitter();
     this.confirmDelete = new ConfirmDelete(this.app);
+    this._log = q('.ed-log');
+    this._logBody = q('.ed-log-body');
+    q('.ed-log-hide').addEventListener('click', () => { this._log.hidden = true; });
     this.help = new EditorHelp(this.app);
     this._searchEl = q('.ed-search');
     this.search = new SearchPanel(this._searchEl, {
@@ -188,7 +227,7 @@ export class EditorWindow {
     this._layout();
 
     this.tree = new FileTree(this._files, {
-      onOpen: (p) => this.open(p),
+      onOpen: (p) => this._activateFile(p),
       mark: (p) => this._mark(p),
       onError: (m) => this.app.log('!', m),
     });
@@ -231,16 +270,25 @@ export class EditorWindow {
       this.tree.sel = row.dataset.path;
       const n = this.tree.find(row.dataset.path);
       if (n?.dir) this.tree.toggle(n);
-      else this.open(row.dataset.path);
+      else this._activateFile(row.dataset.path);
       this.tree.invalidate();
+      this._paintPartition();
+      this._renderTitle();
     });
 
     q('.ed-b-sidebar').addEventListener('click', () => this.toggleSidebar());
     this._keysBtn = q('.ed-b-keys');
     this._keysBtn.addEventListener('click', () => this.app.setPref('vim', !this.vimOn));
     q('.ed-b-save').addEventListener('click', () => this.save());
-    q('.ed-b-run').addEventListener('click', () => this.run());
-    q('.ed-b-stop').addEventListener('click', () => this.stop());
+    this._runBtn = q('.ed-b-run');
+    this._stopBtn = q('.ed-b-stop');
+    this._runBtn.addEventListener('click', () => this.run());
+    this._stopBtn.addEventListener('click', () => this.stop());
+    this._buildBtn = q('.ed-b-build');
+    this._buildLabel = q('.ed-build-label');
+    this._brunBtn = q('.ed-b-brun');
+    this._buildBtn.addEventListener('click', () => this.build());
+    this._brunBtn.addEventListener('click', () => this.build({ run: true }));
     q('.ed-b-new').addEventListener('click', () => this.newFile());
     q('.ed-b-upload').addEventListener('click', () => { this._uploadDir = undefined; this._upload.click(); });
     q('.ed-b-download').addEventListener('click', () => this.download());
@@ -385,8 +433,13 @@ export class EditorWindow {
       + '<div class="ed-dropzone" hidden></div><div class="ed-tabmark" hidden></div>';
     const v = { id, el, bar: el.querySelector('.ed-tabbar'), shown: null, saved: new Map(),
                 vst: initialState(), vcur: 0, painted: null, ins: null, sig: '' };
-    v.core = new EditorCore(el.querySelector('.ed-surface'));
-    v.preview = new ImagePreview(el.querySelector('.ed-surface'));
+    const surface = el.querySelector('.ed-surface');
+    v.core = new EditorCore(surface);
+    v.preview = new ImagePreview(surface);
+    v.part = new PexPartition(surface, {
+      onPack: () => this._pexCompact(),
+      onSelect: (name) => this._selectPex(name),
+    });
     v.core.readOnly = true;
     const ta = v.core.ta;
     // Whichever half is touched or focused is the one keys and toolbar act on.
@@ -434,6 +487,7 @@ export class EditorWindow {
     for (const [id, v] of this.views) {
       if (ids.includes(id)) continue;
       v.preview.hide();
+      v.part.hide();
       v.el.remove();
       this.views.delete(id);
     }
@@ -634,6 +688,24 @@ export class EditorWindow {
         this._groups.classList.remove('is-dnd');
         if (this._tabDrag) { this._tabDrag = false; this._renderTitle(); }
       }, true);
+      // A tap on a draggable tab sometimes starts a drag the browser then
+      // drops without dragend. The file still switches; the row would not.
+      const endStuckDrag = () => {
+        if (!this._tabDrag) return;
+        requestAnimationFrame(() => {
+          if (!this._tabDrag) return;
+          this._tabDrag = false;
+          this._groups.classList.remove('is-dnd');
+          for (const o of this.views.values()) {
+            o.el.querySelector('.ed-dropzone').hidden = true;
+            o.el.querySelector('.ed-tabmark').hidden = true;
+            o.bar.querySelectorAll('.is-dragging').forEach((t) => t.classList.remove('is-dragging'));
+          }
+          this._renderTitle();
+        });
+      };
+      window.addEventListener('pointerup', endStuckDrag, true);
+      window.addEventListener('pointercancel', endStuckDrag, true);
     }
     v.bar.addEventListener('dragend', (e) => {
       e.target.closest?.('.ed-ftab')?.classList.remove('is-dragging');
@@ -661,7 +733,7 @@ export class EditorWindow {
     if (!v) return;
     const p = this.tabs.activePath(gi);
     if (v.shown === p && !force) return;
-    if (v.shown && v.shown !== p && g.tabs.includes(v.shown) && this.buffers.has(v.shown)) {
+    if (v.shown && v.shown !== p && v.shown !== PEX_PART && g.tabs.includes(v.shown) && this.buffers.has(v.shown)) {
       v.saved.set(v.shown, v.core.saveView());
     }
     v.shown = p;
@@ -670,6 +742,16 @@ export class EditorWindow {
     v.vst = { ...initialState(), search, word, sdir, hl };
     v.painted = null;
     v.ins = null;
+    if (p === PEX_PART) {
+      v.core.scroll.hidden = true;
+      v.preview.hide();
+      v.core.setFind(null);
+      this._partSig = '';
+      this._paintPartition();
+      return;
+    }
+    v.part.hide();
+    v.core.scroll.hidden = false;
     const b = p && this.buffers.get(p);
     if (!b) {
       v.core.setValue('', 'text');
@@ -700,10 +782,28 @@ export class EditorWindow {
       if (!v) return;
       const dirty = g.tabs.map((p) => this._mark(p).dirty);
       const sig = JSON.stringify([g.tabs, g.active, dirty, this.tabs.split]);
-      if (sig === v.sig || this._tabDrag) return;
+      if (sig === v.sig) return;
+      const tabs = [...v.bar.querySelectorAll(':scope > .ed-ftab')];
+      const same = tabs.length === g.tabs.length && tabs.every((t, i) => t.dataset.path === g.tabs[i]);
+      // Same files: move the highlight in place. Replacing the row is what
+      // makes a tap lose its selection when the browser also started a drag
+      // (the drag must keep its node, so a full redraw is skipped).
+      if (same) {
+        tabs.forEach((t, i) => {
+          const on = i === g.active;
+          t.classList.toggle('is-active', on);
+          t.classList.toggle('is-dirty', !!dirty[i]);
+          t.setAttribute('aria-selected', String(on));
+        });
+        v.sig = sig;
+        v.bar.hidden = !g.tabs.length;
+        tabs[g.active]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        return;
+      }
+      if (this._tabDrag) return;
       v.sig = sig;
       v.bar.hidden = !g.tabs.length;
-      const base = (p) => p.split('/').pop();
+      const base = (p) => (p === PEX_PART ? 'PEX partition' : p.split('/').pop());
       v.bar.innerHTML = g.tabs.map((p, i) => {
         const twin = g.tabs.some((o) => o !== p && base(o) === base(p));
         const dir = p.split('/').slice(0, -1).join('/');
@@ -1135,30 +1235,183 @@ export class EditorWindow {
 
   onShow() {
     if (!this.tree.root.children) this.tree.load();
-    this._restoreTabs();
+    this._bootP = this._restoreTabs().then(() => this._freshAll());
     this._poll();
     clearInterval(this._pollTimer);
     this._pollTimer = setInterval(() => this._poll(), ARENA_POLL_MS);
+    this._armFresh();
   }
 
   onHide() {
     clearInterval(this._pollTimer);
     this._pollTimer = 0;
+    clearInterval(this._freshTimer);
+    this._freshTimer = 0;
   }
 
   onConnect() {
+    const board = this._boardName();
+    if (board) {
+      for (const [dir, pin] of this._buildPin) {
+        if (pin.board && pin.board !== board) this._buildPin.delete(dir);
+      }
+    }
+    this._proj = null;
     if (this._pollTimer) { this.tree.refresh(); this._poll(); }
+    this._freshAll();
+    this._scheduleProject();
+  }
+
+  _armFresh() {
+    clearInterval(this._freshTimer);
+    this._freshTimer = setInterval(() => this._freshOne(), FRESH_MS);
+  }
+
+  // Open text files, in a stable order, skipping one whose save is in flight.
+  _freshPaths() {
+    const out = [];
+    for (const [path, b] of this.buffers) {
+      if (!b || b.binary || b.partition || path === this._freshSkip) continue;
+      out.push(path);
+    }
+    out.sort();
+    return out;
+  }
+
+  _freshOne() {
+    if (this._freshFlight || this._freshAsking) return;
+    if (Date.now() < this._freshNext) return;
+    const paths = this._freshPaths();
+    if (!paths.length) return;
+    const path = paths[this._freshIx % paths.length];
+    this._freshIx++;
+    this._freshFlight = this._freshPath(path).finally(() => { this._freshFlight = null; });
+  }
+
+  _freshAll() {
+    if (this._freshFlight || this._freshAsking) return this._freshFlight;
+    const paths = this._freshPaths();
+    this._freshFlight = (async () => {
+      for (const path of paths) {
+        if (this._freshAsking) return;
+        const busy = await this._freshPath(path);
+        if (busy) return;
+      }
+    })().finally(() => { this._freshFlight = null; });
+    return this._freshFlight;
+  }
+
+  async _freshPath(path) {
+    const b = this.buffers.get(path);
+    if (!b || b.binary || b.partition || path === this._freshSkip) return false;
+    if (this.path === path && this.core) b.text = this.core.value;
+    const rev = b.rev || 0;
+    const r = await fs.readText(path);
+    const now = this.buffers.get(path);
+    if (!now || now !== b || (now.rev || 0) !== rev || path === this._freshSkip) return false;
+    if (this.path === path && this.core) now.text = this.core.value;
+    const remote = r.ok
+      ? { status: 200, hash: fnv1a(r.text), text: r.text }
+      : { status: r.status, offline: !!r.offline };
+    const action = freshnessAction({
+      binary: now.binary,
+      partition: now.partition,
+      isNew: !!now.isNew,
+      pristine: !!now.isNew && now.text === '',
+      dirty: this._isDirty(now),
+      base: now.base,
+      kept: now.keptRemote,
+      notedGone: !!now.notedGone,
+      askedGone: !!now.askedGone,
+      remote,
+    });
+    if (action === 'busy') {
+      this._freshWait = nextFreshDelay(this._freshWait);
+      this._freshNext = Date.now() + this._freshWait;
+      return true;
+    }
+    if (action === 'error') return false;
+    this._freshWait = 0;
+    if (action === 'reload') await this._takeRemote(path, now, remote.text);
+    else if (action === 'ask') await this._askRemote(path, now, remote);
+    else if (action === 'gone') await this._askGone(path, now);
+    else if (action === 'gone-dirty') {
+      now.notedGone = true;
+      this._say(`${path} was deleted on another device. This copy is still here.`, 'warn');
+    }
+    return false;
+  }
+
+  async _takeRemote(path, b, text) {
+    if (!this.buffers.get(path)) return;
+    const pristine = !!b.isNew && b.text === '';
+    if (this._isDirty(b) && !pristine) return;
+    b.text = text;
+    b.base = fnv1a(text);
+    delete b.isNew;
+    delete b.keptRemote;
+    delete b.notedGone;
+    delete b.askedGone;
+    for (const v of this.views.values()) {
+      if (v.shown === path) v.core.adopt(text);
+    }
+    this.search.invalidate(path);
+    this.tree.invalidate();
+    this._renderTitle();
+    this._say(`Updated ${path} from another device.`);
+  }
+
+  async _askRemote(path, b, remote) {
+    if (this._freshAsking || !this.buffers.get(path)) return;
+    this._freshAsking = true;
+    const reload = confirm(`${path} changed on another device. Reload it and discard your edits?`);
+    this._freshAsking = false;
+    if (!this.buffers.get(path)) return;
+    if (!reload) {
+      b.keptRemote = remote.hash;
+      this._say(`Keeping your edits to ${path}.`, 'warn');
+      return;
+    }
+    this.buffers.delete(path);
+    await this.open(path);
+    this._say(`Updated ${path} from another device.`);
+  }
+
+  async _askGone(path, b) {
+    if (this._freshAsking || !this.buffers.get(path)) return;
+    b.askedGone = true;
+    this._freshAsking = true;
+    const close = confirm(`${path} was deleted on another device. Close it?`);
+    this._freshAsking = false;
+    if (!close || !this.buffers.get(path)) return;
+    for (let gi = this.tabs.groups.length - 1; gi >= 0; gi--) {
+      if (this.tabs.groups[gi]?.tabs.includes(path)) this.closeTab(path, gi, { force: true });
+    }
   }
 
   async _poll() {
     if (!this.ws.connected) return;
     try {
-      const [loaded, list] = await Promise.all([this.ws.call('script.loaded'), this.ws.call('script.list')]);
+      // pex.list is absent on firmware built before PEX. A failure leaves the
+      // Lua marks updating exactly as they did.
+      const [loaded, list, pex, inst] = await Promise.all([
+        this.ws.call('script.loaded'),
+        this.ws.call('script.list'),
+        this.ws.call('pex.list').catch(() => null),
+        this.ws.call('pex.installed').catch(() => null),
+      ]);
       this.marks = arenaMarks(loaded.units);
       this.list = list;
       this.runtime = list.runtime || null;
+      this.pexStates = pexRunningPaths(pex);
+      this.pexArch = pex?.arch || this.pexArch;
+      this.pexPool = pex?.pool || this.pexPool;
+      this.pexPolicy = pex?.policy || this.pexPolicy;
+      this.pexInstalled = new Set((inst?.modules || []).map((m) => m.name));
+      this.pexPart = inst;
       this.tree.invalidate();
       this._renderTitle();
+      this._paintPartition();
     } catch { /* offline or an older firmware: markers simply stay as they were */ }
   }
 
@@ -1168,7 +1421,11 @@ export class EditorWindow {
 
   _mark(path) {
     const b = this.buffers.get(path);
-    return { dirty: !!b && this._isDirty(b), arena: shownArena(this.marks.get(path), b?.base) };
+    return {
+      dirty: !!b && this._isDirty(b),
+      arena: shownArena(this.marks.get(path), b?.base),
+      pex: this.pexStates[path],
+    };
   }
 
   // A file into a buffer (once; every tab and half shares it). Returns the
@@ -1176,6 +1433,14 @@ export class EditorWindow {
   // :sp) makes a missing file a new, unsaved buffer -- as vim does -- rather
   // than reporting it missing.
   async _load(path, { create = false } = {}) {
+    if (path === PEX_PART) {
+      let part = this.buffers.get(path);
+      if (!part) {
+        part = { text: '', base: fnv1a(''), lang: '', binary: true, partition: true, fresh: true };
+        this.buffers.set(path, part);
+      }
+      return part;
+    }
     let b = this.buffers.get(path);
     if (b) return b;
     const img = imageKind(path);
@@ -1186,7 +1451,9 @@ export class EditorWindow {
       const blob = new Blob([r.blob], { type: imageType(path) });
       const text = img === 'svg' ? await blob.text() : '';
       b = { text, base: fnv1a(text), lang: 'text', binary: img !== 'svg', image: img, blob, showText: false };
-    } else if (/\.(bin|luac|bak)$/i.test(path)) {
+    } else if (/\.(bin|luac|bak|pex)$/i.test(path)) {
+      // A .pex is the app itself. Shown as binary so Save cannot rewrite it
+      // with the empty text buffer. Run / Stop start and stop the app.
       b = { text: '', base: fnv1a(''), lang: 'text', binary: true };
     } else {
       // a .gz arrives as its text: the device sends it Content-Encoding: gzip
@@ -1211,6 +1478,7 @@ export class EditorWindow {
 
   // Show a file in the focused half: its tab if it has one, else a new tab.
   async open(path, { create = false } = {}) {
+    if (path === PEX_PART) return this._openPartition();
     const b = await this._load(path, { create });
     if (!b) return false;
     const fresh = b.fresh;
@@ -1294,6 +1562,7 @@ export class EditorWindow {
     if (!b || b.binary) return false;
     const path = this.path;
     const text = this.core.value;
+    this._freshSkip = path;
     // A .gz stays compressed: the browser packs it, the board cannot.
     const body = isGz(path) ? await gzipText(text) : text;
     // A file of the web UI keeps the version it replaces as <file>.bak --
@@ -1303,10 +1572,15 @@ export class EditorWindow {
       bak = `${path}.bak`;
       await fs.remove(bak);
       const mv = await fs.rename(path, bak);
-      if (!mv.ok && mv.status !== 404) { this._say(`Save stopped: could not keep ${bak} (${mv.error})`, 'err'); return false; }
+      if (!mv.ok && mv.status !== 404) {
+        this._freshSkip = '';
+        this._say(`Save stopped: could not keep ${bak} (${mv.error})`, 'err');
+        return false;
+      }
       if (!mv.ok) bak = null;                      // nothing there to keep
     }
     const r = await fs.write(path, body);
+    this._freshSkip = '';
     if (!r.ok) {
       if (bak) await fs.rename(bak, path);         // put the old one back
       this._say(`Save failed: ${r.error}`, 'err');
@@ -1314,6 +1588,8 @@ export class EditorWindow {
     }
     b.text = text;
     b.base = fnv1a(text);
+    b.rev = (b.rev || 0) + 1;
+    delete b.keptRemote;
     this.search.invalidate(path);
     const packed = typeof body === 'string' ? '' : ` (stored compressed: ${bytes(body.size)} for ${bytes(new TextEncoder().encode(text).length)} of text)`;
     this._say(`Saved ${path}${packed}${bak ? ` — the previous version is ${bak.split('/').pop()}` : ''}`);
@@ -1325,6 +1601,8 @@ export class EditorWindow {
     // a closed one (every new file, in a fresh session) would not appear.
     await this.tree.refresh();
     this.tree.reveal(this.path);
+    this._proj = null;
+    this._scheduleProject();
     return true;
   }
 
@@ -1340,6 +1618,9 @@ export class EditorWindow {
   }
 
   async run() {
+    const pex = this._activePex();
+    if (pex) return this._pexStart(pex);
+    if (this.path === PEX_PART) { this._say('Select a .pex file. Run starts that app.', 'warn'); return; }
     const name = this.path && scriptNameOf(this.path);
     if (!name) {
       this._say(this.path?.endsWith('.lua')
@@ -1362,6 +1643,9 @@ export class EditorWindow {
   }
 
   async stop() {
+    const pex = this._activePex();
+    if (pex) return this._pexStop(pex);
+    if (this.path === PEX_PART) return;
     const name = this.path && scriptNameOf(this.path);
     if (!name) return;
     try {
@@ -1371,6 +1655,288 @@ export class EditorWindow {
       this._say(`Stop: ${e.message}`, 'err');
     }
     this._poll();
+  }
+
+  // The toolbar Run / Stop buttons, and the file menu's Start / Stop on a
+  // .pex file. Lua scripts never come through here.
+  async _pexStart(name) {
+    if (!name) return;
+    try {
+      const r = await startPex(this.ws, name);
+      this._say(r.started ? `Started ${name}` : `${name} is already running`);
+    } catch (e) {
+      this._say(`Start failed: ${e.message}`, 'err');
+    }
+    await this._poll();
+  }
+
+  async _pexStop(name) {
+    if (!name) return;
+    try {
+      const r = await stopPex(this.ws, name);
+      if (r.unloaded) this._say(`Stopped and unloaded ${name}`);
+      else this._say(`Stopped ${name}. It is still loaded: ${r.error || 'unload failed'}`, 'warn');
+    } catch (e) {
+      this._say(`Stop failed: ${e.message}`, 'err');
+    }
+    await this._poll();
+  }
+
+  async _pexInstall(name) {
+    if (!name) return;
+    try {
+      const r = await this.ws.call('pex.install', { name });
+      this._say(r?.xip_ready === false
+        ? `Installed ${name}. It loads into RAM until the next boot reserves its RW area.`
+        : `Installed ${name}`);
+    } catch (e) {
+      this._say(`pex.install: ${e.message}`, 'err');
+    }
+    await this._poll();
+  }
+
+  async _pexUninstall(name) {
+    if (!name) return;
+    if (!confirm(`Uninstall ${name} from the PEX partition? The file in pex/ stays. A running copy has to be stopped and unloaded first.`)) return;
+    try {
+      await this.ws.call('pex.uninstall', { name });
+      this._say(`Uninstalled ${name}`);
+    } catch (e) {
+      this._say(`pex.uninstall: ${e.message}`, 'err');
+    }
+    await this._poll();
+  }
+
+  async _pexCompact() {
+    try {
+      const r = await this.ws.call('pex.compact', {});
+      const n = Number(r?.moved) || 0;
+      this._say(`Packed the PEX partition: ${n} file${n === 1 ? '' : 's'} moved, ${bytes(r?.free)} free, largest run ${bytes(r?.largest)}.`);
+    } catch (e) {
+      this._say(`pex.compact: ${e.message}`, 'err');
+    }
+    await this._poll();
+  }
+
+  // A .pex (and a gzipped copy) opens its menu. Editable files still open a tab.
+  // The toolbar still follows the selected module: see _activePex.
+  _activateFile(path) {
+    if (isPexFile(path)) { this._rowMenu(path); return; }
+    return this.open(path);
+  }
+
+  // The row the user pointed at wins, so Run / Stop follow a .pex file even
+  // while a script stays open. The open buffer is the fallback. The partition
+  // view keeps the block it last described when the tree is on something else.
+  _activePex() {
+    const selected = pexNameOf(this.tree?.sel);
+    if (selected) return selected;
+    const open = pexNameOf(this.path);
+    if (open) return open;
+    return this.path === PEX_PART ? (this._pexFocus || null) : null;
+  }
+
+  _selectedPexName() {
+    return pexNameOf(this.tree?.sel) || this._pexFocus || null;
+  }
+
+  _selectPex(name) {
+    if (!name) return false;
+    this._pexFocus = name;
+    const path = `pex/${name}.${this.pexArch}.pex`;
+    if (this.tree.find(path)) {
+      this.tree.sel = path;
+      this.tree.reveal(path);
+    }
+    this._partSig = '';
+    this._paintPartition();
+    return false;
+  }
+
+  async _openPartition() {
+    const b = await this._load(PEX_PART);
+    if (!b) return false;
+    b.fresh = false;
+    this._openBuffer(PEX_PART, { force: true });
+    if (!this.pexPart) this._poll();
+    this._say('PEX partition. Pack slides installed files together. A running module stays where it is.');
+    return true;
+  }
+
+  _paintPartition() {
+    const selected = this._selectedPexName();
+    const sig = JSON.stringify([this.pexPart, selected]);
+    if (sig === this._partSig) return;
+    this._partSig = sig;
+    for (const v of this.views.values()) {
+      if (v.shown === PEX_PART && v.part) v.part.show(this.pexPart, { selected });
+    }
+  }
+
+  _act_pexpart() { return this.open(PEX_PART); }
+
+  _boardName() {
+    const b = this.app.sysInfo?.board;
+    return typeof b === 'string' && b ? b : null;
+  }
+
+  // The open text buffer, when the build should compile it in place of the
+  // card copy. Only this path is substituted. Other dirty tabs stay on the card.
+  _activeSource() {
+    const path = this.path;
+    const b = path && this.buffers.get(path);
+    if (!b || b.binary || b.partition) return null;
+    if (path === this.path && this.core) b.text = this.core.value;
+    return { path, text: b.text, dirty: this._isDirty(b) };
+  }
+
+  async _readProjectText(path) {
+    const b = this.buffers.get(path);
+    if (b && !b.binary && !b.partition) {
+      const text = path === this.path && this.core ? this.core.value : b.text;
+      return { ok: true, text, status: 200 };
+    }
+    return fs.readText(path);
+  }
+
+  _scheduleProject() {
+    const path = this.path;
+    if (this._proj?.filePath === path && (this._proj.ready || this._proj.loading)) return;
+    const gen = ++this._projGen;
+    this._proj = { filePath: path, ready: false, loading: true };
+    this._loadProject(path, gen);
+  }
+
+  async _loadProject(path, gen) {
+    if (!path || path === PEX_PART) {
+      if (gen !== this._projGen) return;
+      this._proj = { filePath: path, ready: true, project: null, selection: null, errors: [] };
+      this._renderTitle();
+      return;
+    }
+    try {
+      const { loadProject } = await import('../editor/pexproj.js');
+      const pin = path && this._projPin(path);
+      const spec = await loadProject({
+        filePath: path,
+        readText: (p) => this._readProjectText(p),
+        arch: this.pexArch,
+        board: this._boardName(),
+        pin,
+      });
+      if (gen !== this._projGen) return;
+      this._proj = { ...spec, ready: true, loading: false };
+    } catch (e) {
+      if (gen !== this._projGen) return;
+      this._proj = {
+        filePath: path, ready: true, loading: false, project: null, selection: null,
+        errors: [e.message || String(e)],
+      };
+    }
+    this._renderTitle();
+  }
+
+  // A pin applies to the project directory, which we do not know until the
+  // Pexfile is found. Pass every pin whose directory is a parent of the file;
+  // loadProject only honors a pin that is one of the bound targets.
+  _projPin(filePath) {
+    let best = null;
+    let bestLen = -1;
+    for (const [dir, pin] of this._buildPin) {
+      if (filePath === dir || filePath.startsWith(`${dir}/`)) {
+        if (dir.length > bestLen) { best = pin.target; bestLen = dir.length; }
+      }
+    }
+    return best;
+  }
+
+  _rememberPin(dir, target) {
+    if (!dir || !target) return;
+    this._buildPin.set(dir, { target: target.name, board: target.board || null });
+  }
+
+  _logLine(level, text) {
+    this._log.hidden = false;
+    this._logBody.textContent += (this._logBody.textContent ? '\n' : '') + text;
+    this._logBody.scrollTop = this._logBody.scrollHeight;
+    const kind = level === 'error' ? 'err' : level === 'warn' ? 'warn' : '';
+    this._say(text, kind);
+  }
+
+  // Build the project of `from` (the open file, unless the Pexfile menu
+  // named one). `target` pins that target for the session. `all` builds
+  // every target. `run` continues into the target's run ram or run flash.
+  async build({ from = null, target = null, all = false, run = false, pin = false } = {}) {
+    if (this._building) { this._say('A build is already running.', 'warn'); return; }
+    const origin = from || this.path;
+    if (!origin || origin === PEX_PART) {
+      this._say('This file is not in a project.', 'warn');
+      return;
+    }
+    if (origin.startsWith('sd/') && !fs.sdAvailable()) { this._say(NO_SD, 'err'); return; }
+    this._building = true;
+    this._log.hidden = false;
+    this._logBody.textContent = '';
+    try {
+      const { loadProject, executeTarget } = await import('../editor/pexproj.js');
+      const { buildModule } = await import('../editor/pexbuild.js');
+      const spec = await loadProject({
+        filePath: origin,
+        readText: (p) => this._readProjectText(p),
+        arch: this.pexArch,
+        board: this._boardName(),
+        pin: target || this._projPin(origin),
+      });
+      if (!spec.project) {
+        this._say(spec.errors[0] || 'This file is not in a project.', 'warn');
+        return;
+      }
+      if (spec.errors.length) {
+        for (const e of spec.errors) this._logLine('error', e);
+        return;
+      }
+      const targets = all
+        ? spec.targets
+        : spec.targets.filter((t) => t.name === (target || spec.selection?.target?.name));
+      if (!targets.length) {
+        this._say(spec.selection?.reason || 'No target.', 'warn');
+        return;
+      }
+      if (pin && targets.length === 1) {
+        this._rememberPin(spec.dir, targets[0]);
+        this._proj = null;
+      }
+      let lastError = '';
+      for (const t of targets) {
+        const key = `pex/${spec.project.name}.${t.arch}.pex`;
+        const result = await executeTarget({
+          project: spec.project,
+          target: t,
+          andRun: run && !all,
+          active: this._activeSource(),
+          readText: (p) => this._readProjectText(p),
+          write: (p, data) => fs.write(p, data),
+          list: (p) => fs.list(p),
+          compile: (opts) => buildModule(opts),
+          confirm: (text) => confirm(text),
+          ws: this.ws,
+          poolLargest: this.pexPool?.largest,
+          policy: this.pexPolicy,
+          running: this.pexStates?.[key] === 'running',
+          onLine: (level, text) => this._logLine(level, text),
+        });
+        if (!result.ok && result.error) lastError = result.error;
+      }
+      await this.tree.refresh();
+      if (run) await this._poll();
+      if (lastError) this._say(lastError, 'err');
+    } catch (e) {
+      const msg = e && e.message ? e.message : String(e);
+      this._logLine('error', msg === 'unreachable' ? NO_SD : msg);
+    } finally {
+      this._building = false;
+      this._scheduleProject();
+    }
   }
 
   async _tier(op, done) {
@@ -1392,6 +1958,7 @@ export class EditorWindow {
   _act_revert() { return this._tier('script.revert', (n) => `Reverted ${n}: the next tier down runs now`); }
 
   async _act_reload() {
+    if (this.path === PEX_PART) { this._poll(); return; }
     if (!this.path) return;
     const b = this.buffers.get(this.path);
     if (b && this._isDirty(b) && !confirm(`Discard unsaved changes to ${this.path}?`)) return;
@@ -1404,7 +1971,7 @@ export class EditorWindow {
 
   // Any file, open or not (the file menu); the open one by default.
   async renameFile(path) {
-    if (!path) return;
+    if (!path || path === PEX_PART) return;
     const to = prompt('Rename or move to:', path)?.trim();
     if (!to || to === path) return;
     const r = await fs.rename(path, to);
@@ -1417,7 +1984,8 @@ export class EditorWindow {
   }
 
   async deleteFile(path) {
-    if (!path || !confirm(`Delete ${path} from the device? This cannot be undone.`)) return;
+    if (!path || path === PEX_PART) return;
+    if (!confirm(`Delete ${path} from the device? This cannot be undone.`)) return;
     const r = await fs.remove(path);
     if (!r.ok) { this._say(`Delete failed: ${r.error}`, 'err'); return; }
     this.buffers.delete(path);
@@ -1651,6 +2219,7 @@ export class EditorWindow {
     this.tree.sel = path;
     this.tree.invalidate();
     this.tree.render();
+    this._renderTitle();
     this.openFileMenu(path);
   }
 
@@ -1667,13 +2236,30 @@ export class EditorWindow {
     const row = this._files.querySelector(`.ft-row[data-path="${CSS.escape(path)}"]`);
     if (!row) return false;
     const siblings = node.dir ? [] : this._siblings(path);
+    let builds = null;
+    if (!node.dir && node.name === 'Pexfile') {
+      const { loadProject } = await import('../editor/pexproj.js');
+      const spec = await loadProject({
+        filePath: path,
+        readText: (p) => this._readProjectText(p),
+        arch: this.pexArch,
+        board: this._boardName(),
+        pin: this._projPin(path),
+      });
+      if (spec.project && !spec.errors.length) {
+        builds = projectBuildItems(spec.project, { arch: this.pexArch, board: this._boardName() });
+      }
+    }
     const items = fileMenuItems(node, {
       card: node.dir && path === fs.SD_ROOT && fs.sdAvailable(),
       isOpen: this.path === path,
       script: scriptNameOf(path),
+      pex: pexNameOf(path),
+      installed: this.pexInstalled.has(pexNameOf(path)),
       empty: node.dir && node.children?.length === 0,
       hasBak: siblings.includes(`${node.name}.bak`),
-    }).map((it) => ({ label: it.label, keep: it.keep, cls: it.danger ? 'sm-danger' : '', fn: () => this._fileAct(it.id, node) }));
+      builds,
+    }).map((it) => ({ label: it.label, keep: it.keep, cls: it.danger ? 'sm-danger' : '', fn: () => this._fileAct(it.id, node, it) }));
     this.tree.menuPath = path;
     this.tree.invalidate();
     this.tree.render();
@@ -1706,12 +2292,20 @@ export class EditorWindow {
     }
   }
 
-  _fileAct(id, node) {
+  _fileAct(id, node, item) {
     const p = node.path;
     switch (id) {
+      case 'pex-build': return this.build({ from: p, target: item?.target, pin: true });
+      case 'pex-brun': return this.build({ from: p, target: item?.target, run: true, pin: true });
+      case 'pex-build-all': return this.build({ from: p, all: true });
       case 'open': return this.open(p);
       case 'start': return this.scriptOp('script.start', p, (n) => `Started ${n}`);
       case 'stop': return this.scriptOp('script.stop', p, (n) => `Stopped ${n}`);
+      case 'pex-start': return this._pexStart(pexNameOf(p));
+      case 'pex-stop': return this._pexStop(pexNameOf(p));
+      case 'pex-install': return this._pexInstall(pexNameOf(p));
+      case 'pex-uninstall': return this._pexUninstall(pexNameOf(p));
+      case 'pex-partition': return this._selectPex(pexNameOf(p)) || this.open(PEX_PART);
       case 'commit': return this.scriptOp('script.commit', p, (n) => `Committed ${n} to lua/${n}.lua`);
       case 'revert': return this.scriptOp('script.revert', p, (n) => `Reverted ${n}: the next tier down runs now`);
       case 'download': return this.download(p);
@@ -1831,7 +2425,7 @@ export class EditorWindow {
   }
 
   async download(path = this.path) {
-    if (!path) return;
+    if (!path || path === PEX_PART) return;
     const b = this.buffers.get(path);
     // The buffer if it is text (what you see is what you get, saved or not);
     // the device's bytes if it is binary.
@@ -1873,15 +2467,37 @@ export class EditorWindow {
 
   _renderTitle() {
     const b = this.path && this.buffers.get(this.path);
-    this._name.textContent = this.path || 'No file open';
-    const m = this.path ? this._mark(this.path) : {};
+    const part = this.path === PEX_PART;
+    this._name.textContent = part ? 'PEX partition' : (this.path || 'No file open');
+    const m = this.path && !part ? this._mark(this.path) : {};
+    const pex = this._activePex();
+    // A selected .pex is not the open buffer (a click opens its menu). The
+    // status line still names that app, beside whatever the open file says.
+    const beside = pex && pex !== pexNameOf(this.path)
+      ? this.pexStates[`pex/${pex}.${this.pexArch}.pex`] : null;
     const bits = [];
     if (m.dirty) bits.push('● modified');
     if (m.arena === 'loaded') bits.push('loaded');
     if (m.arena === 'stale') bits.push('loaded — changed since');
+    const app = m.pex || beside;
+    if (app === 'running') bits.push('running');
+    else if (app === 'faulted') bits.push('faulted');
+    else if (app) bits.push(app);
     this._state.textContent = bits.length ? `  ${bits.join(' · ')}` : '';
-    this._state.className = `ed-state${m.arena ? ' ed-' + m.arena : ''}${m.dirty ? ' is-dirty' : ''}`;
-    this._sPath.textContent = this.path || '';
+    const pexClass = app === 'running' ? ' ed-loaded' : app === 'faulted' ? ' ed-stale' : app ? ' ed-idle' : '';
+    const runState = m.arena ? ' ed-' + m.arena : pexClass;
+    this._state.className = `ed-state${runState}${m.dirty ? ' is-dirty' : ''}`;
+    if (this._runBtn) {
+      this._runBtn.title = pex
+        ? `Start the ${pex} PEX app (F5)`
+        : 'Run as a draft — nothing is written to flash (F5)';
+      this._stopBtn.title = pex
+        ? `Stop the ${pex} PEX app (Shift+F5)`
+        : 'Stop the script (Shift+F5)';
+    }
+    this._scheduleProject();
+    this._applyBuildButton();
+    this._sPath.textContent = part ? 'PEX partition' : (this.path || '');
     // the open file's size and what it takes on flash, as listed (saved state)
     const n = this.path && this.tree.find(this.path);
     this._sSize.textContent = n && !n.dir ? fileInfo(n) : '';
@@ -1896,8 +2512,31 @@ export class EditorWindow {
     this._keysBtn.classList.toggle('on', this.vimOn);
   }
 
+  _applyBuildButton() {
+    if (!this._buildBtn) return;
+    const spec = this._proj;
+    const here = spec && spec.filePath === this.path && spec.ready;
+    let st;
+    if (!this.path || this.path === PEX_PART) st = buildButtonState(null, null);
+    else if (!here) st = { disabled: true, label: 'Build', title: 'Looking for a Pexfile…' };
+    else if (!spec.project) {
+      st = spec.errors?.length
+        ? { disabled: true, label: 'Build', title: spec.errors[0] }
+        : buildButtonState(null, null);
+    } else st = buildButtonState(spec.project, spec.selection, { boardKnown: !!this._boardName() });
+    this._buildBtn.disabled = st.disabled;
+    this._brunBtn.disabled = st.disabled;
+    this._buildLabel.textContent = st.label;
+    this._buildBtn.title = st.title;
+    this._buildBtn.setAttribute('aria-label', st.label);
+    const runTitle = st.disabled ? st.title : st.title.replace(/^Build /, 'Build and run ');
+    this._brunBtn.title = runTitle;
+    this._brunBtn.setAttribute('aria-label', runTitle);
+  }
+
   render() {
     for (const v of this.views.values()) v.core.render();
     this.tree.render();
+    this._paintPartition();
   }
 }

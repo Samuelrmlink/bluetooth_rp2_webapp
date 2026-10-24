@@ -7,6 +7,7 @@ import { WireguardSection } from './wireguard.js';
 import { BluetoothSection } from './bluetooth.js';
 import { FirmwareSection } from './firmware.js';
 import { SdCardSection } from './sdcard.js';
+import { StartupSection } from './startup.js';
 import { SystemSection } from './system.js';
 
-export const SETTINGS_SECTIONS = [UiSection, WifiSection, EthernetSection, UplinksSection, WireguardSection, BluetoothSection, SdCardSection, FirmwareSection, SystemSection];
+export const SETTINGS_SECTIONS = [UiSection, WifiSection, EthernetSection, UplinksSection, WireguardSection, BluetoothSection, SdCardSection, FirmwareSection, StartupSection, SystemSection];

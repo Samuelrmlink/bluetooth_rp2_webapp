@@ -205,6 +205,7 @@ test.describe('touch', () => {
     await openFile(page, 'lua/pinecil.lua');
     await tab(page, 'lua/anker.lua').locator('.ed-ftab-name').tap();
     await expect(name(page)).toHaveText('lua/anker.lua');
+    expect(await tabsOf(page)).toEqual(['[lua/anker.lua]', 'lua/pinecil.lua']);
     const x = tab(page, 'lua/pinecil.lua').locator('.ed-ftab-x');
     const box = await x.boundingBox();
     expect(box.width).toBeGreaterThanOrEqual(28);                  // finger-sized
@@ -253,6 +254,34 @@ async function edgePoint(loc, side) {
   return { x: at[0], y: at[1] };
 }
 const ratio = (page) => page.evaluate(() => window.__btgwApp.windows.get('editor').win.tabs.ratio);
+
+test('a click moves the highlight when that click also started a drag', async ({ page }) => {
+  await editor(page);
+  await openFile(page, 'lua/pinecil.lua');
+  // dragstart and click(), no pointerup and no dragend: a tap the browser
+  // treated as a drag and then abandoned. The highlight has to move anyway.
+  const mid = await page.evaluate(async () => {
+    const t = document.querySelector('.ed-ftab[data-path="lua/anker.lua"]');
+    t.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: new DataTransfer() }));
+    t.querySelector('.ed-ftab-name').click();
+    await new Promise((r) => queueMicrotask(r));
+    return {
+      active: [...document.querySelectorAll('.ed-ftab')].filter((e) => e.classList.contains('is-active')).map((e) => e.dataset.path),
+      dragging: t.classList.contains('is-dragging'),
+    };
+  });
+  expect(mid).toEqual({ active: ['lua/anker.lua'], dragging: true });
+  await expect(name(page)).toHaveText('lua/anker.lua');
+  // lifting the pointer with no dragend still clears the faded drag state,
+  // and a tab opened after that is drawn
+  await page.evaluate(async () => {
+    window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  });
+  await expect(tab(page, 'lua/anker.lua')).not.toHaveClass(/is-dragging/);
+  await openFile(page, 'lua/anker2.lua');
+  expect(await tabsOf(page)).toEqual(['lua/anker.lua', '[lua/anker2.lua]', 'lua/pinecil.lua']);
+});
 
 test('a tab dragged along its row is rearranged', async ({ page }) => {
   await editor(page);

@@ -24,6 +24,8 @@ import { uuidDisplay } from '../gattfmt.js';
 import { toast } from '../toast.js';
 import { columnsDialog } from '../controls/columnsdialog.js';
 import { openCellMenu, copyWithToast } from '../controls/cellmenu.js';
+import { factsFromAd, matchingDrivers, driverStatus, driverLabel, loadDriverManifests } from '../drivers.js';
+import { startPex } from '../editor/pexrun.js';
 
 const lc = (s) => String(s || '').toLowerCase();
 
@@ -63,7 +65,7 @@ const list = (a) => (a || []).map((u) => shortUuid(u)).join(' ');
 
 // --- the columns ------------------------------------------------------------------
 // `p(d)` is the device's parsed advertisement. `hidden` = off until chosen.
-function scannerColumns(p, now) {
+function scannerColumns(p, now, driverOf) {
   return [
     { key: 'action', label: '', width: 112, pinned: true, sortable: false, group: '' },
     // Device
@@ -76,6 +78,7 @@ function scannerColumns(p, now) {
       get: (d) => (d.seen ? Math.round((now() - d.seen) / 1000) : null), show: (d) => (d.seen ? `${Math.round((now() - d.seen) / 1000)} s` : '') },
     // Advertisement
     { key: 'name', label: 'Name', group: 'Advertisement', width: 170, get: (d) => p(d).nameComplete || p(d).nameShort || d.name },
+    { key: 'driver', label: 'Driver', group: 'Advertisement', width: 160, get: (d) => driverOf(d) },
     { key: 'name_complete', label: 'Complete name', group: 'Advertisement', width: 150, hidden: true, get: (d) => p(d).nameComplete },
     { key: 'name_short', label: 'Shortened name', group: 'Advertisement', width: 120, hidden: true, get: (d) => p(d).nameShort },
     { key: 'flags', label: 'Flags', group: 'Advertisement', width: 140, hidden: true, get: (d) => flagNames(p(d).flags) },
@@ -115,6 +118,9 @@ export class ScannerWindow {
     this._parsed = new Map();     // addr -> { sig, p }
     this._dirty = true;
     this.filters = { ...FILTER_DEFAULTS, ...(this.app.prefs.scanFilters || {}) };
+    this.drivers = [];
+    this._driverState = { runningPex: new Set(), runningLua: new Set(), installed: new Set(), loadedPex: new Set(), pexFiles: new Set(), luaFiles: new Set() };
+    this._driverTick = 0;
 
     el.innerHTML = `
       <div class="pane-bar scan-bar">
@@ -137,7 +143,7 @@ export class ScannerWindow {
     this._menu = el.querySelector('.s-menu');
 
     const p = (d) => this._parse(d);
-    this.columns = scannerColumns(p, () => Date.now());
+    this.columns = scannerColumns(p, () => Date.now(), (d) => this._driverText(d));
     this.grid = new Grid(el.querySelector('.s-table'), {
       id: 'scanner', columns: this.columns, defaultSort: { key: 'rssi', dir: 'desc' },
       onChange: () => { this._dirty = true; this._columnsDlg?.sync(); },
@@ -160,7 +166,12 @@ export class ScannerWindow {
     ctx.bus.on('scan.done', () => { this.scanning = false; this._syncToggle(); });
     // Expiry runs whether or not the window is on screen: it is the list's
     // policy, not a view of it.
-    this._expiryTimer = setInterval(() => this._expire(), 1000);
+    this._expiryTimer = setInterval(() => {
+      this._expire();
+      this._driverTick++;
+      if (this._driverTick % 15 === 0) this._refreshDriverState();
+      if (this._driverTick % 60 === 0) this._loadDrivers();
+    }, 1000);
   }
 
   // --- parsing ------------------------------------------------------------------------
@@ -303,6 +314,12 @@ export class ScannerWindow {
 
     if (d.connected || d.connectable) item(d.connected ? 'Disconnect' : 'Connect', () => this._connectToggle(d.addr));
     if (d.connected) item('Show in GATT', () => this.app.showDevice(d.addr));
+    for (const drv of this._matches(d)) {
+      const st = driverStatus(drv, this._driverState);
+      if (st.present && !st.running && st.startName) {
+        item(`Start ${drv.title || drv.id}`, () => this._startDriver(drv));
+      }
+    }
     const p = this._parse(d);
     switch (key) {
       case 'addr':
@@ -339,7 +356,73 @@ export class ScannerWindow {
 
   // --- data -----------------------------------------------------------------------------
 
+  // Manifests on flash and the card, checked against each advertisement.
+  _matches(d) {
+    return matchingDrivers(this.drivers, factsFromAd(this._parse(d), d));
+  }
+
+  _driverText(d) {
+    return driverLabel(this._matches(d), this._driverState);
+  }
+
+  async _loadDrivers() {
+    if (!this.ws.connected) return;
+    try {
+      // Imported here: fs.js reads location at load, and the scanner module
+      // is also imported by unit tests that have no window.
+      const fs = await import('../fs.js');
+      const r = await loadDriverManifests(fs, { sd: fs.sdAvailable() });
+      this.drivers = r.manifests;
+      this._driverState = { ...this._driverState, pexFiles: r.pexFiles, luaFiles: r.luaFiles };
+      this._dirty = true;
+    } catch { /* a missing folder just leaves the column blank */ }
+  }
+
+  async _refreshDriverState() {
+    if (!this.ws.connected) return;
+    try {
+      const [pex, inst, scripts] = await Promise.all([
+        this.ws.call('pex.list').catch(() => null),
+        this.ws.call('pex.installed').catch(() => null),
+        this.ws.call('script.list').catch(() => null),
+      ]);
+      const runningPex = new Set();
+      const loadedPex = new Set();
+      for (const m of pex?.modules || []) {
+        const name = String(m.name || '').replace(/#\d+$/, '');
+        if (!name) continue;
+        loadedPex.add(name);
+        if (m.state === 'running') runningPex.add(name);
+      }
+      const runningLua = new Set((scripts?.scripts || []).filter((s) => s.running).map((s) => s.name));
+      this._driverState = {
+        ...this._driverState,
+        runningPex, loadedPex, runningLua,
+        installed: new Set((inst?.modules || []).map((m) => m.name)),
+      };
+      this._dirty = true;
+    } catch { /* older firmware: the column still names a match, without Start */ }
+  }
+
+  async _startDriver(drv) {
+    const st = driverStatus(drv, this._driverState);
+    try {
+      if (drv.kind === 'pex') {
+        const r = await startPex(this.ws, st.startName);
+        toast(r.started ? `Started ${drv.title || drv.id}` : `${drv.title || drv.id} is already running`);
+      } else {
+        await this.ws.call('script.start', { script: st.startName });
+        toast(`Started ${drv.title || drv.id}`);
+      }
+    } catch (e) {
+      toast(`${drv.title || drv.id}: ${e.message}`);
+    }
+    this._refreshDriverState();
+  }
+
   async onConnect() {
+    this._loadDrivers();
+    this._refreshDriverState();
     // Paged (fw 1.85+): one reply is one 4 KB frame. An older firmware has no
     // `next`, and its one page is all it has.
     try {

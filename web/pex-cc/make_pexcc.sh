@@ -1,0 +1,30 @@
+#!/bin/bash
+# Refresh the gitignored browser toolchain cache at web/.pex-cc/.
+#
+# Build fetches these files from the SD card (pex-cc/...) the first time it
+# is clicked. Nothing here is copied into web/js/. pexcc.wasm is the WASI
+# compiler from the pexcc repo (make wasm). It is not web/pex-cc/pexcc.c.
+#
+#   web/pex-cc/make_pexcc.sh
+set -euo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../.." && pwd)
+PEXCC=$(cd "$ROOT/../pexcc" && pwd)
+CACHE="$HERE/../.pex-cc"
+DRV="$ROOT/pex/modules/drivers"
+
+make -C "$PEXCC" wasm
+rm -rf "$CACHE"
+mkdir -p "$CACHE/include" "$CACHE/modinc" "$CACHE/drivers"
+cp "$PEXCC/build/pexcc.wasm" "$CACHE/pexcc.wasm"
+cp "$PEXCC/include/pex.h" "$CACHE/include/pex.h"
+cp "$PEXCC/modinc/stddef.h" "$PEXCC/modinc/stdint.h" "$PEXCC/modinc/string.h" "$CACHE/modinc/"
+cp "$ROOT/pex/host_api.json" "$CACHE/host_api.json"
+cp "$DRV"/anker_app.c "$DRV"/anker_adv.c "$DRV"/anker_adv.h \
+   "$DRV"/anker_wire.c "$DRV"/anker_wire.h \
+   "$DRV"/anker_models.c "$DRV"/anker_models.h \
+   "$DRV"/pinecil_app.c "$DRV"/pinecil_live.c "$DRV"/pinecil_live.h \
+   "$CACHE/drivers/"
+
+echo "cache $CACHE"
+ls -la "$CACHE" "$CACHE/include" "$CACHE/modinc" "$CACHE/drivers"

@@ -5,6 +5,13 @@ import { makeSection, kvRows, button, PolledSection } from './common.js';
 
 const kb = (n) => (n == null ? '—' : `${(n / 1024).toFixed(1)} KB`);
 
+// Shown before sys.reboot. Scripts and PEX apps come back only on a normal
+// boot, and only when Startup lists them.
+export const REBOOT_CONFIRM =
+  'Reboot the gateway?\n\nEvery connection drops: WiFi, WireGuard, Bluetooth devices and this page. ' +
+  'Scripts and PEX apps start again only when this boot is a normal one and Startup lists them. ' +
+  'A watchdog reboot or a double reset starts nothing.';
+
 // The census as rows. Pure; tested.
 export function heapRows(h) {
   if (!h?.arena) return [];
@@ -61,7 +68,7 @@ export class SystemSection extends PolledSection {
   }
 
   async reboot() {
-    if (!window.confirm('Reboot the gateway?\n\nEvery connection drops: WiFi, WireGuard, Bluetooth devices and this page. Scripts do not restart by themselves.')) return;
+    if (!window.confirm(REBOOT_CONFIRM)) return;
     try {
       await this.ws.call('sys.reboot');
       this._note.textContent = 'Rebooting… this page reconnects when it is back.';
