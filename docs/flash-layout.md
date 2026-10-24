@@ -11,17 +11,25 @@ checks them against each other: `partitions.json` (what the boot ROM reads),
 | Offset | Size | What | Notes |
 |---|---|---|---|
 | `0x000000` | 64 KB | partition table | unpartitioned; `tools/provision.sh` writes it |
-| `0x010000` | 864 KB | Main A | firmware slot (`rp2350-arm-s`) |
-| `0x0E8000` | 864 KB | Main B | linked to A; OTA writes the inactive one |
+| `0x010000` | 864 KB | Main A | firmware slot (`rp2350-arm-s`); executes at `0x10000000` |
+| `0x0E8000` | 864 KB | Main B | same linked image as A; OTA writes the inactive one |
 | `0x1C0000` | 256 KB | Wi-Fi Firmware | CYW43 blob, provisioned once, never OTA'd |
 | `0x200000` | **1776 KB** | LittleFS | `cfg/`, `lua/`, `cache/`, web assets |
 | `0x3BC000` | **256 KB** | **PEX** | native modules, executed in place ([pex-format.md](pex-format.md) 6.1). Id `0x7065780000000000` ("pex"), family `data` |
 | `0x3FC000` | 16 KB | BTstack NVM | bonds + LE device DB; unpartitioned, never touched |
 
+On the RP2350 the QSPI XIP controller maps either Main slot onto
+`0x10000000`, which is the only address the image is linked at. The same
+bytes boot from A or from B. An RP2040 XIP window does not translate, so
+the same layout there would be two images: one linked for slot A's
+addresses and one linked for slot B's. This table is the RP2350 map.
+[OTA.md](../OTA.md) has the boot rule.
+
 Until the PEX partition, LittleFS ran from `0x200000` to `0x3FC000` (2032 KB).
 It keeps its **start**; the PEX partition is the last 256 KB of that region,
-so nothing else moves. The firmware only **reserves** PEX for now (no loader
-yet); `sys.info` reports it:
+so nothing else moves. Installed modules execute in place from this
+partition. `sys.info` still calls the region `reserved` once migration has
+finished, which means it is outside the old LittleFS:
 
 ```json
 "fs": {"kb": 1776, "layout_kb": 1776, "migration": "done",

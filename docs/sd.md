@@ -62,7 +62,8 @@ What bring-up found (each now has a host test that fails without the fix):
 
 ## Build
 
-`CONFIG_SD` (default **n** in every shipped defconfig). `menuconfig` →
+`CONFIG_SD` is off in `configs/pico2w_defconfig`. `pico2w_sd`,
+`pico2w_sdspi`, and `pico2w_pexcc` turn it on. `menuconfig` →
 "SD card":
 
 | Option | Default | |

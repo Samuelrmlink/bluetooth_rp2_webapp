@@ -642,7 +642,13 @@ compiled only into firmware that has Lua.
     puts the books right, and the Lua layer does it for every call;
   - *references*: Lua closures/tables holding its C functions (a userdata
     anchor with `__gc` per module), anything else holding a pointer into it --
-    counted through `pex_ref/pex_unref` in the host API;
+    counted through `pex_ref/pex_unref` in the host API. A manual unload
+    (`pex.unload`, the gateway `pex.unload` op) asks Lua to release its
+    anchor first: `pex.on_unload(name)` runs while the module is still
+    loaded, then the ref is dropped, so a closure that is still reachable
+    does not by itself refuse the unload. Calling that closure afterwards
+    is an error, and the firmware logs it once. A module with tasks, or one
+    on a call stack, is not detached. Any other ref still refuses;
   - *a running app* (0.6): its scheduled tasks count; `pex.stop` first.
   Ops, listeners, open files and requests it registered with host groups do
   **not** block unload: the host releases them (`on_unload`), and leaked
@@ -656,9 +662,20 @@ compiled only into firmware that has Lua.
   it" with the caller's offset -- and a call through a NULL weak import is
   attributed by LR. A host that can resume (the test hosts do) unwinds and
   keeps running; the gateway records the fault and reboots, §15.)
-- **Hangs** (0.6): while module code runs the trampoline keeps the first word
-  of its build id in a host-provided word that survives a reset; a watchdog
-  reset with it set names the module on the next boot.
+- **Hangs**: modules are cooperative on the one main loop, so a callback
+  that never returns blocks every other module. The host may set a slice
+  (`pex_config_t.slice_ms`; the gateway uses `CONFIG_PEX_SLICE_MS`, 500 ms).
+  The outermost `pex_call` arms it. If the call is still running when it
+  fires, a timer interrupt returns that call early: the module whose code
+  was running, and any module it had called into, is marked faulted, its
+  tasks are cancelled, `on_slice` runs (the gateway releases what the module
+  registered and appends the build to `var/pex_faults.json`), and `pex_poll`
+  continues with the next task. The call comes back `PEX_EFAULT`. A faulted
+  module is not entered again. The watchdog is the backstop, not the first
+  response: while module code runs the trampoline still keeps the first word
+  of its build id in a host word that survives a reset, and a watchdog reset
+  with it set (the slice never got to run, because the module had masked
+  interrupts) names the module on the next boot.
 
 ## 9. Lua integration (optional, 0.6)
 
@@ -692,8 +709,10 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
    how the gateway's `require` finds the caller's environment (sandbox).
    A module loaded by `require` **belongs to the VM**: every Lua function it
    registers holds a reference through one anchor userdata; when the last is
-   collected (or the VM closes) it is unloaded. `pex.unload(name)` drops
-   `require`'s cache entry, collects, then unloads.
+   collected (or the VM closes) it is unloaded. `pex.unload(name)` calls
+   `pex.on_unload(name)` while the module is still loaded, drops the anchor
+   and `require`'s cache entry, then unloads. A function used after that
+   raises an error. `pex.stop` does not unload.
 3. Every call from Lua into a module runs under `lua_pcall`: a Lua error
    raised inside module code (`pexlua_checkint` on a bad argument) unwinds to
    the bridge, which fixes the trampoline's books and re-raises from host
@@ -920,14 +939,17 @@ either (the pool is allocated on first use).
   persisted in a 64-byte record next to the crumb record (SCRATCH_X, not
   cleared by a reset); the board then takes its normal fault path -- the
   watchdog reboots it into the **same** image;
-- a hang inside module code is caught by the trace word (the trampoline
-  keeps the executing module's build-id word there) -- after the watchdog
-  reset the next boot names it;
-- either way the next boot appends the build id to `var/pex_faults.json`, and
-  autostart **skips** every listed build until `pex.faults_clear`;
+- a hang inside module code with interrupts still enabled is stopped by the
+  slice (§8): that module is faulted, its tasks cancelled, the build id is
+  appended to `var/pex_faults.json` immediately, and the main loop keeps
+  running. The trace word is still kept, so a hang that masks interrupts
+  (the slice cannot preempt it) still ends in a watchdog reset and the next
+  boot names it;
+- either way the build id is in `var/pex_faults.json`, and autostart
+  **skips** every listed build until `pex.faults_clear`;
 - a TBYB image that faults before it is confirmed reverts to the previous slot,
   as any image does.
-Proven in mcusim (`pex/test/gw_sim.py`, scenarios `fault`, `hang`).
+Proven in mcusim (`pex/test/gw_sim.py`, scenarios `fault`, `hang`, `hangmask`, and the host suite's `slice.*`).
 
 **Measured in mcusim** (0.6; for 0.7 see §15.1) (the deploy image, SD + Wi-Fi + WireGuard + BLE up):
 the pool came out at 10 KB (contiguous room), leaving 8 KB of C heap.
@@ -1187,6 +1209,10 @@ area without a reboot; `require` searching `sd:/`.
   the flash headroom.
 - §9 the Lua launcher: `pex.install`, `pex.installed`, `pex.uninstall`;
   `pex.load` and `require` prefer the installed copy.
+- §8 a slice (`slice_ms`) aborts one cooperative call that runs too long and
+  leaves the rest of the loop running. The watchdog remains the backstop
+  when that call has interrupts masked. The gateway's budget is
+  `CONFIG_PEX_SLICE_MS`.
 - Q10 and Q12 decided.
 
 ## Appendix A. The v1 host API (generated)
@@ -1284,7 +1310,7 @@ typedef struct {
 
 ### A.4 `sched` -- group 4, v1.0
 
-cooperative tasks on the host's main loop: no RTOS; callbacks must return quickly
+cooperative tasks on the host's main loop: no RTOS; callbacks must return quickly. A callback that runs longer than the host's slice (`pex_config_t.slice_ms`) is faulted and the loop continues; see §8
 
 ```c
 /* Return PEX_TASK_AGAIN to stay scheduled, PEX_TASK_DONE to end the task. */
@@ -1330,9 +1356,9 @@ board identity; optional (a host may leave it out: import it WEAK)
 | `uint32_t pex_board_cpu_hz(void)` | `6c793b1f` | 1.0 |  |
 | `int pex_board_uid(uint8_t *out, size_t cap)` | `83d497e4` | 1.0 | bytes written |
 
-### A.7 `sys` -- group 7, v1.0
+### A.7 `sys` -- group 7, v1.1
 
-system facts: wall clock, host name, firmware version, memory
+system facts: wall clock, host name, firmware version, memory, credential files
 
 ```c
 typedef struct {
@@ -1349,6 +1375,7 @@ typedef struct {
 | `const char *pex_sys_hostname(void)` | `33f8f0d0` | 1.0 |  |
 | `const char *pex_sys_version(void)` | `8251eb9b` | 1.0 | firmware version, e.g. "1.201" |
 | `int pex_sys_mem(pex_sys_mem_t *out)` | `bdaabc0a` | 1.0 |  |
+| `int pex_sys_secret(const char *name, const char *key, char *out, size_t cap)` | `403510b5` | 1.1 | one top-level string from cfg/<name>.json (no slash or dot in name); length, or a negative PEX_E*. The HTTP filesystem does not serve cfg/. Same rule as Lua sys.secret |
 
 ### A.8 `json` -- group 8, v1.0
 
@@ -1507,6 +1534,68 @@ typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
 | `int pex_bt_subscribe(const uint8_t *addr, int chr, int mode)` | `ee8e0976` | 1.0 | 0 off, 1 notify, 2 indicate |
 | `int pex_bt_listen(const uint8_t *addr, pex_bt_fn fn, void *arg)` | `ffc11b85` | 1.0 | events of one device (addr NULL: all); id |
 | `int pex_bt_unlisten(int id)` | `1f584f1a` | 1.0 |  |
+
+### A.13 `codec` -- group 13, v1.1
+
+The firmware's Anker frame, TLV and session crypto, the same C Lua's frame, tlv and crypto tables call. Present only when the firmware is built with PROTO_ANKER_CRYPTO. A module must not link uECC or tiny-AES. GCM decrypt does not check the tag.
+
+```c
+#define PEX_CODEC_REASM_SIZE 680
+#define PEX_CODEC_TLV_STRING 0
+#define PEX_CODEC_TLV_U8 1
+#define PEX_CODEC_TLV_U16 2
+#define PEX_CODEC_TLV_U32 3
+#define PEX_CODEC_TLV_F32 4
+#define PEX_CODEC_TLV_BYTES 5
+#define PEX_CODEC_TLV_UNKNOWN 6
+#define PEX_CODEC_ENC_STRING 0
+#define PEX_CODEC_ENC_U8 1
+#define PEX_CODEC_ENC_U16 2
+#define PEX_CODEC_ENC_U32 3
+#define PEX_CODEC_ENC_F32 4
+#define PEX_CODEC_ENC_BYTES 5
+typedef struct {
+    uint8_t version, slave_id, function_type;
+    uint8_t encrypted, fragmented, is_response;
+    uint8_t frag_index, frag_count, checksum_ok, length_ok;
+    uint16_t opcode, payload_len;
+    const uint8_t *payload; /* into the caller's buffer, after a frag header */
+} pex_codec_frame_t;
+typedef struct {
+    uint8_t tag, type;       /* type is PEX_CODEC_TLV_* */
+    int16_t type_byte;       /* -1 when the item has none */
+    uint16_t raw_len, val_len;
+    int64_t ival;
+    const uint8_t *raw;      /* charging: includes the type byte; negotiation: the value */
+    const uint8_t *val;
+} pex_codec_tlv_t;
+typedef struct {
+    uint8_t tag, enc;        /* enc is PEX_CODEC_ENC_*; not the type byte */
+    int16_t type_byte;       /* -2 omit, -1 default for enc, >= 0 explicit */
+    int64_t ival;
+    const uint8_t *data;
+    uint16_t data_len;
+} pex_codec_spec_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_codec_frame_parse(const uint8_t *buf, size_t len, pex_codec_frame_t *out)` | `43877059` | 1.0 | 1 if the buffer is an FF09 frame (checksum_ok is separate), 0 if not, or a negative PEX_E* |
+| `int pex_codec_frame_build(uint8_t function_type, uint16_t opcode, int encrypted, uint8_t slave_id, const uint8_t *payload, size_t n, uint8_t *out, size_t cap)` | `830f03de` | 1.0 | frame length, or a negative PEX_E* |
+| `void pex_codec_reasm_reset(void *st)` | `c3f3c6cc` | 1.0 | st is PEX_CODEC_REASM_SIZE bytes, owned by the caller |
+| `int pex_codec_reasm_push(void *st, const pex_codec_frame_t *f, const uint8_t **out, size_t *outlen)` | `44484751` | 1.0 | 0 while a fragmented frame is incomplete; else the payload length. *out points at the caller's frame or into st: copy it before returning |
+| `int pex_codec_tlv_next(const uint8_t **body, size_t *len, pex_codec_tlv_t *out)` | `ebc17dc6` | 1.0 | one charging-dialect item; advances *body. 1, or 0 at the end. raw includes the type byte |
+| `int pex_codec_tlv_neg(const uint8_t **body, size_t *len, pex_codec_tlv_t *out)` | `c137b6b7` | 1.0 | one negotiation-dialect item (no type byte). raw is the value |
+| `int pex_codec_tlv_build(const pex_codec_spec_t *specs, size_t n, uint8_t *out, size_t cap)` | `8e8587ed` | 1.0 | bytes written. type_byte -2 omits the type byte, so a u8 0x21 is tag, len 1, 0x21 |
+| `int pex_codec_pubkey(const uint8_t *d, uint8_t *xy)` | `e4e7a22e` | 1.0 | d is 32 bytes, xy is X\|\|Y 64 bytes; 64 or a negative PEX_E*. The private scalar is the caller's |
+| `int pex_codec_ecdh(const uint8_t *d, const uint8_t *peer, size_t peer_len, uint8_t *Z)` | `c6564958` | 1.0 | Z is the 32-byte X coordinate. peer is 04\|\|X\|\|Y or bare X\|\|Y. About 40 ms. 32 or a negative PEX_E* |
+| `int pex_codec_gcm_encrypt(const uint8_t *key, size_t keylen, const uint8_t *iv12, const uint8_t *aad, size_t aad_len, const uint8_t *pt, size_t n, uint8_t *out, size_t cap)` | `32734c6f` | 1.0 | ciphertext \|\| tag; returns n + 16 |
+| `int pex_codec_gcm_decrypt(const uint8_t *key, size_t keylen, const uint8_t *iv12, const uint8_t *body, size_t n, uint8_t *out, size_t cap)` | `10fe8c83` | 1.0 | does NOT check the tag. body is ciphertext \|\| tag. plaintext length |
+| `void pex_codec_gcm_tag(const uint8_t *key, size_t keylen, const uint8_t *iv12, const uint8_t *aad, size_t aad_len, const uint8_t *ct, size_t ct_len, uint8_t *tag)` | `cc46bff6` | 1.1 | the 16-byte tag a conforming implementation would produce. Decrypt never checks one. Same C as Lua crypto.gcm_tag |
+| `int pex_codec_cbc(int encrypt, const uint8_t *key, size_t keylen, const uint8_t *iv, const uint8_t *in, size_t n, uint8_t *out, size_t cap, size_t *outlen)` | `2ebc3536` | 1.0 | AES-CBC. Encrypt PKCS7-pads. Decrypt unpads leniently. iv is 16 bytes. byte count or a negative PEX_E* |
+| `int pex_codec_kdf(const uint8_t *Z, uint8_t *out, size_t outlen)` | `acd2235b` | 1.0 | Anker ECIES KDF. outlen bytes, or a negative PEX_E* |
+| `int pex_codec_account_key(const char *id, uint8_t *key, uint8_t *iv)` | `be91f92f` | 1.0 | AesConferV1: key is the id padded to 32, iv is 16 zero bytes. 32 or a negative PEX_E* |
+| `void pex_codec_ghash(const uint8_t *H, const uint8_t *aad, size_t aad_len, const uint8_t *ct, size_t ct_len, uint8_t *out)` | `c62e1321` | 1.0 | GHASH(H, aad, ct) -> 16 bytes. The negotiation tag is this XOR a recovered E(J0); the constants stay in the module |
 
 ### A.16 `lua` -- group 16, v1.0
 

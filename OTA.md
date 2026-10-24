@@ -9,10 +9,23 @@ the commands.
 
 ## The model
 
-Flash holds **two application slots, A and B** (`partitions.json`). One
-compiled binary boots from either, because the ROM sets up QMI address
-translation so whichever slot it picks appears at `0x10000000`. The ROM
-picks the slot whose image carries the **higher version number**
+Flash holds **two application slots, A and B** (`partitions.json`). On the
+RP2350 they hold **one compiled binary**. The linker places that image at
+`0x10000000` (`linker/pico_flash_region.ld`). The boot ROM programs the QSPI
+XIP controller — QMI address translation — so whichever slot it picked
+appears at `0x10000000` and runs there. Slot A is stored at `0x010000` and
+slot B at `0x0E8000`. Code in the running image sees its own slot at
+`0x10000000`, so the firmware keeps the other slot's location as a storage
+offset and reads it through the NOTRANSLATE alias (`src/ota/ota_slot.h`).
+
+An RP2040 has no such translation. XIP is a straight map: flash offset N
+executes at `0x10000000 + N`. Slot A and slot B are different addresses, so
+each slot needs an image linked for that slot. Copying the slot A image
+into slot B runs it at the wrong addresses. This tree's partition table is
+the RP2350 family (`rp2350-arm-s`) and the linker origin is the one shared
+window. It does not produce the two RP2040 slot images.
+
+The RP2350 ROM picks the slot whose image carries the **higher version number**
 (`pico_set_binary_version`), so **every update must have a larger version
 than the one it replaces** or the ROM keeps running the old one.
 
@@ -136,13 +149,15 @@ cmake -B build -DBTGW_TBYB=ON -DBTGW_VERSION_MINOR=99
 pipx install smpmgr        # or: pip install --user smpmgr
 ```
 
-The **same commands work over every transport** — only the address changes:
+The same commands work over every IP path. Only the address changes. USB-NCM, Wi-Fi, and WireGuard all reach the SMP server on **UDP port 1337**:
 
 | Transport | Address |
 |---|---|
 | USB-NCM (wired) | `192.168.8.1` |
 | Local Wi-Fi (LAN) | the device's DHCP address, e.g. `192.168.1.162` |
 | WireGuard (remote) | `10.255.255.23` |
+
+UART is not an SMP transport, and neither is USB serial. `smpmgr --port` names a serial device on the PC. It does not select UDP 1337, and this firmware does not accept SMP there.
 
 The flow, step by step (this is the sequence verified on the bench):
 
