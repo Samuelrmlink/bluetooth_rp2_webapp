@@ -12,6 +12,7 @@
 
 extern const op_module_t op_module_sys;
 extern const op_module_t op_module_launch;
+extern const op_module_t op_module_fs;
 #if CONFIG_BT_LE
 extern const op_module_t op_module_bt;
 #endif
@@ -53,6 +54,7 @@ extern const op_module_t op_module_pex;
 static const op_module_t *const modules[] = {
     &op_module_sys,
     &op_module_launch,
+    &op_module_fs,
 #if CONFIG_BT_LE
     &op_module_bt,
 #endif

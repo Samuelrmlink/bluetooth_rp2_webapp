@@ -6,8 +6,10 @@ import {
   parsePexfile, parseBoard, findPexfile, findBoard, bindTarget, selectTarget,
   macroLines, prefixSource, artifactRel, logRel, joinProject, sdLoadPath,
   flashConfirm, ramDecision, layoutGuest, BuildLog, badRel,
+  sdInstallCap, verifiedPexRel, verifiedNoteRel,
 } from './pexfile.js';
 import { badSdPath } from './pexbuilddlg.js';
+import { imageOffOf, installMapNote } from './pexmap.js';
 
 const SIGN = 'python3 pex/tools/pexlink.py sign';
 
@@ -82,6 +84,134 @@ function headerDirs(target) {
   return [...dirs];
 }
 
+function linkedOf(compiled) {
+  if (compiled instanceof Uint8Array) return { bytes: compiled, map: '', dis: '', symbols: [] };
+  if (compiled?.bytes instanceof Uint8Array) return compiled;
+  throw new Error('compiler returned no module');
+}
+
+/** "name.arch.pex" at the end of an editor path. */
+export function pexIdentity(path) {
+  const base = String(path || '').split('/').pop();
+  const m = /^([A-Za-z_][A-Za-z0-9_-]*)\.([A-Za-z0-9]+)\.pex$/.exec(base || '');
+  return m ? { name: m[1], arch: m[2] } : null;
+}
+
+/**
+ * Copy a module to sd/pex/good/ and write the note only after that copy is
+ * complete. The previous verified file stays until the new bytes are on the
+ * card under a sibling name.
+ */
+export async function markVerified({ name, arch, bytes, buildId = '', when, write, rename, remove }) {
+  const base = verifiedPexRel(name, arch);
+  const incoming = `${base}.incoming`;
+  const prev = `${base}.prev`;
+  const notePath = verifiedNoteRel(name, arch);
+  const put = await write(incoming, new Blob([bytes]));
+  if (!put?.ok) return { ok: false, error: put?.error || 'could not write the verified copy' };
+  if (remove) await remove(prev);
+  if (rename) {
+    const mv = await rename(base, prev);
+    if (!mv?.ok && mv?.status !== 404) {
+      return { ok: false, error: mv?.error || 'could not move the previous verified file', incoming };
+    }
+    const fin = await rename(incoming, base);
+    if (!fin?.ok) return { ok: false, error: fin?.error || 'verified copy stayed as .incoming', incoming };
+    if (remove) await remove(prev);
+  } else {
+    const fin = await write(base, new Blob([bytes]));
+    if (!fin?.ok) return { ok: false, error: fin?.error || 'could not write the verified file' };
+    if (remove) await remove(incoming);
+  }
+  const note = `build ${buildId}\nsize ${bytes.length}\nwhen ${when}\n`;
+  const n = await write(notePath, note);
+  if (!n?.ok) return { ok: false, error: n?.error || 'note not written', file: base };
+  return { ok: true, file: base, note: notePath };
+}
+
+async function waitSd(ws, call) {
+  const done = watchEvent(ws, 'pex.sd_done', 60000);
+  let reply;
+  try { reply = await call(); }
+  catch (e) { done.cancel(); throw e; }
+  if (reply?.pending) {
+    const ev = await done.promise;
+    if (!ev?.ok) throw new Error(ev?.msg || ev?.error || 'install failed');
+    return ev;
+  }
+  done.cancel();
+  return reply;
+}
+
+async function installedOffset(ws, name) {
+  try {
+    const list = await ws.call('pex.installed');
+    const hit = (list?.modules || []).find((m) => m?.name === name);
+    return hit && typeof hit.offset === 'number' ? hit : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Install only when the module is not loaded. A file larger than the pool
+ * is copied to LittleFS and installed by name. A smaller file on the card
+ * is installed from its sd: path, which stages the whole file in the pool.
+ */
+export async function installCandidate({ ws, write, name, arch, bytes, sdPath, cap }) {
+  const internal = `pex/${name}.${arch}.pex`;
+  if (!sdPath || bytes.length > cap) {
+    const copy = await write(internal, new Blob([bytes]));
+    if (!copy?.ok) throw new Error(copy?.error || `could not write ${internal}`);
+    return ws.call('pex.install', { name });
+  }
+  await waitSd(ws, () => ws.call('pex.install', { path: sdPath, name }));
+  const hit = await installedOffset(ws, name);
+  return hit || { name };
+}
+
+async function recordOffset(write, stem, linked, inst) {
+  const offset = typeof inst?.offset === 'number' ? inst.offset : null;
+  if (offset == null || !linked?.map || !stem) return;
+  const symbol = (linked.symbols || []).find((s) => s.name === 'pex_main') || (linked.symbols || [])[0] || null;
+  const imageOff = linked.imageOff ?? imageOffOf(linked.bytes);
+  const extra = installMapNote({ offset, imageOff, symbol });
+  await write(`${stem}.map`, `${linked.map}${extra}`);
+}
+
+/**
+ * Put the verified file back through the same unload-first gate.
+ * `read` returns `{ ok, bytes }` for the verified .pex.
+ */
+export async function restoreVerified({
+  name, arch, read, write, confirm = () => false, unload = null, ws = null,
+  loaded = false, running = false, poolLargest = null,
+}) {
+  const path = verifiedPexRel(name, arch);
+  const got = await read(path);
+  if (!got?.ok) return { ok: false, error: got?.error || `${path} was not found` };
+  const bytes = got.bytes instanceof Uint8Array ? got.bytes : new Uint8Array(got.bytes || []);
+  const cap = sdInstallCap(poolLargest);
+  const busy = loaded || running;
+  if (!confirm(flashConfirm({
+    name, arch, loaded: busy, bytes: bytes.length, poolCap: cap, sdPath: sdLoadPath(path) || '',
+  }))) {
+    return { ok: false, cancelled: true, error: busy ? `Left ${name} loaded.` : 'Restore cancelled.' };
+  }
+  if (busy) {
+    if (!unload) return { ok: false, error: `cannot unload ${name}` };
+    let u;
+    try { u = await unload(name); }
+    catch (e) { return { ok: false, error: e?.message || String(e) }; }
+    if (!u?.unloaded) return { ok: false, error: u?.error || `Unload of ${name} failed.` };
+  }
+  if (!ws) return { ok: false, error: 'not connected' };
+  const inst = await installCandidate({
+    ws, write, name, arch, bytes, sdPath: sdLoadPath(path), cap,
+  });
+  return { ok: inst?.xip_ready !== false, installed: inst, file: path };
+}
+
 function watchEvent(ws, topic, timeoutMs) {
   let off = () => {};
   let timer = 0;
@@ -102,7 +232,8 @@ function watchEvent(ws, topic, timeoutMs) {
 export async function executeTarget({
   project, target, andRun = false, active = null,
   readText, write, list, compile, confirm = () => false, ws = null,
-  poolLargest = null, policy = '', running = false,
+  poolLargest = null, policy = '', running = false, loaded = false,
+  unload = null,
   now = new Date(), onLine = () => {},
 }) {
   const log = new BuildLog(target.level || project.level || 'info');
@@ -202,7 +333,7 @@ export async function executeTarget({
 
     const guest = layoutGuest({ units, headers, boardHeaders });
     note('debug', `pexcc /tmp/out.elf ${guest.inputs.join(' ')}`);
-    const bytes = await compile({
+    const linked = linkedOf(await compile({
       name: project.name,
       version: project.version,
       kind: project.kind,
@@ -213,7 +344,8 @@ export async function executeTarget({
       tree: guest.tree,
       include: guest.include,
       onStatus: (m) => note('debug', m),
-    });
+    }));
+    const bytes = linked.bytes;
 
     if (String(policy).includes('signed-only')) {
       note('warn', `Unsigned module. A signed-only board refuses it until ${SIGN}`);
@@ -225,6 +357,17 @@ export async function executeTarget({
     const put = await write(artifact, new Blob([bytes]));
     if (!put?.ok) throw new Error(put?.error || `could not write ${artifact}`);
     note('info', `Saved ${artifact} (${bytes.length} bytes).`);
+    const stem = artifact.replace(/\.pex$/, '');
+    if (linked.map) {
+      const mw = await write(`${stem}.map`, linked.map);
+      if (!mw?.ok) note('warn', mw?.error || `could not write ${stem}.map`);
+      else note('info', `Saved ${stem}.map`);
+    }
+    if (linked.dis) {
+      const dw = await write(`${stem}.dis`, linked.dis);
+      if (!dw?.ok) note('warn', dw?.error || `could not write ${stem}.dis`);
+      else note('info', `Saved ${stem}.dis`);
+    }
 
     if (!andRun) return finish(true);
 
@@ -232,6 +375,10 @@ export async function executeTarget({
       const gate = ramDecision({ bytes: bytes.length, poolLargest });
       if (!gate.ok) {
         note('warn', gate.message);
+        return finish(false);
+      }
+      if (running || loaded) {
+        note('error', `${project.name} is already ${running ? 'running' : 'loaded'}. A RAM run does not start a second copy.`);
         return finish(false);
       }
       const path = sdLoadPath(artifact);
@@ -250,35 +397,51 @@ export async function executeTarget({
         const ev = await done.promise;
         if (!ev?.ok) throw new Error(ev?.msg || ev?.error || 'RAM load failed');
       } else done.cancel();
-      if (running) {
-        note('error', `${project.name} is already running.`);
-        return finish(false);
-      }
       await ws.call('pex.start', { name: project.name });
       note('info', `Started ${project.name} from RAM.`);
       return finish(true);
     }
 
-    const internal = `pex/${project.name}.${target.arch}.pex`;
-    const ok = confirm(flashConfirm({ name: project.name, arch: target.arch }));
+    const cap = sdInstallCap(poolLargest);
+    const sdPath = sdLoadPath(artifact);
+    const busy = running || loaded;
+    const ok = confirm(flashConfirm({
+      name: project.name, arch: target.arch, loaded: busy,
+      bytes: bytes.length, poolCap: cap, sdPath: sdPath || '',
+    }));
     if (!ok) {
-      note('info', `Install cancelled. ${artifact} is on the card.`);
+      note('info', busy
+        ? `Left ${project.name} loaded. ${artifact} is on the card.`
+        : `Install cancelled. ${artifact} is on the card.`);
       return finish(true);
     }
-    const copy = await write(internal, new Blob([bytes]));
-    if (!copy?.ok) throw new Error(copy?.error || `could not write ${internal}`);
-    note('info', `Copied ${internal}.`);
+    if (busy) {
+      if (!unload) throw new Error(`cannot unload ${project.name}`);
+      let u;
+      try { u = await unload(project.name); }
+      catch (e) {
+        note('error', e?.message || String(e));
+        note('info', `${artifact} is on the card.`);
+        return finish(false);
+      }
+      if (!u?.unloaded) {
+        note('error', u?.error || `Unload of ${project.name} failed.`);
+        note('info', `The module was left in place. ${artifact} is on the card.`);
+        return finish(false);
+      }
+      note('info', `Unloaded ${project.name}.`);
+    }
     if (!ws) throw new Error('not connected');
-    const inst = await ws.call('pex.install', { name: project.name });
+    const inst = await installCandidate({
+      ws, write, name: project.name, arch: target.arch, bytes, sdPath, cap,
+    });
     if (inst?.xip_ready === false) {
       note('warn', `Installed ${project.name}, but it is not ready to run from flash. Not started.`);
+      await recordOffset(write, stem, linked, inst);
       return finish(false);
     }
     note('info', `Installed ${project.name}.`);
-    if (running) {
-      note('error', `${project.name} is already running.`);
-      return finish(false);
-    }
+    await recordOffset(write, stem, linked, inst);
     await ws.call('pex.load', { name: project.name });
     await ws.call('pex.start', { name: project.name });
     note('info', `Started ${project.name}.`);

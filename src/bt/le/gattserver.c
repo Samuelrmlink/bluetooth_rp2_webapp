@@ -17,8 +17,32 @@
 #include "btstack.h"
 #include "bt/le/gattserver.h"
 #include "autoconf.h"
+#if CONFIG_BT_PERIPHERAL && CONFIG_OTA
+#include "ota/smp.h"
+#endif
 
 static char s_device_name[32];
+
+#if CONFIG_BT_PERIPHERAL
+/* MCUmgr SMP characteristic. Recorded when Lua or a PEX module adds it, and
+ * when bt.smp does. Writes land in att_write_cb only if the property bit
+ * ATT_PROPERTY_DYNAMIC is set, so that bit is forced on for this UUID. */
+static uint16_t s_smp_value;
+#if CONFIG_OTA
+static uint8_t s_smp_rsp[512];
+#endif
+
+static int smp_chr_uuid(const char *uuid) {
+    static const char k[] = "da2e7828-fbce-4e01-ae9e-261174997c48";
+    if (!uuid) { return 0; }
+    for (int i = 0; k[i]; i++) {
+        char a = uuid[i];
+        if (a >= 'A' && a <= 'Z') { a = (char)(a - 'A' + 'a'); }
+        if (a != k[i]) { return 0; }
+    }
+    return uuid[sizeof k - 1] == 0;
+}
+#endif
 
 static uint16_t att_read_cb(hci_con_handle_t c, uint16_t handle, uint16_t off,
                             uint8_t *buf, uint16_t sz) {
@@ -28,7 +52,23 @@ static uint16_t att_read_cb(hci_con_handle_t c, uint16_t handle, uint16_t off,
 
 static int att_write_cb(hci_con_handle_t c, uint16_t handle, uint16_t mode,
                         uint16_t off, uint8_t *buf, uint16_t sz) {
-    (void)c; (void)handle; (void)mode; (void)off; (void)buf; (void)sz;
+    (void)mode;
+#if CONFIG_BT_PERIPHERAL && CONFIG_OTA
+    if (s_smp_value && handle == s_smp_value) {
+        if (off != 0) { return ATT_ERROR_INVALID_OFFSET; }
+        if (sz > sizeof s_smp_rsp) { return ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH; }
+        size_t n = smp_process(buf, sz, s_smp_rsp, sizeof s_smp_rsp);
+        if (n > 0 && n <= 0xFFFF) {
+            uint8_t st = att_server_notify(c, handle, s_smp_rsp, (uint16_t)n);
+            if (st) {
+                printf("bt: SMP notify failed 0x%02x (%u bytes)\n", st, (unsigned)n);
+            }
+        }
+        return 0;
+    }
+#else
+    (void)c; (void)handle; (void)off; (void)buf; (void)sz;
+#endif
     return 0;
 }
 
@@ -67,6 +107,9 @@ void gatt_server_begin(void) {
     att_db_util_init();
     n_entries = 0;
     building = true;
+#if CONFIG_BT_PERIPHERAL
+    s_smp_value = 0;
+#endif
     /* GAP always comes first: a peer expects to be able to read our name, and
      * a script forgetting to declare it should not break that. */
     att_db_util_add_service_uuid16(ORG_BLUETOOTH_SERVICE_GENERIC_ACCESS);
@@ -102,6 +145,9 @@ bool gatt_server_add_characteristic(const char *uuid, uint16_t properties,
     if (!building) { *err = "call gatt_server.begin first"; return false; }
     uint16_t u16 = 0; uint8_t u128[16];
     if (!parse_uuid(uuid, &u16, u128)) { *err = "uuid must be 4 hex chars or dashed 128-bit"; return false; }
+#if CONFIG_BT_PERIPHERAL
+    if (smp_chr_uuid(uuid)) { properties |= ATT_PROPERTY_DYNAMIC; }
+#endif
     uint16_t h;
     if (u16) {
         h = att_db_util_add_characteristic_uuid16(u16, properties, ATT_SECURITY_NONE,
@@ -111,6 +157,9 @@ bool gatt_server_add_characteristic(const char *uuid, uint16_t properties,
                                                    ATT_SECURITY_NONE, (uint8_t *)value, len);
     }
     if (out_handle) { *out_handle = h; }
+#if CONFIG_BT_PERIPHERAL
+    if (smp_chr_uuid(uuid)) { s_smp_value = h; }
+#endif
     return note(false, uuid, properties, h, err);
 }
 
@@ -122,10 +171,12 @@ bool gatt_server_commit(const char **err) {
         return false;
     }
     building = false;
-    /* BTstack holds the pointer att_server_init was given and reads it live,
-     * so the new contents are already in effect. Bonded peers cache the
-     * database across connections, though, and must be told it moved. */
-    att_server_init(att_db_util_get_address(), NULL, NULL);
+    /* BTstack holds the pointer att_server_init was given and reads it live.
+     * Passing the callbacks again is required: NULL here drops the ones
+     * gatt_server_init registered, and a Lua or PEX rebuild would then
+     * ignore writes. Bonded peers cache the database and must be told it
+     * moved. */
+    att_server_init(att_db_util_get_address(), att_read_cb, att_write_cb);
     printf("bt: local GATT database rebuilt, %u bytes, %u entries\n",
            att_db_util_get_size(), n_entries);
     return true;
@@ -158,7 +209,6 @@ void gatt_server_init(const char *name) {
         ATT_PROPERTY_READ, ATT_SECURITY_NONE, ATT_SECURITY_NONE,
         appearance, sizeof(appearance));
 
-    (void)att_read_cb; (void)att_write_cb;
     building = false;
     att_server_init(att_db_util_get_address(), att_read_cb, att_write_cb);
     printf("bt: local GATT database %u bytes (name \"%s\")\n",

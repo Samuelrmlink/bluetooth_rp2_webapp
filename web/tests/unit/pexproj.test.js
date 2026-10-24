@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadProject, executeTarget } from '../../js/editor/pexproj.js';
+import { loadProject, executeTarget, markVerified, restoreVerified } from '../../js/editor/pexproj.js';
 
 const PEX = `name blink
 version 0.1.0
@@ -200,7 +200,7 @@ test('run flash asks before copying internally, and m0p is refused before compil
     compile: async () => new Uint8Array([9]),
   });
   assert.equal(cancelled.ok, true);
-  assert.match(asked, /pex\/blink\.m33\.pex/);
+  assert.match(asked, /Install sd:\/projects\/blink\/build\/pico2_w\/blink\.m33\.pex/);
   assert.ok(w.writes.some((x) => x.path.endsWith('blink.m33.pex')));
   assert.equal(w.writes.some((x) => x.path === 'pex/blink.m33.pex'), false);
   assert.match(cancelled.log, /Install cancelled/);
@@ -217,4 +217,120 @@ test('run flash asks before copying internally, and m0p is refused before compil
   assert.equal(refused.ok, false);
   assert.equal(compiled, false);
   assert.match(refused.log, /Cortex-M33 only/);
+});
+
+function callsOf() {
+  const calls = [];
+  return {
+    calls,
+    ws: {
+      call: async (op, params) => {
+        calls.push({ op, params });
+        if (op === 'pex.install' && params?.path) return { pending: true };
+        if (op === 'pex.installed') return { modules: [{ name: 'blink', offset: 94208 }] };
+        return { offset: 8192, xip_ready: true };
+      },
+      on: (topic, fn) => {
+        if (topic === 'pex.sd_done') queueMicrotask(() => fn({ ok: true, name: 'blink' }));
+        return () => {};
+      },
+    },
+  };
+}
+
+test('a running module is not installed until unload succeeds', async () => {
+  const w = world();
+  const spec = await loadProject({
+    filePath: 'sd/projects/blink/src/main.c', readText: w.readText, arch: 'm33', board: 'pico2_w',
+  });
+  const target = spec.targets.find((t) => t.name === 'pico2_w');
+  const { ws, calls } = callsOf();
+  const left = await executeTarget({
+    project: spec.project, target, andRun: true, running: true, loaded: true,
+    readText: w.readText, write: w.write, list: w.list, ws,
+    confirm: () => false,
+    compile: async () => new Uint8Array([1, 2, 3, 4]),
+  });
+  assert.equal(left.ok, true, left.log);
+  assert.match(left.log, /Left blink loaded/);
+  assert.equal(calls.length, 0);
+  assert.equal(w.writes.some((x) => x.path === 'pex/blink.m33.pex'), false);
+
+  let unloaded = false;
+  const failed = await executeTarget({
+    project: spec.project, target, andRun: true, running: true, loaded: true,
+    readText: w.readText, write: w.write, list: w.list, ws,
+    confirm: () => true,
+    unload: async () => { unloaded = true; return { stopped: true, unloaded: false, error: 'busy' }; },
+    compile: async () => new Uint8Array([1, 2, 3, 4]),
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(unloaded, true);
+  assert.match(failed.log, /left in place/);
+  assert.equal(calls.some((c) => c.op === 'pex.install'), false);
+});
+
+test('a file larger than the pool is installed by name only after unload', async () => {
+  const w = world();
+  const spec = await loadProject({
+    filePath: 'sd/projects/blink/src/main.c', readText: w.readText, arch: 'm33', board: 'pico2_w',
+  });
+  const target = spec.targets.find((t) => t.name === 'pico2_w');
+  const { ws, calls } = callsOf();
+  const big = new Uint8Array(200);
+  const result = await executeTarget({
+    project: spec.project, target, andRun: true, running: true, loaded: true,
+    readText: w.readText, write: w.write, list: w.list, ws,
+    poolLargest: 64,
+    confirm: () => true,
+    unload: async () => ({ stopped: true, unloaded: true }),
+    compile: async () => ({
+      bytes: big,
+      map: '# map\n00000001 T pex_main\n',
+      dis: '00000000 <pex_main>:\n',
+      symbols: [{ name: 'pex_main', value: 1, kind: 'T' }],
+      imageOff: 128,
+    }),
+  });
+  assert.equal(result.ok, true, result.log);
+  assert.equal(w.writes.some((x) => x.path === 'pex/blink.m33.pex'), true);
+  const install = calls.find((c) => c.op === 'pex.install');
+  assert.deepEqual(install.params, { name: 'blink' });
+  assert.ok(w.writes.some((x) => x.path.endsWith('blink.m33.map')));
+  assert.ok(w.writes.some((x) => x.path.endsWith('blink.m33.dis')));
+  const map = w.writes.filter((x) => x.path.endsWith('.map')).pop();
+  assert.match(String(map.data), /partition_offset 0x2000/);
+});
+
+test('mark verified keeps the previous file until the new copy is on the card', async () => {
+  const writes = [];
+  const renames = [];
+  const removes = [];
+  const bytes = new Uint8Array(92);
+  bytes.set([0xab, 0xcd], 76);
+  const res = await markVerified({
+    name: 'anker', arch: 'm33', bytes, buildId: 'abcd', when: '2026-10-23T00:00:00.000Z',
+    write: async (path, data) => { writes.push(path); return { ok: true, data }; },
+    rename: async (from, to) => { renames.push([from, to]); return { ok: true }; },
+    remove: async (path) => { removes.push(path); return { ok: true }; },
+  });
+  assert.equal(res.ok, true);
+  assert.equal(writes[0], 'sd/pex/good/anker.m33.pex.incoming');
+  assert.deepEqual(renames[0], ['sd/pex/good/anker.m33.pex', 'sd/pex/good/anker.m33.pex.prev']);
+  assert.deepEqual(renames[1], ['sd/pex/good/anker.m33.pex.incoming', 'sd/pex/good/anker.m33.pex']);
+  assert.equal(writes[1], 'sd/pex/good/anker.m33.txt');
+  assert.ok(removes.includes('sd/pex/good/anker.m33.pex.prev'));
+
+  const calls = [];
+  const restored = await restoreVerified({
+    name: 'blink', arch: 'm33', loaded: true, running: true, poolLargest: 48 * 1024,
+    confirm: () => true,
+    unload: async () => ({ unloaded: false, error: 'still referenced' }),
+    read: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
+    write: async () => { calls.push('write'); return { ok: true }; },
+    ws: { call: async () => { calls.push('call'); return {}; }, on: () => () => {} },
+  });
+  assert.equal(restored.ok, false);
+  assert.match(restored.error, /still referenced/);
+  assert.deepEqual(calls, []);
 });

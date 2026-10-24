@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { freshnessAction, nextFreshDelay, FRESH_MS, FRESH_BACKOFF_MAX } from '../../js/editor/freshness.js';
+import { freshnessAction, changeAction, freshTimerActive, nextFreshDelay, FRESH_MS, FRESH_BACKOFF_MAX } from '../../js/editor/freshness.js';
 
 const same = { status: 200, hash: 'abc' };
 const other = { status: 200, hash: 'def' };
@@ -49,4 +49,15 @@ test('a busy card backs off; other failures do not reload', () => {
   assert.equal(nextFreshDelay(10000), 20000);
   assert.equal(nextFreshDelay(20000), FRESH_BACKOFF_MAX);
   assert.equal(nextFreshDelay(FRESH_BACKOFF_MAX), FRESH_BACKOFF_MAX);
+});
+
+test('the poll stops once change events arrive, and a matching hash needs no read', () => {
+  assert.equal(freshTimerActive(false), true);
+  assert.equal(freshTimerActive(true), false);
+  assert.equal(changeAction({ binary: false, gz: false, hash: 'abc', base: 'abc' }), 'same');
+  assert.equal(changeAction({ binary: false, gz: false, hash: 'def', base: 'abc' }), 'read');
+  assert.equal(changeAction({ binary: false, gz: true, hash: 'abc', base: 'abc' }), 'read');
+  assert.equal(changeAction({ binary: false, gz: false, hash: null, base: 'abc' }), 'read');
+  assert.equal(changeAction({ binary: false, missing: true }), 'read');
+  assert.equal(changeAction({ binary: true, hash: 'def', base: 'abc' }), 'skip');
 });

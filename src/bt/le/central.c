@@ -959,6 +959,11 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
 
 void le_on_disconnected(uint16_t con_handle) {
     le_link_t *l = link_by_handle(con_handle);
+    bt_device_t *d = bt_registry_by_handle(con_handle);
+    /* A Classic ACL drop, or a phone that connected to the peripheral, uses
+     * a handle this central never stored. Emitting that as a zero-address
+     * dev.disconnected is noise, and the Lua flush below would run on it. */
+    if (!l && !d) { return; }
     uint8_t addr[BT_ADDR_LEN] = {0};
     if (l) {
         memcpy(addr, l->addr, BT_ADDR_LEN);
@@ -972,7 +977,6 @@ void le_on_disconnected(uint16_t con_handle) {
 #endif
         memset(l, 0, sizeof(*l));
     }
-    bt_device_t *d = bt_registry_by_handle(con_handle);
     if (d) {
         d->connected = false;
         d->con_handle = 0;

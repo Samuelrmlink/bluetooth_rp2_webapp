@@ -7,6 +7,12 @@
 //
 // The input is the same ELF pexlink.py accepts (ARM ELF32, --emit-relocs,
 // the PEX linker script). On a deterministic link the bytes match.
+//
+// The image digest is a pure-JS SHA-256. crypto.subtle is absent on the
+// board's plain HTTP page, and this module still must not hold the OTA key.
+
+import { sha256 } from './sha256.js';
+import { renderDis, renderMap } from './pexmap.js';
 
 export const TOOL = 'pexlink 0.6';
 const MAGIC = [0x50, 0x45, 0x58, 0x1a];
@@ -571,7 +577,7 @@ export async function linkElf(elfBytes, opts = {}) {
   hdr = concat([hdr, pack('IHHII', [feats, api.api.major, api.api.minor, flags >>> 0, moduleVersion])]);
   hdr = concat([hdr, pack('IIIIIII', [img.length, textSize, roSize >>> 0, dataSize >>> 0, bssSize >>> 0, stack >>> 0, entry])]);
   hdr = concat([hdr, pack('IIII', [nsec, HEADER_SIZE, imageOff, 0])]);
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', img));
+  const digest = sha256(img);
   hdr = concat([hdr, digest.subarray(0, 16)]);
   if (hdr.length !== HEADER_SIZE) throw new LinkError(`header ${hdr.length} != ${HEADER_SIZE}`);
   let out = concat([hdr, table, body, img]);
@@ -583,5 +589,11 @@ export async function linkElf(elfBytes, opts = {}) {
     roRelocs: roList.length, rwRelocs: rwList.length,
     imports: imports.length, exports: exports.length, file: out.length,
   };
-  return { bytes: out, info };
+  const codeSyms = elf.syms.filter((s) => s.type === 2 && s.shndx && s.shndx < 0xFF00 && s.name && segOfShndx(s.shndx) === 'code');
+  const symbols = codeSyms.map((s) => ({ name: s.name, value: s.value >>> 0, kind: 'T' }));
+  const map = renderMap({
+    tool: TOOL, name: meta.name, arch: target, imageOff, text: textSize, ro: roSize, data: dataSize, bss: bssSize, symbols,
+  });
+  const dis = renderDis(img.subarray(0, textSize), symbols);
+  return { bytes: out, info, map, dis, symbols, imageOff };
 }

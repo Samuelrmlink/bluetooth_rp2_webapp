@@ -482,12 +482,15 @@ bool fs_stat(const char *name, size_t *size) {
 }
 
 static fs_change_fn change_hook;
+static fs_watch_fn watch_hook;
 static char wname[FS_PATH_MAX + 1];
 
 void fs_on_change(fs_change_fn fn) { change_hook = fn; }
+void fs_on_watch(fs_watch_fn fn) { watch_hook = fn; }
 
-static void changed(const char *name) {
+static void changed(const char *name, const char *op) {
     if (change_hook) { change_hook(name); }
+    if (watch_hook) { watch_hook(name, op); }
 }
 
 /* A file, or an EMPTY directory: LittleFS itself refuses a directory with
@@ -501,7 +504,7 @@ int fs_delete(const char *name) {
     }
     int err = lfs_remove(&lfs, name);
     if (err == LFS_ERR_NOTEMPTY) { return FS_ERR_NOTEMPTY; }
-    if (err >= 0) { changed(name); }
+    if (err >= 0) { changed(name, "delete"); }
     return err < 0 ? err : 0;
 }
 
@@ -523,7 +526,7 @@ int fs_rename(const char *from, const char *to) {
     if (err == LFS_ERR_EXIST) {
         return 1;
     }
-    if (err >= 0) { changed(from); changed(to); }
+    if (err >= 0) { changed(from, "delete"); changed(to, "rename"); }
     return err < 0 ? err : 0;
 }
 
@@ -569,7 +572,7 @@ int fs_end_write(void) {
     }
     int err = lfs_file_close(&lfs, &wfile);
     wopen = false;
-    if (err >= 0) { changed(wname); }
+    if (err >= 0) { changed(wname, "write"); }
     return err;
 }
 
@@ -734,7 +737,7 @@ int fs_fclose(int h) {
     int err = lfs_file_close(&lfs, &p->m->f);
     bool dirty = p->dirty;
     p->used = false;
-    if (dirty && err >= 0) { changed(p->m->name); }
+    if (dirty && err >= 0) { changed(p->m->name, "write"); }
     p->m = NULL;                 /* the caller frees it now */
     return err;
 }

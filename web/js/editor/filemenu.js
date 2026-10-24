@@ -57,7 +57,13 @@ export function fileMenuItems(node, { isOpen = false, script = null, pex = null,
     // Uninstall only this name, and only when the partition already has it.
     // A running copy answers busy; the item stays so that answer is visible.
     if (installed) out.push({ id: 'pex-uninstall', label: `Uninstall ${pex}` });
+    out.push({ id: 'pex-mark', label: `Mark ${pex} verified` });
+    out.push({ id: 'pex-restore', label: `Restore verified ${pex}` });
     out.push({ id: 'pex-partition', label: 'PEX partition…' });
+  } else if (/\.pex$/i.test(node.path || node.name || '') && !isGz(node.path || '')) {
+    const base = (node.name || node.path || '').split('/').pop().replace(/\.pex$/i, '');
+    out.push({ id: 'pex-mark', label: `Mark ${base} verified` });
+    out.push({ id: 'pex-restore', label: `Restore verified ${base}` });
   }
   out.push({ id: 'download', label: 'Download' });
   if (canCompress(node.path)) out.push({ id: 'compress', label: 'Store compressed (.gz)' });

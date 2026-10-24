@@ -37,7 +37,7 @@
 #define NVM_NUM_DEVICE_DB_ENTRIES 16
 #define NVM_NUM_LINK_KEYS 16
 
-/* ---- Classic (phase 9; not built) --------------------------------------- */
+/* ---- Classic. Off unless BT_CLASSIC is set. ----------------------------- */
 #if CONFIG_BT_CLASSIC
 #define ENABLE_CLASSIC
 #define ENABLE_SDP
@@ -49,8 +49,22 @@
 #define MAX_NR_SERVICE_RECORD_ITEMS 4
 /* Classic wants the full 1691-byte ACL payload; LE alone does not. */
 #define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
+#define MAX_NR_L2CAP_SERVICES  5
+#define MAX_NR_L2CAP_CHANNELS  (CONFIG_BT_MAX_LINKS + 4)
 #else
 #define HCI_ACL_PAYLOAD_SIZE (255 + 4)
+#define MAX_NR_L2CAP_SERVICES  3
+#define MAX_NR_L2CAP_CHANNELS  (CONFIG_BT_MAX_LINKS + 2)
+#endif
+
+#if CONFIG_BT_CLASSIC_NAP
+#define ENABLE_BNEP
+#define MAX_NR_BNEP_SERVICES 1
+#define MAX_NR_BNEP_CHANNELS 1
+#endif
+
+#if CONFIG_BT_PERIPHERAL
+#define ENABLE_LE_PERIPHERAL
 #endif
 
 /* ---- Sizing ------------------------------------------------------------- */
@@ -58,8 +72,6 @@
  * the RAM budget rather than restructuring anything. */
 #define MAX_NR_HCI_CONNECTIONS CONFIG_BT_MAX_LINKS
 #define MAX_NR_GATT_CLIENTS    CONFIG_BT_MAX_LINKS
-#define MAX_NR_L2CAP_CHANNELS  (CONFIG_BT_MAX_LINKS + 2)
-#define MAX_NR_L2CAP_SERVICES  3
 #define MAX_NR_WHITELIST_ENTRIES 16
 #define MAX_NR_LE_DEVICE_DB_ENTRIES 16
 

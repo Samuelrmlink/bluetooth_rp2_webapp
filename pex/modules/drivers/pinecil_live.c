@@ -1,3 +1,14 @@
+/* Scales and names match lua/profiles/pinecil.lua.
+ *
+ * Confirmed on the bench unit: the 56-byte layout, tip_c, setpoint_c (it
+ * matched settings characteristic index 0), handle_c at room temperature,
+ * tip_ohms 8.0 on the V2, and power_source 3 meaning PD.
+ *
+ * Still inferred, and left that way: power_source 0 DC, 1 QC, 2 PD-VBUS
+ * (IronOS order, not seen on this unit); tip_uv; hall_uT; the watts divisor
+ * (the iron was idle, so the /10 scale is unproven). Settings are u16 LE.
+ * Live values are u32 LE. Settings index 1 (sleep temp, f6d70001) is
+ * unconfirmed and is not decoded here. */
 #include "pinecil_live.h"
 #include <string.h>
 

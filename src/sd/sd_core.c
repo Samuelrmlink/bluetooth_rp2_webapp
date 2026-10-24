@@ -6,6 +6,7 @@
  */
 #include "sd/sd_core.h"
 
+#include "fs/fs_watch.h"
 #include "sd/sd_api.h"
 #include "sd/sd_jobs.h"
 #include "sd/sd_port.h"
@@ -86,6 +87,11 @@ void sd_core_worker_body(void) {
          * transfers: a browser upload is not held up by a script. */
         if (sdj_run()) {
             worked = true;          /* free space: the 5 s refresh catches up */
+        }
+        /* One queued card stat per turn, including between yields of a
+         * long transfer, so a reconnect is not stuck behind an upload. */
+        if (fs_watch_sd_slice()) {
+            worked = true;
         }
         if (!worked) {
             sdw_set_phase("idle");

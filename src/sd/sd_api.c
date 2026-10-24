@@ -12,6 +12,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "fs/fs_watch.h"
 #include "sd/sd_card.h"
 #include "sd/sd_core.h"
 #include "sd/sd_port.h"
@@ -766,6 +767,7 @@ static void run_put(struct xfer *t) {
     sdw_lock();
     t->size = got;
     sdw_unlock();
+    fs_watch_note_sd(t->path, "write");
     finish(t, SDX_DONE, 200, 0, NULL);
 }
 
@@ -799,6 +801,7 @@ static void run_delete(struct xfer *t) {
         fail_ls(t, r);
         return;
     }
+    fs_watch_note_sd(t->path, "delete");
     finish(t, SDX_DONE, 200, 0, NULL);
 }
 
@@ -927,6 +930,8 @@ static void run_rename(struct xfer *t) {
         fail_ls(t, r);
         return;
     }
+    fs_watch_note_sd(t->path, "delete");
+    fs_watch_note_sd(t->path2, "rename");
     finish(t, SDX_DONE, 200, 0, NULL);
 }
 

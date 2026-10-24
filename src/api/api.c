@@ -271,14 +271,15 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
 #if CONFIG_LUA_ENABLE
     lrt_mem_json(memj, sizeof memj);
 #endif
-    static char result[1664];
+    static char result[2048];
     snprintf(result, sizeof(result),
-             "{\"firmware\":\"bluetooth_rp2_webapp\",\"uptime_ms\":%lu,"
+             "{\"firmware\":\"bluetooth_rp2_webapp\",\"board\":\"%s\",\"uptime_ms\":%lu,"
              "\"watchdog_reboot\":%s,\"safe_mode\":%s,\"radio_wait_max_us\":%lu,"
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
              "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s,\"lua_mem\":%s}",
+             PICO_BOARD,
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
               * because a device reached over WireGuard has no RTT, and a

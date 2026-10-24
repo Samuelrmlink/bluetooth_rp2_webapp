@@ -62,11 +62,12 @@ These are part of the architecture. They are not tasks.
 
 ## Later
 
-- [ ] **R7 — Map and disassembly beside the module**
+- [x] **R7 — Map and disassembly beside the module**
   - Layer: 2, files written by layer 4.
   - Why: The flash offset of an installed module is known after `pex.install`. A map and a disassembly next to the `.pex` are what a later debugger would use.
   - Needs: `<out>/<name>.map` and `<out>/<name>.dis` from the link. After install, the map can record the partition offset. Check the SWD address of one known symbol against that formula before any tool uses it. This does not drive a probe.
   - Done when: A build writes both files next to the `.pex`, and one symbol's address has been checked by hand.
+  - Checked 2026-10-23 on `pex/test/modules/hello.c` with the reloc link. The link wrote `hello.m33.map` and `hello.m33.dis` beside `hello.m33.pex`. Map: `image_off 0x3a0`, text 332, ro 84, data 52, bss 0, and `00000001 T pex_main`. `arm-none-eabi-nm -n` prints `00000000 T pex_main`; this nm clears the Thumb bit, and the ELF value keeps it. The paper address at partition offset `0x17000` (94208) is `0x10400000 + 0x17000 + 0x3a0 + (0x1 & ~1) = 0x104173a0`. No probe.
 
 - [ ] **R8 — Protocols live in PEX, and the Lua files that remain are launchers**
   - Layer: 3 calls layer 2.
@@ -74,16 +75,24 @@ These are part of the architecture. They are not tasks.
   - Needs: R12, R13, and R14. Do not start the Lua Anker stack beside the PEX Anker app. Do not add a launch list that starts Anker on boot.
   - Done when: R14 is ticked.
 
-- [ ] **R12 — Can the Anker Lua drop 64-bit values?**
+- [x] **R12 — Can the Anker Lua drop 64-bit values?**
   - Layer: 3, at the boundary with the Anker PEX module.
   - Why: `third_party/lua/lua_pico_conf.h` asks for `LUA_32BITS`, so `lua_Integer` is 32-bit and `lua_Number` is a single-precision float. Neither chip has a double-precision FPU, and a 64-bit number is twice the size in every table. `third_party/lua/luaconf.h` then defines `LUA_32BITS` as 0, and that is the value the firmware build uses, so the VM still runs 64-bit integers and doubles ([lua-net-fs.md](lua-net-fs.md)).
   - Needs: A pass over `lua/profiles/anker/` and over the numbers `pex/modules/drivers/anker_app.c` pushes toward Lua. Record each value that does not fit in a signed 32-bit integer or a single-precision float, and name the field. This item does not change the VM width.
   - Done when: The answer is written here. Either every Anker Lua value fits, or the list of values that do not is on this item. A code change, if the answer allows one, is a new item.
+  - Answer: No. The VM width stays as the firmware builds it. These values do not fit in a signed 32-bit integer, or are not exact in a single-precision float. A later item can change the VM only after it keeps every bit of these fields.
+    - `fe` epoch (`link.lua` `now_epoch`, `cipher.lua` `now_epoch`). Base `1700000000` plus uptime in seconds, written by `le32` on setters and on the negotiation frame. Signed 32-bit holds it until 2038. At that magnitude a single-precision float steps by 128, so the seconds are not exact. The mask `0xffffffff` in `le32` is not a signed 32-bit value, and as a float it rounds to 2^32.
+    - Timezone wire form (`neg_gcm.lua`): `(-(cfg.tz_offset_sec or 0)) & 0xffffffff`. UTC−5 becomes `0xffffb9b0`. The offset in seconds fits. The 32-bit two's-complement form does not fit a positive signed integer, and it is not exact in a float.
+    - `memory_port_bits` (A1761 tag `f7`, a u32 bitmask). `anker.get` pushes it (`em_i64` at depth 0, then `pexlua_pushnum`). A 32-bit mask is not exact in a float. Bit 31 does not fit a signed 32-bit integer.
+    - Screensaver `id` and `holiday_id` (A2687 report, both u32) and the upload fields `id`, `crc`, and `size` (`screensaver.lua`). `crc` is a CRC32. The report fields are inside a nested object, so `anker.get` does not sample them (`s_depth != 0`). The Lua profile still has to keep all 32 bits to build the upload.
+    - `age_ms` (`anker_app.c` `l_age`): `pex_ms()` minus `sample_ms`, a 32-bit millisecond clock. Exact in a float only under 2^24 ms (about 4.7 h). Fits a signed 32-bit integer only under about 24.8 days. A live poll is a few seconds and does fit.
+  - These do fit, and they are not a reason to keep 64-bit by themselves. u8 and u16 measurements (power, state of charge, versions, flags, temperatures). Countdown fields `ac_countdown_s`, `car_countdown_s`, `countdown_s`, `countdown_remain_s`, and `c1_timer_s` / `c2_timer_s` / `c3_timer_s`, all ranged 0..86400. `remaining_time_h` is tenths of an hour and a realistic reading fits a float; the wire type is still u32. `l_set` already casts the Lua number to `int32_t`, and every verified setter value is inside that range.
 
 - [ ] **R13 — Finish moving the Pinecil protocol into the PEX module**
   - Layer: 2. The Lua profile is the spec.
   - Why: `pex/modules/drivers/pinecil_app.c` already scans, connects, reads identity, polls the 56-byte live characteristic, and registers `pinecil.set_temp`. `lua/pinecil.lua` only starts that module. `lua/profiles/pinecil.lua` is still the behavior spec, and it still contains the protocol.
   - Needs: Compare the profile to the module and port the confirmed behavior the module does not yet perform. Settings the profile marks as unconfirmed stay marked. The hardware check is H3 in [Hardware-Testing.md](Hardware-Testing.md).
+  - Compared 2026-10-23: the module already performs the confirmed path. It scans for a name starting with `Pinecil`, reads build and the 6-byte serial once, polls the 56-byte bulk live characteristic, and clamps `pinecil.set_temp` to 10..`max_tip_c` (or 450) as a u16 LE write to settings index 0. Sleep temp (`f6d70001`) is not implemented. `pinecil_live.c` marks power source values other than PD, `tip_uv`, `hall_uT`, and the watts divisor as inferred. H3 is still open, so this box stays open.
   - Done when: The confirmed Pinecil behavior runs from the PEX module, and H3 is ticked.
 
 - [ ] **R14 — Retire the old Anker and Pinecil Lua ports**
@@ -102,18 +111,21 @@ These are part of the architecture. They are not tasks.
   - Layer: 1. `BT_CLASSIC`, default off.
   - Why: The CYW43439 is dual-mode. `include/btstack_config.h` already has the Classic block (`ENABLE_CLASSIC`, SDP, RFCOMM, one channel) and it is not compiled. The shape follows `/home/samuel/Projects/pm220-pico2w`, which opens SPP by SDP and falls back to RFCOMM channel 1. `MAX_NR_HCI_CONNECTIONS` is shared with LE, so the RAM budget is part of turning the option on.
   - Needs: `BT_CLASSIC` builds and brings up inquiry, SDP, and one RFCOMM channel. A PEX module, or the firmware if the module boundary is wrong for it, opens that channel to a PM220 the way `pm220-pico2w` does. LE central stays the path to Anker and Pinecil. BNEP is R17, not this item.
+  - Code: `src/bt/classic/spp.c` is compiled only when `BT_CLASSIC` is on. `classic.scan` starts inquiry. `classic.connect` does SDP, then RFCOMM channel 1 if SDP has no channel, and the first payload is `BATTERY?\r\n`. Nothing inquires at boot. The product defconfig leaves the option off. Not tried against a PM220. A separate build with `BT_CLASSIC`, `BT_CLASSIC_NAP`, and `BT_PERIPHERAL` on compiles `spp.c`, `nap.c`, `bnep.c`, and `peripheral.c`. That image does not link: flash overflowed by 47612 bytes and RAM by 20376. `pico_btstack_classic` pulls the full profile set, and `btstack_memory` BSS grows from 4420 bytes to 17460 because the classic ACL buffers are larger. The flashed image leaves the options off.
   - Done when: With `BT_CLASSIC` on, the board opens an RFCOMM channel to a PM220 and exchanges the same first traffic `pm220-pico2w` does (`BATTERY?`). The default image still has the option off.
 
 - [ ] **R17 — Bluetooth Classic BNEP / NAP**
   - Layer: 1. Its own Kconfig option, depending on `BT_CLASSIC`.
   - Why: A phone tether is another uplink. The board could serve the web app to the phone, and it could reach the WireGuard server through that uplink. `pm220-pico2w` sizes one BNEP channel and does not implement NAP.
   - Needs: R16. The option brings up BNEP and NAP. The netif joins the existing uplink choice (Wi-Fi, Ethernet, USB-NCM, WireGuard) instead of a second stack. Off in the default image.
+  - Code: `BT_CLASSIC_NAP` depends on `BT_CLASSIC` and `NET_UPLINK`. It builds a PANU netif named `b0`. `classic.nap` connects to a phone NAP. The netif is an uplink candidate and does not set the default route itself. The product defconfig leaves the option off. Not tried against a phone.
   - Done when: A phone NAP connection can open the web app, and, when that uplink is selected, WireGuard comes up over it. The option is off unless the defconfig turns it on.
 
 - [ ] **R18 — BLE Peripheral**
   - Layer: 1, with the database filled from layer 2 or layer 3. New Kconfig option, default off.
   - Why: The board should be able to act as a BLE peripheral. A phone connects to it, it can stand in for another device, and it can take an OTA image. `BT_LE` today is the central: it scans and connects out to Anker and Pinecil. The local ATT database is a 1024-byte buffer Lua can rebuild with `gatt_server.begin`, `service`, `characteristic`, and `commit` (`src/bt/le/gattserver.h`). A commit swaps the buffer and signals Service Changed. PEX cannot build that database. SMP is UDP port 1337 only, so a phone cannot send `smpmgr` over BLE.
   - Needs: The new option advertises a peripheral beside the central. A PEX module, and Lua, can replace the service and characteristic list while the board is running. One of those services can be MCUmgr's SMP service, so an image can arrive over BLE as well as over UDP 1337. The central path stays. The default image leaves the option off.
+  - Code: `BT_PERIPHERAL` advertises beside the central after the controller is up. `bt.smp` installs the MCUmgr SMP service. Lua and `pex_gatt_begin`, `pex_gatt_service`, `pex_gatt_characteristic`, and `pex_gatt_commit` (bt group minor 1) can replace the list. Those calls return `PEX_ENOTSUP` while the option is off. A commit keeps the read and write callbacks. The product defconfig leaves the option off. Not tried against a phone.
   - Done when: A PEX module and a Lua script can each publish a service a phone can read, change it without a reflash, and the BLE SMP service accepts an image upload. Central behavior is unchanged when the option is off.
 
 - [ ] **R19 — Wi-Fi link recovery**

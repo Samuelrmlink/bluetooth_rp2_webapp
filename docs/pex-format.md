@@ -1480,9 +1480,9 @@ typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);
 | `int pex_http_status(int id, pex_http_res_t *out)` | `48b3c23a` | 1.0 |  |
 | `int pex_http_cancel(int id)` | `49e97eb2` | 1.0 |  |
 
-### A.12 `bt` -- group 12, v1.0
+### A.12 `bt` -- group 12, v1.1
 
-Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop)
+Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database when BT_PERIPHERAL is on, and returns PEX_ENOTSUP when it is off
 
 ```c
 typedef struct {
@@ -1531,6 +1531,10 @@ typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
 | `int pex_bt_subscribe(const uint8_t *addr, int chr, int mode)` | `ee8e0976` | 1.0 | 0 off, 1 notify, 2 indicate |
 | `int pex_bt_listen(const uint8_t *addr, pex_bt_fn fn, void *arg)` | `ffc11b85` | 1.0 | events of one device (addr NULL: all); id |
 | `int pex_bt_unlisten(int id)` | `1f584f1a` | 1.0 |  |
+| `int pex_gatt_begin(void)` | `3ad7cbf9` | 1.1 | start a local ATT database (GAP name is always first). PEX_ENOTSUP when BT_PERIPHERAL is off |
+| `int pex_gatt_service(const char *uuid)` | `a99251f7` | 1.1 | 4 hex chars or a dashed 128-bit UUID |
+| `int pex_gatt_characteristic(const char *uuid, int properties)` | `fcc1c221` | 1.1 | ATT property bits. The MCUmgr SMP UUID is recorded and marked dynamic |
+| `int pex_gatt_commit(void)` | `cc8d34b1` | 1.1 | install the database. Keeps the read and write callbacks |
 
 ### A.13 `codec` -- group 13, v1.1
 

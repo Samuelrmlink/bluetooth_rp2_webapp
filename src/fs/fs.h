@@ -122,6 +122,13 @@ void fs_abort_write(void);
 typedef void (*fs_change_fn)(const char *name);
 void fs_on_change(fs_change_fn fn);
 
+/* A second listener, for the editor. `op` is "write", "rename", or "delete".
+ * Same rule: it runs in the writer's context and must only take a note.
+ * Files over FS_HASH_MAX are reported with a size and no hash. */
+#define FS_HASH_MAX (256u * 1024u)
+typedef void (*fs_watch_fn)(const char *name, const char *op);
+void fs_on_watch(fs_watch_fn fn);
+
 /* --- a pool of general-purpose handles (the Lua `file` module) -------------
  * Separate from the single write slot above, which PUT /api/fs, SMP, the
  * bytecode cache and sys.secret_put share: a script holding a file open must

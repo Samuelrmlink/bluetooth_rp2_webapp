@@ -12,6 +12,9 @@
 #define CHR_BUILD "9eae1003-9d0d-48c5-aa55-33e27f9bc533"
 #define CHR_SERIAL "9eae1004-9d0d-48c5-aa55-33e27f9bc533"
 #define SVC_SET "f6d80000-5a10-4eba-aa55-33e27f9bc533"
+/* Settings index 0, u16 LE. Confirmed: the live setpoint reads back the same
+ * value. Index 1 (f6d70001, sleep temp) is unconfirmed in the profile and
+ * is not opened or written. */
 #define CHR_SETPT "f6d70000-5a10-4eba-aa55-33e27f9bc533"
 
 enum { ST_OFF = 0, ST_HUNT, ST_IDLE, ST_CONN, ST_DISC, ST_READ, ST_GAP, ST_BACKOFF };

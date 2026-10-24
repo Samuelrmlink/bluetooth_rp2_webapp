@@ -564,11 +564,14 @@ export function buildButtonState(project, selection, { boardKnown = false } = {}
   if (!selection?.target) {
     return { disabled: true, label: 'Build', title: selection?.reason || 'No target' };
   }
-  const label = `Build ${project.name} · ${selection.target.name}`;
+  const boardName = selection.target.board;
+  const label = boardKnown && boardName && selection.target.name !== boardName
+    ? `Build ${project.name} · ${selection.target.name} · ${boardName}`
+    : `Build ${project.name} · ${selection.target.name}`;
   let title = label;
   if (selection.status === 'pinned') title += ' — pinned';
   else if (selection.status === 'unreported') title += ' — the board name is not reported';
-  else if (boardKnown) title += ' — this board';
+  else if (boardKnown) title += ` — this board${selection.target.board ? ` (${selection.target.board})` : ''}`;
   return { disabled: false, label, title };
 }
 
@@ -601,11 +604,36 @@ export function sdLoadPath(editorPath) {
   return `sd:/${p.slice(3)}`;
 }
 
-export function flashConfirm({ name, arch }) {
-  const file = `pex/${name}.${arch}.pex`;
-  let text = `Copy the module to ${file} and install it? This replaces that file.`;
-  if (name === 'anker') text += ' This replaces the running signed module.';
-  return text;
+export const POOL_BYTES = 48 * 1024;
+
+/** The largest file an sd: install can stage. The pool is 48 KB; a known free block is tighter. */
+export function sdInstallCap(poolLargest) {
+  return typeof poolLargest === 'number' ? poolLargest : POOL_BYTES;
+}
+
+export function verifiedPexRel(name, arch) {
+  return `sd/pex/good/${name}.${arch}.pex`;
+}
+
+export function verifiedNoteRel(name, arch) {
+  return `sd/pex/good/${name}.${arch}.txt`;
+}
+
+/**
+ * The one question before an install.
+ * `loaded` asks to unload and replace. A file larger than the pool is copied
+ * to LittleFS first, because an sd: install reads the whole file into the pool.
+ */
+export function flashConfirm({ name, arch, loaded = false, bytes = 0, poolCap = POOL_BYTES, sdPath = '' }) {
+  const signed = name === 'anker' ? ' This replaces the running signed module.' : '';
+  if (loaded) {
+    return `Unload ${name} and replace the installed module?${signed} Cancel leaves it loaded. The new file stays on the card.`;
+  }
+  if (bytes > poolCap) {
+    return `Copy the module to pex/${name}.${arch}.pex and install it? The file is ${bytes} bytes, which does not fit in the PEX pool, so it is not installed from the SD card.${signed}`;
+  }
+  const from = sdPath || `${name}.${arch}.pex`;
+  return `Install ${from} into the PEX partition?${signed}`;
 }
 
 export function ramDecision({ bytes, poolLargest }) {

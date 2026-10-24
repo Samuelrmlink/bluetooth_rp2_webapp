@@ -25,6 +25,15 @@
 #include "bt/le/gattserver.h"
 #include "net/ws.h"
 #include "autoconf.h"
+#if CONFIG_BT_CLASSIC
+#include "bt/classic/spp.h"
+#endif
+#if CONFIG_BT_CLASSIC_NAP
+#include "bt/classic/nap.h"
+#endif
+#if CONFIG_BT_PERIPHERAL
+#include "bt/le/peripheral.h"
+#endif
 
 static btstack_packet_callback_registration_t hci_cb;
 static bool s_ready;
@@ -96,6 +105,32 @@ static bool event_is_handled(uint8_t evt) {
         case ATT_EVENT_CAN_SEND_NOW:
         case ATT_EVENT_HANDLE_VALUE_INDICATION_COMPLETE:
         case L2CAP_EVENT_CAN_SEND_NOW:
+        case HCI_EVENT_INQUIRY_COMPLETE:
+        case HCI_EVENT_INQUIRY_RESULT:
+        case HCI_EVENT_INQUIRY_RESULT_WITH_RSSI:
+        case HCI_EVENT_CONNECTION_COMPLETE:
+        case HCI_EVENT_PIN_CODE_REQUEST:
+        case HCI_EVENT_LINK_KEY_REQUEST:
+        case HCI_EVENT_LINK_KEY_NOTIFICATION:
+        case HCI_EVENT_USER_CONFIRMATION_REQUEST:
+        case HCI_EVENT_AUTHENTICATION_COMPLETE:
+        case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
+        case HCI_EVENT_ROLE_CHANGE:
+        case HCI_EVENT_MODE_CHANGE:
+        case GAP_EVENT_INQUIRY_RESULT:
+        case GAP_EVENT_INQUIRY_COMPLETE:
+        case RFCOMM_EVENT_CHANNEL_OPENED:
+        case RFCOMM_EVENT_CHANNEL_CLOSED:
+        case RFCOMM_EVENT_INCOMING_CONNECTION:
+        case RFCOMM_EVENT_CAN_SEND_NOW:
+        case RFCOMM_EVENT_REMOTE_MODEM_STATUS:
+        case SDP_EVENT_QUERY_COMPLETE:
+        case SDP_EVENT_QUERY_RFCOMM_SERVICE:
+        case BNEP_EVENT_SERVICE_REGISTERED:
+        case BNEP_EVENT_CHANNEL_OPENED:
+        case BNEP_EVENT_CHANNEL_CLOSED:
+        case BNEP_EVENT_CHANNEL_TIMEOUT:
+        case BNEP_EVENT_CAN_SEND_NOW:
             return true;
         default:
             return false;
@@ -178,6 +213,15 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
                     le_on_connect_failed(st, peer);
                     break;
                 }
+#if CONFIG_BT_PERIPHERAL
+                /* Role 0 is central. A phone that connected to our advert
+                 * is not one of the central's outgoing links; handing it to
+                 * le_on_connected would start a client discovery and, with
+                 * no free slot, disconnect the phone. */
+                if (gap_subevent_le_connection_complete_get_role(pkt) != 0) {
+                    break;
+                }
+#endif
                 le_on_connected(gap_subevent_le_connection_complete_get_connection_handle(pkt),
                                 peer,
                                 gap_subevent_le_connection_complete_get_peer_address_type(pkt));
@@ -320,6 +364,15 @@ void bt_init(void) {
     le_central_init();
     bond_init();
     io_load();
+#if CONFIG_BT_CLASSIC
+    classic_init();
+#endif
+#if CONFIG_BT_CLASSIC_NAP
+    nap_init();
+#endif
+#if CONFIG_BT_PERIPHERAL
+    bt_peripheral_init(CONFIG_NET_HOSTNAME);
+#endif
 
     hci_cb.callback = &hci_handler;
     hci_add_event_handler(&hci_cb);
@@ -835,6 +888,17 @@ static const op_def_t bt_ops[] = {
     { "scan.start", op_scan_start },
     { "scan.stop",  op_scan_stop },
     { "scan.list",  op_scan_list },
+#if CONFIG_BT_CLASSIC
+    { "classic.scan",    op_classic_scan },
+    { "classic.connect", op_classic_connect },
+    { "classic.state",   op_classic_state },
+#endif
+#if CONFIG_BT_CLASSIC_NAP
+    { "classic.nap", op_classic_nap },
+#endif
+#if CONFIG_BT_PERIPHERAL
+    { "bt.smp", op_bt_smp },
+#endif
     { NULL, NULL }
 };
 

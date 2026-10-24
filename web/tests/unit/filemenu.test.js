@@ -33,7 +33,7 @@ test('a script gets start / stop / commit / revert; the open file no Open', () =
 
 test('a PEX app gets start / stop / install, and uninstall only when it is in the partition', () => {
   const m = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker' });
-  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-partition', 'download', 'rename', 'delete']);
+  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-mark', 'pex-restore', 'pex-partition', 'download', 'rename', 'delete']);
   assert.equal(m.find((i) => i.id === 'pex-start').label, 'Start anker');
   assert.equal(m.find((i) => i.id === 'pex-stop').label, 'Stop anker');
   const installed = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker', installed: true });

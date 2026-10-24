@@ -19,7 +19,7 @@
 
 import * as fs from '../fs.js';
 import { fnv1a } from '../fnv.js';
-import { freshnessAction, FRESH_MS, nextFreshDelay } from '../editor/freshness.js';
+import { freshnessAction, changeAction, FRESH_MS, nextFreshDelay } from '../editor/freshness.js';
 import { ScriptIO } from '../scriptio.js';
 import { EditorCore } from '../editor/core.js';
 import { FileTree } from '../editor/filetree.js';
@@ -30,6 +30,7 @@ import { copyText } from '../clipboard.js';
 import { openCellMenu } from '../controls/cellmenu.js';
 import { fileMenuItems, fileInfo, dirInfo, folderSize, sizeInfo } from '../editor/filemenu.js';
 import { pexNameOf, pexRunningPaths, isPexFile, startPex, stopPex } from '../editor/pexrun.js';
+import { buildIdOf } from '../editor/pexmap.js';
 import { PexPartition, PEX_PART } from '../editor/pexpart.js';
 import { buildButtonState, projectBuildItems } from '../editor/pexfile.js';
 import { LongPress } from '../editor/longpress.js';
@@ -85,6 +86,8 @@ export class EditorWindow {
     this._freshNext = 0;
     this._freshSkip = '';
     this._freshAsking = false;
+    this._eventsLive = false;
+    this.ws.on('fs.changed', (data) => { this._onFsChanged(data); });
     this._proj = null;
     this._projGen = 0;
     this._buildPin = new Map();
@@ -1258,12 +1261,63 @@ export class EditorWindow {
     }
     this._proj = null;
     if (this._pollTimer) { this.tree.refresh(); this._poll(); }
-    this._freshAll();
+    this._adoptFresh();
     this._scheduleProject();
+  }
+
+  // fs.stat on reconnect. An older image has no such op, and the poll stays.
+  async _adoptFresh() {
+    const paths = this._freshPaths().slice(0, 32);
+    if (!paths.length) return;
+    let stat;
+    try {
+      stat = await this.ws.call('fs.stat', { paths });
+    } catch {
+      this._freshAll();
+      return;
+    }
+    if (stat?.pending) {
+      stat = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { off(); reject(new Error('fs.stat timed out')); }, 20000);
+        const off = this.ws.on('fs.stated', (data) => { clearTimeout(timer); off(); resolve(data); });
+      }).catch(() => null);
+      if (!stat) { this._freshAll(); return; }
+    }
+    this._eventsLive = true;
+    clearInterval(this._freshTimer);
+    this._freshTimer = 0;
+    for (const row of stat.files || []) await this._applyChange(row);
+  }
+
+  _onFsChanged(data) {
+    if (!data?.path) return;
+    if (!this._eventsLive) {
+      this._eventsLive = true;
+      clearInterval(this._freshTimer);
+      this._freshTimer = 0;
+    }
+    this._applyChange(data);
+  }
+
+  async _applyChange(row) {
+    const path = row?.path;
+    const b = path && this.buffers.get(path);
+    if (!b || path === this._freshSkip) return;
+    const action = changeAction({
+      binary: b.binary,
+      partition: b.partition,
+      gz: isGz(path),
+      hash: row.hash,
+      base: b.base,
+      missing: row.op === 'delete' || !!row.missing,
+    });
+    if (action === 'read') await this._freshPath(path);
   }
 
   _armFresh() {
     clearInterval(this._freshTimer);
+    this._freshTimer = 0;
+    if (this._eventsLive) return;
     this._freshTimer = setInterval(() => this._freshOne(), FRESH_MS);
   }
 
@@ -1580,14 +1634,15 @@ export class EditorWindow {
       if (!mv.ok) bak = null;                      // nothing there to keep
     }
     const r = await fs.write(path, body);
-    this._freshSkip = '';
     if (!r.ok) {
+      this._freshSkip = '';
       if (bak) await fs.rename(bak, path);         // put the old one back
       this._say(`Save failed: ${r.error}`, 'err');
       return false;
     }
     b.text = text;
     b.base = fnv1a(text);
+    this._freshSkip = '';
     b.rev = (b.rev || 0) + 1;
     delete b.keptRemote;
     this.search.invalidate(path);
@@ -1679,6 +1734,60 @@ export class EditorWindow {
     } catch (e) {
       this._say(`Stop failed: ${e.message}`, 'err');
     }
+    await this._poll();
+  }
+
+  async _pexMark(path) {
+    const { pexIdentity, markVerified } = await import('../editor/pexproj.js');
+    const id = pexIdentity(path);
+    if (!id) { this._say('That file is not a PEX module.', 'warn'); return; }
+    const got = await fs.readBlob(path);
+    if (!got.ok) { this._say(`Could not read ${path}: ${got.error}`, 'err'); return; }
+    const bytes = new Uint8Array(await got.blob.arrayBuffer());
+    const res = await markVerified({
+      name: id.name,
+      arch: id.arch,
+      bytes,
+      buildId: buildIdOf(bytes),
+      when: new Date().toISOString(),
+      write: (p, data) => fs.write(p, data),
+      rename: (a, b) => fs.rename(a, b),
+      remove: (p) => fs.remove(p),
+    });
+    this._say(res.ok ? `Marked ${res.file} verified` : `Mark verified failed: ${res.error}`, res.ok ? '' : 'err');
+    this.tree.refresh();
+  }
+
+  async _pexRestore(path) {
+    const { pexIdentity, restoreVerified } = await import('../editor/pexproj.js');
+    const id = pexIdentity(path);
+    if (!id) { this._say('That file is not a PEX module.', 'warn'); return; }
+    const key = `pex/${id.name}.${id.arch}.pex`;
+    const state = this.pexStates?.[key];
+    let res;
+    try {
+      res = await restoreVerified({
+        name: id.name,
+        arch: id.arch,
+        loaded: !!state,
+        running: state === 'running',
+        poolLargest: this.pexPool?.largest,
+        confirm: (text) => confirm(text),
+        unload: (name) => stopPex(this.ws, name),
+        ws: this.ws,
+        write: (p, data) => fs.write(p, data),
+        read: async (p) => {
+          const r = await fs.readBlob(p);
+          if (!r.ok) return r;
+          return { ok: true, bytes: new Uint8Array(await r.blob.arrayBuffer()) };
+        },
+      });
+    } catch (e) {
+      this._say(`Restore failed: ${e.message}`, 'err');
+      return;
+    }
+    if (res.cancelled) this._say(res.error);
+    else this._say(res.ok ? `Restored ${id.name} from ${res.file}` : `Restore failed: ${res.error}`, res.ok ? '' : 'err');
     await this._poll();
   }
 
@@ -1923,6 +2032,8 @@ export class EditorWindow {
           poolLargest: this.pexPool?.largest,
           policy: this.pexPolicy,
           running: this.pexStates?.[key] === 'running',
+          loaded: !!this.pexStates?.[key],
+          unload: (name) => stopPex(this.ws, name),
           onLine: (level, text) => this._logLine(level, text),
         });
         if (!result.ok && result.error) lastError = result.error;
@@ -2305,6 +2416,8 @@ export class EditorWindow {
       case 'pex-stop': return this._pexStop(pexNameOf(p));
       case 'pex-install': return this._pexInstall(pexNameOf(p));
       case 'pex-uninstall': return this._pexUninstall(pexNameOf(p));
+      case 'pex-mark': return this._pexMark(p);
+      case 'pex-restore': return this._pexRestore(p);
       case 'pex-partition': return this._selectPex(pexNameOf(p)) || this.open(PEX_PART);
       case 'commit': return this.scriptOp('script.commit', p, (n) => `Committed ${n} to lua/${n}.lua`);
       case 'revert': return this.scriptOp('script.revert', p, (n) => `Reverted ${n}: the next tier down runs now`);

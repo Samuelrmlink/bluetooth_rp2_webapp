@@ -117,7 +117,7 @@ export async function buildPex(source, name, onStatus, openFile, siblingRoot) {
  * Compile one project's translation units. `tree` is the guest /p directory
  * (sources already prefixed, headers beside them). `include` is extra
  * headers for /include (board.h and each inc file). pex.h stays the
- * toolchain header. Returns the unsigned module bytes.
+ * toolchain header. Returns `{ bytes, map, dis }` for the unsigned module.
  */
 export async function buildModule({
   name, version = '0.1.0', kind = 'app', model = 'reloc', arch = 'm33',
@@ -141,5 +141,5 @@ export async function buildModule({
     kind,
     apiName: 'pex-cc/host_api.json',
   });
-  return linked.bytes;
+  return { bytes: linked.bytes, map: linked.map, dis: linked.dis, symbols: linked.symbols, imageOff: linked.imageOff };
 }

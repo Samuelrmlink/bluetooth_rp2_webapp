@@ -26,6 +26,7 @@
 #include "app_config.h"
 #include "fs/fs.h"
 #include "fs/fs_migrate.h"
+#include "fs/fs_watch.h"
 #include "config/config.h"
 #include "net/http.h"
 #include "net/usb_ncm.h"
@@ -257,6 +258,9 @@ int main(void) {
         sd_poll();
         http_sd_pump();
 #endif
+        /* After the worker's turn, so a note it just queued is in this pass.
+         * LittleFS notes are queued on the write itself and leave here too. */
+        fs_watch_poll();
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
 #if CONFIG_NET_WIFI
         /* wifi_poll() makes that same call and THEN advances the station/AP

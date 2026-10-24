@@ -279,10 +279,12 @@ test('macros: arch, board, board defines, then target defines, then the header',
   assert.equal(artifactRel({ name: 'blink' }, { out: 'build/ram', arch: 'm33' }), 'build/ram/blink.m33.pex');
 });
 
-test('flash confirm names the internal file, and anker says it replaces the signed module', () => {
-  assert.match(flashConfirm({ name: 'blink', arch: 'm33' }), /pex\/blink\.m33\.pex/);
-  assert.doesNotMatch(flashConfirm({ name: 'blink', arch: 'm33' }), /signed/);
-  assert.match(flashConfirm({ name: 'anker', arch: 'm33' }), /replaces the running signed module/);
+test('flash confirm installs a small file from the card, and a large one through LittleFS', () => {
+  assert.match(flashConfirm({ name: 'blink', arch: 'm33', bytes: 4, sdPath: 'sd:/projects/blink/build/pico2_w/blink.m33.pex' }), /sd:\/projects\/blink/);
+  assert.doesNotMatch(flashConfirm({ name: 'blink', arch: 'm33', bytes: 4 }), /signed/);
+  assert.match(flashConfirm({ name: 'blink', arch: 'm33', bytes: 80000 }), /pex\/blink\.m33\.pex/);
+  assert.match(flashConfirm({ name: 'anker', arch: 'm33', loaded: true }), /Unload anker/);
+  assert.match(flashConfirm({ name: 'anker', arch: 'm33', loaded: true }), /replaces the running signed module/);
   assert.equal(ramDecision({ bytes: 100, poolLargest: 48 * 1024 }).ok, true);
   assert.match(ramDecision({ bytes: 164596, poolLargest: 48 * 1024 }).message, /164596/);
 });

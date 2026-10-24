@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "fs/fs_watch.h"
 #include "sd/sd_store.h"
 #include "sd/sd_worker.h"
 
@@ -22,6 +23,8 @@ static struct {
     ls_file *f;
     uint32_t gen;
     bool close_owed;
+    bool wrote;
+    char path[SDJ_PATH_MAX + 1];
 } s_files[SDJ_FILES];
 static uint32_t s_gen;
 /* One scratch path for every parent-of computation: a job runs alone. */
@@ -136,7 +139,12 @@ static void check_generation(void) {
          * it had went with it (ls_unmount forgot them), and our indices must
          * not reach whatever reuses those slots. */
         s_gen = g;
-        for (int i = 0; i < SDJ_FILES; i++) { s_files[i].f = NULL; s_files[i].close_owed = false; }
+        for (int i = 0; i < SDJ_FILES; i++) {
+            s_files[i].f = NULL;
+            s_files[i].close_owed = false;
+            s_files[i].wrote = false;
+            s_files[i].path[0] = 0;
+        }
     }
 }
 
@@ -145,11 +153,23 @@ static ls_file *file_at(int i) {
     return s_files[i].f;
 }
 
-static void close_file(int i) {
-    ls_file *f = file_at(i);
-    if (f) { ls_close(f); }
+/* A write is reported when the handle closes, not on every chunk. */
+static void forget_file(int i, bool closed_ok) {
+    bool wrote = closed_ok && s_files[i].wrote && s_files[i].path[0];
+    char path[SDJ_PATH_MAX + 1];
+    if (wrote) { snprintf(path, sizeof path, "%s", s_files[i].path); }
     s_files[i].f = NULL;
     s_files[i].close_owed = false;
+    s_files[i].wrote = false;
+    s_files[i].path[0] = 0;
+    if (wrote) { fs_watch_note_sd(path, "write"); }
+}
+
+static void close_file(int i) {
+    ls_file *f = file_at(i);
+    int rc = 0;
+    if (f) { rc = ls_close(f); }
+    forget_file(i, f && rc >= 0);
 }
 
 static int mkdir_p(char *p) {
@@ -238,6 +258,8 @@ static void run_job(sdj_t *j) {
         s_files[slot].f = f;
         s_files[slot].gen = s_gen;
         s_files[slot].close_owed = false;
+        s_files[slot].wrote = (j->mode == LS_WR); /* truncate is already a write */
+        snprintf(s_files[slot].path, sizeof s_files[slot].path, "%s", j->path);
         file_result(j, f);
         j->rc = slot;
         return;
@@ -245,10 +267,17 @@ static void run_job(sdj_t *j) {
     case SDJ_READ: case SDJ_WRITE: case SDJ_SEEK: case SDJ_CLOSE: {
         ls_file *f = file_at(j->file);
         if (!f) { j->rc = LS_EIO; if (j->op == SDJ_CLOSE) { j->rc = LS_OK; } return; }
-        if (j->op == SDJ_CLOSE) { j->rc = ls_close(f); s_files[j->file].f = NULL; return; }
+        if (j->op == SDJ_CLOSE) {
+            j->rc = ls_close(f);
+            forget_file(j->file, j->rc >= 0);
+            return;
+        }
         uint32_t n = j->len > SDJ_BUF ? SDJ_BUF : j->len;
         if (j->op == SDJ_READ)  { j->rc = ls_read(f, s_buf, n); }
-        if (j->op == SDJ_WRITE) { j->rc = ls_write(f, s_buf, n); }
+        if (j->op == SDJ_WRITE) {
+            j->rc = ls_write(f, s_buf, n);
+            if (j->rc >= 0) { s_files[j->file].wrote = true; }
+        }
         if (j->op == SDJ_SEEK)  { j->rc = ls_seek(f, j->pos); }
         file_result(j, f);
         return;
@@ -270,6 +299,7 @@ static void run_job(sdj_t *j) {
         j->rc = ls_remove(j->path);
         bool d = false; uint64_t sz = 0;
         if (j->rc == LS_ENOSPC && do_stat(j->path, &d, &sz) == LS_OK && d) { j->rc = SDJ_ENOTEMPTY; }
+        if (j->rc == LS_OK) { fs_watch_note_sd(j->path, "delete"); }
         return;
     }
     case SDJ_RENAME: {
@@ -279,6 +309,10 @@ static void run_job(sdj_t *j) {
         char *slash = strrchr(s_parent, '/');
         if (slash) { *slash = 0; mkdir_p(s_parent); }
         j->rc = ls_rename(j->path, j->path2);
+        if (j->rc == LS_OK) {
+            fs_watch_note_sd(j->path, "delete");
+            fs_watch_note_sd(j->path2, "rename");
+        }
         return;
     }
     case SDJ_STATFS:

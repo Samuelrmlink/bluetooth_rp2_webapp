@@ -10,6 +10,26 @@
 export const FRESH_MS = 5000;
 export const FRESH_BACKOFF_MAX = 30000;
 
+// The five-second poll runs until the board has sent fs.changed. A reconnect
+// then uses fs.stat instead of walking every open file on a timer.
+export function freshTimerActive(eventsLive) {
+  return !eventsLive;
+}
+
+/**
+ * What an fs.changed or fs.stat row means before any GET.
+ * 'same' needs no read. 'read' fetches the text and then freshnessAction.
+ * A .gz is hashed by the editor after the browser unpacks it, so a stored-byte
+ * hash is not compared with the buffer.
+ */
+export function changeAction({ binary, partition, gz, hash, base, missing }) {
+  if (binary || partition) return 'skip';
+  if (missing) return 'read';
+  if (gz || hash == null || hash === '') return 'read';
+  if (hash === base) return 'same';
+  return 'read';
+}
+
 // Delay before the next check after the card answers 503. Doubles, and
 // stops at 30s. `previous` is 0 for the first busy answer.
 export function nextFreshDelay(previous) {

@@ -12,6 +12,8 @@
 #include "bt/registry.h"
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
+#include "bt/le/gattserver.h"
+#include "autoconf.h"
 #include "pico/stdlib.h"
 
 #define LISTENERS 8
@@ -228,4 +230,52 @@ int pex_bt_write(const uint8_t *addr, int chr, const void *data, size_t len, int
 int pex_bt_subscribe(const uint8_t *addr, int chr, int mode) {
     if (chr < 0 || chr > 255 || mode < 0 || mode > 2) { return PEX_EINVAL; }
     return le_rc(le_subscribe(addr, 0, (uint8_t)chr, mode));
+}
+
+/* Local ATT database. Present in the group either way so a module built
+ * against minor 1 still links; the calls do nothing useful until
+ * BT_PERIPHERAL is on. */
+int pex_gatt_begin(void) {
+#if !CONFIG_BT_PERIPHERAL
+    return PEX_ENOTSUP;
+#else
+    gatt_server_begin();
+    return PEX_OK;
+#endif
+}
+
+int pex_gatt_service(const char *uuid) {
+#if !CONFIG_BT_PERIPHERAL
+    (void)uuid;
+    return PEX_ENOTSUP;
+#else
+    const char *err = NULL;
+    if (!uuid || !gatt_server_add_service(uuid, &err)) { return PEX_EINVAL; }
+    return PEX_OK;
+#endif
+}
+
+int pex_gatt_characteristic(const char *uuid, int properties) {
+#if !CONFIG_BT_PERIPHERAL
+    (void)uuid;
+    (void)properties;
+    return PEX_ENOTSUP;
+#else
+    if (!uuid || properties < 0 || properties > 0xFFFF) { return PEX_EINVAL; }
+    const char *err = NULL;
+    if (!gatt_server_add_characteristic(uuid, (uint16_t)properties, NULL, 0, NULL, &err)) {
+        return PEX_EINVAL;
+    }
+    return PEX_OK;
+#endif
+}
+
+int pex_gatt_commit(void) {
+#if !CONFIG_BT_PERIPHERAL
+    return PEX_ENOTSUP;
+#else
+    const char *err = NULL;
+    if (!gatt_server_commit(&err)) { return PEX_EINVAL; }
+    return PEX_OK;
+#endif
 }

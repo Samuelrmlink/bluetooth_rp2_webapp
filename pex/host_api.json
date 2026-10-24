@@ -688,8 +688,8 @@
       "name": "bt",
       "id": 12,
       "major": 1,
-      "minor": 0,
-      "doc": "Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop)",
+      "minor": 1,
+      "doc": "Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database when BT_PERIPHERAL is on, and returns PEX_ENOTSUP when it is off",
       "types": [
         "typedef struct {",
         "    uint8_t addr[6]; uint8_t addr_type; int8_t rssi;",
@@ -799,6 +799,30 @@
         {
           "name": "pex_bt_unlisten",
           "proto": "int pex_bt_unlisten(int id)"
+        },
+        {
+          "name": "pex_gatt_begin",
+          "proto": "int pex_gatt_begin(void)",
+          "since": 1,
+          "doc": "start a local ATT database (GAP name is always first). PEX_ENOTSUP when BT_PERIPHERAL is off"
+        },
+        {
+          "name": "pex_gatt_service",
+          "proto": "int pex_gatt_service(const char *uuid)",
+          "since": 1,
+          "doc": "4 hex chars or a dashed 128-bit UUID"
+        },
+        {
+          "name": "pex_gatt_characteristic",
+          "proto": "int pex_gatt_characteristic(const char *uuid, int properties)",
+          "since": 1,
+          "doc": "ATT property bits. The MCUmgr SMP UUID is recorded and marked dynamic"
+        },
+        {
+          "name": "pex_gatt_commit",
+          "proto": "int pex_gatt_commit(void)",
+          "since": 1,
+          "doc": "install the database. Keeps the read and write callbacks"
         }
       ]
     },

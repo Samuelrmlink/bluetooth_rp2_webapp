@@ -39,6 +39,9 @@
 #include "net/wifi.h"
 #endif
 #include "net/eth_w5500.h"
+#if CONFIG_BT_CLASSIC_NAP
+#include "bt/classic/nap.h"
+#endif
 
 #define UPLINK_CFG_PATH   "cfg/uplink.json"
 #define PROBE_EVERY_MS    2000
@@ -68,6 +71,9 @@ static cand_t cands[] = {
 #endif
 #if CONFIG_NET_ETH_W5500
     { .name = "e0", .kind = "ethernet", .get = eth_uplink_netif },
+#endif
+#if CONFIG_BT_CLASSIC_NAP
+    { .name = "b0", .kind = "nap", .get = nap_uplink_netif },
 #endif
 };
 #define N_CANDS ((int)(sizeof cands / sizeof cands[0]))

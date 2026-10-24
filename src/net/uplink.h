@@ -6,8 +6,9 @@
  * and NEW outbound connections. The ONLY caller of netif_set_default() in
  * the firmware (a tier-0 guard enforces it).
  *
- * Candidates are the WiFi station ("w0") and the W5500 ("e0") -- any of them
- * that has a gateway; one without is not checked and not chosen. Each is
+ * Candidates are the WiFi station ("w0"), the W5500 ("e0"), and, when
+ * BT_CLASSIC_NAP is on, the phone NAP ("b0"). Any of them that has a
+ * gateway is checked; one without is not chosen. Each is
  * pinged (ICMP echo, outside the tunnel, from that interface's own address)
  * every 2 s at the WireGuard endpoint, or at cfg/uplink.json's probe_ip for a
  * server that drops ICMP. RTT, jitter and loss feed src/net/uplink_core.c,

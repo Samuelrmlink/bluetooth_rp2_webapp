@@ -45,9 +45,24 @@ test('JS pexlink matches pexlink.py on hello.elf', async () => {
     ]);
     const pyBytes = pyLink(elf, py, ['--name', 'hello', '--version', '1.0.0', '--kind', 'lua']);
     const api = JSON.parse(readFileSync(API, 'utf8'));
-    const { bytes, info } = await linkElf(readFileSync(elf), {
+    const { bytes, info, map, dis, symbols, imageOff } = await linkElf(readFileSync(elf), {
       target: 'm33', model: 'reloc', api, name: 'hello', version: '1.0.0', kind: 'lua',
     });
+    const nm = execFileSync(join(process.env.HOME, '.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-nm'), ['-n', elf], { encoding: 'utf8' });
+    const row = nm.split('\n').find((l) => l.endsWith(' pex_main'));
+    // This nm prints a Thumb function with bit 0 clear. The ELF st_value,
+    // which the map records, keeps it set.
+    const nmAddr = parseInt(row.split(/\s+/)[0], 16);
+    const sym = symbols.find((s) => s.name === 'pex_main');
+    assert.equal(sym.value & ~1, nmAddr & ~1);
+    assert.equal(sym.value & 1, 1);
+    assert.match(map, /0x10400000 \+ partition_offset \+ image_off/);
+    assert.match(dis, /<pex_main>:/);
+    // Paper check, not a probe. code_addr is exec_base + sector*4096 + image_off,
+    // and a Thumb symbol's bit 0 is not part of the address.
+    const offset = 94208;
+    const swd = (0x10400000 + offset + imageOff + (sym.value & ~1)) >>> 0;
+    assert.equal(swd, (0x10400000 + 94208 + imageOff + (nmAddr & ~1)) >>> 0);
     assert.equal(info.imports, 9);
     assert.equal(info.exports, 1);
     assert.equal(info.text, 332);

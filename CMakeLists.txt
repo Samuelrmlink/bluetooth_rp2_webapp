@@ -58,6 +58,8 @@ add_executable(btgw
     src/net/ws.c
     src/fs/fs.c
     src/fs/fs_migrate.c
+    src/fs/fs_watch.c
+    src/fs/fs_ops.c
     src/ota/crc32.c
     src/util/inflate.c
     src/fs/littlefs/lfs.c
@@ -104,7 +106,17 @@ if(CONFIG_BT_LE)
     target_link_libraries(btgw pico_btstack_ble pico_btstack_cyw43 pico_btstack_flash_bank)
 endif()
 if(CONFIG_BT_CLASSIC)
+    target_sources(btgw PRIVATE src/bt/classic/spp.c)
     target_link_libraries(btgw pico_btstack_classic)
+endif()
+if(CONFIG_BT_CLASSIC_NAP)
+    # bnep.c only. pico_btstack_bnep_lwip also compiles the FreeRTOS
+    # bnep_lwip.c, which this NO_SYS=1 build cannot use.
+    target_sources(btgw PRIVATE src/bt/classic/nap.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/bnep.c)
+endif()
+if(CONFIG_BT_PERIPHERAL)
+    target_sources(btgw PRIVATE src/bt/le/peripheral.c)
 endif()
 
 if(CONFIG_IO_PINS)

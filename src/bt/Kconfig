@@ -13,11 +13,31 @@ config BT_CLASSIC
     default n
     depends on BT_LE
     help
-      NOT IMPLEMENTED YET -- the option exists so the seam stays visible.
-      The CYW43439 is dual-mode and pico_btstack_classic composes with
-      pico_btstack_ble, so adding Classic is additive. Note MAX_NR_HCI_CONNECTIONS
-      is shared across both transports, so enabling this means re-checking the
-      RAM budget rather than restructuring anything.
+      Inquiry, SDP, and one RFCOMM channel, the shape pm220-pico2w uses to
+      open SPP (SDP, else channel 1). The first payload on an open channel
+      is BATTERY?. LE central stays the path to Anker and Pinecil.
+      MAX_NR_HCI_CONNECTIONS is shared, so turning this on costs ACL buffer
+      RAM. Off in the default image. BNEP is BT_CLASSIC_NAP.
+
+config BT_CLASSIC_NAP
+    bool "Bluetooth Classic BNEP / NAP uplink"
+    default n
+    depends on BT_CLASSIC
+    depends on NET_UPLINK
+    help
+      A PANU connection to a phone NAP. The netif ("b0") joins the uplink
+      choice with Wi-Fi, Ethernet and USB-NCM. Off unless this option is on.
+
+config BT_PERIPHERAL
+    bool "BLE peripheral beside the central"
+    default n
+    depends on BT_LE
+    help
+      Advertise a connectable peripheral while the central keeps scanning.
+      Lua and a PEX module can replace the local service list at runtime.
+      One of those services can be MCUmgr SMP, so an image can arrive over
+      BLE as well as UDP 1337. Off in the default image, and the central
+      path is unchanged while it is off.
 
 config BT_MAX_LINKS
     int "Concurrent links (all transports)"
