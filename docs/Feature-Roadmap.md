@@ -22,6 +22,12 @@ These are part of the architecture. They are not tasks.
 
 ## Now
 
+- [ ] **R3 — Build while a module is running, and keep a verified copy on the card**
+  - Layer: 4 writes the candidate. Layer 1 accepts it into the PEX partition only after unload.
+  - Why: A new build of a module that is still running should finish. The executable partition is the copy the board is running, so the new file stays on the SD card until that module is unloaded. The card also keeps the last version marked verified, so a bad install can be put back. This is the first item to implement. It does not wait on R1 or R2.
+  - Needs: The build writes `sd/projects/<name>/build/<name>.<arch>.pex` whether or not that module is loaded. The page holds those bytes only until that write finishes. It does not copy the file to LittleFS `pex/` and it does not call `pex.install` while the module is loaded. `pex_install` already returns busy when the module runs from its installed copy. If it is loaded or running, the page asks to unload and replace it, or to leave it running. Unload is stop, then unload, including `pex.on_unload`. Install reads the candidate from the SD path, and only after unload succeeds. A failed unload leaves the running module and leaves the candidate on the card. If the module is not loaded, install proceeds from that SD file. "Mark verified" copies the candidate to `sd/pex/good/<name>.<arch>.pex` and writes a note beside it with the build id, the size, and when it was marked. The previous verified file stays until that copy finishes. "Restore verified" installs that file through the same unload-first gate. On a signed-only image the marked file is the signed bytes. An unsigned candidate can sit on the card, and install still refuses it until `pexlink sign`. A RAM run does not write the partition, and it does not start a second copy of a module that is already running. Replacing a module that Lua still holds needs the R1 image. Uploading these pages onto firmware 1.239 can unload the signed Anker module that is running, because that module has no Lua reference and unload already succeeds there.
+  - Done when: A build of a running module leaves the partition untouched and the new file on the card. The prompt installs only after unload succeeds. A file marked verified can be restored after a later candidate was installed.
+
 - [ ] **R1 — The running board matches the unload contract**
   - Layer: 2 and 3, driven from layer 4.
   - Why: The README says Stop unloads a module, and that Lua gets `pex.on_unload` first. Firmware 1.239 refuses `pex.unload` while Lua still holds a reference, and the pages on the board only stop.
@@ -35,12 +41,6 @@ These are part of the architecture. They are not tasks.
   - Done when: A write from one session updates a clean buffer in another, a dirty buffer is asked before it is replaced, and the five-second poll is gone.
 
 ## Next
-
-- [ ] **R3 — Build while a module is running, and keep a verified copy on the card**
-  - Layer: 4 writes the candidate. Layer 1 accepts it into the PEX partition only after unload.
-  - Why: A new build of a module that is still running should finish. The executable partition is the copy the board is running, so the new file stays on the SD card until that module is unloaded. The card also keeps the last version marked verified, so a bad install can be put back.
-  - Needs: The build writes `sd/projects/<name>/build/<name>.<arch>.pex` whether or not that module is loaded. The page holds those bytes only until that write finishes. It does not copy the file to LittleFS `pex/` and it does not call `pex.install` while the module is loaded. `pex_install` already returns busy when the module runs from its installed copy. If it is loaded or running, the page asks to unload and replace it, or to leave it running. Unload is stop, then unload, including `pex.on_unload`. Install reads the candidate from the SD path, and only after unload succeeds. A failed unload leaves the running module and leaves the candidate on the card. If the module is not loaded, install proceeds from that SD file. "Mark verified" copies the candidate to `sd/pex/good/<name>.<arch>.pex` and writes a note beside it with the build id, the size, and when it was marked. The previous verified file stays until that copy finishes. "Restore verified" installs that file through the same unload-first gate. On a signed-only image the marked file is the signed bytes. An unsigned candidate can sit on the card, and install still refuses it until `pexlink sign`. A RAM run does not write the partition, and it does not start a second copy of a module that is already running.
-  - Done when: A build of a running module leaves the partition untouched and the new file on the card. The prompt installs only after unload succeeds. A file marked verified can be restored after a later candidate was installed.
 
 - [ ] **R4 — The page knows which board answered**
   - Layer: 1 tells layer 4. Layer 2 build selection uses it.
