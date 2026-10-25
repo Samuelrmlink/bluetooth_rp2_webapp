@@ -22,7 +22,7 @@ export class ConsoleWindow {
       <div class="pane-bar">
         <label class="dim"><input type="checkbox" class="c-info" checked> info</label>
         <label class="dim"><input type="checkbox" class="c-lua" checked> Lua</label>
-        <label class="dim"><input type="checkbox" class="c-bt"> Bluetooth</label>
+        <label class="dim" title="Classic link, pairing, and BNEP lines from the board, plus connect and bond events"><input type="checkbox" class="c-bt" checked> Bluetooth</label>
         <span class="spacer"></span>
         <button type="button" class="pane-btn c-copy" title="Copy every line shown (the filters apply) to the clipboard">Copy all</button>
         <button type="button" class="pane-btn c-clear" title="Clear">Clear</button>
@@ -66,7 +66,18 @@ export class ConsoleWindow {
     new ResizeObserver(() => { if (this._stick) this._toBottom(); }).observe(this._log);
 
     const bus = ctx.bus;
-    bus.on('log', (d) => this.add('info', d?.src || 'device', d?.message ?? JSON.stringify(d), d?.level));
+    bus.on('log', (d) => {
+      const src = d?.src || 'device';
+      // src "bt" is the board's Classic/BNEP log (bt_log). The Bluetooth
+      // checkbox hides it without dropping the lines.
+      this.add(src === 'bt' ? 'bt' : 'info', src, d?.message ?? JSON.stringify(d), d?.level);
+    });
+    bus.on('bt.unhandled', (d) => {
+      const name = d?.name || 'unhandled';
+      const code = d?.code ? ` ${d.code}` : '';
+      const hex = d?.hex ? ` ${d.hex}` : '';
+      this.add('bt', 'bt', `${name}${code}${hex}`, 'warn');
+    });
     bus.on('script.error', (d) => this.add('lua', d?.script || 'lua', d?.error || 'error', 'error'));
     // A short wait timing out is a script polling in slices (the Anker
     // loop's 250 ms waits): routine, not news -- firmware 1.97+ no longer

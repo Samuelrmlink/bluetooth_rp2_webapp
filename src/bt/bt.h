@@ -21,4 +21,13 @@ bool bt_ready(void);
 bool bt_stack_up(void);
 uint32_t bt_unhandled_count(void);   /* HCI events nobody handled; for stat */
 
+/* One Classic/BNEP line. Always printed on RTT. Also sent to the websocket
+ * console as {"evt":"log","data":{"src":"bt",...}} while link logging is on
+ * (the default). bt.trace {"link":false} silences the console copy.
+ * level is "info", "warn", or "error". */
+void bt_log(const char *level, const char *fmt, ...);
+
+/* Short name for an HCI status byte. The caller still prints the hex. */
+const char *bt_hci_reason(uint8_t status);
+
 #endif

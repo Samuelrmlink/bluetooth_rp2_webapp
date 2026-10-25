@@ -28,10 +28,18 @@ export class BluetoothSection extends PolledSection {
         <input id="bt-mtu" type="number" min="23" step="1" inputmode="numeric">
         <button type="button" class="pane-btn bt-mtu-save">Save</button></div>
       <div class="dim bt-mtu-note"></div>
+      <div class="row bt-listen-row" hidden><label for="bt-listen">Discoverable</label>
+        <input id="bt-listen" type="checkbox" checked></div>
+      <div class="dim bt-listen-note" hidden>A phone can find this board and start a Classic link. The same switch is under Phone network.</div>
       <div class="row"><strong>Bonded devices</strong></div>
       <div class="kv-list bt-bonds"></div>`);
     this._status = d.querySelector('.bt-status');
     this._bonds = d.querySelector('.bt-bonds');
+    this._listenRow = d.querySelector('.bt-listen-row');
+    this._listen = d.querySelector('#bt-listen');
+    this._listenNote = d.querySelector('.bt-listen-note');
+    this._classic = false;
+    this._listen.addEventListener('change', () => this._setListen());
     this._policy = d.querySelector('#bt-policy');
     // The most a connection asks for; the peer's answer decides what each
     // link actually gets (bt.mtu, fw 1.84+).
@@ -58,6 +66,22 @@ export class BluetoothSection extends PolledSection {
     });
   }
 
+  onConnect() { this._syncClassic(); }
+
+  _syncClassic() {
+    const t = this.app.sysInfo?.transports || [];
+    this._classic = t.includes('classic') || t.includes('bnep');
+    this._listenRow.hidden = !this._classic;
+    this._listenNote.hidden = !this._classic;
+  }
+
+  async _setListen() {
+    try {
+      await this.ws.call('classic.nap', { listen: this._listen.checked });
+    } catch (e) { this.app.log('!', e.message); }
+    this.soon();
+  }
+
   async _saveMtu() {
     const v = Number(this._mtu.value);
     try {
@@ -73,12 +97,18 @@ export class BluetoothSection extends PolledSection {
   }
 
   async poll() {
-    const [st, bonds, mtu, io] = await Promise.all([
+    this._syncClassic();
+    const jobs = [
       this.ws.call('bt.state').catch(() => ({})),
       this.ws.call('bond.list').catch(() => ({ bonds: [] })),
       this.ws.call('bt.mtu').catch(() => null),
       this.ws.call('bond.io').catch(() => null),
-    ]);
+    ];
+    if (this._classic) jobs.push(this.ws.call('classic.nap', {}).catch(() => null));
+    const [st, bonds, mtu, io, nap] = await Promise.all(jobs);
+    if (nap && document.activeElement !== this._listen && typeof nap.listen === 'boolean') {
+      this._listen.checked = nap.listen;
+    }
     if (io) {
       if (document.activeElement !== this._io) this._io.value = io.io_capability;
       if (document.activeElement !== this._mitm) this._mitm.checked = !!io.mitm;
@@ -103,22 +133,34 @@ export class BluetoothSection extends PolledSection {
       ['Links', st.max_links != null ? `up to ${st.max_links}` : null],
     ]);
     if (document.activeElement !== this._policy && bonds.policy) this._policy.value = bonds.policy;
-    const list = bonds.bonds || [];
+    const list = bondEntries(bonds.bonds);
     this._bonds.replaceChildren(...list.flatMap((b) => {
-      const addr = b.addr || b.device || String(b);
       const k = document.createElement('div');
       k.className = 'k';
-      k.textContent = addr;
+      k.textContent = `${b.addr} · ${b.kind}`;
       const v = document.createElement('div');
       v.className = 'v';
       v.append(button('Remove', async () => {
-        await this.ws.call('bond.remove', { device: addr }).catch((e) => this.app.log('!', e.message));
+        await this.ws.call('bond.remove', { device: b.addr }).catch((e) => this.app.log('!', e.message));
         this.soon();
       }));
       return [k, v];
     }));
     if (!list.length) this._bonds.textContent = 'none';
   }
+}
+
+// Empty LE slots come back as 00:00:00:00:00:00 with addr_type 254. A Classic
+// link key is a separate entry and names its transport.
+export function bondEntries(bonds) {
+  const out = [];
+  for (const b of bonds || []) {
+    const addr = String((b && (b.addr || b.device)) || '').trim();
+    if (!addr || addr.toLowerCase() === '00:00:00:00:00:00') continue;
+    if (b.addr_type === 254) continue;
+    out.push({ addr, kind: b.transport === 'classic' ? 'Classic' : 'LE' });
+  }
+  return out;
 }
 
 // What a choice means in practice: which questions can come up, and where.

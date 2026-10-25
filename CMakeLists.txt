@@ -110,18 +110,57 @@ endif()
 if(CONFIG_BT_CLASSIC)
     # RFCOMM and SDP only. pico_btstack_classic also compiles A2DP, AVRCP,
     # HFP, HSP, HID, OBEX and PBAP, and that set does not fit this image.
-    target_sources(btgw PRIVATE
+    # The CYW43 port asks for the TLV link-key db once ENABLE_CLASSIC is set.
+    # Same -Os as the rest of BTstack: this is bookkeeping around the radio.
+    # The SDP server handles a search inside its own file, so --wrap never
+    # sees the call. The NAP image compiles a copy that logs the request.
+    set(_sdp_server ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_server.c)
+    if(CONFIG_BT_CLASSIC_NAP)
+        set(_sdp_server ${CMAKE_CURRENT_BINARY_DIR}/sdp_server_logged.c)
+        add_custom_command(
+            OUTPUT ${_sdp_server}
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_server.c ${_sdp_server}
+            COMMAND python3 ${CMAKE_CURRENT_LIST_DIR}/tools/patch_sdp_log.py ${_sdp_server}
+            DEPENDS ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_server.c
+                    ${CMAKE_CURRENT_LIST_DIR}/tools/patch_sdp_log.py
+            VERBATIM)
+    endif()
+    set(_classic_srcs
         src/bt/classic/spp.c
         ${PICO_SDK_PATH}/lib/btstack/src/classic/rfcomm.c
         ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_client.c
         ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_client_rfcomm.c
-        ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_util.c)
+        ${_sdp_server}
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_util.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/btstack_link_key_db_tlv.c)
+    target_sources(btgw PRIVATE ${_classic_srcs})
+    set_property(SOURCE ${_classic_srcs} APPEND PROPERTY COMPILE_OPTIONS -Os)
 endif()
 if(CONFIG_BT_CLASSIC_NAP)
-    # bnep.c only. pico_btstack_bnep_lwip also compiles the FreeRTOS
-    # bnep_lwip.c, which this NO_SYS=1 build cannot use.
-    target_sources(btgw PRIVATE src/bt/classic/nap.c
-        ${PICO_SDK_PATH}/lib/btstack/src/classic/bnep.c)
+    # bnep.c and pan.c. pico_btstack_bnep_lwip also compiles the FreeRTOS
+    # bnep_lwip.c, which this NO_SYS=1 build cannot use. pan.c builds the
+    # SDP records only.
+    # l2cap_ready_to_connect is static. The NAP image compiles a copy that
+    # waits for the Information exchange, and the SDK file is not compiled.
+    set(_l2cap ${CMAKE_CURRENT_BINARY_DIR}/l2cap_info_wait.c)
+    add_custom_command(
+        OUTPUT ${_l2cap}
+        COMMAND ${CMAKE_COMMAND} -E copy
+                ${PICO_SDK_PATH}/lib/btstack/src/l2cap.c ${_l2cap}
+        COMMAND python3 ${CMAKE_CURRENT_LIST_DIR}/tools/patch_l2cap_info_wait.py ${_l2cap}
+        DEPENDS ${PICO_SDK_PATH}/lib/btstack/src/l2cap.c
+                ${CMAKE_CURRENT_LIST_DIR}/tools/patch_l2cap_info_wait.py
+        VERBATIM)
+    set_source_files_properties(${PICO_SDK_PATH}/lib/btstack/src/l2cap.c
+        PROPERTIES HEADER_FILE_ONLY TRUE)
+    set(_nap_srcs src/bt/classic/nap.c
+        src/net/nap_fwd.c
+        ${_l2cap}
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/bnep.c
+        ${PICO_SDK_PATH}/lib/btstack/src/classic/pan.c)
+    target_sources(btgw PRIVATE ${_nap_srcs})
+    set_property(SOURCE ${_nap_srcs} APPEND PROPERTY COMPILE_OPTIONS -Os)
 endif()
 if(CONFIG_BT_PERIPHERAL)
     target_sources(btgw PRIVATE src/bt/le/peripheral.c)

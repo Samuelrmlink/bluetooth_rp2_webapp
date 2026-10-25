@@ -183,6 +183,15 @@ struct ip4_addr;
 struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr *dest);
 #define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) uplink_route_src((src), (dest))
 #endif
+
+/* Phone-network masquerade. The hook returns immediately while Share
+ * internet is off. The product image does not set CONFIG_BT_CLASSIC_NAP. */
+#if CONFIG_BT_CLASSIC_NAP
+struct pbuf;
+struct netif;
+int nap_fwd_ip4_input(struct pbuf *p, struct netif *inp);
+#define LWIP_HOOK_IP4_INPUT(pbuf, inp) nap_fwd_ip4_input((pbuf), (inp))
+#endif
 /* lwIP's own count covers the core protocols only. Beyond it:
      - the mDNS responder keeps up to MDNS_TIMEOUTS_PER_NETIF timeouts on
        EVERY netif it is bound to (probe/announce, the three multicast rate

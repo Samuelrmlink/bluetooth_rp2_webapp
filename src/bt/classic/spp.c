@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "api/ops.h"
+#include "bt/bt.h"
 #include "btstack.h"
 
 #define SPP_FALLBACK_CHANNEL 1
@@ -146,6 +147,182 @@ static void handle_sdp(uint8_t *packet) {
     }
 }
 
+/* ACL and pairing, one line each. These events are marked handled, so they
+ * never become bt.unhandled, and until now they only reached RTT. */
+static const char *io_cap_name(uint8_t cap) {
+    switch (cap) {
+    case 0: return "display only";
+    case 1: return "display yes/no";
+    case 2: return "keyboard";
+    case 3: return "no input/output";
+    default: return "unknown";
+    }
+}
+
+static const char *key_type_name(uint8_t t) {
+    switch (t) {
+    case 0: return "combination";
+    case 3: return "debug";
+    case 4: return "unauthenticated";
+    case 5: return "authenticated";
+    case 6: return "changed";
+    default: return "other";
+    }
+}
+
+static const char *link_type_name(uint8_t t) {
+    return t == 1 ? "acl" : t == 0 ? "sco" : "other";
+}
+
+static const char *mode_name(uint8_t m) {
+    switch (m) {
+    case 0: return "active";
+    case 1: return "hold";
+    case 2: return "sniff";
+    case 3: return "park";
+    default: return "other";
+    }
+}
+
+static void log_link_event(uint8_t event, const uint8_t *packet, uint16_t size) {
+    bd_addr_t addr;
+    uint8_t st;
+    switch (event) {
+    case HCI_EVENT_CONNECTION_REQUEST:
+        hci_event_connection_request_get_bd_addr(packet, addr);
+        bt_log("info", "page from %s cod 0x%06lx %s",
+               bd_addr_to_str(addr),
+               (unsigned long)hci_event_connection_request_get_class_of_device(packet),
+               link_type_name(hci_event_connection_request_get_link_type(packet)));
+        break;
+    case HCI_EVENT_CONNECTION_COMPLETE:
+        st = hci_event_connection_complete_get_status(packet);
+        hci_event_connection_complete_get_bd_addr(packet, addr);
+        bt_log(st ? "warn" : "info", "acl %s %s (0x%02x) handle %u %s encrypt %u",
+               bd_addr_to_str(addr), bt_hci_reason(st), st,
+               hci_event_connection_complete_get_connection_handle(packet),
+               link_type_name(hci_event_connection_complete_get_link_type(packet)),
+               hci_event_connection_complete_get_encryption_enabled(packet));
+        break;
+    case HCI_EVENT_DISCONNECTION_COMPLETE:
+        st = hci_event_disconnection_complete_get_reason(packet);
+        bt_log("info", "acl down handle %u %s (0x%02x)",
+               hci_event_disconnection_complete_get_connection_handle(packet),
+               bt_hci_reason(st), st);
+        break;
+    case HCI_EVENT_AUTHENTICATION_COMPLETE:
+        st = hci_event_authentication_complete_get_status(packet);
+        bt_log(st ? "warn" : "info", "authentication handle %u %s (0x%02x)",
+               hci_event_authentication_complete_get_connection_handle(packet),
+               bt_hci_reason(st), st);
+        break;
+    case HCI_EVENT_ENCRYPTION_CHANGE:
+        st = hci_event_encryption_change_get_status(packet);
+        bt_log(st ? "warn" : "info", "encryption handle %u %s (0x%02x) enabled %u",
+               hci_event_encryption_change_get_connection_handle(packet),
+               bt_hci_reason(st), st,
+               hci_event_encryption_change_get_encryption_enabled(packet));
+        break;
+    case HCI_EVENT_ENCRYPTION_CHANGE_V2:
+        st = hci_event_encryption_change_v2_get_status(packet);
+        bt_log(st ? "warn" : "info", "encryption v2 handle %u %s (0x%02x) enabled %u key %u",
+               hci_event_encryption_change_v2_get_connection_handle(packet),
+               bt_hci_reason(st), st,
+               hci_event_encryption_change_v2_get_encryption_enabled(packet),
+               hci_event_encryption_change_v2_get_encryption_key_size(packet));
+        break;
+    case HCI_EVENT_ENCRYPTION_KEY_REFRESH_COMPLETE:
+        st = hci_event_encryption_key_refresh_complete_get_status(packet);
+        bt_log(st ? "warn" : "info", "encryption refresh handle %u %s (0x%02x)",
+               hci_event_encryption_key_refresh_complete_get_handle(packet),
+               bt_hci_reason(st), st);
+        break;
+    case HCI_EVENT_LINK_KEY_REQUEST:
+        hci_event_link_key_request_get_bd_addr(packet, addr);
+        bt_log("info", "link key requested %s", bd_addr_to_str(addr));
+        break;
+    case HCI_EVENT_LINK_KEY_NOTIFICATION:
+        if (size < 25) { break; }
+        hci_event_link_key_request_get_bd_addr(packet, addr);
+        {
+            int null_key = 1;
+            for (int i = 0; i < 16; i++) { if (packet[8 + i]) { null_key = 0; } }
+            if (null_key) {
+                bt_log("warn", "null link key from %s, not stored", bd_addr_to_str(addr));
+            } else {
+                bt_log("info", "link key from %s type %s (%u)",
+                       bd_addr_to_str(addr), key_type_name(packet[24]), packet[24]);
+            }
+        }
+        break;
+    case HCI_EVENT_IO_CAPABILITY_REQUEST:
+        hci_event_io_capability_request_get_bd_addr(packet, addr);
+        bt_log("info", "SSP io capability request %s", bd_addr_to_str(addr));
+        break;
+    case HCI_EVENT_IO_CAPABILITY_RESPONSE:
+        hci_event_io_capability_response_get_bd_addr(packet, addr);
+        bt_log("info", "peer io %s auth 0x%02x %s",
+               io_cap_name(hci_event_io_capability_response_get_io_capability(packet)),
+               hci_event_io_capability_response_get_authentication_requirements(packet),
+               bd_addr_to_str(addr));
+        break;
+    case HCI_EVENT_USER_CONFIRMATION_REQUEST:
+        hci_event_user_confirmation_request_get_bd_addr(packet, addr);
+        bt_log("info", "SSP confirm %s, accepting", bd_addr_to_str(addr));
+        break;
+    case HCI_EVENT_USER_PASSKEY_REQUEST:
+        hci_event_user_passkey_request_get_bd_addr(packet, addr);
+        bt_log("warn", "passkey requested %s", bd_addr_to_str(addr));
+        break;
+    case HCI_EVENT_SIMPLE_PAIRING_COMPLETE:
+        st = hci_event_simple_pairing_complete_get_status(packet);
+        hci_event_simple_pairing_complete_get_bd_addr(packet, addr);
+        bt_log(st ? "warn" : "info", "pairing complete %s %s (0x%02x)",
+               bd_addr_to_str(addr), bt_hci_reason(st), st);
+        break;
+    case HCI_EVENT_ROLE_CHANGE:
+        st = hci_event_role_change_get_status(packet);
+        hci_event_role_change_get_bd_addr(packet, addr);
+        bt_log(st ? "warn" : "info", "role %s %s (0x%02x) local %s",
+               bd_addr_to_str(addr), bt_hci_reason(st), st,
+               hci_event_role_change_get_role(packet) ? "slave" : "master");
+        break;
+    case HCI_EVENT_MODE_CHANGE:
+        st = hci_event_mode_change_get_status(packet);
+        bt_log(st ? "warn" : "info", "mode handle %u %s interval %u %s (0x%02x)",
+               hci_event_mode_change_get_handle(packet),
+               mode_name(hci_event_mode_change_get_mode(packet)),
+               hci_event_mode_change_get_interval(packet),
+               bt_hci_reason(st), st);
+        break;
+    case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
+        st = hci_event_remote_name_request_complete_get_status(packet);
+        hci_event_remote_name_request_complete_get_bd_addr(packet, addr);
+        if (st) {
+            bt_log("warn", "remote name %s %s (0x%02x)",
+                   bd_addr_to_str(addr), bt_hci_reason(st), st);
+        } else {
+            char name[33];
+            const char *n = hci_event_remote_name_request_complete_get_remote_name(packet);
+            size_t i = 0;
+            for (; i < sizeof name - 1 && n[i] >= 32 && n[i] < 127; i++) { name[i] = n[i]; }
+            name[i] = 0;
+            bt_log("info", "remote name %s \"%s\"", bd_addr_to_str(addr), name);
+        }
+        break;
+    case HCI_EVENT_COMMAND_STATUS:
+        st = hci_event_command_status_get_status(packet);
+        if (st) {
+            bt_log("warn", "HCI command 0x%04x %s (0x%02x)",
+                   hci_event_command_status_get_command_opcode(packet),
+                   bt_hci_reason(st), st);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size) {
     (void)channel;
     if (packet_type == RFCOMM_DATA_PACKET) {
@@ -158,6 +335,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
     }
     if (packet_type != HCI_EVENT_PACKET) { return; }
     uint8_t event = hci_event_packet_get_type(packet);
+    log_link_event(event, packet, size);
     if (event == SDP_EVENT_QUERY_RFCOMM_SERVICE || event == SDP_EVENT_QUERY_COMPLETE) {
         handle_sdp(packet);
         return;
@@ -167,7 +345,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         if (s_st == ST_SCANNING) { note_scan(packet); }
         break;
     case GAP_EVENT_INQUIRY_COMPLETE:
-        printf("bt: inquiry complete, %d device(s)\n", s_scan_n);
+        bt_log("info", "inquiry complete, %d device(s)", s_scan_n);
         if (s_st == ST_SCANNING) { s_st = ST_IDLE; }
         if (s_sdp_after_scan) {
             s_sdp_after_scan = 0;
@@ -179,14 +357,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
         hci_event_pin_code_request_get_bd_addr(packet, addr);
         const char *pin = s_pin_alt ? "1234" : "0000";
         s_pin_alt = 1;
-        printf("bt: PIN request %s -> %s\n", bd_addr_to_str(addr), pin);
+        bt_log("info", "legacy PIN %s answering %s", bd_addr_to_str(addr), pin);
         gap_pin_code_response(addr, pin);
         break;
     }
     case HCI_EVENT_USER_CONFIRMATION_REQUEST: {
         bd_addr_t addr;
         hci_event_user_confirmation_request_get_bd_addr(packet, addr);
-        printf("bt: SSP confirm %s\n", bd_addr_to_str(addr));
         gap_ssp_confirmation_response(addr);
         break;
     }

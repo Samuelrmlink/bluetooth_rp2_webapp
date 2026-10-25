@@ -133,5 +133,9 @@ err_t wireguardif_peer_is_up(struct netif *netif, u8_t peer_index, ip_addr_t *cu
 void wireguardif_set_tx_netif(struct netif *netif);
 struct netif *wireguardif_get_tx_netif(void);
 err_t wireguardif_send_keepalive_now(struct netif *netif, u8_t peer_index);
+/* Encrypt q to peer_index. Skips the allowed-IP lookup that
+ * wireguardif_output() does. q is an inner IPv4 packet. */
+err_t wireguardif_output_peer(struct netif *netif, struct pbuf *q,
+		const ip4_addr_t *ipaddr, u8_t peer_index);
 
 #endif /* _WIREGUARDIF_H_ */

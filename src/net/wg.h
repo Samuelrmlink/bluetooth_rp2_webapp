@@ -77,6 +77,11 @@ bool wg_endpoint(struct ip4_addr *out);   /* the configured endpoint, if any */
 void wg_set_uplink(struct netif *nif);
 uint32_t wg_last_tx_ms(void);             /* sys_now() of the last tunnelled packet out */
 uint32_t wg_last_rx_ms(void);             /* ...and of the last authenticated one in */
+struct pbuf;
+/* Encrypt an inner IPv4 packet to the configured peer. Share internet calls
+ * this when the selected exit is the tunnel. It does not change the default
+ * route. 1 on success. */
+int wg_output(struct pbuf *p, const struct ip4_addr *dest);
 
 #else
 
@@ -94,6 +99,10 @@ static inline bool wg_endpoint(struct ip4_addr *out) { (void)out; return false; 
 static inline void wg_set_uplink(struct netif *nif) { (void)nif; }
 static inline uint32_t wg_last_tx_ms(void) { return 0; }
 static inline uint32_t wg_last_rx_ms(void) { return 0; }
+struct pbuf;
+static inline int wg_output(struct pbuf *p, const struct ip4_addr *dest) {
+    (void)p; (void)dest; return 0;
+}
 
 #endif
 #endif

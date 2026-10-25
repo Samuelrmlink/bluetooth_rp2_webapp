@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "btstack.h"
+#include "autoconf.h"
 #include "bt/le/bond.h"
 #include "bt/le/central.h"
 #include "bt/registry.h"
@@ -216,37 +217,112 @@ void bond_init(void) {
     sm_add_event_handler(&sm_cb);
 }
 
+/* le_device_db_count() is how many entries are valid, not the last index.
+ * A removed bond leaves a hole, and reading only the first N indices prints
+ * those holes (addr_type 0xfe, address all zeros) and skips the real ones. */
+static bool bond_addr_real(int type, const uint8_t *addr) {
+    static const uint8_t zero[6] = {0};
+    return type >= 0 && type != BD_ADDR_TYPE_UNKNOWN && memcmp(addr, zero, 6) != 0;
+}
+
+static size_t bond_json_add(char *dst, size_t n, size_t cap, bool *first,
+                            int index, const char *addr, int addr_type,
+                            const char *transport) {
+    int w;
+    if (n + 96 >= cap) return n;
+    w = snprintf(dst + n, cap - n,
+                 "%s{\"index\":%d,\"addr\":\"%s\",\"addr_type\":%d,\"transport\":\"%s\"}",
+                 *first ? "" : ",", index, addr, addr_type, transport);
+    if (w < 0 || (size_t)w >= cap - n) return n;
+    *first = false;
+    return n + (size_t)w;
+}
+
 size_t bond_list_json(char *dst, size_t cap) {
     size_t n = (size_t)snprintf(dst, cap, "[");
-    int count = le_device_db_count();
+    int max = le_device_db_max_count();
     bool first = true;
-    for (int i = 0; i < count && n + 64 < cap; i++) {
-        int type = 0;
+    for (int i = 0; i < max && n + 96 < cap; i++) {
+        int type = BD_ADDR_TYPE_UNKNOWN;
         bd_addr_t addr;
         sm_key_t irk;
         le_device_db_info(i, &type, addr, irk);
-        if (type < 0) {
-            continue;
-        }
-        n += (size_t)snprintf(dst + n, cap - n,
-                              "%s{\"index\":%d,\"addr\":\"%s\",\"addr_type\":%d}",
-                              first ? "" : ",", i, bd_addr_to_str(addr), type);
-        first = false;
+        if (!bond_addr_real(type, addr)) continue;
+        n = bond_json_add(dst, n, cap, &first, i, bd_addr_to_str(addr), type, "le");
     }
+#if CONFIG_BT_CLASSIC
+    /* Classic keys live in a different TLV database from the LE device DB. */
+    {
+        btstack_link_key_iterator_t it;
+        if (gap_link_key_iterator_init(&it)) {
+            bd_addr_t addr;
+            link_key_t key;
+            link_key_type_t ktype;
+            int idx = 0;
+            memset(key, 0, sizeof key);
+            while (n + 96 < cap &&
+                   gap_link_key_iterator_get_next(&it, addr, key, &ktype)) {
+                memset(key, 0, sizeof key);
+                if (bond_addr_real(0, addr)) {
+                    n = bond_json_add(dst, n, cap, &first, idx, bd_addr_to_str(addr), 0, "classic");
+                }
+                idx++;
+            }
+            memset(key, 0, sizeof key);
+            gap_link_key_iterator_done(&it);
+        }
+    }
+#endif
     return n + (size_t)snprintf(dst + n, cap - n, "]");
 }
 
 bool bond_remove(const uint8_t *addr, uint8_t addr_type) {
-    int count = le_device_db_count();
-    for (int i = 0; i < count; i++) {
-        int type = 0;
+    bool removed = false;
+    int max;
+    if (!addr) return false;
+    max = le_device_db_max_count();
+    for (int i = 0; i < max; i++) {
+        int type = BD_ADDR_TYPE_UNKNOWN;
         bd_addr_t a;
         sm_key_t irk;
         le_device_db_info(i, &type, a, irk);
-        if (type == addr_type && memcmp(a, addr, 6) == 0) {
+        if (!bond_addr_real(type, a)) continue;
+        if (type == (int)addr_type && memcmp(a, addr, 6) == 0) {
             le_device_db_remove(i);
-            return true;
+            removed = true;
         }
     }
-    return false;
+    return removed;
+}
+
+bool bond_forget(const char *addr_str) {
+    bd_addr_t addr;
+    bool removed = false;
+    int max;
+    if (!addr_str || !sscanf_bd_addr(addr_str, addr)) return false;
+    max = le_device_db_max_count();
+    for (int i = 0; i < max; i++) {
+        int type = BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t a;
+        sm_key_t irk;
+        le_device_db_info(i, &type, a, irk);
+        if (!bond_addr_real(type, a)) continue;
+        if (memcmp(a, addr, 6) == 0) {
+            le_device_db_remove(i);
+            removed = true;
+        }
+    }
+#if CONFIG_BT_CLASSIC
+    {
+        link_key_t key;
+        link_key_type_t ktype = (link_key_type_t)0;
+        memset(key, 0, sizeof key);
+        if (gap_get_link_key_for_bd_addr(addr, key, &ktype)) {
+            gap_drop_link_key_for_bd_addr(addr);
+            removed = true;
+        }
+        memset(key, 0, sizeof key);
+    }
+#endif
+    return removed;
 }

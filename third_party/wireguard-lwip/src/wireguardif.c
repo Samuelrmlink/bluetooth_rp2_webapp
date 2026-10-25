@@ -226,6 +226,21 @@ static err_t wireguardif_output(struct netif *netif, struct pbuf *q, const ip4_a
 	}
 }
 
+/* LOCAL CHANGE (btgw): Share internet can name this tunnel as the exit for
+ * the phone. That choice is explicit, so the packet is not dropped when the
+ * destination sits outside allowed_ips. The netif is still not the default
+ * route; only this call sends to the peer. */
+err_t wireguardif_output_peer(struct netif *netif, struct pbuf *q, const ip4_addr_t *ipaddr, u8_t peer_index) {
+	struct wireguard_device *device;
+	struct wireguard_peer *peer;
+	if (!netif || !q || peer_index >= WIREGUARD_MAX_PEERS) { return ERR_ARG; }
+	device = (struct wireguard_device *)netif->state;
+	if (!device) { return ERR_ARG; }
+	peer = &device->peers[peer_index];
+	if (!peer->valid) { return ERR_CONN; }
+	return wireguardif_output_to_peer(netif, q, ipaddr, peer);
+}
+
 static void wireguardif_send_keepalive(struct wireguard_device *device, struct wireguard_peer *peer) {
 	// Send a NULL packet as a keep-alive
 	wireguardif_output_to_peer(device->netif, NULL, NULL, peer);

@@ -59,7 +59,13 @@ typedef enum {
 typedef void (*bond_pairing_hook_t)(uint16_t con_handle, bond_ask_t ask, uint32_t number);
 void bond_set_pairing_hook(bond_pairing_hook_t fn);
 
+/* JSON array. Empty LE slots are left out. A Classic build also lists stored
+ * link keys as "transport":"classic". The key itself is never written. */
 size_t bond_list_json(char *dst, size_t cap);
+/* Drop the LE bond with this address and type. */
 bool bond_remove(const uint8_t *addr, uint8_t addr_type);
+/* Drop every stored LE bond for addr_str, and the Classic link key on a
+ * Classic build. addr_str is "AA:BB:CC:DD:EE:FF". */
+bool bond_forget(const char *addr_str);
 
 #endif

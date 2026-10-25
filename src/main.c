@@ -63,6 +63,9 @@
 #if CONFIG_BT_LE
 #include "bt/bt.h"
 #include "bt/le/central.h"
+#if CONFIG_BT_CLASSIC_NAP
+#include "bt/classic/nap.h"
+#endif
 #endif
 
 /* Set while the previous boot ended in a watchdog reset, so the fact survives
@@ -285,6 +288,11 @@ int main(void) {
         crumb(CRUMB_LOOP_BT);
         bt_power_on_tick();   /* deferred controller power-on; staggers BT behind WiFi at boot */
         le_central_tick();
+#if CONFIG_BT_CLASSIC_NAP
+        /* After the radio poll, so a BNEP event can mark cfg/nap.json dirty
+         * without writing flash from inside cyw43_arch_poll. */
+        nap_tick();
+#endif
 #endif
 #if CONFIG_LUA_ENABLE
         crumb(CRUMB_LOOP_LUA);

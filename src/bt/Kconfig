@@ -17,9 +17,10 @@ config BT_CLASSIC
       open SPP (SDP, else channel 1). The first payload on an open channel
       is BATTERY?. LE central stays the path to Anker and Pinecil.
       MAX_NR_HCI_CONNECTIONS is shared, so turning this on costs ACL buffer
-      RAM. The ACL payload is 1536 bytes, enough for one Ethernet frame, and
-      the BNEP defconfig lowers the lwIP heap to pay for it. Off in the
-      default image. BNEP is BT_CLASSIC_NAP.
+      RAM. The ACL payload is 1536 bytes, enough for one Ethernet frame.
+      The BNEP defconfig turns the HTTPS client off: its 40 KB pool is what
+      pays for those buffers, and the 864 KiB slot cannot hold both. Off in
+      the default image. BNEP is BT_CLASSIC_NAP.
 
 config BT_CLASSIC_NAP
     bool "Bluetooth Classic BNEP / NAP uplink"
@@ -27,8 +28,10 @@ config BT_CLASSIC_NAP
     depends on BT_CLASSIC
     depends on NET_UPLINK
     help
-      A PANU connection to a phone NAP. The netif ("b0") joins the uplink
-      choice with Wi-Fi, Ethernet and USB-NCM. Off unless this option is on.
+      A PANU connection to a phone NAP, and a NAP the phone can call.
+      The netif ("b0") joins the uplink choice with Wi-Fi, Ethernet and
+      USB-NCM when the phone is sharing its network. Off unless this
+      option is on.
 
 config BT_PERIPHERAL
     bool "BLE peripheral beside the central"

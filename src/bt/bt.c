@@ -5,6 +5,7 @@
  * (transport, address) so Classic can be added later without reshaping the
  * data model, the JSON schema or the Lua API. Only src/bt/le/ knows about GATT.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -65,8 +66,49 @@ static bool s_stack_up;
  * On by default; bt.trace turns it off. The only high-rate event is the
  * advertising report, which IS handled, so this stays quiet in normal use. */
 static bool s_trace_unhandled = true;
+static bool s_link_log = true;
 static uint32_t s_unhandled_count;
 uint32_t bt_unhandled_count(void) { return s_unhandled_count; }
+
+const char *bt_hci_reason(uint8_t status) {
+    switch (status) {
+        case 0x00: return "ok";
+        case 0x04: return "page timeout";
+        case 0x05: return "authentication failed";
+        case 0x06: return "pin or key missing";
+        case 0x08: return "connection timeout";
+        case 0x0b: return "acl already exists";
+        case 0x0d: return "rejected, limited resources";
+        case 0x0e: return "rejected, security";
+        case 0x13: return "remote ended";
+        case 0x14: return "remote ended, resources";
+        case 0x15: return "remote ended, power off";
+        case 0x16: return "local ended";
+        case 0x18: return "pairing not allowed";
+        case 0x22: return "lmp response timeout";
+        case 0x3e: return "connection failed to establish";
+        default:   return "error";
+    }
+}
+
+void bt_log(const char *level, const char *fmt, ...) {
+    char msg[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    printf("bt: %s\n", msg);
+    if (!s_link_log) { return; }
+    if (!level || (strcmp(level, "warn") != 0 && strcmp(level, "error") != 0)) {
+        level = "info";
+    }
+    char esc[320];
+    api_json_escape(esc, sizeof esc, msg);
+    char json[400];
+    snprintf(json, sizeof json,
+             "{\"src\":\"bt\",\"level\":\"%s\",\"message\":\"%s\"}", level, esc);
+    api_emit("log", json);
+}
 
 /* Events some part of this firmware acts on. Listed explicitly rather than
  * inferred, so adding a handler without adding it here shows up as noise and
@@ -842,8 +884,10 @@ static void op_bond_list(const char *params, api_reply_fn reply, void *ctx, long
 }
 
 static void op_bond_remove(const char *params, api_reply_fn reply, void *ctx, long id) {
-    bt_device_t *d = dev_param(params);
-    if (!d || !bond_remove(d->addr, d->addr_type)) {
+    char addr[24];
+    /* The scan registry only knows LE devices seen this boot. A Classic
+     * phone, or an LE bond that is not in the scan table, is still stored. */
+    if (!api_json_str(params, "device", addr, sizeof addr) || !bond_forget(addr)) {
         api_reply_err(reply, ctx, id, "not_found", "no stored bond for that device"); return;
     }
     api_reply_ok(reply, ctx, id, "{\"removed\":true}");
@@ -857,12 +901,16 @@ static void op_gattsrv_describe(const char *params, api_reply_fn reply, void *ct
     api_reply_ok(reply, ctx, id, list_buf);
 }
 
+/* unhandled: the bt.unhandled event. link: Classic/BNEP lines on the console.
+ * Neither is stored. Both come back on after a reboot. */
 static void op_bt_trace(const char *params, api_reply_fn reply, void *ctx, long id) {
     bool on;
     if (api_json_bool(params, "unhandled", &on)) { s_trace_unhandled = on; }
-    char r[96];
-    snprintf(r, sizeof(r), "{\"unhandled\":%s,\"seen\":%lu}",
-             s_trace_unhandled ? "true" : "false", (unsigned long)s_unhandled_count);
+    if (api_json_bool(params, "link", &on)) { s_link_log = on; }
+    char r[128];
+    snprintf(r, sizeof(r), "{\"unhandled\":%s,\"seen\":%lu,\"link\":%s}",
+             s_trace_unhandled ? "true" : "false", (unsigned long)s_unhandled_count,
+             s_link_log ? "true" : "false");
     api_reply_ok(reply, ctx, id, r);
 }
 

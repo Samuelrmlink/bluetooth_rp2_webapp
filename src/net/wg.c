@@ -590,6 +590,19 @@ bool wg_endpoint(ip4_addr_t *out) {
     return true;
 }
 
+int wg_output(struct pbuf *p, const ip4_addr_t *dest) {
+    err_t e;
+    if (!p || !dest || !netif_added || peer_index == WIREGUARDIF_INVALID_INDEX) {
+        return 0;
+    }
+    if (!netif_is_up(&wg_netif) || !netif_is_link_up(&wg_netif)) { return 0; }
+    e = wireguardif_output_peer(&wg_netif, p, dest, peer_index);
+    if (e != ERR_OK) { return 0; }
+    tx_bytes += p->tot_len;
+    last_tx_sys = sys_now();
+    return 1;
+}
+
 void wg_set_uplink(struct netif *nif) {
     if (!netif_added) { return; }
     struct netif *was = wireguardif_get_tx_netif();

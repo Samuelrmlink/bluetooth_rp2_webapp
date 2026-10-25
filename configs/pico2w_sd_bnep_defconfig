@@ -6,10 +6,8 @@ CONFIG_NET_NCM_IP1=168
 CONFIG_NET_NCM_IP2=8
 CONFIG_NET_MDNS=y
 CONFIG_NET_HOSTNAME="bluetooth-rp2-webapp"
-# 24 KB is under the product image's 32 KB. The difference pays for the
-# Classic ACL buffer (1536 bytes on each link). The measured lwIP peak on
-# this firmware is 20.6 KB.
-CONFIG_LWIP_MEM_SIZE_KB=24
+# Same lwIP heap as the product image. The measured peak is 20.6 KB.
+CONFIG_LWIP_MEM_SIZE_KB=32
 CONFIG_BT_LE=y
 CONFIG_BT_CLASSIC=y
 CONFIG_BT_CLASSIC_NAP=y
@@ -17,7 +15,13 @@ CONFIG_BT_MAX_LINKS=4
 CONFIG_LUA_ENABLE=y
 CONFIG_LUA_HEAP_KB=116
 CONFIG_PEX_POOL_KB=48
-CONFIG_NET_TLS_POOL_KB=40
+# Local builds are unsigned. The product defconfig stays signed-only.
+CONFIG_PEX_ALLOW_UNSIGNED=y
+# The 864 KiB slot cannot hold Classic (1536-byte ACL, RFCOMM, SDP, BNEP)
+# and the HTTPS client together. The web app is plain HTTP. https:// from
+# Lua is off in this image, and the 40 KB TLS pool is the RAM that pays
+# for the larger ACL buffers.
+# CONFIG_NET_HTTP_TLS is not set
 CONFIG_LUA_HOOK_BUDGET=20000
 CONFIG_IO_PINS=y
 CONFIG_IO_GPIO=y

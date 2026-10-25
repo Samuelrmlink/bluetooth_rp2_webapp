@@ -24,6 +24,10 @@ typedef struct {
      * USB-NCM and the SoftAP) keeps them -- this server's own address -- as
      * it always did; Ethernet's server mode sets it unless dhcp_router. */
     bool no_router;
+    /* When set, option 6 is this address instead of the server itself.
+     * The router option is unchanged. dhcp_server_init clears it. */
+    bool dns_set;
+    ip4_addr_t dns;
 } dhcp_server_t;
 
 void dhcp_server_init(dhcp_server_t *d, struct netif *nif, const ip_addr_t *ip, const ip_addr_t *nm);

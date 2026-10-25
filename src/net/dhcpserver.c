@@ -179,7 +179,7 @@ void dhcp_handle_bootp(dhcp_server_t *d, const uint8_t *bootp, uint16_t n) {
     opt_n(&w, DHCP_OPT_SUBNET_MASK, ip_2_ip4(&d->nm), 4);
     if (!d->no_router) {
         opt_n(&w, DHCP_OPT_ROUTER, ip_2_ip4(&d->ip), 4);
-        opt_n(&w, DHCP_OPT_DNS, ip_2_ip4(&d->ip), 4);
+        opt_n(&w, DHCP_OPT_DNS, d->dns_set ? (const void *)&d->dns : (const void *)ip_2_ip4(&d->ip), 4);
     }
     opt_u32(&w, DHCP_OPT_LEASE, DEFAULT_LEASE_S);
     *w++ = DHCP_OPT_END;

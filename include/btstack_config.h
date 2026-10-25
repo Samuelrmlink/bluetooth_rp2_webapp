@@ -43,15 +43,21 @@
 #define ENABLE_SDP
 #define ENABLE_RFCOMM
 #define ENABLE_L2CAP_ENHANCED_RETRANSMISSION_MODE
+/* Linux sends the L2CAP Information Request when the ACL comes up, and the
+ * Connection Request only after that exchange. This starts the exchange at
+ * ACL-up. tools/patch_l2cap_info_wait.py holds the Connection Request until
+ * the reply, including for basic mode (BNEP). */
+#define ENABLE_L2CAP_INFORMATION_REQUESTS_ON_CONNECT
 #define MAX_NR_RFCOMM_CHANNELS 1
 #define MAX_NR_RFCOMM_MULTIPLEXERS 1
 #define MAX_NR_RFCOMM_SERVICES 1
 #define MAX_NR_SERVICE_RECORD_ITEMS 4
-/* One Ethernet frame (1514) plus the L2CAP header and the 15-byte BNEP
- * header that bnep.c subtracts. 1691, the full Classic ACL size, does not
- * fit: the radio malloc needs 8192 bytes between __end__ and __HeapLimit.
- * The BNEP defconfig pays for this buffer by lowering the lwIP heap. */
-#define HCI_ACL_PAYLOAD_SIZE 1536
+/* BNEP's minimum L2CAP MTU is 1691. l2cap_max_mtu() is this value minus
+ * the 4-byte L2CAP header, and that is what the Configure Request offers.
+ * 1536 (offered MTU 1532) let the phone accept the connection and then
+ * stall in configuration. The radio malloc still needs 8192 bytes between
+ * __end__ and __HeapLimit. Do not flash a build whose gap is smaller. */
+#define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
 #define HCI_HOST_ACL_PACKET_LEN HCI_ACL_PAYLOAD_SIZE
 #define MAX_NR_L2CAP_SERVICES  5
 #define MAX_NR_L2CAP_CHANNELS  (CONFIG_BT_MAX_LINKS + 4)
@@ -63,7 +69,7 @@
 
 #if CONFIG_BT_CLASSIC_NAP
 #define ENABLE_BNEP
-#define MAX_NR_BNEP_SERVICES 1
+#define MAX_NR_BNEP_SERVICES 2
 #define MAX_NR_BNEP_CHANNELS 1
 #endif
 
