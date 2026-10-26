@@ -167,6 +167,9 @@ the boot). A replaced default `_http` service comes back. Op: `mdns.groups`.
 
 ## Forwarding rules
 
+`CONFIG_NET_FORWARD` defaults to **n**, so `lo` and `net.forward` are absent
+unless a defconfig sets the option.
+
 ```lua
 local id = net.forward{ proto='tcp', listen=6767, to='127.0.0.1', port=80 }
 net.forward{ proto='udp', listen=7007, iface='e0', to='192.168.50.9', port=7 }

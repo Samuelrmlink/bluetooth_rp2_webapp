@@ -17,16 +17,20 @@
  *
  * fs_migrate_boot() runs in main() after fs_init() and BEFORE the network
  * config is read, so Wi-Fi, Ethernet and WireGuard come up from the restored
- * files. It feeds the watchdog and drives the SD worker itself. */
+ * files. It feeds the watchdog and drives the SD worker itself.
+ *
+ * CONFIG_FS_MIGRATE defaults to n. The .c file is linked only then. With it
+ * off, fs.c still answers these three: boot records a pending note when the
+ * mounted geometry is the old one, and nothing is formatted. */
 #ifndef BTGW_FS_MIGRATE_H
 #define BTGW_FS_MIGRATE_H
 
-#include <stdbool.h>
 #include <stddef.h>
 
 void fs_migrate_boot(void);
 /* Main loop: after an OTA confirm (buy), the reboot that runs a migration a
- * try-before-you-buy boot had to leave pending. */
+ * try-before-you-buy boot had to leave pending. A no-op when the migrator
+ * is not linked. */
 void fs_migrate_tick(void);
 /* {"kb":..,"layout_kb":..,"migration":"..","pex":{...}} for sys.info. */
 int fs_migrate_json(char *buf, size_t cap);

@@ -5,23 +5,19 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Flash layout — see linker/pico_flash_region.ld for the linker-enforced
- * half of this: the linker refuses to place firmware code/rodata/data
- * past FS_FLASH_OFF at all, so these two can never silently overlap no
- * matter how the firmware grows. FS_FLASH_OFF here must match the linker
- * fragment's FLASH LENGTH exactly.
+/* Flash layout — the linker caps the image at one slot
+ * (linker/pico_flash_region.ld). LittleFS starts after that slot pair and
+ * the Wi-Fi blob, so the two cannot overlap. fs.c asserts the region ends
+ * on the BTstack NVM.
  *
- * Overridable because the two boards this builds for have different parts:
- * the Adafruit Feather USB Host has 8MiB (2MiB firmware + 6MiB fs), while
- * the Pico W test target has only 2MiB and needs 1MiB + 1MiB. Getting this
- * wrong is silent — the defaults put the whole filesystem past the end of a
- * 2MiB chip — so fs.c asserts the region fits the board's real flash. */
-/* 4 MB part (docs/flash-layout.md). From 2 MiB: LittleFS (FS_SIZE), then the
- * PEX partition (FS_PEX_SIZE), and the last 16 KiB is BTstack's NVM (bonds and
- * the LE device DB) via pico_btstack_flash_bank -- RP2350-E10 spare sector plus
- * two flash banks, per pm220-pico2w. Stay below it. */
+ * The Pico 2 W on the bench is already on this map (1 MiB slots, LittleFS
+ * 1200 KiB at 0x250000, PEX 512 KiB). A volume of exactly FS_SIZE blocks is
+ * the current one: fs_init mounts it and does not treat it as legacy. */
+/* 4 MB part (docs/flash-layout.md). LittleFS (FS_SIZE), then the PEX
+ * partition (FS_PEX_SIZE). The last 16 KiB is BTstack's NVM (bonds and the
+ * LE device DB) via pico_btstack_flash_bank. Stay below it. */
 #ifndef FS_FLASH_OFF
-#define FS_FLASH_OFF (2u * 1024u * 1024u)
+#define FS_FLASH_OFF (2368u * 1024u)
 /* See the read hook in fs.c: on RP2350 flash is read through the alias that
  * ignores QMI address translation, so the filesystem stays reachable when
  * the firmware is booted from an A/B slot (src/ota/). */
@@ -35,17 +31,16 @@
 #ifndef FS_BT_TAIL
 #define FS_BT_TAIL   (16u * 1024u)
 #endif
-/* The region LittleFS had to itself until the PEX partition (2032 KiB): the
- * geometry of every filesystem formatted before it, which fs_init() still
- * mounts as it is (fs_legacy()) until fs_migrate.c has moved it. */
+/* LittleFS plus the PEX partition. Together they end at the BTstack NVM.
+ * A superblock bigger than FS_SIZE is still mounted as found (fs_legacy());
+ * this image does not format it. */
 #ifndef FS_REGION_SIZE
-#define FS_REGION_SIZE ((2u * 1024u * 1024u) - FS_BT_TAIL)
+#define FS_REGION_SIZE ((1200u + 512u) * 1024u)
 #endif
-/* The PEX partition (docs/flash-layout.md, docs/pex-format.md 6.1): native
- * modules executed in place, at the END of the old LittleFS region so
- * LittleFS keeps its start. Only reserved so far -- nothing writes it. */
+/* Native modules executed in place (docs/flash-layout.md). The bench copy
+ * already lives at FS_PEX_OFF; the window size is this value. */
 #ifndef FS_PEX_SIZE
-#define FS_PEX_SIZE  (256u * 1024u)
+#define FS_PEX_SIZE  (512u * 1024u)
 #endif
 #ifndef FS_SIZE
 #define FS_SIZE      (FS_REGION_SIZE - FS_PEX_SIZE)

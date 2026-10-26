@@ -59,12 +59,12 @@ config PEX_XIP
 config PEX_ALLOW_UNSIGNED
     bool "Load unsigned modules (development)"
     depends on PEX
-    default y if !OTA
-    default n
+    default y
     help
-      Off: only modules signed with the OTA key (tools/ota_sign.py, pexlink
-      --sign) load. On: unsigned ones too, and pex.list says so. A build
-      without OTA has no key to check signatures with, so it defaults on.
+      Development builds load unsigned modules and pex.list says so. A
+      signed module still has to verify. Turn this off for a release image
+      that should refuse unsigned files. A build without OTA has no key
+      to check signatures with, so it stays on.
 
 config PEX_LUA
     bool "Lua launcher and require for PEX modules"

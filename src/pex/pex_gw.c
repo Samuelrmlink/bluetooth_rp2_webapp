@@ -113,6 +113,9 @@ static void on_unload(pex_mod_t *m) {
 #if CONFIG_BT_LE
     pex_gw_bt_unload(m);
 #endif
+#if CONFIG_BT_CLASSIC
+    pex_gw_classic_unload(m);
+#endif
 }
 
 /* Append one record to var/pex_faults.json. Autostart skips that build.
@@ -244,6 +247,9 @@ bool pex_gw_ensure(void) {
 #endif
 #if CONFIG_BT_LE
     pex_register_group(&pex_group_bt);
+#endif
+#if CONFIG_BT_CLASSIC
+    pex_register_group(&pex_group_classic);
 #endif
 #if CONFIG_PROTO_ANKER_CRYPTO
     pex_register_group(&pex_group_codec);
@@ -468,6 +474,9 @@ void pex_gw_poll(void) {
 #endif
 #if CONFIG_BT_LE
     pex_gw_bt_poll();
+#endif
+#if CONFIG_BT_CLASSIC
+    pex_gw_classic_poll();
 #endif
 }
 

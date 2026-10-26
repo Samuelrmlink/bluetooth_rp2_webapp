@@ -43,6 +43,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_LIST_DIR}/src/io/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/ota/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/sd/Kconfig
+    ${CMAKE_CURRENT_LIST_DIR}/src/fs/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/pex/Kconfig
     ${APP_DEFCONFIG})
 
@@ -57,7 +58,6 @@ add_executable(btgw
     src/net/http.c
     src/net/ws.c
     src/fs/fs.c
-    src/fs/fs_migrate.c
     src/fs/fs_watch.c
     src/fs/fs_ops.c
     src/ota/crc32.c
@@ -72,8 +72,12 @@ add_executable(btgw
     src/launch.c
 )
 
-# Runs once per board (the pre-PEX filesystem move, fs_migrate.h): size over speed.
-set_property(SOURCE src/fs/fs_migrate.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+# The pre-PEX filesystem move (fs_migrate.h). Off unless a defconfig asks.
+# One boot per old board, so size over speed.
+if(CONFIG_FS_MIGRATE)
+    target_sources(btgw PRIVATE src/fs/fs_migrate.c)
+    set_property(SOURCE src/fs/fs_migrate.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+endif()
 
 target_include_directories(btgw PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/include
@@ -127,6 +131,7 @@ if(CONFIG_BT_CLASSIC)
             VERBATIM)
     endif()
     set(_classic_srcs
+        src/bt/classic/cl_sess.c
         src/bt/classic/spp.c
         ${PICO_SDK_PATH}/lib/btstack/src/classic/rfcomm.c
         ${PICO_SDK_PATH}/lib/btstack/src/classic/sdp_client.c
@@ -381,6 +386,9 @@ if(CONFIG_PEX)
     if(CONFIG_PROTO_ANKER_CRYPTO)
         list(APPEND _pex_groups codec)
     endif()
+    if(CONFIG_BT_CLASSIC)
+        list(APPEND _pex_groups classic)
+    endif()
     pex_runtime_add(btgw GROUPS ${_pex_groups} NO_PICO_PORT SIG_UECC)
     target_sources(btgw PRIVATE ${CMAKE_CURRENT_LIST_DIR}/pex/runtime/port/pico/pex_port_pico.c
         src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c)
@@ -394,6 +402,9 @@ if(CONFIG_PEX)
     if(CONFIG_BT_LE)
         target_sources(btgw PRIVATE src/pex/pex_gw_bt.c)
     endif()
+    if(CONFIG_BT_CLASSIC)
+        target_sources(btgw PRIVATE src/pex/pex_gw_classic.c)
+    endif()
     if(NOT CONFIG_LUA_ENABLE)
         target_sources(btgw PRIVATE src/lua/lfile_path.c)
     endif()
@@ -405,7 +416,7 @@ if(CONFIG_PEX)
     # micro-ecc: the OTA key checks module signatures (spec 10).
     target_include_directories(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc)
     set_property(SOURCE src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c
-        src/pex/pex_gw_net.c src/pex/pex_gw_bt.c src/pex/pex_gw_lua.c APPEND PROPERTY COMPILE_OPTIONS -Os)
+        src/pex/pex_gw_net.c src/pex/pex_gw_bt.c src/pex/pex_gw_classic.c src/pex/pex_gw_lua.c APPEND PROPERTY COMPILE_OPTIONS -Os)
     # Paying for PEX (~38 KB) in the 864 KiB slot, measured on the SD build
     # (2026-10-21; it had ~8 KB left): code that is not on a hot path goes
     # -Os. Lua's COMPILE-time half -- code generator, parser, lexer, (un)dump
@@ -425,12 +436,12 @@ if(CONFIG_PEX)
     # runtime, file/HTTP/JSON bridges; the interpreter core above and the
     # allocator, lheap.c, every Lua allocation goes through, stay -O3)
     # goes -Os, as do the cold paths -- OTA/SMP (bound by the link and the
-    # flash), the one-time LittleFS migration, littlefs itself (bound by
-    # flash erase/program).
+    # flash), littlefs itself (bound by flash erase/program). The migration's
+    # -Os is next to CONFIG_FS_MIGRATE, since that file is not always built.
     file(GLOB _lua_glue ${CMAKE_CURRENT_LIST_DIR}/src/lua/*.c)
     list(FILTER _lua_glue EXCLUDE REGEX "/lheap\\.c$")
     file(GLOB _ota_srcs ${CMAKE_CURRENT_LIST_DIR}/src/ota/*.c)
-    set_property(SOURCE ${_lua_glue} ${_ota_srcs} src/fs/fs_migrate.c src/fs/littlefs/lfs.c
+    set_property(SOURCE ${_lua_glue} ${_ota_srcs} src/fs/littlefs/lfs.c
         APPEND PROPERTY COMPILE_OPTIONS -Os)
 endif()
 

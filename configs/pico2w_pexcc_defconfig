@@ -45,5 +45,5 @@ CONFIG_SD_DETECT=9
 # Adafruit's SDIO breakout drives DET high with a card in (measured 2026-10-19).
 CONFIG_SD_DETECT_LEVEL=1
 
-# sim-only: browser-built modules are unsigned
+# Development loads unsigned PEX modules. A release image turns this off.
 CONFIG_PEX_ALLOW_UNSIGNED=y

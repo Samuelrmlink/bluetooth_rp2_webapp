@@ -5,8 +5,8 @@ Does not flash a board and does not touch lua/. The simulator binary is copied
 to pexsim-cc before exec (a process named mcusim gets killed on this machine).
 pexsim-editor and pexsim-gw are left alone.
 
-CONFIG_PEX_ALLOW_UNSIGNED is set only in configs/pico2w_pexcc_defconfig, the
-image built in build-pexcc (version minor 238). The user's build/ is not used.
+Development images set CONFIG_PEX_ALLOW_UNSIGNED. This sim still boots the
+image in build-pexcc. The user's build/ is not used.
 """
 import os, shutil, subprocess, sys, time, urllib.request
 from pathlib import Path

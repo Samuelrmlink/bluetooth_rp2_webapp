@@ -214,9 +214,10 @@ reachable. The explicit sequence above is the one to use.
 
 ## Updating a board from before the PEX partition
 
-Firmware from the PEX layout on shrinks LittleFS from 2032 KB to 1776 KB, by
+Firmware from the PEX layout on can shrink LittleFS from 2032 KB to 1776 KB, by
 copying it through the SD card and back ([docs/flash-layout.md](docs/flash-layout.md)).
-Over OTA:
+That mover is `CONFIG_FS_MIGRATE`, off unless the image was built with it.
+Over OTA, on an image that has it:
 
 * the new image **does not migrate while it is unbought** (`sys.info`:
   `"migration":"migration pending: waiting for the OTA confirm ..."`): an

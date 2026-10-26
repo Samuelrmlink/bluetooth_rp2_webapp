@@ -40,8 +40,8 @@ These are part of the architecture. They are not tasks.
 - [ ] **R5 — A PEX build finishes, and signing stays on the host**
   - Layer: 2, produced from layer 4, accepted by layer 1.
   - Why: The product image loads signed modules. The host cmake build and the in-browser `pexcc` build both emit unsigned files. The browser build also stops at the SHA-256 of the image, because `crypto.subtle` is missing on plain `http://`. The page cannot hold the OTA key.
-  - Needs: A SHA-256 in the page, so the browser build writes `<out>/<name>.m33.pex` and `build.log` on the SD card. Signing stays `pexlink sign` with the OTA key on the host. The product defconfig keeps `CONFIG_PEX_ALLOW_UNSIGNED` off. `configs/pico2w_pexcc_defconfig` remains the image that loads unsigned modules.
-  - Done when: A `Pexfile` build on the board's own HTTP page writes the `.pex`, and that file loads on the product image only after `pexlink sign`.
+  - Needs: A SHA-256 in the page, so the browser build writes `<out>/<name>.m33.pex` and `build.log` on the SD card. Signing stays `pexlink sign` with the OTA key on the host, for a release image. Development images set `CONFIG_PEX_ALLOW_UNSIGNED`, so an unsigned browser build loads on those images.
+  - Done when: A `Pexfile` build on the board's own HTTP page writes the `.pex`, and that unsigned file loads on a development image. A release image, with the flag off, still requires `pexlink sign`.
   - 2026-10-24: a Build of `sd/projects/anker/Pexfile` on the board's page wrote `sd/projects/anker/build/anker.m33.pex` (168836 bytes) and said a signed-only board refuses it until `pexlink sign`. That file was not loaded and not installed. The box stays open until a signed copy of it is the one that loads.
 
 - [ ] **R6 — One Anker source tree**
@@ -100,9 +100,9 @@ These are part of the architecture. They are not tasks.
 
 - [ ] **R16 — Bluetooth Classic RFCOMM, for the PM220**
   - Layer: 1. `BT_CLASSIC`, default off.
-  - Why: The CYW43439 is dual-mode. `include/btstack_config.h` already has the Classic block (`ENABLE_CLASSIC`, SDP, RFCOMM, one channel) and it is not compiled. The shape follows `/home/samuel/Projects/pm220-pico2w`, which opens SPP by SDP and falls back to RFCOMM channel 1. `MAX_NR_HCI_CONNECTIONS` is shared with LE, so the RAM budget is part of turning the option on.
+  - Why: The CYW43439 is dual-mode. `include/btstack_config.h` has the Classic block (`ENABLE_CLASSIC`, SDP, RFCOMM). It is compiled only when `BT_CLASSIC` is on. The caller supplies the service UUID, the channel, and any PIN. `MAX_NR_HCI_CONNECTIONS` is shared with LE, so the RAM budget is part of turning the option on.
   - Needs: `BT_CLASSIC` builds and brings up inquiry, SDP, and one RFCOMM channel. A PEX module, or the firmware if the module boundary is wrong for it, opens that channel to a PM220 the way `pm220-pico2w` does. LE central stays the path to Anker and Pinecil. BNEP is R17, not this item.
-  - Code: `src/bt/classic/spp.c` is compiled only when `BT_CLASSIC` is on. `classic.scan` starts inquiry. `classic.connect` does SDP, then RFCOMM channel 1 if SDP has no channel, and the first payload is `BATTERY?\r\n`. Nothing inquires at boot. The product defconfig leaves the option off. Not tried against a PM220. A separate build with `BT_CLASSIC`, `BT_CLASSIC_NAP`, and `BT_PERIPHERAL` on compiles `spp.c`, `nap.c`, `bnep.c`, and `peripheral.c`. That image does not link: flash overflowed by 47612 bytes and RAM by 20376. `pico_btstack_classic` pulls the full profile set, and `btstack_memory` BSS grows from 4420 bytes to 17460 because the classic ACL buffers are larger. The flashed image leaves the options off.
+  - Code: `src/bt/classic/spp.c` and `src/bt/classic/cl_sess.c` are compiled only when `BT_CLASSIC` is on. `classic.scan` starts inquiry. `classic.connect` opens a session; the caller passes the UUID, the channel (0 means SDP), and the PIN list. Nothing is sent on open, and nothing inquires at boot. PEX group `classic` is id 14. The product defconfig leaves the option off. Not tried against a PM220.
   - Done when: With `BT_CLASSIC` on, the board opens an RFCOMM channel to a PM220 and exchanges the same first traffic `pm220-pico2w` does (`BATTERY?`). The default image still has the option off.
 
 - [ ] **R17 — Bluetooth Classic BNEP / NAP**

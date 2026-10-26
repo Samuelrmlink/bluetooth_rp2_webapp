@@ -225,6 +225,13 @@ static void trace_unhandled(uint8_t evt, const uint8_t *pkt, uint16_t size) {
 bool bt_ready(void) { return s_ready; }
 bool bt_stack_up(void) { return s_stack_up; }
 
+bool bt_radio_busy(void) {
+#if CONFIG_BT_CLASSIC
+    if (classic_radio_busy()) { return true; }
+#endif
+    return le_radio_busy();
+}
+
 static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
     (void)ch;
     if (type != HCI_EVENT_PACKET) {
@@ -937,9 +944,14 @@ static const op_def_t bt_ops[] = {
     { "scan.stop",  op_scan_stop },
     { "scan.list",  op_scan_list },
 #if CONFIG_BT_CLASSIC
-    { "classic.scan",    op_classic_scan },
-    { "classic.connect", op_classic_connect },
-    { "classic.state",   op_classic_state },
+    { "classic.scan",       op_classic_scan },
+    { "classic.connect",    op_classic_connect },
+    { "classic.state",      op_classic_state },
+    { "classic.disconnect", op_classic_disconnect },
+    { "classic.send",       op_classic_send },
+    { "classic.pin",        op_classic_pin },
+    { "classic.passkey",    op_classic_passkey },
+    { "classic.confirm",    op_classic_confirm },
 #endif
 #if CONFIG_BT_CLASSIC_NAP
     { "classic.nap", op_classic_nap },
@@ -956,7 +968,12 @@ static const char *const bt_topics[] = {
     "security.required", "security.bonded", "security.failed",
     "security.passkey_request", "security.numeric_comparison",
     "security.passkey_display", "security.passkey_cancel", "security.answered",
-    "bt.unhandled", NULL
+    "bt.unhandled",
+#if CONFIG_BT_CLASSIC
+    "classic.device", "classic.state", "classic.pin", "classic.passkey",
+    "classic.confirm", "classic.rx",
+#endif
+    NULL
 };
 
 const op_module_t op_module_bt = {

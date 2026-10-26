@@ -9,18 +9,26 @@ config BT_LE
       leads with.
 
 config BT_CLASSIC
-    bool "Bluetooth Classic (SPP/SSP)"
+    bool "Bluetooth Classic (RFCOMM)"
     default n
     depends on BT_LE
     help
-      Inquiry, SDP, and one RFCOMM channel, the shape pm220-pico2w uses to
-      open SPP (SDP, else channel 1). The first payload on an open channel
-      is BATTERY?. LE central stays the path to Anker and Pinecil.
-      MAX_NR_HCI_CONNECTIONS is shared, so turning this on costs ACL buffer
-      RAM. The ACL payload is 1536 bytes, enough for one Ethernet frame.
-      The BNEP defconfig turns the HTTPS client off: its 40 KB pool is what
-      pays for those buffers, and the 864 KiB slot cannot hold both. Off in
-      the default image. BNEP is BT_CLASSIC_NAP.
+      Inquiry, SDP, and one RFCOMM session per link. A PEX module or a
+      websocket op supplies the service UUID, the security policy, and any
+      PIN. LE central stays available. MAX_NR_HCI_CONNECTIONS is shared,
+      so turning this on costs ACL buffer RAM. The ACL payload is
+      BT_ACL_PAYLOAD. Off in the default image. BNEP is BT_CLASSIC_NAP.
+
+config BT_ACL_PAYLOAD
+    int "Classic ACL payload bytes"
+    depends on BT_CLASSIC
+    default 1695 if BT_CLASSIC_NAP
+    default 1021
+    range 259 1695
+    help
+      HCI ACL payload, including the 4-byte L2CAP header. 1021 offers an
+      RFCOMM MTU of 1017. 1695 is what BNEP needs so the Configure Request
+      can offer MTU 1691. The NAP image keeps 1695.
 
 config BT_CLASSIC_NAP
     bool "Bluetooth Classic BNEP / NAP uplink"

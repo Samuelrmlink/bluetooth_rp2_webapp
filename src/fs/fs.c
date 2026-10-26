@@ -10,6 +10,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "autoconf.h"
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/flash.h"
@@ -29,7 +30,9 @@ _Static_assert(FS_FLASH_OFF + FS_SIZE + FS_BT_TAIL <= PICO_FLASH_SIZE_BYTES,
 _Static_assert(FS_FLASH_OFF + FS_SIZE <= PICO_FLASH_SIZE_BYTES,
                "fs region exceeds the board's flash size");
 _Static_assert(FS_PEX_SIZE % FLASH_SECTOR_SIZE == 0, "pex partition must be sector-aligned");
-_Static_assert(FS_SIZE + FS_PEX_SIZE == FS_REGION_SIZE, "LittleFS + PEX must fill the old LittleFS region");
+_Static_assert(FS_SIZE + FS_PEX_SIZE == FS_REGION_SIZE, "LittleFS + PEX must fill their region");
+_Static_assert(FS_FLASH_OFF + FS_REGION_SIZE + FS_BT_TAIL == PICO_FLASH_SIZE_BYTES,
+               "filesystem, PEX and the BTstack NVM must fill the chip");
 
 static lfs_t lfs;
 static struct lfs_config cfg;
@@ -329,6 +332,28 @@ uint32_t fs_mounted_size(void) { return mounted ? g_blocks * FS_BLOCK : 0; }
 bool fs_legacy(void) { return mounted && g_legacy; }
 void fs_set_note(const char *note) { g_note = note ? note : ""; }
 const char *fs_note(void) { return g_note; }
+
+#if !CONFIG_FS_MIGRATE
+/* The mover is not in this image. An old geometry still mounts (fs_init
+ * above); say so, and do not format it. */
+void fs_migrate_boot(void) {
+    if (!fs_legacy()) { return; }
+    fs_set_note("migration pending: not in this build");
+    printf("fs: pre-PEX layout, migration is not in this build\n");
+}
+
+void fs_migrate_tick(void) {}
+
+int fs_migrate_json(char *buf, size_t cap) {
+    const char *m = fs_legacy() ? "migration pending: not in this build" : "none";
+    return snprintf(buf, cap,
+                    "{\"kb\":%lu,\"layout_kb\":%u,\"migration\":\"%s\","
+                    "\"pex\":{\"offset\":%lu,\"size\":%u,\"state\":\"%s\"}}",
+                    (unsigned long)(fs_mounted_size() / 1024u), (unsigned)(FS_SIZE / 1024u), m,
+                    (unsigned long)FS_PEX_OFF, (unsigned)FS_PEX_SIZE,
+                    fs_legacy() ? "inside the old LittleFS until it migrates" : "reserved");
+}
+#endif
 
 /* --- for fs_migrate.c only (fs_internal.h) --- */
 lfs_t *fs_lfs(void) { return mounted ? &lfs : NULL; }

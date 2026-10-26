@@ -80,7 +80,7 @@ static void f_lua(cbor_enc_t *e) {
 static void f_bt(cbor_enc_t *e) {
     cbor_kv_uint(e, "unhandled_events", bt_unhandled_count());
     cbor_kv_uint(e, "notify_dropped", le_notify_dropped());
-    cbor_kv_uint(e, "radio_busy", le_radio_busy() ? 1 : 0);
+    cbor_kv_uint(e, "radio_busy", bt_radio_busy() ? 1 : 0);
 }
 #endif
 #if CONFIG_NET_USB_NCM

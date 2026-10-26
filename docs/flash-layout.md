@@ -11,11 +11,11 @@ checks them against each other: `partitions.json` (what the boot ROM reads),
 | Offset | Size | What | Notes |
 |---|---|---|---|
 | `0x000000` | 64 KB | partition table | unpartitioned; `tools/provision.sh` writes it |
-| `0x010000` | 864 KB | Main A | firmware slot (`rp2350-arm-s`); executes at `0x10000000` |
-| `0x0E8000` | 864 KB | Main B | same linked image as A; OTA writes the inactive one |
-| `0x1C0000` | 256 KB | Wi-Fi Firmware | CYW43 blob, provisioned once, never OTA'd |
-| `0x200000` | **1776 KB** | LittleFS | `cfg/`, `lua/`, `cache/`, web assets |
-| `0x3BC000` | **256 KB** | **PEX** | native modules, executed in place ([pex-format.md](pex-format.md) 6.1). Id `0x7065780000000000` ("pex"), family `data` |
+| `0x010000` | 1024 KB | Main A | firmware slot (`rp2350-arm-s`); executes at `0x10000000` |
+| `0x110000` | 1024 KB | Main B | same linked image as A; OTA writes the inactive one |
+| `0x210000` | 256 KB | Wi-Fi Firmware | CYW43 blob, provisioned once, never OTA'd |
+| `0x250000` | **1200 KB** | LittleFS | `cfg/`, `lua/`, web assets. 300 blocks |
+| `0x37C000` | **512 KB** | **PEX** | native modules, executed in place ([pex-format.md](pex-format.md) 6.1). Id `0x7065780000000000` ("pex"), family `data` |
 | `0x3FC000` | 16 KB | BTstack NVM | bonds + LE device DB; unpartitioned, never touched |
 
 On the RP2350 the QSPI XIP controller maps either Main slot onto
@@ -25,15 +25,14 @@ the same layout there would be two images: one linked for slot A's
 addresses and one linked for slot B's. This table is the RP2350 map.
 [OTA.md](../OTA.md) has the boot rule.
 
-Until the PEX partition, LittleFS ran from `0x200000` to `0x3FC000` (2032 KB).
-It keeps its **start**; the PEX partition is the last 256 KB of that region,
-so nothing else moves. Installed modules execute in place from this
-partition. `sys.info` still calls the region `reserved` once migration has
-finished, which means it is outside the old LittleFS:
+The bench board is already on the table above. This image mounts the 1200 KiB
+volume at `0x250000` and does not run the layout mover. The earlier shrink,
+from 2032 KiB at `0x200000` down to 1776 KiB, is what the rest of this page
+describes. It has finished on that board (`cfg/migrated.json`).
 
 ```json
-"fs": {"kb": 1776, "layout_kb": 1776, "migration": "done",
-       "pex": {"offset": 3915776, "size": 262144, "state": "reserved"}}
+"fs": {"kb": 1200, "layout_kb": 1200, "migration": "done",
+       "pex": {"offset": 3653632, "size": 524288, "state": "reserved"}}
 ```
 
 `kb` is the geometry actually mounted (2032 while a migration is pending),
@@ -51,9 +50,14 @@ firmware used to **format on any mount error**, so simply shipping a smaller
 the only way to reach a remote gateway -- on the first boot.
 
 So `fs_init()` now mounts a mismatching filesystem **as found** (block count
-taken from the superblock, bounded by the old region), and the migration in
-`src/fs/fs_migrate.c` moves it, at boot, **before** any configuration is read:
-Wi-Fi, Ethernet and WireGuard come up from the restored files.
+taken from the superblock, bounded by the old region). The move itself is
+`CONFIG_FS_MIGRATE` (`src/fs/fs_migrate.c`), which defaults to **n**. A
+normal image does not link it. An old geometry still mounts, `sys.info` and
+the root of `/api/fs` say `migration pending: not in this build`, and the
+PEX partition stays inside that filesystem so nothing is written over it.
+Set the option (it needs `CONFIG_SD`) for the one boot that copies through
+the card, **before** any configuration is read, so Wi-Fi, Ethernet and
+WireGuard come up from the restored files.
 
 **Firmware older than this layout formats a migrated filesystem** (it sees
 444 blocks where it expects 508, fails to mount, formats). Never boot a

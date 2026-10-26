@@ -15,7 +15,7 @@ CONFIG_BT_MAX_LINKS=4
 CONFIG_LUA_ENABLE=y
 CONFIG_LUA_HEAP_KB=116
 CONFIG_PEX_POOL_KB=48
-# Local builds are unsigned. The product defconfig stays signed-only.
+# Development loads unsigned PEX modules. A release image turns this off.
 CONFIG_PEX_ALLOW_UNSIGNED=y
 # The 864 KiB slot cannot hold Classic (1536-byte ACL, RFCOMM, SDP, BNEP)
 # and the HTTPS client together. The web app is plain HTTP. https:// from

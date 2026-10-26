@@ -19,6 +19,10 @@ bool bt_ready(void);
  * check this before entering BTstack, because the loop ticks them regardless
  * of whether the radio initialised. */
 bool bt_stack_up(void);
+/* LE scan, connect, or an LE link, or Classic inquiry, paging, or SDP.
+ * An open Classic session that is only transferring does not count.
+ * A PIN wait after the ACL is up does not count. */
+bool bt_radio_busy(void);
 uint32_t bt_unhandled_count(void);   /* HCI events nobody handled; for stat */
 
 /* One Classic/BNEP line. Always printed on RTT. Also sent to the websocket

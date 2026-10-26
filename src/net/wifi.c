@@ -499,7 +499,7 @@ static void begin_join(const char *ssid, const char *psk) {
      * forever then WiFi waits forever, which is the right way round -- a
      * degraded network path beats a board that needs a power cycle.
      */
-    if (le_radio_busy()) {
+    if (bt_radio_busy()) {
         if (!deferred_for_bt) {
             printf("wifi: deferring the join, Bluetooth has the radio\n");
             deferred_for_bt = true;
@@ -748,7 +748,7 @@ bool wifi_connect(const char *ssid, const char *psk) {
 #if CONFIG_BT_LE
     /* Bluetooth holds the radio: the network is saved, but leave the join to
      * the state machine (known_in_scan) once the radio is free. */
-    if (le_radio_busy()) { return true; }
+    if (bt_radio_busy()) { return true; }
 #endif
     snprintf(pending_ssid, sizeof(pending_ssid), "%s", ssid);
     pending_join = true;
@@ -909,7 +909,7 @@ void wifi_poll(void) {
          * `return` while waiting: that skipped the machine below and left the
          * join unable to resolve, ever ("connecting" for a full minute). */
 #if CONFIG_BT_LE
-        if (want && le_radio_busy()) {
+        if (want && bt_radio_busy()) {
             if (!ap_deferred_for_bt) {
                 printf("wifi: deferring the AP, Bluetooth has the radio\n");
                 ap_deferred_for_bt = true;

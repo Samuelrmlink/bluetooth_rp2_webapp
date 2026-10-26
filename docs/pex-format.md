@@ -736,12 +736,13 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
   trusts what its owner signs. `key_id` n selects the host's n-th key (1 =
   the OTA key on the gateway). The CRC excludes `SIG`, so a damaged signature
   is caught by the signature check alone (tested).
-- Policy (firmware config) **[D, Q7]**: `signed-only` for production builds,
-  `allow-unsigned` for development builds (the UI says so loudly). An unsigned
-  module is never installed into the XIP partition of a `signed-only` device.
-  A file with `NEEDS_SIG` is refused unsigned under either policy. (0.6: the
-  gateway defaults to **signed-only** (`CONFIG_PEX_ALLOW_UNSIGNED=n`);
-  `pex.list` reports the policy.)
+- Policy (firmware config) **[D, Q7]**: `allow-unsigned` for development
+  builds, `signed-only` for a release image that turns the flag off. An
+  unsigned module is never installed into the XIP partition of a
+  `signed-only` device. A file with `NEEDS_SIG` is refused unsigned under
+  either policy. Development images default to **allow-unsigned**
+  (`CONFIG_PEX_ALLOW_UNSIGNED=y`, including when OTA is on). `pex.list`
+  reports the policy.
 - No sandbox: a PEX can do anything the firmware can. Signing is the security
   boundary; say so in the UI.
 
@@ -972,8 +973,8 @@ in mcusim, after a reboot of a TBYB-booted image some HTTP uploads (PUT
 with the deployed 1.212, 6 of 20 with 1.228 (`gw_sim.py --scenarios
 ota,putstress`); `gw_sim.py` retries an upload, as it retries SMP uploads.
 
-**Signing**: signed-only by default; the OTA public key (`src/ota/ota_pubkey.h`)
-verifies modules signed by `pexlink --sign` with the OTA key.
+**Signing**: development images allow unsigned modules. The OTA public key (`src/ota/ota_pubkey.h`)
+verifies modules signed by `pexlink --sign` with the OTA key. A release image sets `CONFIG_PEX_ALLOW_UNSIGNED` off.
 
 **Budget** (0.6; for 0.7 see §15.1) (pico2w_sd, 2026-10-21): the runtime ~15 KB, the gateway groups and
 ops ~11 KB, pexlua ~4 KB of flash; RAM ~3 KB of tables + the pool. The SD

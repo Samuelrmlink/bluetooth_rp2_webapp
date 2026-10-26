@@ -7,7 +7,9 @@ in mcusim, from a flash image made by the OLD firmware.
 
 --old  a build of the firmware BEFORE the PEX partition (btgw.elf,
        btgw_wifi_firmware.bin; non-TBYB), e.g. 1.180 = feature/lua-net-fs~4
---new  this tree's SD build (pico2w_sd, -DBTGW_TBYB=OFF)
+--new  this tree's SD build (pico2w_sd, -DBTGW_TBYB=OFF) with
+       CONFIG_FS_MIGRATE=y. The option defaults to n, so a stock SD image
+       mounts the old geometry and does not move it.
 --tbyb optional: this tree's TBYB build, for the "tbyb" scenario
 --tree what goes into the old LittleFS: a directory or a .tar (e.g. a /api/tar
        backup of a real gateway). Default: a synthetic tree made here, with a

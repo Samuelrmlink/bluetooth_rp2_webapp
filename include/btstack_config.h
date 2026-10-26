@@ -48,16 +48,15 @@
  * ACL-up. tools/patch_l2cap_info_wait.py holds the Connection Request until
  * the reply, including for basic mode (BNEP). */
 #define ENABLE_L2CAP_INFORMATION_REQUESTS_ON_CONNECT
-#define MAX_NR_RFCOMM_CHANNELS 1
-#define MAX_NR_RFCOMM_MULTIPLEXERS 1
+#define MAX_NR_RFCOMM_CHANNELS CONFIG_BT_MAX_LINKS
+#define MAX_NR_RFCOMM_MULTIPLEXERS CONFIG_BT_MAX_LINKS
 #define MAX_NR_RFCOMM_SERVICES 1
 #define MAX_NR_SERVICE_RECORD_ITEMS 4
-/* BNEP's minimum L2CAP MTU is 1691. l2cap_max_mtu() is this value minus
- * the 4-byte L2CAP header, and that is what the Configure Request offers.
- * 1536 (offered MTU 1532) let the phone accept the connection and then
- * stall in configuration. The radio malloc still needs 8192 bytes between
- * __end__ and __HeapLimit. Do not flash a build whose gap is smaller. */
-#define HCI_ACL_PAYLOAD_SIZE (1691 + 4)
+/* HCI ACL payload includes the 4-byte L2CAP header. BT_ACL_PAYLOAD is
+ * 1021 unless BT_CLASSIC_NAP is on, which needs 1695 so BNEP can offer
+ * MTU 1691. The radio malloc still needs 8192 bytes between __end__ and
+ * __HeapLimit. Do not flash a build whose gap is smaller. */
+#define HCI_ACL_PAYLOAD_SIZE CONFIG_BT_ACL_PAYLOAD
 #define HCI_HOST_ACL_PACKET_LEN HCI_ACL_PAYLOAD_SIZE
 #define MAX_NR_L2CAP_SERVICES  5
 #define MAX_NR_L2CAP_CHANNELS  (CONFIG_BT_MAX_LINKS + 4)

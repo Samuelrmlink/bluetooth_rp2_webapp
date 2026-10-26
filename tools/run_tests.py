@@ -928,6 +928,45 @@ def _host_c(name, srcs, binname, defs="-DSPIBUS_HOST"):
         return False, f"{m.group(2)} of {m.group(1)} failed: {first[:70]}"
     return True, f"{m.group(1)} checks"
 
+def t_cl_sess():
+    """Classic session rules with no radio: two owners, PIN list, security, filters."""
+    return _host_c("cl_sess", ["test/host/cl_sess_test.c", "src/bt/classic/cl_sess.c"],
+                   "btgw_cl_sess", defs="")
+
+def t_classic_contract():
+    """The Classic host API stays generic and is the group the requirements named.
+
+    No PIN, Serial Port UUID, or channel is compiled into the driver. The
+    PEX group is id 14 and can be tested with pex_avail. Opening a channel
+    does not send printer traffic."""
+    import json
+    api = json.load(open(os.path.join(ROOT, "pex/host_api.json")))
+    groups = [g for g in api["groups"] if g.get("name") == "classic"]
+    if len(groups) != 1 or groups[0].get("id") != 14:
+        return False, "pex/host_api.json needs one classic group, id 14"
+    names = {f["name"] for f in groups[0].get("functions", [])}
+    for need in ("pex_bt_classic_open", "pex_bt_classic_send", "pex_bt_classic_forget",
+                 "pex_bt_classic_devices", "pex_bt_classic_sdp"):
+        if need not in names:
+            return False, f"classic group is missing {need}"
+    banned = ("BATTERY?", '"0000"', '"1234"', "0x1101")
+    for rel in ("src/bt/classic/cl_sess.c", "src/bt/classic/spp.c", "src/pex/pex_gw_classic.c"):
+        text = open(os.path.join(ROOT, rel)).read()
+        for s in banned:
+            if s in text:
+                return False, f"{rel} compiles in {s}"
+    spp = open(os.path.join(ROOT, "src/bt/classic/spp.c")).read()
+    if "classic_send" not in spp or "op_classic_disconnect" not in spp:
+        return False, "classic.send / classic.disconnect are not on the same core"
+    sd = open(os.path.join(ROOT, "configs/pico2w_sd_classic_defconfig")).read()
+    if "CONFIG_BT_CLASSIC=y" not in sd or "CONFIG_NET_WIFI=y" not in sd or "CONFIG_NET_WIREGUARD=y" not in sd:
+        return False, "the SD Classic image drops Classic, Wi-Fi, or WireGuard"
+    if "# CONFIG_NET_HTTP_TLS is not set" not in sd:
+        return False, "SD + Classic keeps the TLS pool, which misses the 8 KiB heap floor"
+    if "# CONFIG_BT_CLASSIC_NAP is not set" not in sd:
+        return False, "this Classic image turns NAP on"
+    return True, "group 14, no built-in PIN, UUID, channel, or BATTERY?; SD image keeps Wi-Fi and WireGuard"
+
 def t_spibus():
     """The SPI bus layer against a fake DMA: exclusive claims, CS held across
     a chained transfer, completion only from the loop, clock per device."""
@@ -1243,7 +1282,8 @@ def t_lfs_migrate_sim():
     """test/sim/lfs_migrate.py: the pre-PEX LittleFS migration in mcusim
     (happy path, no card, full card, write errors, power cuts, TBYB). Needs a
     build of a firmware from before the PEX partition: BTGW_OLD_BUILD=<dir>
-    (e.g. feature/lua-net-fs~4 = 1.180, pico2w_sd, -DBTGW_TBYB=OFF)."""
+    (e.g. feature/lua-net-fs~4 = 1.180, pico2w_sd, -DBTGW_TBYB=OFF). The new
+    image must be built with CONFIG_FS_MIGRATE=y; the Kconfig default is n."""
     old = os.environ.get("BTGW_OLD_BUILD")
     if not os.path.exists(os.path.expanduser("~/Work/mcusim/target/release/mcusim")):
         return True, "skipped: no mcusim"
@@ -1327,10 +1367,10 @@ def t_ota_partition_layout():
 
     The ROM boots from the table, fs.c reads at FS_FLASH_OFF, and the linker
     caps the image at one slot; three copies of the same numbers, so they are
-    checked against each other rather than trusted. Since the PEX partition
-    (docs/flash-layout.md): LittleFS keeps its start and is FS_SIZE, PEX
-    follows it, and the two together end where the old LittleFS did, 16 KB
-    before the end of the 4 MB part (BTstack's NVM, unpartitioned)."""
+    checked against each other rather than trusted. LittleFS is FS_SIZE, PEX
+    follows it, and the two together end 16 KB before the end of the 4 MB
+    part (BTstack's NVM, unpartitioned). The bench volume is exactly 300
+    blocks, so that size must not count as a legacy filesystem."""
     import json
     pt = json.load(open(os.path.join(ROOT, "partitions.json")))["partitions"]
     by = {p["name"]: p for p in pt}
@@ -1353,8 +1393,10 @@ def t_ota_partition_layout():
     for k in ("FS_FLASH_OFF", "FS_BT_TAIL", "FS_REGION_SIZE", "FS_PEX_SIZE", "FS_SIZE", "FS_PEX_OFF"):
         if k not in d:
             return False, f"fs.h: cannot read {k}"
-    if _kb(fs["start"]) != d["FS_FLASH_OFF"] or d["FS_FLASH_OFF"] != 2 * 1024 * 1024:
-        return False, "LittleFS partition start != FS_FLASH_OFF (2 MiB)"
+    if _kb(fs["start"]) != d["FS_FLASH_OFF"] or d["FS_FLASH_OFF"] != 2368 * 1024:
+        return False, "LittleFS partition start != FS_FLASH_OFF (2368 KiB)"
+    if d["FS_SIZE"] != 1200 * 1024 or d["FS_SIZE"] // 4096 != 300:
+        return False, "LittleFS must be 1200 KiB, 300 blocks, the volume on the board"
     if _kb(fs["size"]) != d["FS_SIZE"]:
         return False, f"LittleFS partition size {_kb(fs['size'])} != FS_SIZE {d['FS_SIZE']}"
     if _kb(pex["start"]) != d["FS_PEX_OFF"] or _kb(pex["size"]) != d["FS_PEX_SIZE"]:
@@ -1375,8 +1417,16 @@ def t_ota_partition_layout():
         return False, "fs.c reads flash via XIP_BASE: faults past the translated slot"
     if "mount_as_found" not in fsc:
         return False, "fs.c formats on a geometry mismatch: the pre-PEX filesystem would be wiped"
+    if "g_legacy = g_blocks > FS_SIZE / FS_BLOCK" not in fsc:
+        return False, "a volume of exactly FS_SIZE blocks must not be treated as legacy"
+    if w0 != a0 + 2 * asz:
+        return False, "Wi-Fi firmware does not start where the two slots end"
+    pages = d["FS_PEX_SIZE"] // 4096
+    if pages != 128 or pages > 0x7FF:
+        return False, "PEX window is not 128 pages, which is what the QMI size field holds"
     return True, (f"A/B {asz // 1024} KB @ {a0 // 1024} KB, WiFi {wsz // 1024} KB, LittleFS "
-                  f"{d['FS_SIZE'] // 1024} KB @ 2048 KB, PEX {d['FS_PEX_SIZE'] // 1024} KB @ {d['FS_PEX_OFF'] // 1024} KB")
+                  f"{d['FS_SIZE'] // 1024} KB @ {d['FS_FLASH_OFF'] // 1024} KB, "
+                  f"PEX {d['FS_PEX_SIZE'] // 1024} KB @ {d['FS_PEX_OFF'] // 1024} KB")
 
 
 def t_ota_keys():
@@ -1426,6 +1476,8 @@ def main():
     step(0, "webapp + model unit tests", t_unit)
     step(0, "script.loaded reports what the arena holds", t_script_loaded_reports_arena)
     step(0, "no device-specific code in the core", t_no_device_in_core)
+    step(0, "Classic sessions: owners, PIN, security, filters", t_cl_sess)
+    step(0, "Classic host API stays generic", t_classic_contract)
     step(0, "protocol binding stays a thin wrapper", t_proto_binding_is_thin)
     step(0, "device registry stays transport-neutral", t_registry_transport_neutral)
     step(0, "frozen protocol vectors", t_parity)

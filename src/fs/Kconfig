@@ -1,0 +1,20 @@
+menu "Filesystem"
+
+config FS_MIGRATE
+    bool "Migrate a pre-PEX LittleFS through the SD card"
+    default n
+    help
+      One boot of a board whose LittleFS is still the old 2032 KiB layout.
+      Copies every file to the SD card, verifies it, formats the smaller
+      filesystem, and restores cfg/ before anything else is read. About 7 KB
+      of flash. Off, that file is not linked.
+
+      A filesystem already in the new layout is unchanged either way.
+      fs_init() still mounts an old one as found. sys.info and the root of
+      /api/fs then say "migration pending: not in this build", and the PEX
+      partition stays inside that filesystem so nothing is written over it.
+      Turn this on, with CONFIG_SD, for the boot that moves it. A build
+      without the card reports the same pending state the migrator always
+      did when the card was missing.
+
+endmenu

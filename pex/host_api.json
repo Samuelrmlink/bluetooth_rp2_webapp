@@ -955,6 +955,152 @@
       ]
     },
     {
+      "name": "classic",
+      "id": 14,
+      "major": 1,
+      "minor": 0,
+      "doc": "Bluetooth Classic RFCOMM sessions. Present only when the firmware is built with BT_CLASSIC. One module may hold several sessions, and another module may hold others at the same time. The caller supplies the 16-bit UUID, the channel, and the security policy. The host has no PIN and no service of its own. A fixed PIN list answers a legacy PIN in order; when that list runs out, or the controller asks for a passkey or a numeric comparison, the session emits PEX_CL_PIN, PEX_CL_PASSKEY, or PEX_CL_CONFIRM and waits. The module answers at once with a fixed code, or later after a person types, through the same submit calls. A weak import of this group still loads on an image without Classic, and pex_avail() is false there.",
+      "types": [
+        "#define PEX_CL_PIN 1",
+        "#define PEX_CL_PASSKEY 2",
+        "#define PEX_CL_CONFIRM 3",
+        "#define PEX_CL_OPEN 4",
+        "#define PEX_CL_CLOSED 5",
+        "#define PEX_CL_FAILED 6",
+        "#define PEX_CL_RX 7",
+        "#define PEX_CL_TX_ROOM 8",
+        "#define PEX_CL_SDP 9",
+        "#define PEX_CL_IO_NONE 0",
+        "#define PEX_CL_IO_DISPLAY 1",
+        "#define PEX_CL_IO_YESNO 2",
+        "#define PEX_CL_IO_KEYBOARD 3",
+        "#define PEX_CL_BOND_NONE 0",
+        "#define PEX_CL_BOND_GENERAL 1",
+        "#define PEX_CL_BOND_DEDICATED 2",
+        "#define PEX_CL_BOND_OMIT 0xFF",
+        "#define PEX_CL_LEVEL_OMIT 0xFF",
+        "#define PEX_CL_PIN_MAX 4",
+        "#define PEX_CL_PIN_LEN 16",
+        "typedef struct {",
+        "    int handle;",
+        "    int kind;               /* PEX_CL_* */",
+        "    int why;",
+        "    int status;             /* SDP: 0 found a channel */",
+        "    uint32_t number;        /* numeric comparison, or the passkey value */",
+        "    uint16_t len;",
+        "    const uint8_t *data;    /* RX peek only; valid during the callback; listen consumes */",
+        "    uint8_t addr[6];",
+        "    uint8_t channel;",
+        "    uint16_t uuid;",
+        "} pex_cl_event_t;",
+        "typedef void (*pex_cl_fn)(void *arg, const pex_cl_event_t *ev);",
+        "typedef struct {",
+        "    uint8_t addr[6];",
+        "    uint16_t uuid;          /* channel 0 looks this up; the host does not assume one */",
+        "    uint8_t channel;        /* 0: SDP */",
+        "    uint8_t fallback;       /* 0: no fallback channel */",
+        "    uint8_t level;          /* 0..4, or PEX_CL_LEVEL_OMIT (level 2) */",
+        "    uint8_t io;             /* PEX_CL_IO_* */",
+        "    uint8_t bond;           /* PEX_CL_BOND_*, or PEX_CL_BOND_OMIT (general) */",
+        "    uint8_t drop_key;       /* on auth failure, drop the link key and try once more */",
+        "    uint32_t deadline_ms;   /* 0: no connect deadline. Short for a fixed PIN, longer for a person */",
+        "    uint8_t npin;",
+        "    char pin[PEX_CL_PIN_MAX][PEX_CL_PIN_LEN];",
+        "    pex_cl_fn fn;",
+        "    void *arg;",
+        "} pex_cl_open_t;",
+        "typedef struct {",
+        "    uint8_t addr[6];",
+        "    char name[32];",
+        "    int8_t rssi;",
+        "    uint32_t cod;",
+        "} pex_cl_dev_t;",
+        "typedef struct {",
+        "    int handle;",
+        "    uint8_t addr[6];",
+        "    uint16_t uuid;",
+        "    uint8_t channel, state, ask, level, secure;",
+        "    int why;",
+        "    uint16_t mtu;",
+        "    uint32_t cod, rx_drop, confirm_num;",
+        "    char error[48];",
+        "} pex_cl_info_t;"
+      ],
+      "functions": [
+        {
+          "name": "pex_bt_classic_scan",
+          "proto": "int pex_bt_classic_scan(uint32_t duration_ms)",
+          "doc": "0 until stop. PEX_EBUSY if an inquiry is already running. An open session does not block it"
+        },
+        {
+          "name": "pex_bt_classic_scan_stop",
+          "proto": "void pex_bt_classic_scan_stop(void)"
+        },
+        {
+          "name": "pex_bt_classic_scanning",
+          "proto": "int pex_bt_classic_scanning(void)"
+        },
+        {
+          "name": "pex_bt_classic_devices",
+          "proto": "int pex_bt_classic_devices(pex_cl_dev_t *out, uint32_t max, uint32_t cod_mask, uint32_t cod_value, const char *name_prefix)",
+          "doc": "this caller's view. cod_mask 0 and a NULL prefix are the whole shared table. count"
+        },
+        {
+          "name": "pex_bt_classic_sdp",
+          "proto": "int pex_bt_classic_sdp(const uint8_t *addr, uint16_t uuid, pex_cl_fn fn, void *arg)",
+          "doc": "one lookup of a 16-bit UUID. 0 accepted; the channel arrives as PEX_CL_SDP. PEX_EBUSY if a query is already running"
+        },
+        {
+          "name": "pex_bt_classic_open",
+          "proto": "int pex_bt_classic_open(const pex_cl_open_t *opt)",
+          "doc": "a session handle, or PEX_ENOMEM when the table is full, or PEX_EBUSY when the radio or the IO capability exchange cannot start another. Level 3 or 4 with no input and no output is PEX_EINVAL. Up to four PIN strings are tried in order and do not wait; the next request after that is PEX_CL_PIN"
+        },
+        {
+          "name": "pex_bt_classic_pin",
+          "proto": "int pex_bt_classic_pin(int handle, const char *pin)",
+          "doc": "answer PEX_CL_PIN. A fixed code or whatever a person typed. Empty or NULL cancels that session"
+        },
+        {
+          "name": "pex_bt_classic_passkey",
+          "proto": "int pex_bt_classic_passkey(int handle, int negative, uint32_t passkey)",
+          "doc": "answer PEX_CL_PASSKEY. negative non-zero cancels. passkey is 0..999999"
+        },
+        {
+          "name": "pex_bt_classic_confirm",
+          "proto": "int pex_bt_classic_confirm(int handle, int accept)",
+          "doc": "answer PEX_CL_CONFIRM. accept 0 declines. The six-digit number was in the event"
+        },
+        {
+          "name": "pex_bt_classic_send",
+          "proto": "int pex_bt_classic_send(int handle, const void *data, size_t len)",
+          "doc": "bytes queued, or PEX_EBUSY while the link is short of the requested level or the TX buffer is full"
+        },
+        {
+          "name": "pex_bt_classic_tx_room",
+          "proto": "int pex_bt_classic_tx_room(int handle)",
+          "doc": "bytes free in this session's TX buffer"
+        },
+        {
+          "name": "pex_bt_classic_listen",
+          "proto": "int pex_bt_classic_listen(int handle, void *buf, size_t cap)",
+          "doc": "consumes up to 252 bytes from this session's RX ring, only after the level is met. The RX event is a peek and does not consume"
+        },
+        {
+          "name": "pex_bt_classic_close",
+          "proto": "int pex_bt_classic_close(int handle)"
+        },
+        {
+          "name": "pex_bt_classic_state",
+          "proto": "int pex_bt_classic_state(int handle, pex_cl_info_t *out)"
+        },
+        {
+          "name": "pex_bt_classic_forget",
+          "proto": "int pex_bt_classic_forget(const uint8_t *addr)",
+          "doc": "drop that address's link key. Does not close a session"
+        }
+      ]
+    },
+    {
       "name": "lua",
       "id": 16,
       "major": 1,

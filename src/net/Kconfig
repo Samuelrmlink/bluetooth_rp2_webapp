@@ -188,7 +188,7 @@ config NET_UPLINK
 
 config NET_FORWARD
     bool "Forwarding rules from Lua (TCP proxy + UDP relay)"
-    default y
+    default n
     depends on LUA_ENABLE
     help
       net.forward{} from a script: a listen port relayed to another port on
@@ -196,6 +196,10 @@ config NET_FORWARD
       gateway terminates and re-originates, so replies come back on the
       same pair whatever the interfaces. Rules belong to the script that
       made them.
+
+      Off unless a defconfig sets it. About 7 KB of flash, and it is what
+      pulls in lwIP's loopback interface. The launchers that only pex.start
+      do not call it.
 
 config LWIP_MEM_SIZE_KB
     int "lwIP heap (KB)"

@@ -23,7 +23,7 @@
 #include "autoconf.h"
 /* After autoconf.h: CONFIG_BT_LE has to be defined before it is tested. */
 #if CONFIG_BT_LE
-#include "bt/le/central.h"
+#include "bt/bt.h"
 #endif
 
 #if CONFIG_NET_WIFI
@@ -82,7 +82,7 @@ static void op_wifi_connect(const char *params, api_reply_fn reply, void *ctx, l
          * which. A join while BLE holds the radio wedges the driver, so it is
          * refused rather than attempted -- see the comment on wifi_connect. */
         api_reply_err(reply, ctx, id, "rejected",
-                      le_radio_busy()
+                      bt_radio_busy()
                         ? "Bluetooth is using the shared radio; stop scanning "
                           "and disconnect devices, then join"
                         : "the credential store refused that ssid/psk");

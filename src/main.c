@@ -63,6 +63,9 @@
 #if CONFIG_BT_LE
 #include "bt/bt.h"
 #include "bt/le/central.h"
+#if CONFIG_BT_CLASSIC
+#include "bt/classic/spp.h"
+#endif
 #if CONFIG_BT_CLASSIC_NAP
 #include "bt/classic/nap.h"
 #endif
@@ -288,6 +291,11 @@ int main(void) {
         crumb(CRUMB_LOOP_BT);
         bt_power_on_tick();   /* deferred controller power-on; staggers BT behind WiFi at boot */
         le_central_tick();
+#if CONFIG_BT_CLASSIC
+        /* After the radio poll, and before pex_gw_poll, so a module still
+         * sees the events classic_poll left queued. */
+        classic_poll();
+#endif
 #if CONFIG_BT_CLASSIC_NAP
         /* After the radio poll, so a BNEP event can mark cfg/nap.json dirty
          * without writing flash from inside cyw43_arch_poll. */

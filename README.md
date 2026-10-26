@@ -42,7 +42,7 @@ A module usually executes in place from the PEX flash partition. A smaller binar
 
 Stop ends the module's tasks and leaves the code loaded, including any ops it registered. Unload runs deinit and drops those ops. The file in `pex/` and an installed copy in the partition stay until uninstall. The editor's Stop button does both. Lua's `pex.stop` only stops, so a script can pause a module and start it again.
 
-An image built with OTA loads signed modules. `CONFIG_PEX_ALLOW_UNSIGNED` defaults off when OTA is on. The signature is the OTA key (`pexlink sign`).
+Development images load unsigned PEX modules. `CONFIG_PEX_ALLOW_UNSIGNED` defaults on, including when OTA is on. A signed module still verifies with the OTA key (`pexlink sign`). A release image turns the flag off.
 
 ### Layer 3 — Lua VM (optional)
 
@@ -136,5 +136,6 @@ curl -X POST http://<addr>/api/op \
 - [docs/Development.md](docs/Development.md) — the build, the upload, the Lua unload contract, and how a feature branch reaches `dev`
 - [OTA.md](OTA.md) — slots, try-before-you-buy, confirm
 - [docs/flash-layout.md](docs/flash-layout.md) — the flash map and the LittleFS migration
+- [docs/memory-optimizations.md](docs/memory-optimizations.md) — measured flash and SRAM, and why the SD Classic image leaves HTTPS off
 - [docs/pex-format.md](docs/pex-format.md) — the module format and the runtime
 - [docs/network.md](docs/network.md), [docs/sd.md](docs/sd.md), [docs/lua-net-fs.md](docs/lua-net-fs.md)
