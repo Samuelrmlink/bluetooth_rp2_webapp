@@ -4,8 +4,8 @@
  * through the host codec, the host test through anker_tlv_build_payload.
  * That is what keeps the wire bytes in one place.
  *
- * Epoch here is the link.lua base (1700000000 + ms/1000). cipher.lua's own
- * base of 0 is a different helper and is not this clock. */
+ * Epoch here is 1700000000 + ms/1000, the base the former link helper used.
+ * A base of 0 is a different helper and is not this clock. */
 #ifndef ANKER_WIRE_H
 #define ANKER_WIRE_H
 #include <stddef.h>

@@ -15,8 +15,8 @@ async function editor(page) {
   page.__dialogs = 0;
   page.on('dialog', (d) => { page.__dialogs++; d.dismiss(); });
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
-  await expect(row(page, 'lua/anker.lua')).toBeVisible();
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
+  await expect(row(page, 'lua/ac_pulse.lua')).toBeVisible();
   // Let the layout settle: the mock's devices register their panes about a
   // second after load, and any layout change closes the popover (app.js) --
   // a menu held open across that would vanish under the test.
@@ -70,7 +70,7 @@ test.describe('touch', () => {
     await expect(menu(page).locator('.sm-title')).toHaveText('lua/pinecil.lua');
     await expect(row(page, 'lua/pinecil.lua')).toHaveClass(/is-menu-row/);
     await page.waitForTimeout(300);                       // a late click would land by now
-    await expect(page.locator('.ed-name')).toHaveText(/anker\.lua/);
+    await expect(page.locator('.ed-name')).toHaveText(/ac_pulse\.lua/);
     await expect(menu(page)).toBeVisible();
     expect(await page.evaluate(() => window.__menus)).toBe(1);
     expect(page.__dialogs).toBe(0);
@@ -105,17 +105,17 @@ test.describe('touch', () => {
     expect(await page.evaluate(() => window.__menus)).toBe(1);
     await page.keyboard.press('Escape');
     // late: after the timer has opened it
-    const at2 = await centre(page, 'lua/anker2.lua');
+    const at2 = await centre(page, 'lua/note.lua');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at2] });
-    await expect(menu(page).locator('.sm-title')).toHaveText('lua/anker2.lua');
-    await ctx('lua/anker2.lua');
+    await expect(menu(page).locator('.sm-title')).toHaveText('lua/note.lua');
+    await ctx('lua/note.lua');
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     await cdp.detach();
     await page.waitForTimeout(200);
     await expect(menu(page)).toBeVisible();
     expect(await page.evaluate(() => window.__menus)).toBe(2);
     expect(page.__dialogs).toBe(0);
-    await expect(page.locator('.ed-name')).toHaveText(/anker\.lua/);
+    await expect(page.locator('.ed-name')).toHaveText(/ac_pulse\.lua/);
   });
 
   test('a long press on a folder opens its menu and does not toggle it', async ({ page }) => {
@@ -123,7 +123,7 @@ test.describe('touch', () => {
     await touch(page, await centre(page, 'lua/profiles'), { ms: 900 });
     await expect(menu(page).getByRole('button', { name: 'New file here…' })).toBeVisible();
     await page.waitForTimeout(300);
-    await expect(row(page, 'lua/profiles/anker')).toHaveCount(0);   // still closed
+    await expect(row(page, 'lua/profiles/pinecil')).toHaveCount(0);   // still closed
   });
 
   test('a drag (a scroll) opens nothing', async ({ page }) => {
@@ -134,7 +134,7 @@ test.describe('touch', () => {
     await page.waitForTimeout(200);
     await expect(menu(page)).toBeHidden();
     expect(await page.evaluate(() => window.__menus)).toBe(0);
-    await expect(page.locator('.ed-name')).toHaveText(/anker\.lua/);
+    await expect(page.locator('.ed-name')).toHaveText(/ac_pulse\.lua/);
   });
 
   test('a short tap still opens the file', async ({ page }) => {
@@ -156,12 +156,12 @@ test.describe('touch', () => {
     await b.tap();
     await expect(menu(page)).toBeVisible();
     await expect(menu(page).locator('.sm-title')).toHaveText('lua/pinecil.lua');
-    await expect(page.locator('.ed-name')).toHaveText(/anker\.lua/);
+    await expect(page.locator('.ed-name')).toHaveText(/ac_pulse\.lua/);
     // on a folder: the menu, and the folder stays as it was
     await page.keyboard.press('Escape');
     await more(page, 'lua/profiles').tap();
     await expect(menu(page).getByRole('button', { name: 'Upload here…' })).toBeVisible();
-    await expect(row(page, 'lua/profiles/anker')).toHaveCount(0);
+    await expect(row(page, 'lua/profiles/pinecil')).toHaveCount(0);
   });
 
   test('rows and menu items are finger-sized', async ({ page }) => {

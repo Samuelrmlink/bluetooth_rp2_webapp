@@ -1,14 +1,14 @@
 /*
  * Negotiation-cipher constants, as a TEST FIXTURE.
  *
- * The authoritative copy of these 99 bytes is lua/profiles/anker_a2687.lua.
+ * The authoritative copy of these 99 bytes is pex/modules/drivers/anker_wire.c.
  * They are device data -- a recovered keystream and the GCM forgery material
  * that goes with it -- not an algorithm, which is why they live with the
- * profile and not in src/crypto/. They are reproduced here so the C parity
+ * module and not in src/crypto/. They are reproduced here so the C parity
  * test can prove that the *generalised* ghash_aad_ct() still reproduces the
  * tags the original, Anker-specific implementation produced.
  *
- * tools/run_tests.py asserts this file and the Lua profile still agree, so the
+ * tools/run_tests.py asserts this file and anker_wire.c still agree, so the
  * duplication cannot silently drift.
  *
  * Nothing here is secret. These are published in the protocol notes and were

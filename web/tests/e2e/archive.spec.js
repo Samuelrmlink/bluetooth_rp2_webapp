@@ -13,7 +13,7 @@ const menu = (page) => page.locator('#pane-popover .ed-file-menu');
 const dlg = (page) => page.locator('#restore-dlg');
 const ed = (page, fn, arg) => page.evaluate(([f, a]) => new Function('w', 'a', `return (${f})(w, a)`)(window.__btgwApp.windows.get('editor').win, a), [fn.toString(), arg]);
 
-async function editor(page, open = 'lua/anker.lua') {
+async function editor(page, open = 'lua/ac_pulse.lua') {
   await ready(page);
   await page.evaluate((p) => window.__btgwApp.openFile(p), open);
   await page.waitForFunction(() => {
@@ -63,7 +63,7 @@ test('folder menu: Download as .tar is the device\'s archive of that folder', as
   expect(dl.suggestedFilename()).toBe('lua.tar');
   const t = parseTar(readFileSync(await dl.path()));
   expect(t.entries[0]).toEqual({ path: 'lua', dir: true });
-  expect(t.entries.map((e) => e.path)).toContain('lua/profiles/anker/run.lua');
+  expect(t.entries.map((e) => e.path)).toContain('lua/profiles/pinecil.lua');
 });
 
 test('Upload archive here: a Linux tar, permissions ignored, a preview, then written', async ({ page }) => {
@@ -91,16 +91,16 @@ test('Upload archive here: a Linux tar, permissions ignored, a preview, then wri
 test('Restore archive… at the root: overwrites are named first, cache/ skipped, nothing deleted', async ({ page }) => {
   await editor(page);
   const before = await (await page.request.get('/api/fs/lua/pinecil.lua')).text();
-  const tar = linuxTar([['lua/anker.lua', '-- restored\n'], ['cache/x.luac', 'junk'], ['lua/new.lua', 'return 1\n']]);
+  const tar = linuxTar([['lua/ac_pulse.lua', '-- restored\n'], ['cache/x.luac', 'junk'], ['lua/new.lua', 'return 1\n']]);
   await page.locator('.ed-b-more').click();
   await page.locator('.ed-more-menu [data-act="restore"]').click();
   await page.locator('.ed-tar-input').setInputFiles({ name: 'btgw.tar', mimeType: 'application/x-tar', buffer: tar });
   await expect(dlg(page).locator('.rs-summary')).toContainText('1 new, 1 overwritten');
-  await expect(dlg(page).locator('.rs-list.rs-warn')).toContainText('lua/anker.lua');
+  await expect(dlg(page).locator('.rs-list.rs-warn')).toContainText('lua/ac_pulse.lua');
   await expect(dlg(page).locator('.rs-lists')).toContainText('cache/x.luac — cache/');
   await dlg(page).getByRole('button', { name: 'Restore 2 files' }).click();
   await expect(dlg(page).locator('.rs-status')).toHaveText('Restored 2 files.');
-  expect(await (await page.request.get('/api/fs/lua/anker.lua')).text()).toBe('-- restored\n');
+  expect(await (await page.request.get('/api/fs/lua/ac_pulse.lua')).text()).toBe('-- restored\n');
   expect(await (await page.request.get('/api/fs/lua/pinecil.lua')).text()).toBe(before);   // untouched
   expect((await page.request.get('/api/fs/cache/x.luac')).status()).toBe(404);
 });
@@ -160,6 +160,6 @@ test('pictures: a PNG shows with its pixel size; an SVG (.svg.gz) toggles to tex
   await expect(page.locator('.ed-surface textarea')).toHaveValue(/<svg/);
   await page.locator('.ed-b-svg').click();
   await expect(page.locator('.ed-preview')).toBeVisible();
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   await expect(page.locator('.ed-preview')).toBeHidden();
 });

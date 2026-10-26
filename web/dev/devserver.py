@@ -83,12 +83,13 @@ def _png(w, h):
 
 def _seed_fs():
     fs = {}
-    for rel in ["lua/anker.lua", "lua/anker2.lua", "lua/pinecil.lua",
-                "lua/profiles/anker/run.lua", "lua/profiles/anker/link.lua",
-                "lua/profiles/anker/models/A1761.lua"]:
+    for rel in ["lua/ac_pulse.lua", "lua/pinecil.lua",
+                "lua/profiles/pinecil.lua", "lua/profiles/pinecil/driver.json"]:
         path = os.path.join(REPO, rel)
         if os.path.exists(path):
             fs[rel] = open(path, "rb").read()
+    # Editor fixture only. Not a file in the repo.
+    fs["lua/note.lua"] = b"-- editor fixture\nreturn 1\n"
     fs["cfg/wifi.json"] = b'{"mode":"auto","networks":[{"ssid":"bench"}]}'
     fs["var/wg_epoch.bin"] = b"\x4e\x00\x00\x00"
     # a web app's folder, stored as the device stores web files: compressed,
@@ -125,8 +126,8 @@ C1000_BASE = {
     "unknown_b1": 3, "capability_block": "\x02\x01\x01\x01", "fault_major": 0,
     "ac_countdown_s": 0, "car_countdown_s": 0,
 }
-# The A2687 charger, alongside: on the bench lua/anker2.lua drives it while
-# lua/anker.lua drives the C1000. The mock publishes both while "anker" runs.
+# The A2687 charger, alongside the C1000. The mock publishes both while the
+# flag "anker" is set. That flag stands in for the running PEX module.
 # Shape from a real report (2026-10-01); ports are tables, as in the model.
 A2687_BASE = {
     "addr": "7C:E9:13:60:1F:D8", "product_type": "B405", "product_code": "A2687", "cipher": "gcm",
@@ -146,8 +147,8 @@ A2687_BASE = {
     "screensaver": {"enabled": True, "flags": 0, "type": 3, "id": 752261, "holiday_id": 0},
 }
 
-# The A2687's setters, as lua/profiles/anker/models/A2687.lua takes them (a
-# value or its name), and what each writes into the state.
+# The A2687's setters, as the PEX module takes them (a value or its name),
+# and what each writes into the state.
 A2687_NAMES = {
     "charging_protocol": {"ai": 0, "standard": 1}, "fixed_allocation": {"c1_priority": 0, "laptop_mode": 1},
     "screen_off": {"30s": 0, "1min": 1, "5min": 2, "30min": 3, "12h": 4},
@@ -375,12 +376,11 @@ def _seed_pexcc(sd):
 def reset_state():
     STATE.clear()
     STATE["fs"] = _seed_fs()
-    # anker runs from boot, as on the bench, with its modules resident
+    # The flag name "anker" stands in for the running PEX module. Telemetry
+    # is published while it is set. It is not a Lua file in the tree.
     STATE["scripts"] = {"anker": {"running": True, "draft": None, "tier": "committed",
-                                  "hash": fnv1a(STATE["fs"].get("lua/anker.lua", b""))}}
-    STATE["modules"] = {m: fnv1a(STATE["fs"][f"lua/{m.replace('.', '/')}.lua"])
-                        for m in ["profiles.anker.run", "profiles.anker.link", "profiles.anker.models.A1761"]
-                        if f"lua/{m.replace('.', '/')}.lua" in STATE["fs"]}
+                                  "hash": fnv1a(b"pex-anker")}}
+    STATE["modules"] = {}
     STATE["c1000"] = dict(C1000_BASE)
     STATE["a2687"] = json.loads(json.dumps(A2687_BASE))
     STATE["drafts"] = {}
@@ -570,7 +570,7 @@ class MockGateway:
                                 "thread": {"n": 2, "bytes": 3100}, "total": 79700},
                     "strtab": {"size": 1024, "used": 812},
                     "tables": [{"bytes": 6200, "array": 0, "hash": 256, "name": "registry"},
-                               {"bytes": 4100, "array": 0, "hash": 128, "name": "module:profiles.anker.run"}],
+                               {"bytes": 4100, "array": 0, "hash": 128, "name": "anker"}],
                     "threads": [2600, 500], "unaccounted": used - 79700}
         if op == "script.arena":
             # a tiny but well-formed arena: one 64 B live table block, then one free block

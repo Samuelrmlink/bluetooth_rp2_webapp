@@ -25,7 +25,7 @@ const fileText = async (page, path) => (await page.request.get(`/api/fs/${path}`
 
 test('/ highlights every match as you type, n moves the current one, :noh clears', async ({ page }) => {
   await ready(page);
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   const text = await ta(page).inputValue();
   const count = text.split('run').length - 1;
   expect(count).toBeGreaterThan(1);
@@ -52,24 +52,24 @@ test('/ highlights every match as you type, n moves the current one, :noh clears
 
 test(':q refuses with unsaved changes, :q! closes and lands in the file list', async ({ page }) => {
   await ready(page);
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   await keys(page, 'x');                                    // modify
   await expect(page.locator('.ed-state')).toContainText('modified');
   await keys(page, ':q<Enter>');
   await expect(notice(page)).toContainText('E37: No write since last change');
-  await expect(name(page)).toHaveText('lua/anker.lua');
+  await expect(name(page)).toHaveText('lua/ac_pulse.lua');
   await keys(page, ':q!<Enter>');
   await expect(name(page)).toHaveText('No file open');
   expect(await page.evaluate(() => document.activeElement?.classList.contains('ed-files'))).toBe(true);
   // Discarded, not saved: the device still has the original.
-  expect(await fileText(page, 'lua/anker.lua')).not.toBe('');
-  await open(page, 'lua/anker.lua');
+  expect(await fileText(page, 'lua/ac_pulse.lua')).not.toBe('');
+  await open(page, 'lua/ac_pulse.lua');
   await expect(page.locator('.ed-state')).not.toContainText('modified');
 });
 
 test(':e opens a new file, :wq writes and closes it; :w path writes a copy and stays', async ({ page }) => {
   await ready(page);
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   await keys(page, ':e lua/zz_new.lua<Enter>');
   await expect(name(page)).toHaveText('lua/zz_new.lua');
   await expect(notice(page)).toContainText('[New]');
@@ -77,15 +77,15 @@ test(':e opens a new file, :wq writes and closes it; :w path writes a copy and s
   await page.keyboard.type('-- hello');
   await keys(page, '<Esc>:wq<Enter>');
   // :wq closes that file's tab; the tab it was opened from shows again
-  await expect(name(page)).toHaveText('lua/anker.lua');
+  await expect(name(page)).toHaveText('lua/ac_pulse.lua');
   await expect(page.locator('.ed-ftab[data-path="lua/zz_new.lua"]')).toHaveCount(0);
   expect(await fileText(page, 'lua/zz_new.lua')).toBe('-- hello');
 
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   const orig = await ta(page).inputValue();
   await keys(page, ':w lua/zz_copy.lua<Enter>');
   await expect(notice(page)).toHaveText('"lua/zz_copy.lua" written');
-  await expect(name(page)).toHaveText('lua/anker.lua');       // stays on this file
+  await expect(name(page)).toHaveText('lua/ac_pulse.lua');       // stays on this file
   expect(await fileText(page, 'lua/zz_copy.lua')).toBe(orig);
   await keys(page, ':nonsense<Enter>');
   await expect(notice(page)).toContainText('Not an editor command');
@@ -93,7 +93,7 @@ test(':e opens a new file, :wq writes and closes it; :w path writes a copy and s
 
 test('Ctrl+H moves into the file list, Ctrl+L back into the text', async ({ page }) => {
   await ready(page);
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   await page.keyboard.press('Control+KeyH');
   const files = page.locator('.ed-files');
   await expect(files).toBeFocused();
@@ -111,7 +111,7 @@ test('Ctrl+H moves into the file list, Ctrl+L back into the text', async ({ page
 
 test('the VIM button turns vim keys off (a plain text box), and it is remembered', async ({ page }) => {
   await ready(page);
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   const btn = page.locator('.ed-b-keys');
   await expect(btn).toHaveAttribute('aria-pressed', 'true');
   await btn.click();
@@ -128,9 +128,9 @@ test('the VIM button turns vim keys off (a plain text box), and it is remembered
 
 test('a mouse drag is visual mode; y copies; a paste in normal mode inserts', async ({ page }) => {
   await ready(page);
-  await open(page, 'lua/anker.lua');
+  await open(page, 'lua/ac_pulse.lua');
   const box = await ta(page).boundingBox();
-  // Line 2 (line 1 of anker.lua is just "--[[", too short to drag across).
+  // Line 2 (line 1 of ac_pulse.lua is just "--[[", too short to drag across).
   await page.mouse.move(box.x + 30, box.y + 30);
   await page.mouse.down();
   await page.mouse.move(box.x + 140, box.y + 30, { steps: 5 });
@@ -153,7 +153,7 @@ test('a mouse drag is visual mode; y copies; a paste in normal mode inserts', as
 test('G jumps to the end and the view follows; gg back to the top; jumps far down and n are scrolled to', async ({ page }) => {
   await ready(page);
   await page.evaluate(() => window.__btgwApp.setPref('vim', true));
-  await page.evaluate(() => window.__btgwApp.openFile('lua/profiles/anker/run.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/profiles/pinecil.lua'));
   const ta = page.locator('.ed-group.is-focus .ed-input');
   await expect(ta).toHaveValue(/./);
   await ta.focus();

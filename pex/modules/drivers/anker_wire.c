@@ -1,9 +1,9 @@
 #include "anker_wire.h"
 #include <string.h>
 
-/* Bytes from lua/profiles/anker/cipher.lua. test/host/neg_fixture.h and
- * tools/run_tests.py keep the Lua copy from drifting; this copy has to match
- * that file. A plaintext 0x0021 is trap 1, and there is no keystream past 67. */
+/* Negotiation bytes. The former Lua profile is gone. test/host/neg_fixture.h
+ * and tools/run_tests.py keep that fixture equal to these arrays. A plaintext
+ * 0x0021 is trap 1, and there is no keystream past 67. */
 static const uint8_t KEYSTREAM[ANKER_KEYSTREAM_LEN] = {
     0xab, 0x86, 0x3f, 0xd2, 0xe6, 0x3a, 0x29, 0xb2, 0xfe, 0xb4, 0x08, 0xc9, 0x4b, 0x6f, 0x66, 0xd5,
     0x83, 0x79, 0x83, 0xd0, 0x3a, 0xe4, 0xc0, 0x82, 0xf6, 0xef, 0xe0, 0x56, 0x34, 0x51, 0xfb, 0x3e,

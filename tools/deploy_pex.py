@@ -273,7 +273,7 @@ def lua_anker_running(base: str) -> bool:
 
 def ensure_running(base: str, dry: bool) -> None:
     if lua_anker_running(base):
-        raise SystemExit("lua/anker.lua is running; the PEX app is not started beside it")
+        raise SystemExit("a Lua script named anker is running; the PEX app is not started beside it")
     ok, info = op(base, "pex.info", {"name": "anker"})
     if ok and info.get("state") == "running":
         print("anker is running")
@@ -318,7 +318,7 @@ def deploy_module(base: str, data: bytes | None, replace: bool, dry: bool) -> No
         return
     if have and replace:
         if lua_anker_running(base):
-            raise SystemExit("lua/anker.lua is running; not replacing the PEX app")
+            raise SystemExit("a Lua script named anker is running; not replacing the PEX app")
         ok, info = op(base, "pex.info", {"name": "anker"})
         if ok:
             op(base, "pex.stop", {"name": "anker"})

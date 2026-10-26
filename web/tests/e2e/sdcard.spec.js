@@ -14,8 +14,8 @@ const sdFile = (page, p) => page.evaluate(async (path) => {
 
 async function editor(page) {
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
-  await expect(row(page, 'lua/anker.lua')).toBeVisible();
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
+  await expect(row(page, 'lua/ac_pulse.lua')).toBeVisible();
   await page.waitForFunction(() => {
     const v = window.__btgwApp._layout.version;
     const s = window.__settle || (window.__settle = { v, t: performance.now() });
@@ -97,8 +97,8 @@ test('a build without the card: no sd folder, no SD card settings', async ({ pag
   await page.evaluate(() => window.__btgwApp.ws.call('test.sd', { module: false }));
   await page.reload();
   await page.waitForFunction(() => document.getElementById('conn-status')?.textContent === 'Connected');
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
-  await expect(row(page, 'lua/anker.lua')).toBeVisible();
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
+  await expect(row(page, 'lua/ac_pulse.lua')).toBeVisible();
   await expect(row(page, 'sd')).toHaveCount(0);
   await page.keyboard.press('Alt+KeyS');
   await expect(page.locator('#sect-sd')).toBeHidden();

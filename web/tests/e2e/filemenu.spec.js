@@ -9,8 +9,8 @@ const menu = (page) => page.locator('#pane-popover .ed-file-menu');
 
 async function editor(page) {
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
-  await expect(row(page, 'lua/anker.lua')).toBeVisible();
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
+  await expect(row(page, 'lua/ac_pulse.lua')).toBeVisible();
   // Let the layout settle (as filemenu-touch.spec.js): the mock's devices
   // register their panes about a second after load, and a layout change
   // closes any popover -- a menu opened just before would vanish mid-test.
@@ -24,15 +24,15 @@ async function editor(page) {
 
 test('right-click: the file\'s menu, its row marked, Esc closes only the menu', async ({ page }) => {
   await editor(page);
-  await row(page, 'lua/anker.lua').click({ button: 'right' });
+  await row(page, 'lua/ac_pulse.lua').click({ button: 'right' });
   await expect(menu(page)).toBeVisible();
-  await expect(menu(page).locator('.sm-title')).toHaveText('lua/anker.lua');
+  await expect(menu(page).locator('.sm-title')).toHaveText('lua/ac_pulse.lua');
   await expect(menu(page).getByRole('button', { name: 'Start anker' })).toBeVisible();
   await expect(menu(page).getByRole('button', { name: 'Open' })).toHaveCount(0);   // it is the open file
-  await expect(row(page, 'lua/anker.lua')).toHaveClass(/is-menu-row/);
+  await expect(row(page, 'lua/ac_pulse.lua')).toHaveClass(/is-menu-row/);
   await page.keyboard.press('Escape');
   await expect(menu(page)).toBeHidden();
-  await expect(row(page, 'lua/anker.lua')).not.toHaveClass(/is-menu-row/);
+  await expect(row(page, 'lua/ac_pulse.lua')).not.toHaveClass(/is-menu-row/);
 });
 
 test('right-click a folder: New file here… starts in that folder', async ({ page }) => {
@@ -53,15 +53,15 @@ test('keyboard: m in the file list opens the menu; the hint bar says so; Downloa
   await page.keyboard.press('KeyJ');
   await page.keyboard.press('KeyK');
   await expect(page.locator('#keyhint')).toContainText('menu');
-  // back on anker.lua, wherever j/k left the cursor
-  await page.evaluate(() => { const w = window.__btgwApp.windows.get('editor').win; w.tree.sel = 'lua/anker.lua'; w.tree.invalidate(); });
+  // back on ac_pulse.lua, wherever j/k left the cursor
+  await page.evaluate(() => { const w = window.__btgwApp.windows.get('editor').win; w.tree.sel = 'lua/ac_pulse.lua'; w.tree.invalidate(); });
   await page.keyboard.press('KeyM');
   await expect(menu(page)).toBeVisible();
   const [dl] = await Promise.all([
     page.waitForEvent('download'),
     menu(page).getByRole('button', { name: 'Download' }).click(),
   ]);
-  expect(dl.suggestedFilename()).toBe('anker.lua');
+  expect(dl.suggestedFilename()).toBe('ac_pulse.lua');
   // the keyboard is back in the list afterwards
   await expect(page.locator('.ed-files')).toHaveAttribute('data-nav-active', '');
   await page.keyboard.press('Shift+F10');
@@ -73,7 +73,7 @@ test('keyboard: m in the file list opens the menu; the hint bar says so; Downloa
 test('rename a file that is not open, from its menu', async ({ page }) => {
   await editor(page);
   await page.evaluate(() => fetch('/api/fs/lua/zz_menu.lua', { method: 'PUT', body: '-- x' }));
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   await page.evaluate(() => window.__btgwApp.windows.get('editor').win.tree.refresh());
   await expect(row(page, 'lua/zz_menu.lua')).toBeVisible();
   page.once('dialog', (d) => d.accept('lua/zz_menu2.lua'));
@@ -89,7 +89,7 @@ test('rename a file that is not open, from its menu', async ({ page }) => {
 
 test('another window scrolling (the Console logging) leaves the menu open; the file list scrolling closes it', async ({ page }) => {
   await editor(page);
-  await row(page, 'lua/anker.lua').click({ button: 'right' });
+  await row(page, 'lua/ac_pulse.lua').click({ button: 'right' });
   await expect(menu(page)).toBeVisible();
   await page.waitForTimeout(300);                                   // past the popover's 200 ms grace
   // something elsewhere scrolls, as the Console does when a line arrives
@@ -110,7 +110,7 @@ test('another window scrolling (the Console logging) leaves the menu open; the f
 
 test('sizes: a file\'s menu and the status bar say its size and flash use', async ({ page }) => {
   await editor(page);
-  await row(page, 'lua/anker.lua').click({ button: 'right' });
+  await row(page, 'lua/ac_pulse.lua').click({ button: 'right' });
   await expect(menu(page).locator('.sm-info')).toHaveText(/B · (.* on flash|stored inline)/);
   await page.keyboard.press('Escape');
   await expect(page.locator('.ed-s-size')).toHaveText(/B · /);

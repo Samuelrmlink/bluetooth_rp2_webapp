@@ -432,29 +432,23 @@ library is more machinery than the bytes.
 116. The help text says the cost "is bss, which this part has to spare."
 On the SD + Classic link that sentence is no longer true.
 
-The 116 KB number pays for the Lua Anker profile, not for a launcher.
-`src/lua/Kconfig` records it: compiling the 28 KB A2687 profile peaks at
-82 KB and sits at about 14 KB once resident; 96 KB fails as soon as another
-script is also loaded; the live stack (driver, link, schema, one model
-table) is about 74 KB; 128 KB still fragments because a report builds ~68
-TLV tables a few times a second. `profiles/anker/run.lua` is 28,575 bytes
-and is what those numbers describe.
+The 116 KB number paid for the Lua Anker profile, not for a launcher.
+`src/lua/Kconfig` records it: compiling the 28 KB A2687 profile peaked at
+82 KB and sat at about 14 KB once resident; 96 KB failed as soon as another
+script was also loaded; the live stack (driver, link, schema, one model
+table) was about 74 KB; 128 KB still fragmented because a report built ~68
+TLV tables a few times a second. That profile was 28,575 bytes. It was
+removed on 2026-10-26. The same protocol is in the Anker PEX module.
 
-The launchers that start the PEX drivers do not load that profile:
+The files that remain, measured before that removal:
 
 | Script | Bytes | What it does |
 |---|---:|---|
 | `lua/pinecil.lua` | 397 | `pex.load` / `pex.start` of `pinecil` |
-| `lua/anker2.lua` | 553 | same `pex.start('anker')`; the module owns both slots |
-| `lua/anker.lua` | 557 | same, for `anker` |
-| `lua/ac_pulse.lua` | 5,556 | still a Lua script |
+| `lua/ac_pulse.lua` | 5,556 | still a Lua script; it calls the loaded Anker module |
 | `lua/profiles/pinecil.lua` | 7,231 | still a Lua profile |
-| `lua/profiles/anker/run.lua` | 28,575 | the profile the 82 KB compile peak was measured on |
 
-`anker.lua` and `pinecil.lua` never `require` the profile tree. The TLV
-tables that fragmented the arena move into the PEX module, whose RW is the
-48 KB `PEX_POOL_KB` block. That pool stays. Shrinking the arena does not
-shrink it, and setting the pool to 0 puts those bytes on the C heap.
+The two Anker launchers (557 and 553 bytes) and the 28,575-byte profile are gone. They never needed to stay once the module owned the protocol. The TLV tables that fragmented the arena are in the PEX module, whose RW is the 48 KB `PEX_POOL_KB` block. That pool stays. Shrinking the arena does not shrink it, and setting the pool to 0 puts those bytes on the C heap.
 
 On the failed image the arena is the whole SRAM lever this workload can
 give. `__end__` is 3,312 bytes past RAM, and the 8,192-byte gap floor needs
@@ -477,12 +471,11 @@ size, and first-fit fails on the largest hole, not on bytes used.
 
 Pick the number from a running image, not from the file sizes. `script.stats`
 reports arena use and the largest free block without a collection.
-`script.heap` reports the same after a full collection. Start `anker.lua`
-and `pinecil.lua` together, and any other launcher that image still runs,
-and read both ops at the compile and again once they are resident. Set the
-arena a step above the peak, not at it. The image that must still Run
-`profiles/anker/run.lua` in the editor keeps 116 KB or the 160 KB default.
-The SD + Classic defconfig, if its Lua is only the launchers, takes the cut.
+`script.heap` reports the same after a full collection. Start `pinecil.lua`
+and any other script that image still runs, and read both ops at the compile
+and again once they are resident. Set the arena a step above the peak, not
+at it. The Anker profile that needed 116 KB is gone. The SD + Classic
+defconfig, if its Lua is only the remaining scripts, takes the cut.
 
 The arena does not close the flash hole. Pair it with one of the flash
 switches above. TLS off already leaves a 37,648-byte gap, so the arena cut

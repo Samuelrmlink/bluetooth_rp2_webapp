@@ -49,7 +49,7 @@ test('Run and Stop on a .pex file start and stop the app; Lua Start is unchanged
 
   // The Lua source was not rewritten by starting the app.
   const lua = await page.evaluate(async () => {
-    const r = await fetch('/api/fs/lua/anker.lua');
+    const r = await fetch('/api/fs/lua/ac_pulse.lua');
     return r.text();
   });
   expect(lua.length).toBeGreaterThan(20);

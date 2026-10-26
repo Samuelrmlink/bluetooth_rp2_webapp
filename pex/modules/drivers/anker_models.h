@@ -1,6 +1,6 @@
 /* Product tables, setter checks and report decode.
- * Field names are copied from lua/profiles/anker/models. Unknown tags keep
- * the unknown_* names. No pex.h. */
+ * Field names were copied from the former Lua model tables. Those files are
+ * gone. Unknown tags keep the unknown_* names. No pex.h. */
 #ifndef ANKER_MODELS_H
 #define ANKER_MODELS_H
 #include <stddef.h>

@@ -794,7 +794,7 @@ void fs_end_read(int h) {
  * empty one survives a restore.
  *
  * Names are relative to the folder's parent: downloading "lua" gives
- * "lua/anker.lua", ...; the whole filesystem gives "cfg/...", "lua/...".
+ * "lua/pinecil.lua", ...; the whole filesystem gives "cfg/...", "lua/...".
  *
  * fs_tar_begin walks once to compute the exact length (Content-Length, so a
  * cut-off download is visible); fs_tar_read then produces it a piece at a

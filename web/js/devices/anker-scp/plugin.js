@@ -1,5 +1,5 @@
-// Anker small chargers (the A2687 family). Field names from
-// lua/profiles/anker/models/A2687.lua; the protocol in docs/a2687-protocol.md.
+// Anker small chargers (the A2687 family). Field names from the A2687 rows
+// in pex/modules/drivers/anker_models.c; the protocol in docs/a2687-protocol.md.
 // Windows: Ports (./ports.js: the ports and the power settings), Controls
 // (the screen and display settings), Telemetry, Screensaver (picture upload).
 

@@ -1,7 +1,7 @@
 // Anker portable power stations: the SOLIX C1000 family (A1761; A1753,
-// A1770 and A1771 share its layout). Field names are the Lua schema's
-// (lua/profiles/anker/models/A1761.lua), which are read off a decompiled app
-// and verified field by field only as far as the notes there say.
+// A1770 and A1771 share its layout). Field names are the PEX model table's
+// (pex/modules/drivers/anker_models.c), read off a decompiled app and
+// verified field by field only as far as the notes there say.
 //
 // Controls that WRITE go through the driver's anker.set op. Each ships
 // disabled (verified: false) until it has been changed on the bench C1000
@@ -21,7 +21,7 @@ export const controls = [
   { kind: 'readout', field: 'bms_temp_major_c', label: 'Battery temperature', unit: '°C' },
 
   // Writable: the four setters whose payloads were captured from the app
-  // (lua/profiles/anker/models/A1761.lua `setters`). `verified` is set once a
+  // (A1761 rows in anker_models.c). `verified` is set once a
   // change from here has been seen to move the matching telemetry field on
   // the bench C1000.
   { kind: 'switch', field: 'car_output_enabled', label: 'Car output', verified: true },

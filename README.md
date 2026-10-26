@@ -48,7 +48,7 @@ Development images load unsigned PEX modules. `CONFIG_PEX_ALLOW_UNSIGNED` defaul
 
 Lua 5.4.8, vendored in `third_party/lua`. The VM compiles a script to bytecode and runs that. `CONFIG_LUA_ENABLE` leaves the VM out of a build. With `CONFIG_PEX_LUA` (the default when Lua and PEX are both on), Lua can load and start PEX modules, and `require` finds a `<name>.<arch>.pex` before a Lua source.
 
-This is the place for high-level logic that changes often and keeps running with no client attached: a reaction to a GPIO input, a timer, a decision on a message from an outside node. Crypto, frames, and the device wire protocols stay in the firmware and in PEX modules. `lua/anker.lua`, `lua/anker2.lua`, and `lua/pinecil.lua` are launchers.
+This is the place for high-level logic that changes often and keeps running with no client attached: a reaction to a GPIO input, a timer, a decision on a message from an outside node. Crypto, frames, and the device wire protocols stay in the firmware and in PEX modules. `lua/pinecil.lua` is a launcher. The Anker module starts from `pex.load` and `pex.start` with no Lua file.
 
 A manual unload of a module Lua is holding calls the global `pex.on_unload(name)` while the module is still callable, drops Lua's reference, then unloads. A later call raises `PEX module '<name>' was unloaded`. The log lines are in [docs/Development.md](docs/Development.md#unload-while-lua-holds-a-pex-module).
 

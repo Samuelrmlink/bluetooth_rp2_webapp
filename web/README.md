@@ -119,11 +119,10 @@ closing the last one removes its DOM, listeners and stylesheet. A device with
 no plugin still gets a telemetry window.
 
 The Anker driver's writes go through `anker.set`, which accepts only the
-setters listed in the model file (`lua/profiles/anker/models/A1761.lua`,
-`setters`) — the ones whose payloads were captured from the official app.
-The A2687 charger's setters (ports, timers, charging modes, protocols, screen),
-the `anker.setters` op that lists them, and the Lua API for scripts are in
-`docs/a2687-protocol.md`.
+setters in the PEX module (`pex/modules/drivers/anker_models.c`) — the ones
+whose payloads were captured from the official app.
+The A2687 charger's setters (ports, timers, charging modes, protocols, screen)
+and the `anker.setters` op that lists them are in `docs/a2687-protocol.md`.
 
 ## The editor
 

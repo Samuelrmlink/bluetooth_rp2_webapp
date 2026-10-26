@@ -77,42 +77,34 @@ def t_proto_binding_is_thin():
     return (len(hits) == 0), (hits[0][:90] if hits else "")
 
 def t_neg_constants_agree():
-    """The negotiation keystream lives in the Lua profile; the C parity test
-    keeps a fixture copy so it can prove the generalised GHASH still matches
-    the tags the Anker-specific original produced. Two copies can drift, and a
-    drift here would be invisible until a charger stopped answering, so assert
-    they are identical.
+    """The negotiation keystream lives in the Anker PEX module. The C parity
+    test keeps a fixture copy so it can prove the generalised GHASH still
+    matches the tags the Anker-specific original produced. Two copies can
+    drift, and a drift here would be invisible until a charger stopped
+    answering, so assert they are identical.
 
-    Repointed at lua/profiles/anker/cipher.lua when the profile was split into
-    modules. A guard that quietly stops matching anything is worse than no
-    guard, so the missing-file case below fails rather than skips."""
+    The former Lua profile is gone. A guard that quietly stops matching
+    anything is worse than no guard, so a missing file fails rather than skips."""
     import pathlib
     fix = pathlib.Path(ROOT, "test/host/neg_fixture.h")
-    prof = pathlib.Path(ROOT, "lua/profiles/anker/cipher.lua")
-    if not fix.exists() or not prof.exists():
-        return False, "fixture or profile missing"
-    ftxt, ptxt = fix.read_text(), prof.read_text()
+    wire = pathlib.Path(ROOT, "pex/modules/drivers/anker_wire.c")
+    if not fix.exists() or not wire.exists():
+        return False, "fixture or anker_wire.c missing"
+    ftxt, wtxt = fix.read_text(), wire.read_text()
 
-    def c_hex(name):
-        m = re.search(re.escape(name) + r"\s*\[[^\]]*\]\s*=\s*\{(.*?)\};", ftxt, re.S)
+    def c_hex(txt, name):
+        m = re.search(re.escape(name) + r"\s*\[[^\]]*\]\s*=\s*\{(.*?)\};", txt, re.S)
         if not m:
             return None
         return "".join(b.lower() for b in re.findall(r"0x([0-9a-fA-F]{2})", m.group(1)))
 
-    def lua_hex(name):
-        # The value may be several quoted chunks joined with '..'.
-        m = re.search(r"\b" + re.escape(name) + r"\s*=\s*bytes\.unhex\((.*?)\)\n", ptxt, re.S)
-        if not m:
-            return None
-        return "".join(re.findall(r"'([0-9a-fA-F]*)'", m.group(1))).lower()
-
-    for cname, lname in (("NEG_KEYSTREAM", "KEYSTREAM"), ("NEG_GHASH_H", "GHASH_H"),
+    for fname, wname in (("NEG_KEYSTREAM", "KEYSTREAM"), ("NEG_GHASH_H", "GHASH_H"),
                          ("NEG_EJ0", "EJ0"), ("ANKER_GCM_AAD", "AAD")):
-        a, b = c_hex(cname), lua_hex(lname)
+        a, b = c_hex(ftxt, fname), c_hex(wtxt, wname)
         if not a or not b:
-            return False, f"could not read {cname} / {lname}"
+            return False, f"could not read {fname} / {wname}"
         if a != b:
-            return False, f"{cname} != the profile's {lname}"
+            return False, f"{fname} != anker_wire.c {wname}"
     return True, "keystream, H, E(J0), AAD"
 
 def t_wireguard_is_never_default():
@@ -517,46 +509,50 @@ def t_dhcp_binds_specific_ip():
     return True, "per-interface :67 binds; no dead reuse option"
 
 def t_anker_model_schemas():
-    """Every per-model schema must satisfy the contract the loader assumes.
+    """The Anker product tables live in the PEX module.
 
-    The loader does require('profiles.anker.models.' .. product_code), so a
-    file whose name and product_code disagree is a schema that never loads --
-    silently, because a missing model is a legitimate state that just falls
-    back to raw hex. That is the failure this catches.
-
-    It also insists on an explicit `verified` flag. Schemas mined from the
-    decompiled app cannot be checked against hardware we do not have, and a
-    confident-looking wrong field name is worse than a missing one, so saying
-    which is which is not optional."""
+    The former Lua loader did require('profiles.anker.models.' .. product_code).
+    That tree is gone. A1761 and A2687 have to stay named in the C tables, and
+    only A2687 is marked verified. The byte checks are host_test.c."""
     import pathlib
-    d = pathlib.Path(ROOT, "lua/profiles/anker/models")
-    if not d.is_dir():
-        return False, "lua/profiles/anker/models is missing"
-    files = sorted(d.glob("*.lua"))
-    if not files:
-        return False, "no model schemas at all"
-    unverified = []
-    for f in files:
-        src = f.read_text()
-        m = re.search(r"product_code\s*=\s*'([A-Z0-9]+)'", src)
-        if not m:
-            return False, f"{f.name} declares no product_code"
-        if m.group(1) != f.stem:
-            return False, (f"{f.name} declares product_code '{m.group(1)}' -- "
-                           f"the loader would look for {m.group(1)}.lua")
-        if not re.search(r"\bfamily\s*=\s*'(pps|scp)'", src):
-            return False, f"{f.name} has no family = 'pps' or 'scp'"
-        if not re.search(r"\bfields\s*=", src):
-            return False, f"{f.name} has no fields table"
-        vm = re.search(r"\bverified\s*=\s*(true|false)", src)
-        if not vm:
-            return False, f"{f.name} does not say whether it is verified"
-        if vm.group(1) == "false":
-            unverified.append(f.stem)
-    detail = f"{len(files)} schema(s)"
-    if unverified:
-        detail += f", {len(unverified)} unverified ({', '.join(sorted(unverified))})"
-    return True, detail
+    h = pathlib.Path(ROOT, "pex/modules/drivers/anker_models.h").read_text()
+    c = pathlib.Path(ROOT, "pex/modules/drivers/anker_models.c").read_text()
+    for ident in ("ANKER_MODEL_A1761", "ANKER_MODEL_A2687"):
+        if ident not in h:
+            return False, f"{ident} missing from anker_models.h"
+    for code in ('"A1761"', '"A2687"'):
+        if code not in c:
+            return False, f"{code} missing from anker_models.c"
+    if "SET_A1761" not in c or "SET_A2687" not in c:
+        return False, "setter tables missing"
+    if "return id == ANKER_MODEL_A2687" not in c:
+        return False, "verified is not A2687-only"
+    return True, "A1761 and A2687 tables present; A2687 is the verified model"
+
+def t_anker_driver_host():
+    """Compile and run the pure Anker and Pinecil driver checks. These are
+    the vectors that used to load the Lua profile."""
+    binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_anker_host")
+    srcs = " ".join([
+        "pex/modules/drivers/host_test.c",
+        "pex/modules/drivers/anker_adv.c",
+        "pex/modules/drivers/anker_wire.c",
+        "pex/modules/drivers/anker_models.c",
+        "pex/modules/drivers/pinecil_live.c",
+        "src/codec/anker_tlv.c",
+        "src/crypto/ghash.c",
+    ])
+    rc, out = sh(f"gcc -O1 -Wall -Wno-unused-function "
+                 f"-Ipex/modules/drivers -Isrc -Isrc/codec -Isrc/crypto "
+                 f"-o {binp} {srcs} -lm")
+    if rc:
+        errs = [l for l in out.splitlines() if "error:" in l]
+        return False, errs[0][:120] if errs else "host_test build failed"
+    rc, out = sh(binp)
+    if rc:
+        bad = next((l for l in out.splitlines() if l.startswith("FAIL") or l.endswith("failed")), "")
+        return False, bad[:120] or "host_test failed"
+    return True, (out.strip().splitlines() or ["ok"])[-1][:80]
 
 def t_inflate():
     """The board's gzip inflater (src/util/inflate.c) against zlib: Python
@@ -832,11 +828,8 @@ def t_ca_roots():
     return rc == 0, out.strip().splitlines()[-1] if out.strip() else ""
 
 def t_lua_proto():
-    """The profile's Lua, on a host, against the REAL C bindings and the REAL
-    vendored Lua -- no board, no flash cycle, no charger. This is the dividend
-    of putting the device-specific half in Lua: the frame construction and the
-    telemetry decode, which are the parts most likely to be wrong, are pure
-    functions of bytes and can be checked in milliseconds."""
+    """Firmware codec and crypto bindings, on a host, against the vendored Lua.
+    The Anker profile checks moved to pex/modules/drivers/host_test.c."""
     uecc = os.path.expanduser("~/.pico-sdk/sdk/2.3.0/lib/btstack/3rd-party/micro-ecc")
     binp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "btgw_luaproto")
     rc, out = sh(f"gcc -O1 -w -DMAKE_LIB=1 "
@@ -1488,7 +1481,7 @@ def main():
     step(0, "protocol binding stays a thin wrapper", t_proto_binding_is_thin)
     step(0, "device registry stays transport-neutral", t_registry_transport_neutral)
     step(0, "frozen protocol vectors", t_parity)
-    step(0, "neg constants agree with the Lua profile", t_neg_constants_agree)
+    step(0, "neg constants agree with the Anker wire module", t_neg_constants_agree)
     step(0, "protocol Lua on a host", t_lua_proto)
     step(0, "the Lua arena, invariants and fuzz", t_lua_heap)
     step(0, "gzip inflate matches zlib, rejects corrupt input", t_inflate)
@@ -1522,7 +1515,8 @@ def main():
     step(0, "OTA flash layout is consistent", t_ota_partition_layout)
     step(0, "OTA keys: public in tree, private out", t_ota_keys)
     step(0, "SMP writes flash from the loop only", t_ota_flash_from_loop_only)
-    step(0, "anker model schemas match their filenames", t_anker_model_schemas)
+    step(0, "anker model tables name A1761 and A2687", t_anker_model_schemas)
+    step(0, "anker and pinecil driver host checks", t_anker_driver_host)
     step(0, "SPI bus: claims, chains, completes from the loop", t_spibus)
     step(0, "SD CRCs (CRC7, CRC16, 4-line CRC16 as one CRC64)", t_sd_crc)
     step(0, "SD card on SDIO and on SPI vs a simulated card", t_sd_card)
