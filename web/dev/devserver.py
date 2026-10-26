@@ -83,11 +83,13 @@ def _png(w, h):
 
 def _seed_fs():
     fs = {}
-    for rel in ["lua/ac_pulse.lua", "lua/pinecil.lua",
-                "lua/profiles/pinecil.lua", "lua/profiles/pinecil/driver.json"]:
+    for rel in ["lua/ac_pulse.lua", "lua/pinecil.lua", "lua/profiles/pinecil.lua"]:
         path = os.path.join(REPO, rel)
         if os.path.exists(path):
             fs[rel] = open(path, "rb").read()
+    manifest = os.path.join(REPO, "pex/modules/drivers/pinecil.driver.json")
+    if os.path.exists(manifest):
+        fs["pex/pinecil.driver.json"] = open(manifest, "rb").read()
     # Editor fixture only. Not a file in the repo.
     fs["lua/note.lua"] = b"-- editor fixture\nreturn 1\n"
     fs["cfg/wifi.json"] = b'{"mode":"auto","networks":[{"ssid":"bench"}]}'

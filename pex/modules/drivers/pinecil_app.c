@@ -7,6 +7,8 @@
 #include "pinecil_live.h"
 #include <string.h>
 
+/* Advertised when the name is missing. Same UUID as the scanner manifest. */
+#define SVC_LIVE "d85ef000-168e-4a71-aa55-33e27f9bc533"
 #define SVC_BULK "9eae1000-9d0d-48c5-aa55-33e27f9bc533"
 #define CHR_LIVE "9eae1001-9d0d-48c5-aa55-33e27f9bc533"
 #define CHR_BUILD "9eae1003-9d0d-48c5-aa55-33e27f9bc533"
@@ -222,7 +224,7 @@ static void start_connect(void) {
 }
 
 static int hunt_look(void) {
-    int n = pex_bt_devices(s_devs, 8, "Pinecil", NULL);
+    int n = pex_bt_devices(s_devs, 8, "Pinecil", SVC_LIVE);
     if (n <= 0) { return 0; }
     if (n > 8) { n = 8; }
     memcpy(s_addr, s_devs[0].addr, 6);

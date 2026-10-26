@@ -3,11 +3,17 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { manifestFor, manifestPath, deployDriverManifest } from '../../js/editor/drivermanifests.js';
 
-const source = readFileSync(new URL('../../../pex/modules/drivers/anker.driver.json', import.meta.url), 'utf8');
+const ankerSource = readFileSync(new URL('../../../pex/modules/drivers/anker.driver.json', import.meta.url), 'utf8');
+const pinecilSource = readFileSync(new URL('../../../pex/modules/drivers/pinecil.driver.json', import.meta.url), 'utf8');
 
 test('the anker manifest matches pex/modules/drivers/anker.driver.json', () => {
-  assert.deepEqual(manifestFor('anker'), JSON.parse(source));
+  assert.deepEqual(manifestFor('anker'), JSON.parse(ankerSource));
   assert.equal(manifestPath(manifestFor('anker')), 'pex/anker.driver.json');
+});
+
+test('the pinecil manifest matches pex/modules/drivers/pinecil.driver.json', () => {
+  assert.deepEqual(manifestFor('pinecil'), JSON.parse(pinecilSource));
+  assert.equal(manifestPath(manifestFor('pinecil')), 'pex/pinecil.driver.json');
 });
 
 test('deploy writes pex/anker.driver.json and skips an unknown module', async () => {
@@ -19,7 +25,7 @@ test('deploy writes pex/anker.driver.json and skips an unknown module', async ()
   assert.equal(r.ok, true);
   assert.equal(r.path, 'pex/anker.driver.json');
   assert.equal(writes[0].path, 'pex/anker.driver.json');
-  assert.equal(writes[0].body, source);
+  assert.equal(writes[0].body, ankerSource);
   assert.deepEqual(JSON.parse(writes[0].body), manifestFor('anker'));
 
   let called = false;

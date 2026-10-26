@@ -1,6 +1,7 @@
 // Scanner manifests written when a PEX module is installed.
 //
-// pex/modules/drivers/anker.driver.json is the canonical copy in the repo.
+// pex/modules/drivers/anker.driver.json and pinecil.driver.json are the
+// canonical copies in the repo.
 // A successful install writes pex/<id>.driver.json on the device, which the
 // scanner reads before any Lua profile. The page cannot read the repo at
 // runtime, so the text is kept here and the unit test checks it still matches.
@@ -17,7 +18,20 @@ const ANKER_JSON = `{
 }
 `;
 
-const MANIFESTS = { anker: ANKER_JSON };
+const PINECIL_JSON = `{
+  "id": "pinecil",
+  "title": "Pinecil V2",
+  "kind": "pex",
+  "file": "pex/pinecil.m33.pex",
+  "note": "Name prefix Pinecil. The live service UUID is the same iron when the name is missing.",
+  "match": [
+    { "all": [ { "name_contains": "Pinecil" } ] },
+    { "all": [ { "uuid128": "d85ef000-168e-4a71-aa55-33e27f9bc533" } ] }
+  ]
+}
+`;
+
+const MANIFESTS = { anker: ANKER_JSON, pinecil: PINECIL_JSON };
 
 /** The manifest object, or null when this module has none. */
 export function manifestFor(name) {

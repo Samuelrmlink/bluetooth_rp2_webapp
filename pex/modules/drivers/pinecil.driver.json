@@ -1,9 +1,9 @@
 {
   "id": "pinecil",
   "title": "Pinecil V2",
-  "kind": "lua",
-  "file": "lua/pinecil.lua",
-  "note": "The profile matches the name prefix. The live service UUID is the same iron when the name is missing.",
+  "kind": "pex",
+  "file": "pex/pinecil.m33.pex",
+  "note": "Name prefix Pinecil. The live service UUID is the same iron when the name is missing.",
   "match": [
     { "all": [ { "name_contains": "Pinecil" } ] },
     { "all": [ { "uuid128": "d85ef000-168e-4a71-aa55-33e27f9bc533" } ] }

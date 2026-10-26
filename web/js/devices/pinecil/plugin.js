@@ -1,6 +1,5 @@
-// The Pinecil soldering iron. Its driver (lua/profiles/pinecil.lua)
-// registers pinecil.set_temp, which the old Pinecil page drove -- so the
-// setpoint is a working control from the start.
+// The Pinecil soldering iron. The PEX module registers pinecil.set_temp.
+// The setpoint is a working control from the start.
 
 export const controls = [
   { kind: 'readout', field: 'tip_c', label: 'Tip', unit: '°C', digits: 0 },
