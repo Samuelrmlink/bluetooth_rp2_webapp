@@ -11,8 +11,8 @@ while Bluetooth holds the radio.
 
   {"op":"script.start","params":{"name":"ac_pulse"}}
 
-Needs the Anker driver running. The native PEX module is preferred when it is
-loaded; otherwise the setter queue is profiles.anker.control from lua/anker.lua.
+Needs the Anker PEX module running. require 'anker' is the table that
+module opens (device, get, age_ms, set).
 
 Rules it keeps:
   - Acts only when the outlet is reported ON, from fresh telemetry.
@@ -20,12 +20,12 @@ Rules it keeps:
     (an error in the middle is caught), and re-sent until telemetry confirms
     it or ON_DEADLINE_MS passes -- re-finding the device each time, since the
     driver may reconnect.
-  - Records every step in control.last_pulse, to be read back once the
+  - Records every step in ac_pulse.last, to be read back once the
     network returns:
-      {"op":"script.eval","params":{"chunk":"return table.concat(require('profiles.anker.control').last_pulse.steps, '\\n')"}}
+      {"op":"script.eval","params":{"chunk":"return table.concat(ac_pulse.last.steps, '\\n')"}}
 ]]
 
-local control = require 'profiles.anker.control'
+ac_pulse = {}
 
 local OFF_S          = 5        -- how long the outlet stays off
 local FIELD          = 'ac_output_enabled'
@@ -34,7 +34,7 @@ local CONFIRM_MS     = 15000    -- wait this long for telemetry to show a change
 local ON_DEADLINE_MS = 300000   -- keep trying to switch back on for 5 minutes
 
 local R = { started = sys.ms(), steps = {}, result = 'running' }
-control.last_pulse = R
+ac_pulse.last = R
 
 local function note(s)
   R.steps[#R.steps + 1] = ('%6.1f s  %s'):format((sys.ms() - R.started) / 1000, s)
@@ -42,20 +42,17 @@ local function note(s)
 end
 
 local function device()
-  -- Prefer the native driver. Check pex.info before require: a missing .pex
-  -- must not fall through into the Lua launcher.
-  if pex and pex.info and pex.info('anker') then
-    local api = require 'anker'
-    local a = api.device()
-    if not a then return nil end
-    local d = {
-      set = function(field, value) return api.set(a, field, value) end,
-      at = sys.ms() - (api.age_ms(a) or 1e9),
-    }
-    d.sample = setmetatable({}, { __index = function(_, k) return api.get(a, k) end })
-    return a, d
-  end
-  for a, d in pairs(control.devices) do return a, d end
+  -- Check pex.info before require: a missing module must not be loaded here.
+  if not (pex and pex.info and pex.info('anker')) then return nil end
+  local api = require 'anker'
+  local a = api.device()
+  if not a then return nil end
+  local d = {
+    set = function(field, value) return api.set(a, field, value) end,
+    at = sys.ms() - (api.age_ms(a) or 1e9),
+  }
+  d.sample = setmetatable({}, { __index = function(_, k) return api.get(a, k) end })
+  return a, d
 end
 
 -- Wait for a telemetry sample, newer than `since`, reporting FIELD == v.
@@ -72,7 +69,7 @@ end
 -- --- preconditions: nothing has been sent yet, so just stop -----------------
 local addr, dev = device()
 if not dev then
-  note('no Anker driver is holding a device -- start lua/anker.lua first')
+  note('no Anker driver is holding a device -- start the anker PEX module first')
   R.result = 'not started: no device'
   return
 end

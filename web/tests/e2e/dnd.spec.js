@@ -15,8 +15,8 @@ const text = (page, p) => page.evaluate(async (path) => (await fetch(`/api/fs/${
 
 async function editor(page) {
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
-  await expect(row(page, 'lua/anker.lua')).toBeVisible();
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
+  await expect(row(page, 'lua/ac_pulse.lua')).toBeVisible();
   await page.waitForFunction(() => {
     const v = window.__btgwApp._layout.version;
     const s = window.__settle || (window.__settle = { v, t: performance.now() });
@@ -42,7 +42,7 @@ test('files dropped on a folder row upload into it; on a file row, beside it', a
   await drop(page, '.ft-row[data-path="lua/profiles"]', [{ name: 'dropped.lua', text: 'return "dropped"\n' }]);
   await expect(notice(page)).toContainText('Uploaded 1 of 1 file to lua/profiles/');
   expect(await text(page, 'lua/profiles/dropped.lua')).toBe('return "dropped"\n');
-  await drop(page, '.ft-row[data-path="lua/anker.lua"]', [{ name: 'beside.txt', text: 'b' }, { name: 'two.txt', text: '2' }]);
+  await drop(page, '.ft-row[data-path="lua/ac_pulse.lua"]', [{ name: 'beside.txt', text: 'b' }, { name: 'two.txt', text: '2' }]);
   await expect(notice(page)).toContainText('Uploaded 2 of 2 files to lua/');
   expect(await text(page, 'lua/beside.txt')).toBe('b');
   await expect(row(page, 'lua/beside.txt')).toBeVisible();
@@ -92,7 +92,7 @@ test('a row dragged onto a folder moves there; its open tab follows; a folder mo
   await expect(page.locator('.ed-ftab[data-path="cfg/www/pinecil.lua"]')).toBeVisible();
   // never into itself
   await page.evaluate(() => window.__btgwApp.windows.get('editor').win.moveTo('lua', 'lua/profiles'));
-  expect(await status(page, 'lua/anker.lua')).toBe(200);
+  expect(await status(page, 'lua/ac_pulse.lua')).toBe(200);
 });
 
 test('dragging a row out carries a download: the file, or a folder as .tar', async ({ page }) => {
@@ -101,7 +101,7 @@ test('dragging a row out carries a download: the file, or a folder as .tar', asy
   await expect(row(page, 'www/demo.js.gz')).toBeVisible();
   const data = await page.evaluate(() => {
     const out = {};
-    for (const p of ['lua/anker.lua', 'www/demo.js.gz', 'lua/profiles']) {
+    for (const p of ['lua/ac_pulse.lua', 'www/demo.js.gz', 'lua/profiles']) {
       const dt = new DataTransfer();
       document.querySelector(`.ft-row[data-path="${p}"]`).dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
       out[p] = dt.getData('DownloadURL');
@@ -109,10 +109,10 @@ test('dragging a row out carries a download: the file, or a folder as .tar', asy
     }
     return out;
   });
-  expect(data['lua/anker.lua']).toMatch(/^application\/octet-stream:anker\.lua:http.*\/api\/fs\/lua\/anker\.lua$/);
+  expect(data['lua/ac_pulse.lua']).toMatch(/^application\/octet-stream:ac_pulse\.lua:http.*\/api\/fs\/lua\/ac_pulse\.lua$/);
   expect(data['www/demo.js.gz']).toMatch(/:demo\.js:/);                       // unpacked on the way
   expect(data['lua/profiles']).toMatch(/^application\/x-tar:profiles\.tar:http.*\/api\/tar\/lua\/profiles\?mtime=\d+$/);
-  await expect(row(page, 'lua/anker.lua')).toHaveAttribute('draggable', 'true');
+  await expect(row(page, 'lua/ac_pulse.lua')).toHaveAttribute('draggable', 'true');
 });
 
 const confirmDlg = (page) => page.locator('#confirm-delete-dlg');
@@ -172,6 +172,6 @@ test.describe('touch', () => {
   test.use({ hasTouch: true, isMobile: true });
   test('rows are not draggable on a touch screen (a long press is the menu)', async ({ page }) => {
     await editor(page);
-    await expect(row(page, 'lua/anker.lua')).not.toHaveAttribute('draggable', 'true');
+    await expect(row(page, 'lua/ac_pulse.lua')).not.toHaveAttribute('draggable', 'true');
   });
 });

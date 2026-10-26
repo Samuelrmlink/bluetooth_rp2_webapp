@@ -1,5 +1,6 @@
 /* Anker advertisement identify. Pure: no pex.h, so the host test links it.
- * Layout is lua/profiles/anker/adv.lua. mfg includes the 2-byte company id.
+ * Layout matches the former advertisement helper. That file is gone.
+ * mfg includes the 2-byte company id.
  * Read the version byte before the capability: a v2 sku is one byte longer,
  * and the last sku character of an A2687 is 0x36, which has the GCM bit set. */
 #ifndef ANKER_ADV_H

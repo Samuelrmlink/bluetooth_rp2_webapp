@@ -18,13 +18,13 @@ Add a row when a session uses another unit.
 
 - [ ] **H1 — Anker PEX on the A2687**
   - Gates: [R14](Feature-Roadmap.md) in the feature roadmap.
-  - The running driver is the signed Anker PEX module. `lua/profiles/anker/` is still the spec.
+  - The running driver is the Anker PEX module. The spec is `pex/modules/drivers/anker_app.c` and `anker_models.c`.
   - See: the link comes up, telemetry arrives, `anker.set` applies a value the setters list allows, `anker.history` returns records, and `anker.screensaver` runs on this model.
   - Seen:
 
 - [ ] **H2 — Anker PEX on the C1000 (A1761)**
   - Gates: R14.
-  - Same module, the other product. Screensaver is an A2687 behavior. This check is the C1000 session: link, telemetry, and a setter the A1761 profile allows.
+  - Same module, the other product. Screensaver is an A2687 behavior. This check is the C1000 session: link, telemetry, and a setter the A1761 table allows.
   - Seen:
 
 - [ ] **H3 — Pinecil PEX on a Pinecil V2**

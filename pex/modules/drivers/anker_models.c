@@ -1,5 +1,6 @@
-/* Product tables copied from lua/profiles/anker. Unknown tags keep the
- * unknown_* names. Width of a scalar comes from the bytes, not from the map. */
+/* Product tables copied from the former Lua profile. That profile is gone.
+ * Unknown tags keep the unknown_* names. Width of a scalar comes from the
+ * bytes, not from the map. */
 #include "anker_models.h"
 #include <string.h>
 

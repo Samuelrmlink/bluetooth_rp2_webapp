@@ -78,31 +78,26 @@ The app re-sends its stored protocol masks every time it connects (`0x021D [0,59
 - **Not captured (deliberately untouched):** Restore Default Settings, Firmware Update, Delete Device;
   screensaver styles other than custom images (this unit's ability flags say it has none).
 
-## WebSocket API (the gateway's Anker driver, `lua/profiles/anker/run.lua`)
+## WebSocket API (the Anker PEX module, `pex/modules/drivers/anker_app.c`)
 - `anker.set {device, field, value}` → `{queued, field, value}` or `{error, message}`
-  (`unknown_field`, `bad_value`, `not_this_device`). Objects/arrays (`custom_mode`, `protocols`)
-  are read from the request's raw JSON. The change shows in `profile.anker.telemetry` ~1 s later.
-  The charger's answer is logged (`anker: set <field>=<value>: accepted` or the reason); a write
-  that fails — refused, timed out, or out of memory — fails alone (`setter.transact` never raises),
-  and an error anywhere in a session ends that session, logged, and the driver reconnects
-  (`run.lua`), rather than leaving the launcher dead.
+  (`unknown_field`, `bad_value`, `not_this_device`). Objects (`custom_mode`, `protocols`)
+  are read from the request's JSON. The change shows in `profile.anker.telemetry` ~1 s later.
+  A write that fails — refused, timed out, or out of memory — fails alone, and an error in a
+  session ends that session. The module reconnects.
 - The gateway's own reconnect does not change the mode (checked: Custom survives it). Its bind
   burst does send `0x021D` with 59/59/59, so protocol masks set from here or the app are reset to
   the default on every gateway connect.
 - `anker.history {device}` → `{queued}`; then `profile.anker.history` events, one per packet:
   `{addr, id, seq, n, last, span_min, interval_s, hex}` (the packet's n×12 record bytes), and a
   final `{addr, id, done, packets, records}` or `{done, error}`. The web's History window draws it.
+- `anker.screensaver {device, step, ...}` queues one upload step (`select`, `begin`, or `data`).
+  The reply is `{queued, step}`. Progress comes back as `profile.anker.screensaver`.
 - `anker.setters {device}` → `{device, setters: {field: {opcode, values, min, max, names, kind,
-  verified, readback}}}` — what a UI can offer.
+  verified, readback}}}` — what a UI can offer. The tables are in `anker_models.c`.
 
-## Lua API (`require 'profiles.anker.control'`)
-```lua
-local anker = require 'profiles.anker.control'
-anker.set('A2687', 'c3_on', 0)                                -- queued, returns at once
-local ok, why = anker.set_wait('A2687', 'backlight_pct', 60)  -- waits for the read-back
-anker.set_wait('A2687', 'custom_mode', { mode = 1, auto_exit = 1, c1_w = 100, c2_w = 45, c3_w = 15 })
-print(anker.get('A2687', 'c2_w'), anker.find('A2687'))
-for field, rule in pairs(anker.setters('A2687')) do print(field, rule.opcode) end
-```
-`which` is an address, a product code, or nil for the only device. `set_wait` blocks the calling
-script (never use it in an op handler).
+## Lua, once the module is loaded
+`require 'anker'` is the table `PEX_LUA_OPEN` pushes. `device()` returns the address of the
+preferred sample (a PPS unit when one is reporting). `get(addr, field)` and `age_ms(addr)` read
+that sample. `set(addr, field, value)` queues a write and returns `{queued, field}` or
+`{error, message}`. There is no blocking wait. `lua/ac_pulse.lua` is a script that uses this
+table. It does not start the module.

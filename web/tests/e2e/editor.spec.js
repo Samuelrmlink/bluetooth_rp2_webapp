@@ -38,14 +38,14 @@ test('grey -> modified -> saved -> loaded -> changed since -> loaded -> stopped'
 
 test('a script the arena is running shows as loaded when opened', async ({ page }) => {
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   await expect(state(page)).toContainText('loaded', { timeout: 8000 });
   await expect(page.locator('.ed-s-arena')).toContainText('arena');
 });
 
 test('vim: motions, dd then u restores exactly, and the Esc ladder', async ({ page }) => {
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   const ta = page.locator('.ed-input');
   await ta.focus();
   const orig = await ta.inputValue();
@@ -69,7 +69,7 @@ test('vim: motions, dd then u restores exactly, and the Esc ladder', async ({ pa
 test('undo groups a typed word even with the highlight redrawing between keys', async ({ page }) => {
   await ready(page);
   await page.evaluate(() => window.__btgwApp.setPref('vim', false));
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   const ta = page.locator('.ed-input');
   const orig = await ta.inputValue();
   await ta.focus();

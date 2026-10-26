@@ -12,7 +12,7 @@ const selected = (page) => focusedTa(page).evaluate((t) => t.value.slice(t.selec
 async function editor(page, vim = false) {
   await ready(page);
   await page.evaluate((v) => window.__btgwApp.setPref('vim', v), vim);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   await expect(focusedTa(page)).toHaveValue(/./);
 }
 
@@ -26,10 +26,10 @@ test('Ctrl+Shift+F: the Search tab; results by file; a click opens the file with
   await page.keyboard.type('require');
   await page.keyboard.press('Enter');
   await expect(status(page)).toContainText(/\d+ match(es)? in \d+ files?/);
-  await expect(page.locator('.es-file', { hasText: 'anker.lua' }).first()).toBeVisible();
-  const hit = page.locator('.es-group', { has: page.locator('.es-file[title="lua/pinecil.lua"]') }).locator('.es-hit').first();
+  await expect(page.locator('.es-file', { hasText: 'ac_pulse.lua' }).first()).toBeVisible();
+  const hit = page.locator('.es-group', { has: page.locator('.es-file[title="lua/ac_pulse.lua"]') }).locator('.es-hit').first();
   await hit.click();
-  await expect(name(page)).toHaveText('lua/pinecil.lua');
+  await expect(name(page)).toHaveText('lua/ac_pulse.lua');
   await expect.poll(async () => (await selected(page)).toLowerCase()).toBe('require');
   // back to the file list with its tab
   await page.locator('.ed-tab[data-tab="files"]').click();
@@ -61,7 +61,7 @@ test('what is searched: unsaved edits, .gz files as text, not cache/; options an
   await w((x) => x.sidebarTab('search'));
   await w((x) => x.search.run({ q: 'zebra_unsaved' }));
   await expect(status(page)).toHaveText(/^1 match in 1 file/);
-  await expect(page.locator('.es-file')).toHaveAttribute('title', 'lua/anker.lua');
+  await expect(page.locator('.es-file')).toHaveAttribute('title', 'lua/ac_pulse.lua');
   // a compressed web file, as its text
   await w((x) => x.search.run({ q: 'answer = 42' }));
   await expect(page.locator('.es-file')).toHaveAttribute('title', 'www/demo.js.gz');

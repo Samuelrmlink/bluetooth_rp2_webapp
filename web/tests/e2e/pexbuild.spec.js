@@ -101,7 +101,7 @@ async function openSource(page) {
 
 test('a file with no Pexfile cannot build, and a second board is not selected', async ({ page }) => {
   await ready(page);
-  await page.evaluate(() => window.__btgwApp.openFile('lua/anker.lua'));
+  await page.evaluate(() => window.__btgwApp.openFile('lua/ac_pulse.lua'));
   await expect(page.locator('.ed-b-build')).toHaveAttribute('title', /not in a project/, { timeout: 15000 });
   await expect(page.locator('.ed-b-build')).toBeDisabled();
   await expect(page.locator('.ed-b-brun')).toBeDisabled();

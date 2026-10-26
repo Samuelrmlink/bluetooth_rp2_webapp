@@ -1,7 +1,7 @@
 // A2687 screensaver upload -- the browser's half, DOM-free and tested.
 //
 // The gateway's driver only frames one step at a time and reports what the
-// charger answered (lua/profiles/anker/screensaver.lua). Everything else is
+// charger answered (the anker.screensaver op). Everything else is
 // here: the CRC32, the image id, cutting the JPEG into packets, the
 // window-of-10 loop, resuming from what the charger says it has, retries.
 //

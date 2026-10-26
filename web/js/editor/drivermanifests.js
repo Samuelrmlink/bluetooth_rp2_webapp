@@ -1,9 +1,9 @@
 // Scanner manifests written when a PEX module is installed.
 //
-// lua/profiles/anker/driver.json is the canonical copy in the repo. The
-// scanner reads pex/<id>.driver.json before that profile, so a successful
-// install writes the pex/ copy. The page cannot read the repo at runtime,
-// so the text is kept here and the unit test checks it still matches.
+// pex/modules/drivers/anker.driver.json is the canonical copy in the repo.
+// A successful install writes pex/<id>.driver.json on the device, which the
+// scanner reads before any Lua profile. The page cannot read the repo at
+// runtime, so the text is kept here and the unit test checks it still matches.
 
 const ANKER_JSON = `{
   "id": "anker",

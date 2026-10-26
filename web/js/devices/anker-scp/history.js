@@ -1,6 +1,6 @@
 // The A2687's History window: the last six hours of each port's output, read
 // from the charger itself (0x020C through the driver's anker.history op --
-// lua/profiles/anker/history.lua, docs/a2687-protocol.md). 73 records, five
+// docs/a2687-protocol.md). 73 records, five
 // minutes apart, oldest first, the last one "now": per port mV and mA, or no
 // reading (an empty port).
 //

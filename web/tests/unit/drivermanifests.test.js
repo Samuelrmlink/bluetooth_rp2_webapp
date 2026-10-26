@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { manifestFor, manifestPath, deployDriverManifest } from '../../js/editor/drivermanifests.js';
 
-const source = readFileSync(new URL('../../../lua/profiles/anker/driver.json', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../../../pex/modules/drivers/anker.driver.json', import.meta.url), 'utf8');
 
-test('the anker manifest matches lua/profiles/anker/driver.json', () => {
+test('the anker manifest matches pex/modules/drivers/anker.driver.json', () => {
   assert.deepEqual(manifestFor('anker'), JSON.parse(source));
   assert.equal(manifestPath(manifestFor('anker')), 'pex/anker.driver.json');
 });
