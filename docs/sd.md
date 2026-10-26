@@ -2,8 +2,8 @@
 
 An optional microSD card as a second filesystem next to the LittleFS on
 flash: FatFs (FAT12/16/32 and exFAT), reached over HTTP at `/api/sd` (the
-same API as km003c_rp2_webapp) and shown in the web editor as a top-level
-`sd` folder. Two buses: **SDIO** 4-bit on PIO, and **SPI** through the shared
+same API as km003c_rp2_webapp). A file or folder is also readable at
+`/sd/<path>`. The web editor shows the card as a top-level `sd` folder. Two buses: **SDIO** 4-bit on PIO, and **SPI** through the shared
 SPI bus layer. No board has the slot yet. The feature is compiled, and
 tested in simulation, so it is ready when one does.
 
@@ -205,7 +205,8 @@ makes every transaction exclusive. What an SD card needs on top (`src/io/spibus.
 ## HTTP API — `/api/sd`
 
 Without `CONFIG_SD` every `/api/sd` path answers `404` (the web app checks
-`sys.info.modules` for `sd`).
+`sys.info.modules` for `sd`). `/sd` is claimed only when the card is
+compiled in. On a build without it, that URL is an ordinary LittleFS path.
 
 | Method | Path | |
 |---|---|---|
@@ -213,6 +214,7 @@ Without `CONFIG_SD` every `/api/sd` path answers `404` (the web app checks
 | `POST` | `/api/sd/format` | `{"fs":"exfat"\|"fat32","cluster":N}` (0/absent = default). `202`, then follow `format` in the status. `409` while one runs |
 | `POST` | `/api/sd/bench` | `{"mb":N}` (default 10). `202`; results in the status `bench` |
 | `GET` | `/api/sd/files[/<path>]` | A folder: `{"dir":"…","files":[{"name":"…","dir":true},{"name":"…","size":123}]}` (streamed, no Content-Length). A file: its bytes with Content-Length and a type by extension |
+| `GET` | `/sd[/<path>]` | The same read. `/sd` and `/sd/` are the card root. A folder is the JSON listing, not `index.html`. `PUT`, `DELETE`, and `POST` answer `404` with `{"error":"GET"}`. `/sdk` is not this route. No `.gz` preference |
 | `PUT` | `/api/sd/files/<path>` | Upload, streamed to the card with TCP back-pressure; parents created; an existing file replaced. `{"ok":true,"bytes":n}`. `507` before writing if it cannot fit |
 | `PUT` | `/api/sd/files/<path>/` | Make a folder (and its parents). `{"ok":true,"dir":true}` (added here; km003c has no mkdir) |
 | `DELETE` | `/api/sd/files/<path>` | A file or an empty folder |
@@ -317,7 +319,8 @@ hardware.
 * `web/js/fs.js` routes any path under `sd/` to `/api/sd/files` (same
   answers as `/api/fs`), adds the `sd` folder at the root when `sys.info`
   lists the `sd` module, refuses a move between the card and flash, and has
-  no 128 KB limit there (FAT32's 4 GB).
+  no 128 KB limit there (FAT32's 4 GB). A browser can also fetch a card
+  file at `GET /sd/<path>`. The editor stays on `/api/sd/files`.
 * The editor keeps flash-only rules off the card: no `.bak` on save, no
   compression, no tar download of a card folder, Lua script status only for
   `lua/` and `staged/`, `sd/` skipped by a whole-device search (search it by

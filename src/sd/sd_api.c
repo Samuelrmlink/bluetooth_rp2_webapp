@@ -495,7 +495,11 @@ static const char *mime_of(const char *name) {
     static const char *const map[][2] = {
         {".json", "application/json"},  {".txt", "text/plain; charset=utf-8"}, {".csv", "text/csv"},
         {".html", "text/html; charset=utf-8"}, {".log", "text/plain; charset=utf-8"},
-        {".png", "image/png"},          {".jpg", "image/jpeg"}, {".svg", "image/svg+xml"},
+        {".js", "text/javascript; charset=utf-8"}, {".mjs", "text/javascript; charset=utf-8"},
+        {".css", "text/css; charset=utf-8"},
+        {".png", "image/png"},          {".jpg", "image/jpeg"}, {".jpeg", "image/jpeg"},
+        {".svg", "image/svg+xml"},      {".ico", "image/x-icon"},
+        {".wasm", "application/wasm"},
     };
     for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
         if (strcasecmp(e, map[i][0]) == 0) {

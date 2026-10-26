@@ -1171,6 +1171,7 @@ static int wifi_routes(struct tcp_pcb *tpcb, const char *method, const char *pat
  *   POST   /api/sd/format {fs,cluster}
  *   POST   /api/sd/bench {mb}
  *   GET    /api/sd/files[/<path>]     a file, or a folder's listing
+ *   GET    /sd[/<path>]               the same read, at a public URL
  *   PUT    /api/sd/files/<path>       upload (parents made); <path>/ = mkdir
  *   DELETE /api/sd/files/<path>
  *   POST   /api/sd/rename {from,to}
@@ -1223,6 +1224,46 @@ static err_t sd_hold_conn(http_conn_t *c, int x, enum sd_op op) {
     c->sd_op = (uint8_t)op;
     c->retries = 0;
     return ERR_OK;      /* held: http_sd_pump answers */
+}
+
+/* /sd, /sd/, /sd?..., /sd/<path>. Not /sdk or any longer sibling. */
+static bool sd_public_prefix(const char *path) {
+    return strncmp(path, "/sd", 3) == 0 &&
+           (path[3] == 0 || path[3] == '/' || path[3] == '?' || path[3] == '#');
+}
+
+/* GET /sd and GET /sd/<path> are a read-only alias of GET /api/sd/files.
+ * A file comes back as its bytes; a directory is the JSON listing. Writes
+ * stay on /api/sd/files. There is no .gz preference: that is a LittleFS
+ * shipping convention, not a property of the card. */
+static int sd_public_get(http_conn_t *c, struct tcp_pcb *tpcb, const char *method, const char *path) {
+    if (strcmp(method, "GET") != 0) {
+        return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"GET\"}");
+    }
+    static struct sd_reply r;
+    memset(&r, 0, sizeof(r));
+    if (!sd_api_gate(&r)) {
+        return sd_http_err(tpcb, &r);
+    }
+    char *p1 = s_sdp1;
+    p1[0] = 0;
+    /* "/sd" and "/sd/" name the card root. Anything after the slash is the path. */
+    if (path[3] == '/') {
+        const char *rest = path + 4;
+        if (*rest && *rest != '?' && *rest != '#') {
+            if (!copy_path_token(rest, p1, sizeof(s_sdp1))) {
+                return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad path\"}");
+            }
+        }
+    }
+    if (!sd_path_clean(p1, sizeof(s_sdp1))) {
+        return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad path\"}");
+    }
+    int x = sd_xfer_start(SD_OP_GET, p1, NULL, 0, &r);
+    if (x < 0) {
+        return sd_http_err(tpcb, &r);
+    }
+    return sd_hold_conn(c, x, SD_OP_GET);
 }
 
 /* /api/sd, /api/sd/format, /api/sd/bench, /api/sd/files[/...] (GET,
@@ -1532,6 +1573,11 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
             return rc;
         }
     }
+    /* Before LittleFS static lookup, so /sd/foo is the card and not flash
+     * object sd/foo. /sdk is left for static. */
+    if (sd_public_prefix(path)) {
+        return sd_public_get(c, tpcb, method, path);
+    }
 #endif
     if (path_is(path, "/api/fs/rename") && strcmp(method, "POST") == 0) {
         /* The path buffers below are static for the reason given on
@@ -1683,6 +1729,7 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
                               "PUT /api/fs/<folder>/  (mkdir)\n"
                               "POST /api/op  {\"op\":..,\"params\":{..}} -> the WebSocket reply\n"
 #if CONFIG_SD
+                              "GET /sd[/<path>]  (same read as /api/sd/files)\n"
                               "GET /api/sd  GET/PUT/DELETE /api/sd/files/<path>  POST /api/sd/rename|format|bench\n"
 #endif
                               "WS " WS_PATH "  JSON API, e.g. {\"id\":1,\"op\":\"sys.info\"}\n");
