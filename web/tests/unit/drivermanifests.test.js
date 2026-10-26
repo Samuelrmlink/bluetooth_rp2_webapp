@@ -1,0 +1,36 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { manifestFor, manifestPath, deployDriverManifest } from '../../js/editor/drivermanifests.js';
+
+const source = readFileSync(new URL('../../../lua/profiles/anker/driver.json', import.meta.url), 'utf8');
+
+test('the anker manifest matches lua/profiles/anker/driver.json', () => {
+  assert.deepEqual(manifestFor('anker'), JSON.parse(source));
+  assert.equal(manifestPath(manifestFor('anker')), 'pex/anker.driver.json');
+});
+
+test('deploy writes pex/anker.driver.json and skips an unknown module', async () => {
+  const writes = [];
+  const r = await deployDriverManifest(async (path, body) => {
+    writes.push({ path, body });
+    return { ok: true };
+  }, 'anker');
+  assert.equal(r.ok, true);
+  assert.equal(r.path, 'pex/anker.driver.json');
+  assert.equal(writes[0].path, 'pex/anker.driver.json');
+  assert.equal(writes[0].body, source);
+  assert.deepEqual(JSON.parse(writes[0].body), manifestFor('anker'));
+
+  let called = false;
+  const skipped = await deployDriverManifest(async () => { called = true; return { ok: true }; }, 'blink');
+  assert.deepEqual(skipped, { ok: true, skipped: true });
+  assert.equal(called, false);
+});
+
+test('a failed manifest write is reported and does not throw', async () => {
+  const r = await deployDriverManifest(async () => ({ ok: false, error: 'write failed' }), 'anker');
+  assert.equal(r.ok, false);
+  assert.equal(r.path, 'pex/anker.driver.json');
+  assert.match(r.error, /write failed/);
+});

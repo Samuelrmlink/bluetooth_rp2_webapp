@@ -24,7 +24,7 @@ import { uuidDisplay } from '../gattfmt.js';
 import { toast } from '../toast.js';
 import { columnsDialog } from '../controls/columnsdialog.js';
 import { openCellMenu, copyWithToast } from '../controls/cellmenu.js';
-import { factsFromAd, matchingDrivers, driverStatus, driverLabel, loadDriverManifests } from '../drivers.js';
+import { factsFromAd, matchingDrivers, driverStatus, driverLabel, loadDriverManifests, driverWatchPath } from '../drivers.js';
 import { startPex } from '../editor/pexrun.js';
 
 const lc = (s) => String(s || '').toLowerCase();
@@ -164,6 +164,12 @@ export class ScannerWindow {
 
     this.store.subscribe(() => { this._dirty = true; });
     ctx.bus.on('scan.done', () => { this.scanning = false; this._syncToggle(); });
+    // A save or delete under pex/ or lua/profiles/ (flash or the card)
+    // reloads the manifests now. The minute tick below still runs when no
+    // event arrives.
+    this.ws.on('fs.changed', (data) => {
+      if (driverWatchPath(data?.path)) this._loadDrivers();
+    });
     // Expiry runs whether or not the window is on screen: it is the list's
     // policy, not a view of it.
     this._expiryTimer = setInterval(() => {
@@ -367,15 +373,30 @@ export class ScannerWindow {
 
   async _loadDrivers() {
     if (!this.ws.connected) return;
+    // One listing at a time. A burst of saves queues one follow-up instead
+    // of overlapping reads of the same directories.
+    if (this._driversFlight) { this._driversAgain = true; return; }
+    this._driversFlight = true;
     try {
-      // Imported here: fs.js reads location at load, and the scanner module
-      // is also imported by unit tests that have no window.
-      const fs = await import('../fs.js');
-      const r = await loadDriverManifests(fs, { sd: fs.sdAvailable() });
-      this.drivers = r.manifests;
-      this._driverState = { ...this._driverState, pexFiles: r.pexFiles, luaFiles: r.luaFiles };
-      this._dirty = true;
-    } catch { /* a missing folder just leaves the column blank */ }
+      do {
+        this._driversAgain = false;
+        try {
+          // Imported here: fs.js reads location at load, and the scanner module
+          // is also imported by unit tests that have no window.
+          const fs = await import('../fs.js');
+          const r = await loadDriverManifests(fs, { sd: fs.sdAvailable() });
+          this.drivers = r.manifests;
+          this._driverState = { ...this._driverState, pexFiles: r.pexFiles, luaFiles: r.luaFiles };
+          this._dirty = true;
+        } catch { /* a missing folder just leaves the column blank */ }
+      } while (this._driversAgain && this.ws.connected);
+    } finally {
+      this._driversFlight = false;
+      if (this._driversAgain && this.ws.connected) {
+        this._driversAgain = false;
+        this._loadDrivers();
+      }
+    }
   }
 
   async _refreshDriverState() {

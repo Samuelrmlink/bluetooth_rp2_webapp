@@ -192,7 +192,7 @@ test('Build and run asks before installing the flash target', async ({ page }) =
   await seed(page);
   await openSource(page);
   page.once('dialog', async (d) => {
-    expect(d.message()).toMatch(/pex\/blink\.m33\.pex/);
+    expect(d.message()).toMatch(/sd:\/projects\/blink\/build\/pico2_w\/blink\.m33\.pex/);
     expect(d.message()).not.toMatch(/signed module/);
     await d.accept();
   });
@@ -206,5 +206,5 @@ test('Build and run asks before installing the flash target', async ({ page }) =
     const r = await fetch('/api/fs/pex/blink.m33.pex');
     return r.status;
   });
-  expect(internal).toBe(200);
+  expect(internal).toBe(404);
 });

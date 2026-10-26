@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pexNameOf, isPexFile, pexRunningPaths, startPex, stopPex } from '../../js/editor/pexrun.js';
+import { pexNameOf, pexFileName, isPexFile, pexRunningPaths, startPex, stopPex } from '../../js/editor/pexrun.js';
 
 const fail = (code, message) => Object.assign(new Error(message || code), { code });
 
@@ -28,8 +28,17 @@ test('pexNameOf reads the app name and ignores everything else', () => {
 test('isPexFile is a .pex or a gzipped .pex, and nothing editable', () => {
   assert.equal(isPexFile('pex/anker.m33.pex'), true);
   assert.equal(isPexFile('pex/anker.m33.pex.gz'), true);
+  assert.equal(isPexFile('sd/projects/blink/build/pico2_w/blink.m33.pex'), true);
   assert.equal(isPexFile('lua/anker.lua'), false);
+  assert.equal(isPexFile('notes.txt'), false);
   assert.equal(isPexFile('js/app.js.gz'), false);
+});
+
+test('pexFileName reads a module name from any directory', () => {
+  assert.equal(pexFileName('sd/projects/anker/build/pico2_w/anker.m33.pex'), 'anker');
+  assert.equal(pexFileName('pex/anker.m33.pex'), 'anker');
+  assert.equal(pexFileName('pex/anker.m33.pex.gz'), null);
+  assert.equal(pexNameOf('sd/projects/anker/build/pico2_w/anker.m33.pex'), null);
 });
 
 test('pexRunningPaths maps every state, and skips a second instance', () => {

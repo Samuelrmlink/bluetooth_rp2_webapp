@@ -91,6 +91,8 @@ python3 tools/ota_release.py build-ota-sd/btgw.bin
 
 The first image a blank board boots normally is built with `-DBTGW_TBYB=OFF` and written by `tools/provision.sh` or `tools/make_provision_uf2.sh`. Release images leave `BTGW_TBYB` at its default, ON.
 
+The signing key stays outside this repository (`~/.config/btgw/ota-signing.pem`, or `$BTGW_OTA_KEY`). Development images, including `configs/pico2w_sd_defconfig`, load unsigned PEX modules. The editor Build button writes an unsigned `.pex` and cannot sign it. That file loads on these images. Turn `CONFIG_PEX_ALLOW_UNSIGNED` off for a release image that should refuse it. The host sign command is in [docs/Development.md](docs/Development.md).
+
 ### Web assets
 
 ```sh

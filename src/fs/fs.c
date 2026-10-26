@@ -7,6 +7,8 @@
  * BTstack NVM tail this project has no equivalent of. */
 #include "fs.h"
 #include "fs_internal.h"
+#include "fs_batch.h"
+#include "fs_job.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -818,9 +820,25 @@ typedef struct {
     uint32_t pad_left;               /* zero bytes after the data */
     uint32_t end_left;               /* the two closing zero blocks */
     bool walked_out;                 /* every directory read to the end */
+    bool list;                       /* POST /api/tar: roots in job_paths */
+    int root_i, root_n;
+    bool in_root;                    /* walking one directory root */
+    int files_done, files_total;
+    uint32_t job_id;
 } tar_state_t;
 
 static tar_state_t tar;
+
+/* One path table, shared by a list tar and a batch delete. They never run
+ * at the same time (each begin fails while the other is active). */
+static char job_paths[FS_BATCH_MAX][FS_BATCH_PATH];
+
+enum { REM_IDLE = 0, REM_RUN, REM_DONE, REM_ERR, REM_ABORT };
+static int rem_state;
+static int rem_i, rem_n;
+static bool rem_closed;
+static uint32_t rem_id;
+static char rem_err[160];
 
 static uint32_t pad512(uint32_t n) { return (512u - (n & 511u)) & 511u; }
 
@@ -864,8 +882,9 @@ static bool tar_header(uint8_t *h, const char *name, bool dir, uint32_t size, ui
     return true;
 }
 
-/* The archive's length for this folder: a pass over the same walk. */
-static int tar_count(char *path, size_t len, uint64_t *total) {
+/* The archive's length for this folder: a pass over the same walk.
+ * *nfiles counts files only (directory headers are not jobs). */
+static int tar_count(char *path, size_t len, uint64_t *total, int *nfiles) {
     lfs_dir_t d;
     if (lfs_dir_open(&lfs, &d, len ? path : "/") < 0) { return -1; }
     struct lfs_info info;
@@ -876,9 +895,10 @@ static int tar_count(char *path, size_t len, uint64_t *total) {
         if (len + n > FS_PATH_MAX) { rc = -1; break; }
         *total += 512;
         if (info.type == LFS_TYPE_DIR) {
-            rc = tar_count(path, len + n, total);
+            rc = tar_count(path, len + n, total, nfiles);
         } else {
             *total += info.size + pad512(info.size);
+            if (nfiles) { (*nfiles)++; }
         }
         path[len] = 0;
     }
@@ -888,6 +908,15 @@ static int tar_count(char *path, size_t len, uint64_t *total) {
 
 void fs_tar_end(void) {
     if (!tar.active) { return; }
+    /* A finished archive has walked out and sent both end blocks, with no
+     * header or file bytes left. Anything else is the connection closing
+     * early: say so, and leave the note until the editor dismisses it. */
+    bool finished = tar.walked_out && tar.end_left == 0 && !tar.file_open
+        && tar.data_left == 0 && tar.pad_left == 0 && tar.hdr_pos >= tar.hdr_len;
+    if (tar.job_id) {
+        fs_job_set(tar.job_id, "tar", finished ? "done" : "abort",
+                   tar.files_done, tar.files_total, "", 0);
+    }
     if (tar.file_open) { lfs_file_close(&lfs, &tar.file); }
     for (int i = 0; i < tar.depth; i++) { lfs_dir_close(&lfs, &tar.dirs[i]); }
     memset(&tar, 0, sizeof tar);
@@ -897,7 +926,7 @@ bool fs_tar_busy(void) { return tar.active; }
 
 int fs_tar_begin(const char *folder, uint32_t mtime, uint64_t *length) {
     if (!mounted) { return -1; }
-    if (tar.active) { return -2; }
+    if (tar.active || rem_state != REM_IDLE) { return -2; }
     const char *f = folder ? folder : "";
     if (f[0] && !fs_is_dir(f)) { return -3; }
     memset(&tar, 0, sizeof tar);
@@ -908,7 +937,8 @@ int fs_tar_begin(const char *folder, uint32_t mtime, uint64_t *length) {
     tar.mtime = mtime;
     uint64_t total = 1024;                           /* the end blocks */
     if (len) { total += 512; }                       /* the folder's own entry */
-    if (tar_count(tar.path, len, &total) < 0) { tar.path[0] = 0; return -1; }
+    tar.files_total = 0;
+    if (tar_count(tar.path, len, &total, &tar.files_total) < 0) { tar.path[0] = 0; return -1; }
     tar.path[len] = 0;
     if (lfs_dir_open(&lfs, &tar.dirs[0], len ? tar.path : "/") < 0) { return -1; }
     tar.dlen[0] = len;
@@ -923,6 +953,12 @@ int fs_tar_begin(const char *folder, uint32_t mtime, uint64_t *length) {
     }
     *length = total;
     return 0;
+}
+
+static void tar_note_file(const char *path, uint32_t size) {
+    if (!tar.job_id) { return; }
+    tar.files_done++;
+    fs_job_set(tar.job_id, "tar", "run", tar.files_done, tar.files_total, path, size);
 }
 
 /* Prepare the next entry's header (and open its file). False when the
@@ -954,13 +990,65 @@ static bool tar_next(void) {
             tar.file_open = lfs_file_open(&lfs, &tar.file, tar.path, LFS_O_RDONLY) >= 0;
             tar.data_left = info.size;
             tar.pad_left = pad512(info.size);
+            tar_note_file(tar.path, info.size);
         }
         tar.hdr_pos = 0;
         tar.hdr_len = 512;
         return true;
     }
-    tar.walked_out = true;
+    /* A list-mode directory root finishing is not the end of the archive. */
+    if (!(tar.list && tar.in_root)) { tar.walked_out = true; }
     return false;
+}
+
+/* Folder mode is tar_next. List mode walks job_paths: a file is one header,
+ * a directory is its header plus the existing walk, then the next root. */
+static bool tar_advance(void) {
+    if (!tar.list) { return tar_next(); }
+    for (;;) {
+        if (tar.in_root) {
+            if (tar_next()) { return true; }
+            tar.walked_out = false;
+            tar.in_root = false;
+            tar.root_i++;
+            continue;
+        }
+        if (tar.root_i >= tar.root_n) {
+            tar.walked_out = true;
+            return false;
+        }
+        const char *p = job_paths[tar.root_i];
+        snprintf(tar.path, sizeof tar.path, "%s", p);
+        tar.base = 0;
+        if (fs_is_dir(p)) {
+            char nm[FS_PATH_MAX + 2];
+            snprintf(nm, sizeof nm, "%s/", p);
+            tar_header(tar.hdr, nm, true, 0, tar.mtime);
+            tar.depth = 0;
+            tar.in_root = false;
+            if (lfs_dir_open(&lfs, &tar.dirs[0], tar.path) >= 0) {
+                tar.dlen[0] = strlen(tar.path);
+                tar.depth = 1;
+                tar.in_root = true;
+            } else {
+                tar.root_i++;
+            }
+            tar.hdr_pos = 0;
+            tar.hdr_len = 512;
+            return true;
+        }
+        size_t sz = 0;
+        if (!fs_stat(p, &sz)) { sz = 0; }
+        tar_header(tar.hdr, p, false, (uint32_t)sz, tar.mtime);
+        tar.file_open = lfs_file_open(&lfs, &tar.file, tar.path, LFS_O_RDONLY) >= 0;
+        tar.data_left = (uint32_t)sz;
+        tar.pad_left = pad512((uint32_t)sz);
+        tar.hdr_pos = 0;
+        tar.hdr_len = 512;
+        tar_note_file(p, (uint32_t)sz);
+        tar.root_i++;
+        return true;
+    }
 }
 
 /* Up to `cap` bytes of the archive. 0 once it is all out; < 0 on error. */
@@ -993,7 +1081,7 @@ int fs_tar_read(uint8_t *buf, size_t cap) {
             out += k;
             continue;
         }
-        if (!tar.walked_out && tar_next()) { continue; }
+        if (!tar.walked_out && tar_advance()) { continue; }
         if (tar.end_left) {
             size_t k = tar.end_left < cap - out ? tar.end_left : cap - out;
             memset(buf + out, 0, k);
@@ -1004,6 +1092,122 @@ int fs_tar_read(uint8_t *buf, size_t cap) {
         break;
     }
     return (int)out;
+}
+
+void fs_tar_set_job(uint32_t id) {
+    if (tar.active) { tar.job_id = id; }
+}
+
+int fs_tar_begin_json(const char *json, size_t json_len, uint64_t *length) {
+    if (!mounted || !json || !length) { return -1; }
+    if (tar.active || rem_state != REM_IDLE) { return -3; }
+    int n = 0;
+    uint32_t mtime = 0, id = 0;
+    int pr = fs_batch_parse(json, json_len, job_paths, &n, &mtime, &id);
+    if (pr == -2) { return -2; }
+    if (pr < 0) { return -1; }
+    uint64_t total = 1024;
+    int nfiles = 0;
+    char scratch[FS_PATH_MAX + 1];
+    for (int i = 0; i < n; i++) {
+        if (!fs_valid_path(job_paths[i])) { return -1; }
+        if (fs_is_dir(job_paths[i])) {
+            snprintf(scratch, sizeof scratch, "%s", job_paths[i]);
+            size_t len = strlen(scratch);
+            total += 512;
+            int nf = 0;
+            if (tar_count(scratch, len, &total, &nf) < 0) { return -1; }
+            nfiles += nf;
+        } else {
+            size_t sz = 0;
+            if (!fs_stat(job_paths[i], &sz)) { return -4; }
+            total += 512ull + (uint64_t)sz + (uint64_t)pad512((uint32_t)sz);
+            nfiles++;
+        }
+    }
+    memset(&tar, 0, sizeof tar);
+    tar.list = true;
+    tar.root_n = n;
+    tar.mtime = mtime;
+    tar.job_id = id;
+    tar.files_total = nfiles;
+    tar.base = 0;
+    tar.active = true;
+    tar.end_left = 1024;
+    *length = total;
+    return 0;
+}
+
+int fs_remove_begin_json(const char *json, size_t json_len) {
+    if (!mounted || !json) { return -1; }
+    if (tar.active || rem_state != REM_IDLE) { return -3; }
+    int n = 0;
+    uint32_t id = 0;
+    int pr = fs_batch_parse(json, json_len, job_paths, &n, NULL, &id);
+    if (pr == -2) { return -2; }
+    if (pr < 0) { return -1; }
+    for (int i = 0; i < n; i++) {
+        if (!fs_valid_path(job_paths[i])) { return -1; }
+    }
+    rem_state = REM_RUN;
+    rem_i = 0;
+    rem_n = n;
+    rem_closed = false;
+    rem_id = id;
+    rem_err[0] = 0;
+    return 0;
+}
+
+void fs_remove_abort(void) {
+    if (rem_state == REM_IDLE) { return; }
+    if (rem_state == REM_RUN) {
+        fs_job_set(rem_id, "delete", "abort", rem_i, rem_n, "", 0);
+    }
+    rem_state = REM_IDLE;
+    rem_closed = false;
+    rem_n = 0;
+    rem_i = 0;
+}
+
+void fs_remove_pump(void) {
+    if (rem_state != REM_RUN) { return; }
+    if (rem_closed) {
+        fs_job_set(rem_id, "delete", "abort", rem_i, rem_n, "", 0);
+        rem_state = REM_ABORT;
+        return;
+    }
+    if (rem_i >= rem_n) {
+        fs_job_set(rem_id, "delete", "done", rem_n, rem_n, "", 0);
+        rem_state = REM_DONE;
+        return;
+    }
+    const char *p = job_paths[rem_i];
+    fs_job_set(rem_id, "delete", "run", rem_i + 1, rem_n, p, 0);
+    int rc = fs_delete(p);
+    if (rc < 0) {
+        snprintf(rem_err, sizeof rem_err, "%s: %s", p,
+                 rc == FS_ERR_NOTEMPTY ? "folder is not empty" : "delete failed");
+        rem_state = REM_ERR;
+        return;
+    }
+    rem_i++;
+    if (rem_i >= rem_n) {
+        fs_job_set(rem_id, "delete", "done", rem_n, rem_n, "", 0);
+        rem_state = REM_DONE;
+    }
+}
+
+int fs_remove_result(int *removed, int *total, char *err, size_t errcap) {
+    if (rem_state == REM_IDLE || rem_state == REM_RUN) { return 0; }
+    if (removed) { *removed = rem_i; }
+    if (total) { *total = rem_n; }
+    int st = rem_state == REM_DONE ? 1 : rem_state == REM_ABORT ? -2 : -1;
+    if (st < 0 && err && errcap) {
+        snprintf(err, errcap, "%s", rem_err[0] ? rem_err : "delete failed");
+    }
+    rem_state = REM_IDLE;
+    rem_closed = false;
+    return st;
 }
 
 /* PUT /api/fs/<path>/ -- an (empty) folder, parents included. */

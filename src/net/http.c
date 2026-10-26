@@ -65,6 +65,7 @@ typedef struct {
     bool taking_post_body;
     bool sending_file;
     bool sending_tar;       /* streaming a folder as tar (fs_tar_*) */
+    bool sending_remove;    /* POST /api/fs/remove, one path per main-loop turn */
     uint64_t tar_left;      /* archive bytes still to send */
     char fs_name[FS_PATH_MAX + 1];
     char method[8];
@@ -208,6 +209,10 @@ static void conn_cleanup(http_conn_t *c) {
     if (c->sending_tar) {
         fs_tar_end();
     }
+    if (c->sending_remove) {
+        c->sending_remove = false;
+        fs_remove_abort();
+    }
 #if CONFIG_SD
     if (c->sd_on) {
         sd_xfer_release(c->sd_x); /* the worker stops; an unfinished upload is deleted */
@@ -226,7 +231,7 @@ static void conn_reset(http_conn_t *c) {
 }
 
 static bool conn_held(const http_conn_t *c) {
-    return c->sending_file || c->sending_tar || c->closing || c->pending_file || c->is_ws
+    return c->sending_file || c->sending_tar || c->sending_remove || c->closing || c->pending_file || c->is_ws
 #if CONFIG_SD
            || c->sd_on
 #endif
@@ -557,9 +562,59 @@ static int http_pump_tar(http_conn_t *c, struct tcp_pcb *tpcb) {
     return fs_tar_read(&probe, 1) == 0 ? 1 : -1;   /* longer than promised */
 }
 
+static uint32_t query_u32(const char *path, const char *key) {
+    size_t klen = strlen(key);
+    const char *q = strchr(path, '?');
+    if (!q) { return 0; }
+    for (const char *p = q + 1; *p; ) {
+        if (strncmp(p, key, klen) == 0 && p[klen] == '=') {
+            return (uint32_t)strtoul(p + klen + 1, NULL, 10);
+        }
+        const char *amp = strchr(p, '&');
+        if (!amp) { break; }
+        p = amp + 1;
+    }
+    return 0;
+}
+
+static void release_op_body(http_conn_t *c) {
+    op_free(c->op_body, c->op_gen);
+    c->op_body = NULL;
+}
+
+static err_t http_write_tar_hdr(struct tcp_pcb *tpcb, unsigned long len, const char *base) {
+    char hdr[480];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/x-tar\r\n"
+                      "Content-Length: %lu\r\n"
+                      "Content-Disposition: attachment; filename=\"%s.tar\"\r\n"
+                      "Cache-Control: no-store\r\n"
+                      "Access-Control-Allow-Origin: *\r\n"
+                      "Access-Control-Expose-Headers: Content-Length, Content-Disposition\r\n"
+                      "Connection: close\r\n\r\n",
+                      len, base);
+    if (hl <= 0 || (size_t)hl >= sizeof(hdr)) { return ERR_MEM; }
+    if (tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY) != ERR_OK) { return ERR_MEM; }
+    return ERR_OK;
+}
+
+static err_t http_tar_arm(http_conn_t *c, struct tcp_pcb *tpcb, uint64_t len, const char *base) {
+    if (http_write_tar_hdr(tpcb, (unsigned long)len, base) != ERR_OK) {
+        fs_tar_end();
+        return http_reply(tpcb, 503, "application/json", "{\"ok\":false,\"error\":\"busy\"}");
+    }
+    c->sending_tar = true;
+    c->tar_left = len;
+    c->retries = 0;
+    tar_buf_len = tar_buf_pos = 0;
+    return http_finish_file(c, tpcb, http_pump_tar(c, tpcb));
+}
+
 /* GET /api/tar/<folder>[?mtime=<unix s>] -- the folder ("" = everything) as
  * a ustar archive, streamed (fs.c fs_tar_*). The board has no clock, so the
- * browser passes the time to stamp the entries with. */
+ * browser passes the time to stamp the entries with. id= names the fs.job
+ * notes; a firmware that does not know it ignores the query. */
 static err_t http_start_tar(http_conn_t *c, struct tcp_pcb *tpcb, const char *path) {
     char folder[FS_PATH_MAX + 1] = "";
     const char *p = path + 8;                   /* after "/api/tar" */
@@ -571,9 +626,7 @@ static err_t http_start_tar(http_conn_t *c, struct tcp_pcb *tpcb, const char *pa
     if (folder[0] && !fs_valid_path(folder)) {
         return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad name\"}");
     }
-    uint32_t mtime = 0;
-    const char *q = strstr(path, "mtime=");
-    if (q) { mtime = (uint32_t)strtoul(q + 6, NULL, 10); }
+    uint32_t mtime = query_u32(path, "mtime");
     uint64_t len = 0;
     int rc = fs_tar_begin(folder, mtime, &len);
     if (rc == -2) {
@@ -585,28 +638,81 @@ static err_t http_start_tar(http_conn_t *c, struct tcp_pcb *tpcb, const char *pa
     if (rc < 0) {
         return http_reply(tpcb, 500, "application/json", "{\"ok\":false,\"error\":\"could not read the folder\"}");
     }
+    fs_tar_set_job(query_u32(path, "id"));
     const char *base = strrchr(folder, '/');
     base = base ? base + 1 : (folder[0] ? folder : "btgw");
-    char hdr[480];
-    int hl = snprintf(hdr, sizeof(hdr),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Content-Type: application/x-tar\r\n"
-                      "Content-Length: %lu\r\n"
-                      "Content-Disposition: attachment; filename=\"%s.tar\"\r\n"
-                      "Cache-Control: no-store\r\n"
-                      "Access-Control-Allow-Origin: *\r\n"
-                      "Access-Control-Expose-Headers: Content-Length, Content-Disposition\r\n"
-                      "Connection: close\r\n\r\n",
-                      (unsigned long)len, base);   /* newlib-nano: no %llu; an archive is < 2 MB */
-    if (tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY) != ERR_OK) {
-        fs_tar_end();
+    return http_tar_arm(c, tpcb, len, base);   /* newlib-nano: no %llu; an archive is < 2 MB */
+}
+
+static err_t http_start_tar_post(http_conn_t *c, struct tcp_pcb *tpcb, const char *body, size_t body_len) {
+    uint64_t len = 0;
+    int rc = fs_tar_begin_json(body ? body : "", body_len, &len);
+    release_op_body(c);
+    if (rc == -3) {
+        return http_reply(tpcb, 503, "application/json", "{\"ok\":false,\"error\":\"an archive is already streaming\"}");
+    }
+    if (rc == -2) {
+        return http_reply(tpcb, 413, "application/json", "{\"ok\":false,\"error\":\"too many paths\"}");
+    }
+    if (rc == -4) {
+        return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"not found\"}");
+    }
+    if (rc < 0) {
+        return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad request\"}");
+    }
+    return http_tar_arm(c, tpcb, len, "files");
+}
+
+static err_t http_start_remove(http_conn_t *c, struct tcp_pcb *tpcb, const char *body, size_t body_len) {
+    int rc = fs_remove_begin_json(body ? body : "", body_len);
+    release_op_body(c);
+    if (rc == -3) {
         return http_reply(tpcb, 503, "application/json", "{\"ok\":false,\"error\":\"busy\"}");
     }
-    c->sending_tar = true;
-    c->tar_left = len;
+    if (rc == -2) {
+        return http_reply(tpcb, 413, "application/json", "{\"ok\":false,\"error\":\"too many paths\"}");
+    }
+    if (rc < 0) {
+        return http_reply(tpcb, 400, "application/json", "{\"ok\":false,\"error\":\"bad request\"}");
+    }
+    c->sending_remove = true;
     c->retries = 0;
-    tar_buf_len = tar_buf_pos = 0;
-    return http_finish_file(c, tpcb, http_pump_tar(c, tpcb));
+    return ERR_OK;
+}
+
+void http_jobs_pump(void) {
+    for (int i = 0; i < HTTP_CONNS; i++) {
+        http_conn_t *c = &conns[i];
+        if (!c->pcb || !c->sending_remove) { continue; }
+        int removed = 0, total = 0;
+        char err[96];
+        err[0] = 0;
+        int st = fs_remove_result(&removed, &total, err, sizeof err);
+        if (st == 0) { continue; }
+        c->sending_remove = false;
+        if (st == -2) {
+            conn_cleanup(c);
+            conn_reset(c);
+            continue;
+        }
+        char body[220];
+        int code;
+        if (st > 0) {
+            snprintf(body, sizeof body, "{\"ok\":true,\"removed\":%d,\"total\":%d}", removed, total);
+            code = 200;
+        } else {
+            char esc[140];
+            api_json_escape(esc, sizeof esc, err[0] ? err : "delete failed");
+            snprintf(body, sizeof body,
+                     "{\"ok\":false,\"error\":\"%s\",\"removed\":%d,\"total\":%d}",
+                     esc, removed, total);
+            code = 400;
+        }
+        struct tcp_pcb *pcb = c->pcb;
+        http_reply(pcb, code, "application/json", body);
+        conn_cleanup(c);
+        conn_reset(c);
+    }
 }
 
 static err_t http_finish_file(http_conn_t *c, struct tcp_pcb *tpcb, int rc) {
@@ -1453,6 +1559,12 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
         }
         return http_reply(tpcb, 200, "application/json", "{\"ok\":true}");
     }
+    if (path_is(path, "/api/tar") && strcmp(method, "POST") == 0) {
+        return http_start_tar_post(c, tpcb, body, body_len);
+    }
+    if (path_is(path, "/api/fs/remove") && strcmp(method, "POST") == 0) {
+        return http_start_remove(c, tpcb, body, body_len);
+    }
     if (strncmp(path, "/api/tar", 8) == 0 && (path[8] == 0 || path[8] == '/' || path[8] == '?')
         && strcmp(method, "GET") == 0) {
         return http_start_tar(c, tpcb, path);
@@ -1567,7 +1679,8 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
             return http_reply(tpcb, 200, "text/plain",
                               "bluetooth_rp2_webapp\n"
                               "GET /api/fs  GET/PUT/DELETE /api/fs/<path>  POST /api/fs/rename\n"
-                              "GET /api/tar/<folder>  (a folder as tar)  PUT /api/fs/<folder>/  (mkdir)\n"
+                              "GET /api/tar/<folder>  POST /api/tar {paths}  POST /api/fs/remove {paths}\n"
+                              "PUT /api/fs/<folder>/  (mkdir)\n"
                               "POST /api/op  {\"op\":..,\"params\":{..}} -> the WebSocket reply\n"
 #if CONFIG_SD
                               "GET /api/sd  GET/PUT/DELETE /api/sd/files/<path>  POST /api/sd/rename|format|bench\n"
@@ -1623,6 +1736,11 @@ static err_t http_poll(void *arg, struct tcp_pcb *tpcb) {
          * TCP keepalive (armed at upgrade) is what reclaims a peer that has
          * actually gone away. */
         return ERR_OK;
+    }
+    /* A batch delete holds the connection with no bytes in flight. The 1 Hz
+     * poll would otherwise abort it after HTTP_MAX_RETRIES. */
+    if (c->sending_remove) {
+        c->retries = 0;
     }
     if (c->retries < 255) {
         c->retries++;
@@ -1789,6 +1907,9 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
         bool want_post_body = c->content_len > 0 && !want_fs_put &&
                               (strcmp(method, "POST") == 0 || strcmp(method, "PUT") == 0 ||
                                strcmp(method, "DELETE") == 0);
+        bool big_post = want_post_body && strcmp(method, "POST") == 0 &&
+                        (path_is(path, "/api/op") || path_is(path, "/api/tar") ||
+                         path_is(path, "/api/fs/remove"));
         /* PUT /api/fs/<path>/ (a trailing slash) makes a folder: what an
          * archive restore needs for an empty one. */
         size_t tok = strcspn(path, "?#");
@@ -1818,12 +1939,15 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
             }
             c->taking_fs_body = true;
             c->body_got = 0;
-        } else if (want_post_body && strcmp(method, "POST") == 0 && path_is(path, "/api/op")) {
+        } else if (big_post) {
             if (c->content_len > OP_BODY_MAX) {
                 pbuf_free(p);
                 conn_drop(tpcb);
-                return http_reply(tpcb, 413, "application/json",
-                                  "{\"ok\":false,\"error\":{\"code\":\"too_large\",\"message\":\"body over 4096 bytes\"}}");
+                if (path_is(path, "/api/op")) {
+                    return http_reply(tpcb, 413, "application/json",
+                                      "{\"ok\":false,\"error\":{\"code\":\"too_large\",\"message\":\"body over 4096 bytes\"}}");
+                }
+                return http_reply(tpcb, 413, "application/json", "{\"ok\":false,\"error\":\"body too large\"}");
             }
             c->op_body = op_alloc(c->content_len + 1, &c->op_gen);
             if (!c->op_body) {

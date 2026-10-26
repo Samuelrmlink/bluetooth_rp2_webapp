@@ -179,3 +179,103 @@ export function foldersOf(parsed, target) {
   }
   return [...out].sort();
 }
+
+// A ustar the device's GET /api/tar would recognise: the same header layout
+// as src/fs/fs.c (name or prefix, mode, ustar, checksum). Used when the card
+// has no tar walker and the page packs those paths itself. Entries:
+// [{ name, dir?, data?: Uint8Array }]. The two zero end-blocks are included.
+const encUtf8 = new TextEncoder();
+
+function putOctal(h, off, width, value) {
+  let v = value >>> 0;
+  h[off + width - 1] = 0;
+  for (let i = width - 1; i-- > 0;) {
+    h[off + i] = 0x30 + (v & 7);
+    v = Math.floor(v / 8);
+  }
+}
+
+function tarHeader(name, dir, size, mtime) {
+  const h = new Uint8Array(512);
+  const raw = encUtf8.encode(name);
+  const n = raw.length;
+  if (n <= 100) {
+    h.set(raw, 0);
+  } else {
+    let cut = -1;
+    for (let i = 0; i < n && i <= 155; i++) {
+      if (raw[i] === 0x2f && n - i - 1 <= 100 && n - i - 1 > 0) { cut = i; break; }
+    }
+    if (cut < 0) throw new Error(`path too long for a tar header: ${name}`);
+    h.set(raw.subarray(0, cut), 345);
+    h.set(raw.subarray(cut + 1), 0);
+  }
+  putOctal(h, 100, 8, dir ? 0o755 : 0o644);
+  putOctal(h, 108, 8, 0);
+  putOctal(h, 116, 8, 0);
+  putOctal(h, 124, 12, dir ? 0 : size);
+  putOctal(h, 136, 12, mtime >>> 0);
+  h[156] = dir ? 0x35 : 0x30;
+  h.set([0x75, 0x73, 0x74, 0x61, 0x72, 0], 257);   // "ustar\0"
+  h[263] = 0x30;
+  h[264] = 0x30;
+  h.set([0x62, 0x74, 0x67, 0x77], 265);
+  h.set([0x62, 0x74, 0x67, 0x77], 297);
+  h.fill(0x20, 148, 156);
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += h[i];
+  putOctal(h, 148, 7, sum);
+  h[155] = 0x20;
+  return h;
+}
+
+function concatBytes(parts) {
+  const n = parts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+export function encodeTar(entries, mtime = 0) {
+  const parts = [];
+  for (const e of entries) {
+    const dir = !!e.dir;
+    let name = String(e.name || '');
+    if (dir && !name.endsWith('/')) name += '/';
+    const data = dir ? new Uint8Array(0) : (e.data instanceof Uint8Array ? e.data : encUtf8.encode(e.data || ''));
+    parts.push(tarHeader(name, dir, data.length, mtime));
+    if (!dir && data.length) {
+      parts.push(data);
+      const pad = (512 - (data.length % 512)) % 512;
+      if (pad) parts.push(new Uint8Array(pad));
+    }
+  }
+  parts.push(new Uint8Array(1024));
+  return concatBytes(parts);
+}
+
+// Drop the archive's trailing zero end-blocks (one or two) so more entries
+// can follow. A block that is not all zeros stays.
+export function stripTarEnd(bytes) {
+  const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let n = b.length;
+  let blocks = 0;
+  while (blocks < 2 && n >= BLOCK) {
+    let zero = true;
+    for (let i = n - BLOCK; i < n; i++) if (b[i] !== 0) { zero = false; break; }
+    if (!zero) break;
+    n -= BLOCK;
+    blocks++;
+  }
+  return b.subarray(0, n);
+}
+
+export function appendTar(base, entries, mtime = 0) {
+  const head = stripTarEnd(base);
+  const extra = encodeTar(entries, mtime);
+  const out = new Uint8Array(head.length + extra.length);
+  out.set(head, 0);
+  out.set(extra, head.length);
+  return out;
+}

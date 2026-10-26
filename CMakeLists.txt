@@ -58,6 +58,8 @@ add_executable(btgw
     src/net/http.c
     src/net/ws.c
     src/fs/fs.c
+    src/fs/fs_batch.c
+    src/fs/fs_job.c
     src/fs/fs_watch.c
     src/fs/fs_ops.c
     src/ota/crc32.c

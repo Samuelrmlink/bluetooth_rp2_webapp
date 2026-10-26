@@ -672,6 +672,13 @@ def t_lua_json_decode():
         return False, first[:100] or f"json_decode_test exited {rc}"
     return True, out.strip().splitlines()[-1]
 
+def t_fs_batch():
+    """Path lists for a chosen tar or a batch delete: JSON paths (escapes,
+    the 32-path cap, a path that does not fit), which roots cover a path,
+    and a pump that stops when the connection has closed."""
+    return _host_c("fs_batch", ["test/host/fs_batch_test.c", "src/fs/fs_batch.c"],
+                   "btgw_fs_batch", defs="")
+
 def t_lfile_path():
     """The Lua file module's volume-qualified paths: lfs:/ and sd:/, slash
     normalisation, each volume's character set, the 64/128 limits, '.'/'..',
@@ -1490,6 +1497,7 @@ def main():
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "json.decode: types, escapes, depth, malformed, bounds", t_lua_json_decode)
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
+    step(0, "batch tar and delete path lists", t_fs_batch)
     step(0, "file module on the SD card: binding -> jobs -> worker -> FatFs", t_lfile_sd)
     step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)
     step(0, "http to_file onto the SD card: stage, write, close, remove", t_lhttp_sd)

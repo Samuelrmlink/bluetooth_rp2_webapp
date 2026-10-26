@@ -2,23 +2,36 @@
 // window turns each { id } into the action (editor.js _fileAct).
 //
 //   file     Open (if it is not the open one), Download, Store compressed /
-//            uncompressed, Restore .bak (when there is one), Rename / move…,
-//            Delete…; a script (lua/x.lua or staged/x.lua) also Start, Stop,
-//            Commit to lua/, Revert to the next tier; a PEX app
-//            (pex/<name>.<arch>.pex) also Start, Stop, Install, Uninstall
-//            (only when that name is in the PEX partition), and PEX
-//            partition…. Start calls pex.start. Stop calls pex.stop and then
-//            pex.unload, not Lua.
+//            uncompressed, Restore .bak (when there is one), Copy to…,
+//            Rename / move…, Delete…; a script (lua/x.lua or staged/x.lua)
+//            also Start, Stop, Commit to lua/, Revert to the next tier; a
+//            PEX app (pex/<name>.<arch>.pex) also Start, Stop, Install,
+//            Uninstall (only when that name is in the PEX partition), and
+//            PEX partition…. A .pex elsewhere, including a build directory
+//            on the SD card, offers Install (the card path calls pex.install
+//            on that sd: path) and PEX partition…. Start calls pex.start.
+//            Stop calls pex.stop and then pex.unload, not Lua.
 //   folder   New file here…, Upload here…, Upload archive here…, Download
-//            as .tar, Calculate size, Refresh, Rename / move…, and Delete…
-//            once it is known to be empty
+//            as .tar, Calculate size, Refresh, Copy to…, Rename / move…,
+//            and Delete… once it is known to be empty. The card's own
+//            top folder has none of copy, rename, or delete.
 //
 // The path itself is added by the menu as the last item, and copies.
 import { isGz, canCompress, imageKind } from '../gz.js';
 
 const onSd = (p) => /^sd(\/|$)/.test(p || '');
 
-export function fileMenuItems(node, { isOpen = false, script = null, pex = null, empty = false, hasBak = false, card = false, installed = false, builds = null } = {}) {
+export function fileMenuItems(node, { isOpen = false, script = null, pex = null, empty = false, hasBak = false, card = false, installed = false, builds = null, picked = 0, inPicked = false, selected = false } = {}) {
+  const pick = { id: 'select', label: selected ? 'Deselect' : 'Select' };
+  // Several rows, and the cursor is one of them: the set is what the menu
+  // acts on. Select stays so a finger can take a row back out.
+  if (picked > 1 && inPicked) {
+    return [
+      pick,
+      { id: 'tar-set', label: 'Download as archive' },
+      { id: 'delete', label: 'Delete…', danger: true },
+    ];
+  }
   if (node.dir) {
     // card: the SD card's own top-level folder (the editor knows it from fs.js)
     const out = [
@@ -31,12 +44,16 @@ export function fileMenuItems(node, { isOpen = false, script = null, pex = null,
       // keep: it answers in the menu (the info line), so the menu stays open
       { id: 'size', label: 'Calculate size', keep: true },
       { id: 'refresh', label: 'Refresh' },
-      ...(card ? [{ id: 'sd-settings', label: 'SD card settings…' }] : [{ id: 'rename', label: 'Rename / move…' }]),
+      ...(card ? [{ id: 'sd-settings', label: 'SD card settings…' }] : [
+        { id: 'copy', label: 'Copy to…' },
+        { id: 'rename', label: 'Rename / move…' },
+      ]),
     ];
-    if (card) return out;           // the card itself: no rename, no delete (format it in Settings)
+    if (card) { out.push(pick); return out; }   // the card itself: no rename, no delete (format it in Settings)
     // an empty folder goes in one step; any other with everything in it,
     // after saying how much that is (and, for the gateway's own folders,
     // asking for the name to be typed)
+    out.push(pick);
     out.push(empty ? { id: 'delete', label: 'Delete folder…', danger: true }
       : { id: 'delete', label: 'Delete folder and everything in it…', danger: true });
     return out;
@@ -62,14 +79,20 @@ export function fileMenuItems(node, { isOpen = false, script = null, pex = null,
     out.push({ id: 'pex-partition', label: 'PEX partition…' });
   } else if (/\.pex$/i.test(node.path || node.name || '') && !isGz(node.path || '')) {
     const base = (node.name || node.path || '').split('/').pop().replace(/\.pex$/i, '');
+    // pex/<name>.<arch>.pex is the branch above. A module in an SD build
+    // directory is installed from that path; firmware reads it into the pool.
+    if (onSd(node.path)) out.push({ id: 'pex-install', label: `Install ${base}` });
     out.push({ id: 'pex-mark', label: `Mark ${base} verified` });
     out.push({ id: 'pex-restore', label: `Restore verified ${base}` });
+    out.push({ id: 'pex-partition', label: 'PEX partition…' });
   }
   out.push({ id: 'download', label: 'Download' });
   if (canCompress(node.path)) out.push({ id: 'compress', label: 'Store compressed (.gz)' });
   else if (isGz(node.path) && imageKind(node.path) !== 'bitmap') out.push({ id: 'decompress', label: 'Store uncompressed' });
   if (hasBak) out.push({ id: 'restore-bak', label: 'Restore .bak (the version before the last save)' });
+  out.push({ id: 'copy', label: 'Copy to…' });
   out.push({ id: 'rename', label: 'Rename / move…' });
+  out.push(pick);
   out.push({ id: 'delete', label: 'Delete…', danger: true });
   return out;
 }

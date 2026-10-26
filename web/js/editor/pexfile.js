@@ -621,16 +621,18 @@ export function verifiedNoteRel(name, arch) {
 
 /**
  * The one question before an install.
- * `loaded` asks to unload and replace. A file larger than the pool is copied
- * to LittleFS first, because an sd: install reads the whole file into the pool.
+ * `loaded` asks to unload and replace. A file larger than the pool cannot
+ * be installed from the card: the firmware reads that file into the RAM
+ * pool. The PEX partition is where the installed image goes, and the file
+ * is not copied to LittleFS to get there.
  */
 export function flashConfirm({ name, arch, loaded = false, bytes = 0, poolCap = POOL_BYTES, sdPath = '' }) {
   const signed = name === 'anker' ? ' This replaces the running signed module.' : '';
+  if (bytes > poolCap && sdPath) {
+    return `${name}.${arch}.pex is ${bytes} bytes. The PEX RAM pool has ${poolCap} bytes in one piece, so this file cannot be installed from the card. It is not copied to internal storage.`;
+  }
   if (loaded) {
     return `Unload ${name} and replace the installed module?${signed} Cancel leaves it loaded. The new file stays on the card.`;
-  }
-  if (bytes > poolCap) {
-    return `Copy the module to pex/${name}.${arch}.pex and install it? The file is ${bytes} bytes, which does not fit in the PEX pool, so it is not installed from the SD card.${signed}`;
   }
   const from = sdPath || `${name}.${arch}.pex`;
   return `Install ${from} into the PEX partition?${signed}`;

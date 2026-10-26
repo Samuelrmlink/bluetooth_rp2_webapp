@@ -3,15 +3,22 @@
 // .pex file uses these instead, so the Lua sources on the device are never
 // the launcher and are never written.
 
-/** "pex/anker.m33.pex" -> "anker". Anything else is not a PEX app file. */
+/** "pex/anker.m33.pex" -> "anker". Anything else is not the installed app file. */
 export function pexNameOf(path) {
   const m = /^pex\/([A-Za-z0-9_-]+)\.[A-Za-z0-9]+\.pex$/.exec(path || '');
   return m ? m[1] : null;
 }
 
-/** A .pex the file list should not open as text, including a gzipped copy. */
+/** Basename of name.arch.pex, including a copy under sd/. A .gz name is not one. */
+export function pexFileName(path) {
+  const base = String(path || '').split('/').pop();
+  const m = /^([A-Za-z_][A-Za-z0-9_-]*)\.[A-Za-z0-9]+\.pex$/i.exec(base || '');
+  return m ? m[1] : null;
+}
+
+/** A .pex the file list should not open as text, including one on the card and a gzipped copy. */
 export function isPexFile(path) {
-  return !!pexNameOf(path) || /\.pex\.gz$/i.test(path || '');
+  return /\.pex(\.gz)?$/i.test(path || '');
 }
 
 const PEX_STATES = new Set(['loaded', 'running', 'stopped', 'exited', 'faulted']);

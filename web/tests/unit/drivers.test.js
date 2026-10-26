@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseAd } from '../../js/adparse.js';
-import { factsFromAd, matchSet, driverMatches, matchingDrivers, driverStatus, driverLabel, loadDriverManifests } from '../../js/drivers.js';
+import { factsFromAd, matchSet, driverMatches, matchingDrivers, driverStatus, driverLabel, loadDriverManifests, driverWatchPath } from '../../js/drivers.js';
 
 const anker = {
   id: 'anker', title: 'Anker SOLIX / Prime', kind: 'pex', file: 'pex/anker.m33.pex',
@@ -90,4 +90,37 @@ test('manifests are read from pex/ and lua/profiles, and one id is kept once', a
   assert.equal(r.manifests[0].title, 'Anker SOLIX / Prime');
   assert.ok(r.pexFiles.has('pex/anker.m33.pex') && r.pexFiles.has('pex/sample.m33.pex'));
   assert.ok(r.luaFiles.has('lua/pinecil.lua'));
+});
+
+test('a change under pex or lua/profiles reloads drivers, and other trees do not', () => {
+  for (const p of [
+    'pex',
+    'pex/anker.driver.json',
+    'pex/anker.m33.pex',
+    '/pex/anker.driver.json',
+    'sd/pex',
+    'sd/pex/anker.driver.json',
+    'lua/profiles',
+    'lua/profiles/anker/driver.json',
+    'lua/profiles/anker/main.lua',
+    'sd/lua/profiles',
+    'sd/lua/profiles/pinecil/driver.json',
+  ]) {
+    assert.equal(driverWatchPath(p), true, p);
+  }
+  for (const p of [
+    '',
+    'lua/pinecil.lua',
+    'lua/anker.lua',
+    'sd/lua/pinecil.lua',
+    'cfg/nap.json',
+    'pexfoo/x',
+    'lua/profiles-old/x',
+    'sd/pextra/x',
+    'not/pex/anker.driver.json',
+  ]) {
+    assert.equal(driverWatchPath(p), false, p);
+  }
+  assert.equal(driverWatchPath(null), false);
+  assert.equal(driverWatchPath(undefined), false);
 });

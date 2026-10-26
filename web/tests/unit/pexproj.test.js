@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadProject, executeTarget, markVerified, restoreVerified } from '../../js/editor/pexproj.js';
+import { loadProject, executeTarget, markVerified, restoreVerified, installFromCard, installCandidate } from '../../js/editor/pexproj.js';
 
 const PEX = `name blink
 version 0.1.0
@@ -238,6 +238,18 @@ function callsOf() {
   };
 }
 
+test('install from the card waits for pex.sd_done and does not copy to LittleFS', async () => {
+  const { ws, calls } = callsOf();
+  const ev = await installFromCard({
+    ws, sdPath: 'sd:/projects/blink/build/pico2_w/blink.m33.pex', name: 'blink',
+  });
+  assert.equal(ev.ok, true);
+  assert.equal(ev.name, 'blink');
+  assert.deepEqual(calls, [
+    { op: 'pex.install', params: { path: 'sd:/projects/blink/build/pico2_w/blink.m33.pex', name: 'blink' } },
+  ]);
+});
+
 test('a running module is not installed until unload succeeds', async () => {
   const w = world();
   const spec = await loadProject({
@@ -270,36 +282,76 @@ test('a running module is not installed until unload succeeds', async () => {
   assert.equal(calls.some((c) => c.op === 'pex.install'), false);
 });
 
-test('a file larger than the pool is installed by name only after unload', async () => {
+test('a file larger than the pool is not copied to LittleFS and is not installed', async () => {
   const w = world();
   const spec = await loadProject({
     filePath: 'sd/projects/blink/src/main.c', readText: w.readText, arch: 'm33', board: 'pico2_w',
   });
   const target = spec.targets.find((t) => t.name === 'pico2_w');
   const { ws, calls } = callsOf();
-  const big = new Uint8Array(200);
+  let asked = false;
+  let unloaded = false;
   const result = await executeTarget({
     project: spec.project, target, andRun: true, running: true, loaded: true,
     readText: w.readText, write: w.write, list: w.list, ws,
     poolLargest: 64,
-    confirm: () => true,
-    unload: async () => ({ stopped: true, unloaded: true }),
+    confirm: () => { asked = true; return true; },
+    unload: async () => { unloaded = true; return { stopped: true, unloaded: true }; },
     compile: async () => ({
-      bytes: big,
+      bytes: new Uint8Array(200),
       map: '# map\n00000001 T pex_main\n',
       dis: '00000000 <pex_main>:\n',
       symbols: [{ name: 'pex_main', value: 1, kind: 'T' }],
       imageOff: 128,
     }),
   });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /not copied to LittleFS/);
+  assert.match(result.log, /not copied to LittleFS/);
+  assert.equal(asked, false);
+  assert.equal(unloaded, false);
+  assert.equal(w.writes.some((x) => x.path === 'pex/blink.m33.pex'), false);
+  assert.equal(calls.some((c) => c.op === 'pex.install'), false);
+});
+
+test('installCandidate refuses a card file that does not fit the pool', async () => {
+  let called = false;
+  await assert.rejects(
+    () => installCandidate({
+      ws: { call: async () => { called = true; return {}; } },
+      name: 'anker', arch: 'm33', bytes: new Uint8Array(100),
+      sdPath: 'sd:/projects/anker/build/anker.m33.pex', cap: 40,
+    }),
+    /not copied to LittleFS/,
+  );
+  assert.equal(called, false);
+});
+
+test('a card file that fits is installed from the card, and anker gets its manifest', async () => {
+  const w = world();
+  const spec = await loadProject({
+    filePath: 'sd/projects/blink/src/main.c', readText: w.readText, arch: 'm33', board: 'pico2_w',
+  });
+  const target = spec.targets.find((t) => t.name === 'pico2_w');
+  const project = { ...spec.project, name: 'anker' };
+  const { ws, calls } = callsOf();
+  const result = await executeTarget({
+    project, target, andRun: true,
+    readText: w.readText, write: w.write, list: w.list, ws,
+    poolLargest: 4096,
+    confirm: () => true,
+    compile: async () => new Uint8Array([1, 2, 3, 4]),
+  });
   assert.equal(result.ok, true, result.log);
-  assert.equal(w.writes.some((x) => x.path === 'pex/blink.m33.pex'), true);
+  assert.equal(w.writes.some((x) => x.path === 'pex/anker.m33.pex'), false);
+  const manifest = w.writes.find((x) => x.path === 'pex/anker.driver.json');
+  assert.ok(manifest);
+  assert.equal(JSON.parse(manifest.data).id, 'anker');
+  assert.equal(JSON.parse(manifest.data).kind, 'pex');
   const install = calls.find((c) => c.op === 'pex.install');
-  assert.deepEqual(install.params, { name: 'blink' });
-  assert.ok(w.writes.some((x) => x.path.endsWith('blink.m33.map')));
-  assert.ok(w.writes.some((x) => x.path.endsWith('blink.m33.dis')));
-  const map = w.writes.filter((x) => x.path.endsWith('.map')).pop();
-  assert.match(String(map.data), /partition_offset 0x2000/);
+  assert.equal(install.params.path, 'sd:/projects/blink/build/pico2_w/anker.m33.pex');
+  assert.equal(install.params.name, 'anker');
+  assert.match(result.log, /Wrote pex\/anker.driver.json/);
 });
 
 test('mark verified keeps the previous file until the new copy is on the card', async () => {
@@ -333,4 +385,19 @@ test('mark verified keeps the previous file until the new copy is on the card', 
   assert.equal(restored.ok, false);
   assert.match(restored.error, /still referenced/);
   assert.deepEqual(calls, []);
+
+  let confirmed = false;
+  let unloaded = false;
+  const tooBig = await restoreVerified({
+    name: 'anker', arch: 'm33', loaded: true, running: true, poolLargest: 64,
+    confirm: () => { confirmed = true; return true; },
+    unload: async () => { unloaded = true; return { unloaded: true }; },
+    read: async () => ({ ok: true, bytes: new Uint8Array(200) }),
+    write: async () => ({ ok: true }),
+    ws: { call: async () => ({ xip_ready: true }), on: () => () => {} },
+  });
+  assert.equal(tooBig.ok, false);
+  assert.match(tooBig.error, /not copied to LittleFS/);
+  assert.equal(confirmed, false);
+  assert.equal(unloaded, false);
 });

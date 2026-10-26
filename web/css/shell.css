@@ -138,6 +138,18 @@ body {
   height: 16px;
 }
 
+/* The operations ring. .tool-btn is inline-flex, which would otherwise
+   beat the hidden attribute and leave an empty button in the bar. */
+.jobs-btn[hidden] { display: none; }
+.jobs-btn { color: var(--green); }
+.jobs-ring { width: 18px; height: 18px; display: block; }
+.jobs-count {
+  fill: currentColor;
+  font-size: 6.5px;
+  font-family: system-ui, sans-serif;
+  font-weight: 600;
+}
+
 .tool-btn:hover:not(:disabled) {
   color: var(--fg);
   border-color: var(--border);
