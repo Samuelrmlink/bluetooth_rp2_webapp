@@ -21,6 +21,8 @@ CONFIG_IO_I2C=y
 CONFIG_IO_SPI=y
 CONFIG_NET_WIREGUARD=y
 CONFIG_OTA=y
+# Development loads unsigned PEX modules. A release image turns this off.
+CONFIG_PEX_ALLOW_UNSIGNED=y
 
 # pico2w plus the W5500 Ethernet uplink on SPI1:
 #   SCK GP14, MOSI GP15, MISO GP8, CS GP13 (plain GPIO), INT GP10, RST GP11.

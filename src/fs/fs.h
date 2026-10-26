@@ -97,9 +97,22 @@ uint32_t fs_file_alloc(const char *name, uint32_t size);
  * 0, or -2 when another archive is already streaming, -3 not a folder;
  * *length is the archive's exact size. read: bytes produced, 0 at the end. */
 int fs_tar_begin(const char *folder, uint32_t mtime, uint64_t *length);
+/* POST /api/tar {"paths":[...],"mtime":N,"id":N}. 0 ok; -2 too many paths;
+ * -3 busy (an archive or a batch delete is already running); -4 a path is
+ * missing; -1 bad JSON or a bad name. *length is the archive size. */
+int fs_tar_begin_json(const char *json, size_t json_len, uint64_t *length);
+void fs_tar_set_job(uint32_t id);
 int fs_tar_read(uint8_t *buf, size_t cap);
 void fs_tar_end(void);
 bool fs_tar_busy(void);
+/* POST /api/fs/remove. Same codes as the tar list, without -4: the pump
+ * reports a path that will not delete. One path per fs_remove_pump. */
+int fs_remove_begin_json(const char *json, size_t json_len);
+void fs_remove_abort(void);
+void fs_remove_pump(void);
+/* 1 finished, 0 still running, -1 failed (*err set), -2 aborted. */
+int fs_remove_result(int *removed, int *total, char *err, size_t errcap);
+void fs_job_poll(void);
 /* Create a folder and its parents. */
 int fs_mkdir(const char *path);
 int fs_rename(const char *from, const char *to);

@@ -1,9 +1,12 @@
 // The PEX partition, drawn in one editor tab (path pex://partition). It is
-// not a file: every .pex shares it, and the row selected in the file list
-// is the module the tab describes. Pack is pex.compact. A running module
-// stays where it is. There is no reserved growth gap: a replacement is
-// written into free space before the old copy is dropped, so a gap kept
-// "for growth" is the space that replacement needs.
+// not a file: every .pex shares it. Start and Stop act on the selected
+// installed module by name, so the file does not have to be in the tree.
+// Pack is pex.compact. Uninstall is pex.uninstall for that module: the
+// file in pex/ stays, and a running copy has to be stopped and unloaded
+// first. A running module stays where it is during Pack. There is no
+// reserved growth gap: a replacement is written into free space before
+// the old copy is dropped, so a gap kept "for growth" is the space that
+// replacement needs.
 
 import { bytes } from './filemenu.js';
 
@@ -42,6 +45,17 @@ export function partitionModel(info) {
   };
 }
 
+/** Which header buttons apply to the selected installed module. `state` is
+ *  the live pex.list state. Start is refused only while it is running.
+ *  Stop stays available for anything still resident, including a stopped copy. */
+export function partitionActions(mod, state) {
+  if (!mod) return { start: false, stop: false, remove: false, state: '' };
+  const live = state || (mod.loaded ? 'loaded' : '');
+  const resident = live === 'running' || live === 'loaded' || live === 'stopped'
+    || live === 'exited' || live === 'faulted';
+  return { start: live !== 'running', stop: resident, remove: true, state: live };
+}
+
 function el(tag, cls, text) {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -50,15 +64,27 @@ function el(tag, cls, text) {
 }
 
 export class PexPartition {
-  constructor(surface, { onPack, onSelect } = {}) {
+  constructor(surface, { onPack, onSelect, onRemove, onStart, onStop } = {}) {
     this.el = document.createElement('div');
     this.el.className = 'ed-pexpart';
     this.el.hidden = true;
     surface.appendChild(this.el);
     this.onPack = onPack || (() => {});
     this.onSelect = onSelect || (() => {});
+    this.onRemove = onRemove || (() => {});
+    this.onStart = onStart || (() => {});
+    this.onStop = onStop || (() => {});
     this.el.addEventListener('click', (e) => {
+      const act = (cls, fn) => {
+        const btn = e.target.closest(cls);
+        if (!btn) return false;
+        if (!btn.disabled && btn.dataset.pex) fn(btn.dataset.pex);
+        return true;
+      };
+      if (act('.ed-px-start', (name) => this.onStart(name))) return;
+      if (act('.ed-px-stop', (name) => this.onStop(name))) return;
       if (e.target.closest('.ed-px-pack')) { this.onPack(); return; }
+      if (act('.ed-px-remove', (name) => this.onRemove(name))) return;
       const row = e.target.closest('[data-pex]');
       if (row?.dataset.pex) this.onSelect(row.dataset.pex);
     });
@@ -68,22 +94,43 @@ export class PexPartition {
 
   hide() { this.el.hidden = true; }
 
-  show(info, { selected = null } = {}) {
+  show(info, { selected = null, states = null } = {}) {
     this.el.hidden = false;
-    this.el.replaceChildren(...this._nodes(info, selected));
+    this.el.replaceChildren(...this._nodes(info, selected, states || {}));
   }
 
-  _nodes(info, selected) {
+  _nodes(info, selected, states) {
     if (!info) {
       return [el('div', 'ed-px-note dim', 'Asking the device for the PEX partition…')];
     }
     const m = partitionModel(info);
     const head = el('div', 'ed-px-head');
+    const mod = m.modules.find((x) => x.name === selected);
+    const act = partitionActions(mod, mod ? states[mod.name] : '');
     head.append(
       el('div', 'ed-px-sum',
         `${bytes(m.size)} partition · index ${bytes(m.indexBytes)} · used ${bytes(m.used)} · free ${bytes(m.free)} · largest run ${bytes(m.largest)} · RW area ${bytes(m.rwArea)}`),
+      el('button', 'pane-btn ed-px-start', 'Start'),
+      el('button', 'pane-btn ed-px-stop', 'Stop'),
+      el('button', 'pane-btn ed-px-remove', 'Uninstall'),
       el('button', 'pane-btn ed-px-pack', 'Pack'),
     );
+    const bind = (cls, on, title) => {
+      const btn = head.querySelector(cls);
+      btn.type = 'button';
+      btn.disabled = !on;
+      if (mod && on) btn.dataset.pex = mod.name;
+      btn.title = title;
+    };
+    bind('.ed-px-start', act.start, mod
+      ? (act.state === 'running' ? `${mod.name} is already running.` : `Load and start ${mod.name} from the partition.`)
+      : 'Select an installed module in the table.');
+    bind('.ed-px-stop', act.stop, mod
+      ? `Stop and unload ${mod.name}.`
+      : 'Select an installed module in the table.');
+    bind('.ed-px-remove', act.remove, mod
+      ? `Remove ${mod.name} from the partition. The file in pex/ stays. A running copy has to be stopped and unloaded first.`
+      : 'Select an installed module in the table.');
     head.querySelector('.ed-px-pack').type = 'button';
     head.querySelector('.ed-px-pack').title = 'Slide installed files together. A running module stays where it is.';
     const noteText = m.fragmented
@@ -97,7 +144,10 @@ export class PexPartition {
     map.setAttribute('aria-label', 'PEX partition, one cell per 4 KB sector');
     for (const c of m.cells) {
       const cell = el('span', `ed-px-cell is-${c.kind === 'module' ? 'mod' : c.kind}`);
-      if (c.kind === 'module' && c.name === selected) cell.classList.add('is-sel');
+      if (c.kind === 'module') {
+        cell.dataset.pex = c.name;
+        if (c.name === selected) cell.classList.add('is-sel');
+      }
       cell.title = c.kind === 'index' ? `sector ${c.sector}: index`
         : c.kind === 'free' ? `sector ${c.sector}: free`
         : `sector ${c.sector}: ${c.name}`;
@@ -112,28 +162,28 @@ export class PexPartition {
     const table = el('table', 'ed-px-table');
     const thead = document.createElement('thead');
     const hr = document.createElement('tr');
-    for (const h of ['Name', 'Version', 'Offset', 'Size', 'Code', 'RW', 'Signed', 'Loaded', 'XIP']) {
+    for (const h of ['Name', 'State', 'Version', 'Offset', 'Size', 'Code', 'RW', 'Signed', 'XIP']) {
       hr.appendChild(el('th', '', h));
     }
     thead.appendChild(hr);
     const tbody = document.createElement('tbody');
-    for (const mod of m.modules) {
+    for (const rowMod of m.modules) {
       const tr = document.createElement('tr');
-      tr.dataset.pex = mod.name;
-      if (mod.name === selected) tr.classList.add('is-sel');
-      for (const v of [mod.name, mod.version, bytes(mod.offset), bytes(mod.size), bytes(mod.code), bytes(mod.rw),
-        mod.signed ? 'yes' : 'no', mod.loaded ? 'yes' : 'no', mod.xip_ready ? 'yes' : 'no']) {
+      tr.dataset.pex = rowMod.name;
+      if (rowMod.name === selected) tr.classList.add('is-sel');
+      const rowAct = partitionActions(rowMod, states[rowMod.name]);
+      for (const v of [rowMod.name, rowAct.state || '—', rowMod.version, bytes(rowMod.offset), bytes(rowMod.size), bytes(rowMod.code), bytes(rowMod.rw),
+        rowMod.signed ? 'yes' : 'no', rowMod.xip_ready ? 'yes' : 'no']) {
         tr.appendChild(el('td', '', String(v ?? '')));
       }
       tbody.appendChild(tr);
     }
     table.append(thead, tbody);
     const detail = el('div', 'ed-px-detail');
-    const mod = m.modules.find((x) => x.name === selected);
-    if (!selected) detail.textContent = 'Select a .pex file in the list. This tab follows that file.';
+    if (!selected) detail.textContent = 'Select an installed module. Start and Stop run it from the partition, with no file in the list. Uninstall removes that copy. The file in pex/, if there is one, stays.';
     else if (!mod) detail.textContent = `${selected} is not in the partition. Install it from the file's menu. The copy in pex/ stays either way.`;
     else {
-      detail.textContent = `${mod.name} ${mod.version} · ${mod.model} · offset ${bytes(mod.offset)} · ${bytes(mod.size)} · code ${bytes(mod.code)} · RW ${bytes(mod.rw)} · ${mod.signed ? 'signed' : 'unsigned'} · ${mod.loaded ? 'loaded' : 'not loaded'} · ${mod.xip_ready ? 'runs from flash' : 'loads into RAM'}`;
+      detail.textContent = `${mod.name} ${mod.version} · ${mod.model} · offset ${bytes(mod.offset)} · ${bytes(mod.size)} · code ${bytes(mod.code)} · RW ${bytes(mod.rw)} · ${mod.signed ? 'signed' : 'unsigned'} · ${act.state || 'not loaded'} · ${mod.xip_ready ? 'runs from flash' : 'loads into RAM'}. Start and Stop use this installed copy.`;
     }
     const meta = el('div', 'ed-px-note dim', `index #${m.seq ?? '—'} · ${m.moves} move${m.moves === 1 ? '' : 's'}`);
     return [head, note, map, legend, table, detail, meta];

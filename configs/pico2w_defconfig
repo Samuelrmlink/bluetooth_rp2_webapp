@@ -21,6 +21,8 @@ CONFIG_IO_I2C=y
 CONFIG_IO_SPI=y
 CONFIG_NET_WIREGUARD=y
 CONFIG_OTA=y
+# Development loads unsigned PEX modules. A release image turns this off.
+CONFIG_PEX_ALLOW_UNSIGNED=y
 # The W5500 Ethernet uplink is opt-in: see pico2w_eth_defconfig.
 # CONFIG_NET_ETH_W5500 is not set
 # CONFIG_SD is not set

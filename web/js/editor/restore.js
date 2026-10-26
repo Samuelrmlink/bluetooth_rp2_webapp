@@ -12,9 +12,10 @@ import { bytes } from './filemenu.js';
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 export class RestoreDialog {
-  constructor(app, { onDone } = {}) {
+  constructor(app, { onDone, track } = {}) {
     this.app = app;
     this.onDone = onDone;
+    this.track = track;
     const body = document.createElement('div');
     body.className = 'rs-body';
     body.innerHTML = `
@@ -28,7 +29,10 @@ export class RestoreDialog {
       </div>`;
     this.dlg = app.registerDialog(new Dialog({ id: 'restore-dlg', title: 'Restore archive', body }));
     this.q = (s) => body.querySelector(s);
-    this.q('.rs-cancel').addEventListener('click', () => { if (this.busy) this.stop = true; else this.dlg.close(); });
+    this.q('.rs-cancel').addEventListener('click', () => {
+      if (this.busy) { this.stop = true; this._job?.request(); }
+      else this.dlg.close();
+    });
     this.q('.rs-go').addEventListener('click', () => this.run());
   }
 
@@ -91,18 +95,25 @@ export class RestoreDialog {
     if (!p || this.busy) return;
     this.busy = true;
     this.stop = false;
+    this._job = this.track?.('Restoring archive') || null;
     this.q('.rs-go').hidden = true;
     this.q('.rs-cancel').textContent = 'Stop';
     const bar = this.q('.rs-progress');
     const status = this.q('.rs-status');
     const writes = [...p.overwrites, ...p.adds].sort((a, b) => a.path.localeCompare(b.path));
+    const total = writes.length + p.mkdirs.length || 1;
     bar.hidden = false;
-    bar.max = writes.length + p.mkdirs.length || 1;
+    bar.max = total;
     bar.value = 0;
     let done = 0, failed = null;
+    const step = (label) => {
+      const n = Math.min(total, done + 1);
+      status.textContent = label;
+      this._job?.set(`Restoring ${label} · ${n} of ${total}`, n / total);
+    };
     for (const d of p.mkdirs) {
       if (this.stop) break;
-      status.textContent = `${d}/`;
+      step(`${d}/`);
       const r = await fs.mkdir(d);
       if (!r.ok) { failed = `${d}/: ${r.error}`; break; }
       bar.value = ++done;
@@ -110,7 +121,7 @@ export class RestoreDialog {
     let files = 0;
     for (const w of failed ? [] : writes) {
       if (this.stop) break;
-      status.textContent = w.path;
+      step(w.path);
       const r = await fs.write(w.path, new Blob([w.data]));
       if (!r.ok) { failed = `${w.path}: ${r.error}`; break; }
       files++;
@@ -118,6 +129,10 @@ export class RestoreDialog {
     }
     this.busy = false;
     this.q('.rs-cancel').textContent = 'Close';
+    if (this.stop) this._job?.aborted();
+    else if (failed) this._job?.fail(failed);
+    else this._job?.done(`Restored ${files} file${files === 1 ? '' : 's'}`);
+    this._job = null;
     const left = writes.length - files;
     status.textContent = failed
       ? `Stopped at ${failed}. ${files} of ${writes.length} files were written; ${left} were not.`

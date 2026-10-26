@@ -22,6 +22,8 @@ void http_broadcast_line(const char *line);
 void http_flush_ws(void);
 /* Moves /api/sd transfers along (main loop; a no-op without CONFIG_SD). */
 void http_sd_pump(void);
+/* Writes the JSON reply for a batch delete the same turn the last path goes. */
+void http_jobs_pump(void);
 
 /* Frames this client lost to a full send buffer. Surfaced rather than silently
  * dropped, because a stalled link otherwise looks like missing data. */

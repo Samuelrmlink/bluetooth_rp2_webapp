@@ -104,6 +104,105 @@ export const fileUrl = (path) => apiUrl(fsPath(path));
 export const readText = (path) => send('GET', fsPath(path), undefined, 'text');
 export const readBlob = (path) => send('GET', fsPath(path), undefined, 'blob');
 
+// A body read as it arrives, so a long open or download can say how far it
+// has got. `got` is capped at Content-Length when the browser has already
+// unpacked a gzip (the length is the stored size, the bytes are the text).
+//
+// Chunks already sitting in the browser resume as microtasks, so a click
+// never runs until the whole body has been pulled. A macrotask at least
+// every 32 ms (and once more before the bytes are kept) lets Abort land
+// while the job is still running. Yielding on every chunk would add the
+// browser's timer clamp to each packet of a large file.
+const READ_YIELD_MS = 32;
+const yieldToInput = () => new Promise((resolve) => setTimeout(resolve, 0));
+const abortedBody = () => ({ ok: false, aborted: true, error: 'aborted' });
+
+export async function fetchBody(url, { method = 'GET', body = undefined, signal, onProgress } = {}) {
+  let res;
+  const target = /^https?:\/\//i.test(url) ? url : apiUrl(url);
+  try {
+    res = await fetch(target, {
+      method,
+      cache: 'no-store',
+      body,
+      signal,
+      headers: body != null ? { 'Content-Type': 'text/plain' } : undefined,
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') return abortedBody();
+    return { ok: false, error: 'unreachable', offline: true };
+  }
+  if (!res.ok) {
+    let error = `HTTP ${res.status}`;
+    try {
+      const j = await res.json();
+      if (typeof j?.error === 'string') error = j.error;
+      else if (j?.error?.message) error = j.error.message;
+    } catch { /* a tar or a file, not JSON */ }
+    return { ok: false, error, status: res.status };
+  }
+  const total = Number(res.headers.get('Content-Length')) || 0;
+  const reader = res.body?.getReader?.();
+  const chunks = [];
+  let raw = 0;
+  let yieldedAt = performance.now();
+  const report = () => onProgress?.({ got: total && raw > total ? total : raw, total, raw });
+  const stop = async () => {
+    try { await reader?.cancel(); } catch { /* already closed */ }
+    return abortedBody();
+  };
+  try {
+    if (signal?.aborted) return stop();
+    if (!reader) {
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (signal?.aborted) return abortedBody();
+      raw = buf.length;
+      chunks.push(buf);
+      report();
+    } else {
+      for (;;) {
+        if (signal?.aborted) return stop();
+        const step = await reader.read();
+        if (signal?.aborted) return stop();
+        if (step.done) break;
+        chunks.push(step.value);
+        raw += step.value.length;
+        report();
+        if (signal?.aborted) return stop();
+        if (performance.now() - yieldedAt >= READ_YIELD_MS) {
+          await yieldToInput();
+          yieldedAt = performance.now();
+          if (signal?.aborted) return stop();
+        }
+      }
+    }
+  } catch (e) {
+    try { await reader?.cancel(); } catch { /* already closed */ }
+    if (e?.name === 'AbortError' || signal?.aborted) return abortedBody();
+    return { ok: false, error: e?.message || 'read failed' };
+  }
+  await yieldToInput();
+  if (signal?.aborted) return stop();
+  const bytes = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+  let o = 0;
+  for (const c of chunks) { bytes.set(c, o); o += c.length; }
+  await yieldToInput();
+  if (signal?.aborted) return abortedBody();
+  return { ok: true, bytes, total, size: bytes.length };
+}
+
+export const readFileStream = (path, opts) => fetchBody(fsPath(path), opts);
+export async function readTextStream(path, opts) {
+  const r = await readFileStream(path, opts);
+  if (!r.ok) return r;
+  if (opts?.signal?.aborted) return abortedBody();
+  // The copy above is synchronous. One more turn so a click that landed
+  // during it is applied before the text is accepted.
+  await yieldToInput();
+  if (opts?.signal?.aborted) return abortedBody();
+  return { ...r, text: new TextDecoder().decode(r.bytes) };
+}
+
 export function write(path, data) {
   const size = typeof data === 'string' ? new TextEncoder().encode(data).length : data.size;
   if (!isSd(path) && size > FILE_MAX) {
@@ -120,14 +219,20 @@ export const remove = (path) => send('DELETE', fsPath(path), undefined, 'json');
 export const mkdir = (path) => send('PUT', fsPath(path) + '/', '', 'json');
 
 // A folder ('' = everything) as a tar archive, streamed by the device
-// (fw 1.95). A URL rather than a fetch: the browser saves it straight to
-// disk, with its progress, and nothing is held in the page. The board has no
-// clock, so the archive's file times are the time asked for.
-export function tarUrl(folder = '') {
+// (fw 1.95). The editor fetches it so the download can be watched and
+// aborted; a drag out of the browser still uses the URL. id= names fs.job
+// notes on a newer image. The board has no clock, so the file times are
+// the time asked for.
+export function tarUrl(folder = '', id = 0) {
   if (isSd(folder)) return null;           // the device streams tar from flash only
   const p = folder ? '/api/tar/' + String(folder).split('/').map(encodeURIComponent).join('/') : '/api/tar/';
-  return apiUrl(`${p}?mtime=${Math.floor(Date.now() / 1000)}`);
+  const idq = id ? `&id=${id}` : '';
+  return apiUrl(`${p}?mtime=${Math.floor(Date.now() / 1000)}${idq}`);
 }
+
+// POST /api/tar {"paths":[...],"mtime":N,"id":N}. Older firmware answers 404.
+export const tarPostUrl = () => apiUrl('/api/tar');
+export const removePostUrl = () => apiUrl('/api/fs/remove');
 
 // The device takes a JSON body here, as text/plain so a cross-origin dev page
 // does not provoke a CORS preflight it would not answer.

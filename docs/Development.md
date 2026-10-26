@@ -28,7 +28,17 @@ python3 tools/ota_release.py build-ota-sd/btgw.bin
 
 `BTGW_TBYB` defaults ON. That image boots only on a flash-update and rolls back unless it is confirmed. The first image written to a blank board is built with `-DBTGW_TBYB=OFF` and provisioned with `tools/provision.sh` (SWD) or `tools/make_provision_uf2.sh` (BOOTSEL). Both are in [OTA.md](../OTA.md).
 
-The signing key is created once per machine with `tools/ota_keygen.py`. The private key stays at `~/.config/btgw/ota-signing.pem` (or `$BTGW_OTA_KEY`). The public key is `src/ota/ota_pubkey.h`. `ota_release.py` appends the 64-byte ECDSA P-256 signature to `btgw.bin` and writes `btgw-<version>.smp.bin` next to it.
+The signing key is created once per machine with `tools/ota_keygen.py`. The private key stays outside this repository, at `~/.config/btgw/ota-signing.pem` (or `$BTGW_OTA_KEY`). The public key is `src/ota/ota_pubkey.h`. `ota_release.py` appends the 64-byte ECDSA P-256 signature to `btgw.bin` and writes `btgw-<version>.smp.bin` next to it. The same key signs a PEX module (`pex/tools/pexlink.py sign`, or `link --sign`). The editor Build button has no key: it writes an unsigned `.pex` on the SD card.
+
+`CONFIG_PEX_ALLOW_UNSIGNED` defaults on. Development images, including `configs/pico2w_sd_defconfig`, load unsigned modules and say so in `pex.list` as `UNSIGNED ALLOWED (development)`. A signed module still verifies. A release image sets the symbol off and then reports `signed-only`. An existing build directory keeps its `.config`, so a directory configured before this default needs the symbol set there, or a fresh directory.
+
+`configs/pico2w_pexcc_defconfig` is the same SD image, used when the browser compiler is under test. Use a fresh directory. After the first configure, cmake keeps that directory's `.config` and ignores a later `-DAPP_DEFCONFIG`.
+
+```sh
+cmake -S . -B build-pexcc -G Ninja -DAPP_DEFCONFIG=configs/pico2w_pexcc_defconfig
+cmake --build build-pexcc -j
+python3 tools/ota_release.py build-pexcc/btgw.bin
+```
 
 Shipped defconfigs:
 
@@ -38,7 +48,7 @@ Shipped defconfigs:
 | `pico2w_eth_defconfig` | `pico2w` plus the W5500 |
 | `pico2w_sd_defconfig` | `pico2w_eth` plus an SD card on SDIO. The image used with the card |
 | `pico2w_sdspi_defconfig` | The same card on SPI |
-| `pico2w_pexcc_defconfig` | The SD image with `CONFIG_PEX_ALLOW_UNSIGNED` |
+| `pico2w_pexcc_defconfig` | The SD image, same unsigned-module default, used with the browser compiler |
 | `pico2w_minimal_defconfig` | BLE over USB-NCM. No Wi-Fi, no Lua, no OTA |
 | `pico2w_noanker_defconfig` | Wi-Fi and Lua, with the Anker codec left out. OTA is off, so unsigned PEX modules load |
 
@@ -111,7 +121,7 @@ cmake --build /tmp/pex-drivers
 
 Outputs land in `/tmp/pex-drivers/pex-drivers/` (`anker.m33.pex`, `pinecil.m33.pex`). A firmware configure with `CONFIG_PEX` builds the same unsigned files into `<build>/pex-drivers/`. `drivers.cmake` does not pass `SIGN`.
 
-An OTA image refuses an unsigned module (`CONFIG_PEX_ALLOW_UNSIGNED` defaults off when `CONFIG_OTA` is on). Sign with the OTA key:
+A development image loads that unsigned file. Sign with the OTA key when the image has `CONFIG_PEX_ALLOW_UNSIGNED` off:
 
 ```sh
 python3 pex/tools/pexlink.py sign \
@@ -119,7 +129,7 @@ python3 pex/tools/pexlink.py sign \
 python3 pex/tools/pexlink.py dump /tmp/anker.m33.pex
 ```
 
-`--key` selects a PEM. Otherwise the tool uses `$BTGW_OTA_KEY`, then `~/.config/btgw/ota-signing.pem`. `link --sign` signs while linking. `configs/pico2w_pexcc_defconfig` is the image that also loads unsigned modules.
+`--key` selects a PEM. Otherwise the tool uses `$BTGW_OTA_KEY`, then `~/.config/btgw/ota-signing.pem`. `link --sign` signs while linking. Development images already load the unsigned file. The configure lines are under Firmware image above.
 
 On the device the file lives at `pex/<name>.<arch>.pex` on LittleFS. `pex.install` copies it into the PEX partition. `pex.load` then `pex.start` run it. `pex.load` of an `sd:` path reads the whole file into the RAM pool and does not install it. The pool on the SD image is 48 KB (`CONFIG_PEX_POOL_KB`). A file larger than `pool.largest` from `pex.list` cannot take that path. The signed Anker module is one of those: it executes in place from the partition.
 

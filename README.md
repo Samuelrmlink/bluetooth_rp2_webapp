@@ -42,7 +42,7 @@ A module usually executes in place from the PEX flash partition. A smaller binar
 
 Stop ends the module's tasks and leaves the code loaded, including any ops it registered. Unload runs deinit and drops those ops. The file in `pex/` and an installed copy in the partition stay until uninstall. The editor's Stop button does both. Lua's `pex.stop` only stops, so a script can pause a module and start it again.
 
-An image built with OTA loads signed modules. `CONFIG_PEX_ALLOW_UNSIGNED` defaults off when OTA is on. The signature is the OTA key (`pexlink sign`).
+Development images load unsigned PEX modules. `CONFIG_PEX_ALLOW_UNSIGNED` defaults on, including when OTA is on. A signed module still verifies with the OTA key (`pexlink sign`). A release image turns the flag off.
 
 ### Layer 3 — Lua VM (optional)
 
@@ -90,6 +90,8 @@ python3 tools/ota_release.py build-ota-sd/btgw.bin
 `ota_release.py` writes `build-ota-sd/btgw-<version>.smp.bin`: the image followed by a 64-byte ECDSA P-256 signature. The version minor is the git commit count unless `-DBTGW_VERSION_MINOR` is set. Apply the file with `smpmgr --ip <addr>` over UDP 1337. A try-before-you-buy image stays unconfirmed until `image state-write --confirm`. The sequence is in [OTA.md](OTA.md).
 
 The first image a blank board boots normally is built with `-DBTGW_TBYB=OFF` and written by `tools/provision.sh` or `tools/make_provision_uf2.sh`. Release images leave `BTGW_TBYB` at its default, ON.
+
+The signing key stays outside this repository (`~/.config/btgw/ota-signing.pem`, or `$BTGW_OTA_KEY`). Development images, including `configs/pico2w_sd_defconfig`, load unsigned PEX modules. The editor Build button writes an unsigned `.pex` and cannot sign it. That file loads on these images. Turn `CONFIG_PEX_ALLOW_UNSIGNED` off for a release image that should refuse it. The host sign command is in [docs/Development.md](docs/Development.md).
 
 ### Web assets
 

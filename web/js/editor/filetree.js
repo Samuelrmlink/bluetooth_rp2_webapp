@@ -10,6 +10,13 @@
 // its parent, the way netrw and NERDTree do.
 
 import * as fs from '../fs.js';
+import { applySelect } from './select.js';
+
+/** LittleFS listings show a spinner. sd and sd/... are the card, not LittleFS. */
+export function listsWithSpinner(path) {
+  const p = String(path || '');
+  return p !== 'sd' && !p.startsWith('sd/');
+}
 
 export class FileTree {
   // mark(path) -> { dirty: bool, arena: 'loaded'|'stale'|undefined }
@@ -19,26 +26,39 @@ export class FileTree {
     this.mark = mark;
     this.onError = onError || (() => {});
     this.root = { path: '', name: '', dir: true, open: true, children: null };
-    this.sel = null;              // selected path
+    this.sel = null;              // the cursor
+    this.picked = new Set();     // highlighted rows; the cursor may be one of them
+    this.anchor = null;          // where a shift-range starts
     this._dirty = true;
   }
 
   async load(node = this.root) {
-    const r = await fs.list(node.path);
-    if (!r.ok) {
-      this.onError(`list ${node.path || '/'}: ${r.error}`);
-      node.children = node.children || [];
-      return;
+    // The frame loop paints while the listing is in flight. The card's own
+    // listing is left alone: this spinner is for LittleFS.
+    const spin = listsWithSpinner(node.path);
+    if (spin) {
+      node.loading = true;
+      this._dirty = true;
     }
-    const old = new Map((node.children || []).map((c) => [c.name, c]));
-    node.children = r.files.map((f) => {
-      const path = node.path ? `${node.path}/${f.name}` : f.name;
-      const prev = old.get(f.name);
-      // Keep an expanded directory's state and contents across a refresh.
-      return prev && prev.dir === !!f.dir ? { ...prev, size: f.size, alloc: f.alloc }
-        : { path, name: f.name, dir: !!f.dir, size: f.size, alloc: f.alloc, open: false, children: null };
-    });
-    this._dirty = true;
+    try {
+      const r = await fs.list(node.path);
+      if (!r.ok) {
+        this.onError(`list ${node.path || '/'}: ${r.error}`);
+        node.children = node.children || [];
+        return;
+      }
+      const old = new Map((node.children || []).map((c) => [c.name, c]));
+      node.children = r.files.map((f) => {
+        const path = node.path ? `${node.path}/${f.name}` : f.name;
+        const prev = old.get(f.name);
+        // Keep an expanded directory's state and contents across a refresh.
+        return prev && prev.dir === !!f.dir ? { ...prev, size: f.size, alloc: f.alloc }
+          : { path, name: f.name, dir: !!f.dir, size: f.size, alloc: f.alloc, open: false, children: null };
+      });
+    } finally {
+      if (spin) node.loading = false;
+      this._dirty = true;
+    }
   }
 
   // Re-list every expanded directory -- after a save, upload, rename or delete.
@@ -74,8 +94,23 @@ export class FileTree {
       if (!node.open) await this.toggle(node, true);
     }
     this.sel = path;
+    this.picked = new Set([path]);
+    this.anchor = path;
     this._dirty = true;
     this._scroll = true;
+  }
+
+  // plain opens, toggle and range only change the set. Returns the rule's
+  // result so the caller can skip opening on a modifier gesture.
+  applyPick(gesture, path) {
+    const rows = this.visible().map((v) => v.node.path);
+    const next = applySelect(rows, { cursor: this.sel, anchor: this.anchor, picked: this.picked }, gesture, path);
+    this.sel = next.cursor;
+    this.anchor = next.anchor;
+    this.picked = next.picked;
+    this._dirty = true;
+    this._scroll = true;
+    return next;
   }
 
   // The directory new files and uploads go to: the selected directory, or
@@ -137,17 +172,18 @@ export class FileTree {
     const frag = document.createDocumentFragment();
     for (const { node, depth } of this.visible()) {
       const row = document.createElement('div');
-      row.className = `ft-row${node.dir ? ' ft-dir' : ''}`;
+      row.className = `ft-row${node.dir ? ' ft-dir' : ''}${node.loading ? ' is-loading' : ''}`;
       row.dataset.path = node.path;
       // Draggable with a mouse only: on a touch screen a long press is the
       // row's menu, and a draggable row would turn it into a drag.
       if (this.canDrag) row.draggable = true;
       row.style.paddingLeft = `${6 + depth * 12}px`;
+      if (this.picked.has(node.path)) row.classList.add('is-picked');
       if (node.path === this.sel) row.setAttribute('aria-selected', 'true');
       if (node.path === this.menuPath) row.classList.add('is-menu-row');   // its menu is open
       const tw = document.createElement('span');
       tw.className = 'ft-twisty';
-      tw.textContent = node.dir ? (node.open ? '▾' : '▸') : '';
+      tw.textContent = node.dir ? (node.loading ? '' : (node.open ? '▾' : '▸')) : '';
       const name = document.createElement('span');
       name.className = 'ft-name';
       name.textContent = node.name;

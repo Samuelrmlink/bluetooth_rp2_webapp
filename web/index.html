@@ -47,6 +47,15 @@
   <span id="conn-status" class="disconnected">Disconnected</span>
   <span id="conn-info" translate="no"></span>
   <span class="spacer"></span>
+  <button id="jobs-btn" class="tool-btn jobs-btn" type="button" hidden
+          title="Operations" aria-label="Operations">
+    <svg class="jobs-ring" viewBox="0 0 16 16" aria-hidden="true">
+      <circle class="jobs-track" cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6" opacity="0.35"></circle>
+      <circle class="jobs-arc" cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"
+              stroke-linecap="butt" transform="rotate(-90 8 8)"></circle>
+      <text class="jobs-count" x="8" y="8.6" text-anchor="middle" dominant-baseline="middle"></text>
+    </svg>
+  </button>
   <button id="swap-splits-btn" class="tool-btn" type="button"
           title="Swap all splits &#8212; horizontal &#8596; vertical (Alt+R)"
           aria-label="Swap all splits"><svg aria-hidden="true"><use href="#i-transpose" xlink:href="#i-transpose"/></svg></button>

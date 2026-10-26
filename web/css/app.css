@@ -194,6 +194,12 @@ table.s-table td:first-child { padding: 3px 4px; }
   color: var(--dim);
 }
 .ed-titlebar .ed-b-keys.on { color: var(--green); }
+.ed-titlebar .ed-b-pex {
+  width: auto;
+  padding: 0 6px;
+  font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.04em;
+}
 .ed-titlebar .ed-b-build,
 .ed-titlebar .ed-b-brun {
   width: auto;
@@ -285,10 +291,54 @@ table.s-table td:first-child { padding: 3px 4px; }
 }
 
 .ft-row:hover { background: #1a1c20; }
+.ft-row.is-picked { background: #243028; box-shadow: inset 2px 0 0 var(--green); }
 .ft-row[aria-selected='true'] { background: #1f2a24; }
+.ft-row.is-picked[aria-selected='true'] { background: #1f2a24; }
+
+/* Narrower than a settings window: this is a list of one-line jobs. */
+.jobs-dlg .modal { width: min(360px, 94vw); }
+.jobs-body { min-width: 0; }
+.jobs-list { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; }
+.jobs-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.jobs-line { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobs-tail { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobs-row.is-done .jobs-line,
+.jobs-row.is-done .jobs-tail,
+.jobs-row.is-aborted .jobs-line,
+.jobs-row.is-aborted .jobs-tail { color: var(--dim); }
+.jobs-row.is-error .jobs-line,
+.jobs-row.is-error .jobs-tail { color: var(--orange); }
+.jobs-abort, .jobs-x {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+  padding: 0 6px;
+  min-height: 22px;
+}
+.jobs-x { padding: 0 7px; }
+.jobs-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.jobs-empty { padding: 4px 0; }
 .ft-dir { color: var(--fg); }
 .ft-row.is-dirty { color: var(--fg); }
 .ft-twisty { flex: 0 0 10px; color: var(--dim); }
+.ft-row.is-loading .ft-twisty {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--dim);
+  border-top-color: var(--fg);
+  border-radius: 50%;
+  animation: ft-spin 0.7s linear infinite;
+}
+@keyframes ft-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ft-row.is-loading .ft-twisty { animation: none; }
+}
 .ft-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .ft-badges { display: inline-flex; gap: 5px; align-items: center; }
 .ft-dot { font-size: 10px; color: var(--fg); }
@@ -688,7 +738,7 @@ table.grid td.is-menu-cell { outline: 2px solid var(--orange); outline-offset: -
 /* The PEX partition tab: one view of the flash region, shared by every .pex. */
 .ed-pexpart { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; background: var(--bg); overflow: auto; }
 .ed-pexpart[hidden] { display: none; }
-.ed-px-head { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.ed-px-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .ed-px-sum { flex: 1 1 auto; min-width: 0; font-size: 12px; }
 .ed-px-note { padding: 6px 10px; font-size: 12px; line-height: 1.4; }
 .ed-px-map { display: flex; flex-wrap: wrap; gap: 2px; padding: 4px 10px 8px; }

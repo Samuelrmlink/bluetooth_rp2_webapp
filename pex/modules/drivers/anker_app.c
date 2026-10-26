@@ -571,6 +571,37 @@ static void enter_stream(sess_t *s) {
             s->code[0] ? s->code : "?", cip_name(s->cipher));
 }
 
+/* Stop owns the links and the page's device windows. A session that has
+ * published telemetry gets profile.anker.gone so the page can drop those
+ * windows without waiting for them to go quiet. */
+static void release_sessions(void) {
+    s_stop = 1;
+    s_running = 0;
+    for (int i = 0; i < 2; i++) {
+        sess_t *s = &S[i];
+        if (!s->on) { continue; }
+        if (s->saw_link || (s->st != ST_OFF && s->st != ST_HUNT && s->st != ST_IDLE)) {
+            pex_bt_disconnect(s->addr);
+        }
+        if (s->have_sample && s->addr_str[0]) {
+            pex_jw_t w;
+            pex_jw_init(&w, s_emit, sizeof s_emit);
+            pex_jw_obj(&w, NULL);
+            pex_jw_str(&w, "addr", s->addr_str);
+            if (s->code[0]) { pex_jw_str(&w, "product_code", s->code); }
+            pex_jw_end(&w);
+            if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.gone", s_emit); }
+        }
+        s->st = ST_OFF;
+        s->streaming = 0;
+        s->saw_link = 0;
+        s->have_sample = 0;
+    }
+    s_hs = -1;
+    if (s_listen >= 0) { pex_bt_unlisten(s_listen); s_listen = -1; }
+    pex_bt_scan_stop();
+}
+
 static void drop_link(sess_t *s) {
     pex_bt_disconnect(s->addr);
     hs_release(slot_of(s));
@@ -1875,21 +1906,10 @@ int pex_main(const pex_host_t *host, uint32_t reason, void *arg) {
         return PEX_OK;
     }
     case PEX_APP_STOP:
-        s_stop = 1;
-        s_running = 0;
-        for (int i = 0; i < 2; i++) {
-            if (S[i].on && S[i].st != ST_OFF && S[i].st != ST_HUNT && S[i].st != ST_IDLE) {
-                pex_bt_disconnect(S[i].addr);
-            }
-            S[i].st = ST_OFF;
-        }
-        s_hs = -1;
-        if (s_listen >= 0) { pex_bt_unlisten(s_listen); s_listen = -1; }
-        pex_bt_scan_stop();
+        release_sessions();
         return PEX_OK;
     case PEX_DEINIT:
-        s_running = 0;
-        s_stop = 1;
+        release_sessions();
         memset(g_priv, 0, sizeof g_priv);
         return PEX_OK;
     default:

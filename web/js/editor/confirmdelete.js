@@ -69,6 +69,48 @@ export class ConfirmDelete {
     });
   }
 
+  // A picked set: one confirm for every path. `roots` are what was picked,
+  // `files` and `dirs` are the expansion (a folder listed with its contents).
+  // `vitals` are gateway folders in that expansion; the first name has to
+  // be typed. Past eight roots the summary says how many more.
+  askList({ roots, files, dirs, vitals = [] }) {
+    this._end(false);
+    const names = roots || [];
+    const shown = names.slice(0, 8).map(esc);
+    const more = names.length - shown.length;
+    const who = shown.join(', ') + (more > 0 ? ` and ${more} more` : '');
+    const size = (files || []).reduce((n, f) => n + (f.size || 0), 0);
+    const nFiles = (files || []).length;
+    const nDirs = (dirs || []).length;
+    this.vital = vitals.length > 0;
+    this.path = vitals[0] || '';
+    this.dlg._overlay.querySelector('.dlg-title').textContent = names.length > 1 ? `Delete ${names.length} items` : `Delete ${names[0] || ''}`;
+    const bits = [];
+    if (nFiles) bits.push(`<b>${nFiles} file${nFiles === 1 ? '' : 's'}</b>`);
+    if (nDirs) bits.push(`<b>${nDirs} folder${nDirs === 1 ? '' : 's'}</b>`);
+    this.q('.cd-summary').innerHTML = `Delete ${who || 'the selection'} from the device`
+      + (bits.length ? `: ${bits.join(' and ')}, ${esc(bytes(size))}` : '')
+      + '. <b class="cd-warn">This cannot be undone.</b>';
+    const rows = (files || []).slice(0, SHOW_MAX).map((f) => `<li>${esc(f.path)} <span class="dim">${esc(bytes(f.size || 0))}</span></li>`);
+    if (nFiles > SHOW_MAX) rows.push(`<li class="dim">… and ${nFiles - SHOW_MAX} more</li>`);
+    this.q('.cd-list').innerHTML = rows.length ? `<ul>${rows.join('')}</ul>` : '';
+    this.q('.cd-tip').hidden = !nFiles;
+    this.q('.cd-type').hidden = !this.vital;
+    const named = vitals.map(esc).join(', ');
+    this.q('.cd-type-label').innerHTML = vitals.length > 1
+      ? `This includes the gateway's own folders <b>${named}</b>. Type <b>${esc(vitals[0])}</b> to delete them:`
+      : `<b>${esc(vitals[0] || '')}/</b> is one of the gateway's own folders. Type <b>${esc(vitals[0] || '')}</b> to delete it:`;
+    this.q('.cd-name').value = '';
+    const noun = nFiles ? `${nFiles} file${nFiles === 1 ? '' : 's'}` : `${nDirs} folder${nDirs === 1 ? '' : 's'}`;
+    this.q('.cd-delete').textContent = `Delete ${noun}`;
+    this._check();
+    return new Promise((resolve) => {
+      this._resolve = resolve;
+      this.dlg.open();
+      setTimeout(() => (this.vital ? this.q('.cd-name') : this.q('.cd-cancel')).focus(), 0);
+    });
+  }
+
   _check() {
     this.q('.cd-delete').disabled = this.vital && this.q('.cd-name').value.trim() !== this.path;
   }

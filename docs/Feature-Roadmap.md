@@ -40,8 +40,8 @@ These are part of the architecture. They are not tasks.
 - [ ] **R5 — A PEX build finishes, and signing stays on the host**
   - Layer: 2, produced from layer 4, accepted by layer 1.
   - Why: The product image loads signed modules. The host cmake build and the in-browser `pexcc` build both emit unsigned files. The browser build also stops at the SHA-256 of the image, because `crypto.subtle` is missing on plain `http://`. The page cannot hold the OTA key.
-  - Needs: A SHA-256 in the page, so the browser build writes `<out>/<name>.m33.pex` and `build.log` on the SD card. Signing stays `pexlink sign` with the OTA key on the host. The product defconfig keeps `CONFIG_PEX_ALLOW_UNSIGNED` off. `configs/pico2w_pexcc_defconfig` remains the image that loads unsigned modules.
-  - Done when: A `Pexfile` build on the board's own HTTP page writes the `.pex`, and that file loads on the product image only after `pexlink sign`.
+  - Needs: A SHA-256 in the page, so the browser build writes `<out>/<name>.m33.pex` and `build.log` on the SD card. Signing stays `pexlink sign` with the OTA key on the host, for a release image. Development images set `CONFIG_PEX_ALLOW_UNSIGNED`, so an unsigned browser build loads on those images.
+  - Done when: A `Pexfile` build on the board's own HTTP page writes the `.pex`, and that unsigned file loads on a development image. A release image, with the flag off, still requires `pexlink sign`.
   - 2026-10-24: a Build of `sd/projects/anker/Pexfile` on the board's page wrote `sd/projects/anker/build/anker.m33.pex` (168836 bytes) and said a signed-only board refuses it until `pexlink sign`. That file was not loaded and not installed. The box stays open until a signed copy of it is the one that loads.
 
 - [ ] **R6 — One Anker source tree**

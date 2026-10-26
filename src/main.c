@@ -266,7 +266,13 @@ int main(void) {
 #endif
         /* After the worker's turn, so a note it just queued is in this pass.
          * LittleFS notes are queued on the write itself and leave here too. */
+        /* One delete per turn, then the notes those writes queued, then the
+         * reply if that delete was the last. Before wifi_poll, so a tcp_write
+         * here is still on this core before lwIP runs. */
+        fs_remove_pump();
         fs_watch_poll();
+        fs_job_poll();
+        http_jobs_pump();
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
 #if CONFIG_NET_WIFI
         /* wifi_poll() makes that same call and THEN advances the station/AP

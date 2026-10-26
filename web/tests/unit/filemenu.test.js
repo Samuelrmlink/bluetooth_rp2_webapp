@@ -5,7 +5,7 @@ import { fileMenuItems } from '../../js/editor/filemenu.js';
 const ids = (items) => items.map((i) => i.id);
 
 test('a folder: new file, upload, refresh, rename', () => {
-  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'mkdir', 'upload', 'untar', 'tar', 'size', 'refresh', 'rename', 'delete']);
+  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'mkdir', 'upload', 'untar', 'tar', 'size', 'refresh', 'copy', 'rename', 'select', 'delete']);
 });
 
 test('a Pexfile lists its build actions before Open', () => {
@@ -21,19 +21,19 @@ test('a Pexfile lists its build actions before Open', () => {
 
 test('a plain file: open, download, rename, delete (last, marked)', () => {
   const m = fileMenuItems({ dir: false, path: 'cfg/bt.json' });
-  assert.deepEqual(ids(m), ['open', 'download', 'rename', 'delete']);
+  assert.deepEqual(ids(m), ['open', 'download', 'copy', 'rename', 'select', 'delete']);
   assert.equal(m.at(-1).danger, true);
 });
 
 test('a script gets start / stop / commit / revert; the open file no Open', () => {
   const m = fileMenuItems({ dir: false, path: 'lua/anker.lua' }, { isOpen: true, script: 'anker' });
-  assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'compress', 'rename', 'delete']);
+  assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'compress', 'copy', 'rename', 'select', 'delete']);
   assert.equal(m[0].label, 'Start anker');
 });
 
 test('a PEX app gets start / stop / install, and uninstall only when it is in the partition', () => {
   const m = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker' });
-  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-mark', 'pex-restore', 'pex-partition', 'download', 'rename', 'delete']);
+  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-mark', 'pex-restore', 'pex-partition', 'download', 'copy', 'rename', 'select', 'delete']);
   assert.equal(m.find((i) => i.id === 'pex-start').label, 'Start anker');
   assert.equal(m.find((i) => i.id === 'pex-stop').label, 'Stop anker');
   const installed = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker', installed: true });
@@ -100,12 +100,38 @@ test('a compressed file says so on its info line', () => {
   assert.match(fileInfo({ path: 'lua/x.lua.gz', size: 900, alloc: 4096 }), /^compressed \(gzip\) · 900 B · 4\.0 KB on flash$/);
 });
 
+test('several picked rows offer the archive and one delete, and Select toggles', () => {
+  const m = fileMenuItems({ dir: false, path: 'lua/a.lua' }, { picked: 3, inPicked: true, selected: true });
+  assert.deepEqual(ids(m), ['select', 'tar-set', 'delete']);
+  assert.equal(m[0].label, 'Deselect');
+  assert.equal(m.at(-1).danger, true);
+  const one = fileMenuItems({ dir: false, path: 'lua/a.lua' }, { picked: 3, inPicked: false });
+  assert.ok(ids(one).includes('open') && ids(one).includes('select') && !ids(one).includes('tar-set'));
+  assert.equal(fileMenuItems({ dir: false, path: 'lua/a.lua' }).find((i) => i.id === 'select').label, 'Select');
+});
+
+test('a .pex in an SD build directory can be installed from the card', () => {
+  const m = fileMenuItems({
+    dir: false,
+    path: 'sd/projects/blink/build/pico2_w/blink.m33.pex',
+    name: 'blink.m33.pex',
+  });
+  assert.ok(ids(m).includes('pex-install'));
+  assert.equal(m.find((i) => i.id === 'pex-install').label, 'Install blink.m33');
+  assert.equal(ids(m).filter((id) => id === 'pex-install').length, 1);
+  assert.ok(ids(m).includes('pex-partition'));
+  const internal = ids(fileMenuItems({ dir: false, path: 'staged/blink.m33.pex', name: 'blink.m33.pex' }));
+  assert.ok(!internal.includes('pex-install'));
+  assert.ok(internal.includes('pex-mark'));
+  assert.ok(internal.includes('pex-partition'));
+});
+
 test('the SD card: its own folder has no rename/delete and links to its settings; tar is flash-only', () => {
   const card = ids(fileMenuItems({ dir: true, path: 'sd' }, { card: true }));
   assert.ok(card.includes('sd-settings') && card.includes('mkdir'));
-  assert.ok(!card.includes('delete') && !card.includes('rename') && !card.includes('tar'));
+  assert.ok(!card.includes('delete') && !card.includes('rename') && !card.includes('copy') && !card.includes('tar'));
   const sub = ids(fileMenuItems({ dir: true, path: 'sd/logs' }));
-  assert.ok(sub.includes('delete') && sub.includes('rename') && !sub.includes('tar'));
+  assert.ok(sub.includes('delete') && sub.includes('rename') && sub.includes('copy') && !sub.includes('tar'));
   assert.ok(!ids(fileMenuItems({ dir: false, path: 'sd/notes.txt' })).includes('compress'));
   assert.match(sizeInfo({ files: 2, dirs: 1, bytes: 2048, alloc: 0, block: 0 }, 'sd/logs'), /on the SD card$/);
 });

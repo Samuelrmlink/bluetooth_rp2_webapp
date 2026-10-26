@@ -107,6 +107,16 @@ async function readListing(fs, dir, { pexFiles, luaFiles, seen, manifests, manif
   }
 }
 
+/** A save or delete here should reload the manifests. Exact directory names
+ *  count. A longer path has to keep the slash, so `pexfoo` does not match. */
+const DRIVER_WATCH = ['pex', 'sd/pex', 'lua/profiles', 'sd/lua/profiles'];
+
+export function driverWatchPath(path) {
+  if (typeof path !== 'string' || !path) return false;
+  const p = path.replace(/^\/+/, '');
+  return DRIVER_WATCH.some((root) => p === root || p.startsWith(`${root}/`));
+}
+
 /**
  * Manifests on flash and, when `sd` is set, the card. One id wins, flash
  * first. Directory listings also record which .pex and top-level .lua files
