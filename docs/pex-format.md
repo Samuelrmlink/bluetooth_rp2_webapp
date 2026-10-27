@@ -1082,7 +1082,9 @@ bases its RO words carry and its RW slot, and the state (signed, verified at
 install). **An update writes the copy that does not hold the current index**
 (erase + program + read back); at mount the valid copy with the newer
 sequence number wins. A power cut during any update leaves the previous index
-in force. A RAM copy of the index lives in the pool (runtime-owned).
+in force. A RAM copy of the index lives in the pool (runtime-owned). An update
+edits that copy and programs the other sector from it; a failed write copies
+the current sector back over the RAM copy.
 
 **Every change is copy-then-commit**: a file is written into free sectors,
 verified in place, and only then entered in the index (replacing an older
