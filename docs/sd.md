@@ -322,6 +322,14 @@ hardware.
   no 128 KB limit there (FAT32's 4 GB). A browser loads a card page at
   `GET /sd/<path>`: a folder serves `index.html`, and a stored `.gz` is sent
   with `Content-Encoding: gzip`. The editor stays on `/api/sd/files`.
+* A sub-app on the card registers a gateway toolbar button by leaving
+  `apps/<id>/app.json` (or `app.json.gz`) in its own folder:
+  `{"label":"Printer"}`. The button opens `/sd/apps/<id>/`. The same file
+  at LittleFS `apps/<id>/` opens `/apps/<id>/`. The link is the folder.
+  `title` is accepted when `label` is absent. A folder with no manifest is
+  not a button. Code already running in the gateway page can call
+  `app.addLauncher({id, label, href})` instead; `href` has to be a path on
+  this device.
 * The editor keeps flash-only rules off the card: no `.bak` on save, no
   compression, no tar download of a card folder, Lua script status only for
   `lua/` and `staged/`, `sd/` skipped by a whole-device search (search it by

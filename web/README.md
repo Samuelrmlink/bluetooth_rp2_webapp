@@ -19,6 +19,7 @@ js/{tiles,layout,keys,nav,dropdown,popover,sheet,splitter,draggable}.js
                           the window manager (from km003c)
 js/wsapi.js  js/bus.js    the WebSocket API; per-owner event subscriptions
 js/fs.js                  the /api/fs file client
+js/launchers.js           toolbar buttons for another web app
 js/windows/*.js           the built-in windows
 js/settings/*.js          Settings sections (UI, WiFi, WireGuard, Bluetooth, Firmware)
 js/editor/                the editor: core (textarea over highlight), highlight,
@@ -27,6 +28,26 @@ js/controls/              the control kit and pending/confirm state
 js/devices/               device plugins: registry, host (lifecycle), windows,
                           and one directory per plugin
 ```
+
+## Another web app
+
+A separate page registers a button in the top bar without adding a file to
+this app. Put `app.json` in its own folder:
+
+```json
+{ "label": "Printer" }
+```
+
+`apps/<id>/app.json` on LittleFS opens `/apps/<id>/`. The same file under
+`apps/<id>/` on the card opens `/sd/apps/<id>/`. `app.json.gz` is used when
+the plain file is absent. `label` is the button text; `title` means the same
+thing. The link is the folder, not a field in the file. A folder with no
+manifest is left off the bar.
+
+Code that already runs in this page, such as `js/ext/<name>/index.js`, can
+call `app.addLauncher({id, label, href})` or `{id, label, onClick}` instead
+of `addWindow`. `href` is a path on this device. `onClick` is used only when
+there is no `href`. `app.removeLauncher(id)` takes the button away.
 
 ## A window
 

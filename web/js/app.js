@@ -29,12 +29,13 @@ import { HelpModal } from './modals/help.js';
 import { readLayoutStore, writeLayoutStore, readPrefs, writePrefs } from './prefs.js';
 import { BUILTIN_WINDOWS, DEFAULT_TREE } from './windows/index.js';
 import { loadExtensions } from './extensions.js';
+import { createRegistry, loadFolderLaunchers, normalizeLauncher } from './launchers.js';
 import { SETTINGS_SECTIONS } from './settings/index.js';
 import { GattLog } from './gattlog.js';
 import { DeviceStore } from './gattdb.js';
 import { DeviceHost } from './devices/host.js';
 import { PairingPrompt } from './pairing.js';
-import { setSd } from './fs.js';
+import { list, readText, setSd } from './fs.js';
 
 const NUDGE_PX = 24;
 const RESIZE_PX = 32;
@@ -86,6 +87,9 @@ class App {
     // Windows from other projects, uploaded to js/ext/ on the gateway
     // (extensions.js). The same promise for anyone who waits on them.
     this.extensions = loadExtensions(this);
+    // Toolbar links to other web apps (launchers.js): a manifest under
+    // apps/ or sd/apps/, or addLauncher from code already on this page.
+    this._launchers = createRegistry();
     this._wireToolbar();
     this._wireConnection();
 
@@ -155,6 +159,72 @@ class App {
     this.windows.delete(id);
     this._layout.removePane(id);
     w.el.remove();
+  }
+
+  // A toolbar button. href is a path on this device; onClick is for code
+  // that is already running here and is used only when href is absent.
+  // The same id replaces the previous button.
+  addLauncher(spec) {
+    const n = normalizeLauncher(spec);
+    if (!n.ok) {
+      this.log('!', `launcher ${spec?.id || '?'}: ${n.error}`);
+      return false;
+    }
+    if (this._launchers.set(n.launcher)) this.log('app', `launcher ${n.launcher.id} replaced`);
+    this._renderLaunchers();
+    return true;
+  }
+
+  removeLauncher(id) {
+    const gone = this._launchers.remove(id);
+    if (gone) this._renderLaunchers();
+    return gone;
+  }
+
+  _renderLaunchers() {
+    const nav = document.getElementById('launchers');
+    if (!nav) return;
+    nav.replaceChildren();
+    for (const L of this._launchers.list()) {
+      const el = L.href ? document.createElement('a') : document.createElement('button');
+      el.className = 'app-link';
+      el.dataset.launcher = L.id;
+      el.textContent = L.label;
+      if (L.href) {
+        el.href = L.href;
+      } else {
+        el.type = 'button';
+        el.addEventListener('click', () => L.onClick?.());
+      }
+      nav.appendChild(el);
+    }
+  }
+
+  // Manifests under apps/ and, when the card is in this image, sd/apps/.
+  // A listing that fails leaves that volume's buttons as they were.
+  async _scanLaunchers() {
+    const gen = (this._scanGen = (this._scanGen || 0) + 1);
+    let found;
+    try {
+      found = await loadFolderLaunchers({
+        listDir: list,
+        readText,
+        sd: (this.sysInfo?.modules || []).includes('sd'),
+        log: (src, text) => this.log(src, text),
+      });
+    } catch (e) {
+      this.log('!', `launchers: ${e?.message || e}`);
+      return;
+    }
+    if (gen !== this._scanGen) return;
+    for (const volume of ['lfs', 'sd']) {
+      const apps = found[volume];
+      if (!apps) continue;
+      for (const id of this._launchers.replaceVolume(volume, apps)) {
+        this.log('app', `launcher ${id} replaced`);
+      }
+    }
+    this._renderLaunchers();
   }
 
   // A line in the Console, from any window. The Console keeps it whether or
@@ -495,6 +565,7 @@ class App {
         this.sysInfo = s;
         setSd((s.modules || []).includes('sd'));    // the editor's sd/ folder (fs.js)
         info.textContent = s.firmware ? `firmware ${s.firmware}` : '';
+        this._scanLaunchers();
       } catch {
         info.textContent = '';
       }
