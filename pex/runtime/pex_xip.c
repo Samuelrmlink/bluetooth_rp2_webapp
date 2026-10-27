@@ -114,34 +114,25 @@ static bool ix_valid(const ix_t *x) {
 static int fl_erase(uint32_t off) { return F->erase(F->ctx, off) ? PEX_EIO : PEX_OK; }
 static int fl_prog(uint32_t off, const void *p, uint32_t n) { return F->prog(F->ctx, off, p, n) ? PEX_EIO : PEX_OK; }
 
-/* Write nx as the next index (into the other copy). On success it is the index. */
-static int commit(ix_t *nx) {
-    nx->h.magic = IX_MAGIC;
-    nx->h.seq = s_ix->h.seq + 1;
-    nx->h.esize = sizeof(ix_ent_t);
-    nx->h.sectors = nsec_total();
-    memset(&nx->e[nx->h.n], 0, IX_BYTES - sizeof(ix_hdr_t) - nx->h.n * sizeof(ix_ent_t));
-    nx->h.crc = ix_crc(nx);
+/* Publish s_ix into the other sector. seq is snapshotted first because s_ix is
+ * the buffer being written. On failure the current sector, which this does not
+ * modify, is copied back, so a torn write leaves the RAM index unchanged too. */
+static int commit(void) {
+    uint32_t seq = s_ix->h.seq;
+    s_ix->h.magic = IX_MAGIC;
+    s_ix->h.seq = seq + 1;
+    s_ix->h.esize = sizeof(ix_ent_t);
+    s_ix->h.sectors = nsec_total();
+    memset(&s_ix->e[s_ix->h.n], 0, IX_BYTES - sizeof(ix_hdr_t) - s_ix->h.n * sizeof(ix_ent_t));
+    s_ix->h.crc = ix_crc(s_ix);
     uint32_t t = s_cur == 0 ? 1u : 0u;
-    if (fl_erase(t * SEC) || fl_prog(t * SEC, nx, IX_BYTES) || memcmp(fptr(t * SEC), nx, IX_BYTES) != 0) {
+    if (fl_erase(t * SEC) || fl_prog(t * SEC, s_ix, IX_BYTES) || memcmp(fptr(t * SEC), s_ix, IX_BYTES) != 0) {
+        if (s_cur >= 0) { memcpy(s_ix, fptr((uint32_t)s_cur * SEC), IX_BYTES); }
         pex__err(PEX_EIO, "flash write of the PEX index failed");
         return PEX_EIO;
     }
-    memcpy(s_ix, nx, IX_BYTES);
     s_cur = (int)t;
     return PEX_OK;
-}
-
-static ix_t *ix_copy(pex_arena_t **a) {
-    *a = pex__scratch_begin(IX_BYTES, PEX_OWNER_HOST);
-    ix_t *nx = *a ? pex__scratch_alloc(*a, IX_BYTES) : NULL;
-    if (!nx) {
-        if (*a) { pex__scratch_end(*a); }
-        pex__err(PEX_ENOMEM, "PEX pool full (index update)");
-        return NULL;
-    }
-    memcpy(nx, s_ix, IX_BYTES);
-    return nx;
 }
 
 static int find_name(const char *name) {
@@ -401,22 +392,18 @@ static int move_entry(int i, uint32_t dst, uint32_t rw_new, uint32_t aoff_new, u
                .ro_at = ro_from_xf, .ro_ctx = &x };
     bool journal = resumed;
     uint32_t committed = done0;
-    pex_arena_t *ar;
     for (uint32_t j = done0; j < n; j++) {
         if (overlap) {
             int64_t destroyed = (int64_t)dst + j - src;
             if (destroyed >= 0 && destroyed < (int64_t)n && (!journal || (int64_t)committed < destroyed + 1)) {
-                ix_t *nx = ix_copy(&ar);
-                if (!nx) { return PEX_ENOMEM; }
-                nx->h.mv_active = 1;
-                nx->h.mv_ent = (uint32_t)i;
-                nx->h.mv_dst = dst;
-                nx->h.mv_done = j;
-                nx->h.mv_code_base = code_new;
-                nx->h.mv_rw_base = rw_new;
-                nx->h.mv_aoff = aoff_new;
-                int rc = commit(nx);
-                pex__scratch_end(ar);
+                s_ix->h.mv_active = 1;
+                s_ix->h.mv_ent = (uint32_t)i;
+                s_ix->h.mv_dst = dst;
+                s_ix->h.mv_done = j;
+                s_ix->h.mv_code_base = code_new;
+                s_ix->h.mv_rw_base = rw_new;
+                s_ix->h.mv_aoff = aoff_new;
+                int rc = commit();
                 if (rc) { return rc; }
                 journal = true;
                 committed = j;
@@ -428,16 +415,13 @@ static int move_entry(int i, uint32_t dst, uint32_t rw_new, uint32_t aoff_new, u
             return PEX_EIO;
         }
     }
-    ix_t *nx = ix_copy(&ar);
-    if (!nx) { return PEX_ENOMEM; }
-    nx->e[i].sec = dst;
-    nx->e[i].code_base = code_new;
-    nx->e[i].rw_base = rw_new;
-    nx->e[i].aoff = aoff_new;
-    nx->h.mv_active = nx->h.mv_ent = nx->h.mv_dst = nx->h.mv_done = 0;
-    nx->h.mv_code_base = nx->h.mv_rw_base = nx->h.mv_aoff = 0;
-    int rc = commit(nx);
-    pex__scratch_end(ar);
+    s_ix->e[i].sec = dst;
+    s_ix->e[i].code_base = code_new;
+    s_ix->e[i].rw_base = rw_new;
+    s_ix->e[i].aoff = aoff_new;
+    s_ix->h.mv_active = s_ix->h.mv_ent = s_ix->h.mv_dst = s_ix->h.mv_done = 0;
+    s_ix->h.mv_code_base = s_ix->h.mv_rw_base = s_ix->h.mv_aoff = 0;
+    int rc = commit();
     if (rc) { return rc; }
     s_moves++;
     pex__logf(PEX_LOG_INFO, "pex: xip: moved %s from sector %lu to %lu%s", e.name, (unsigned long)src,
@@ -638,20 +622,13 @@ int pex_install(const pex_reader_t *rd, uint32_t flags) {
             if (rc) { pex__err(rc, "%s: verification of the installed copy failed (%s)", name, pex_strerror(rc)); }
         }
         if (!rc) {
-            pex_arena_t *ar;
-            ix_t *nx = ix_copy(&ar);
-            if (!nx) {
-                rc = PEX_ENOMEM;
-            } else {
-                if (old >= 0) {
-                    memmove(&nx->e[old], &nx->e[old + 1], (nx->h.n - old - 1) * sizeof(ix_ent_t));
-                    nx->h.n--;
-                }
-                slot = nx->h.n;
-                nx->e[nx->h.n++] = ne;
-                rc = commit(nx);
-                pex__scratch_end(ar);
+            if (old >= 0) {
+                memmove(&s_ix->e[old], &s_ix->e[old + 1], (s_ix->h.n - old - 1) * sizeof(ix_ent_t));
+                s_ix->h.n--;
             }
+            slot = s_ix->h.n;
+            s_ix->e[s_ix->h.n++] = ne;
+            rc = commit();
         }
         if (!rc) {
             pex__logf(PEX_LOG_INFO, "pex: xip: installed %s v%lu.%lu.%lu (model %c, %lu bytes) at 0x%05lx%s%s", name,
@@ -689,13 +666,9 @@ int pex_uninstall(const char *name) {
     int i = name ? find_name(name) : -1;
     if (i < 0) { pex__err(PEX_ENOENT, "%s is not installed", name ? name : "?"); return PEX_ENOENT; }
     if (in_use(i)) { pex__err(PEX_EBUSY, "%s runs from its installed copy: unload it first", name); return PEX_EBUSY; }
-    pex_arena_t *ar;
-    ix_t *nx = ix_copy(&ar);
-    if (!nx) { return PEX_ENOMEM; }
-    memmove(&nx->e[i], &nx->e[i + 1], (nx->h.n - i - 1) * sizeof(ix_ent_t));
-    nx->h.n--;
-    int rc = commit(nx);
-    pex__scratch_end(ar);
+    memmove(&s_ix->e[i], &s_ix->e[i + 1], (s_ix->h.n - i - 1) * sizeof(ix_ent_t));
+    s_ix->h.n--;
+    int rc = commit();
     if (!rc) { pex__logf(PEX_LOG_INFO, "pex: xip: uninstalled %s", name); }
     return rc;
 }

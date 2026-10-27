@@ -37,6 +37,7 @@ uint64_t pex_tramp(uint32_t sb, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t 
     return 0;
 }
 uintptr_t pex_get_sp(void) { return 0; }
+size_t pex_scratch_avail(void);
 
 /* ---- NOR flash with power cuts -------------------------------------------------- */
 #define FSEC 40u                       /* partition sectors */
@@ -401,6 +402,45 @@ int main(void) {
     pex_xip_stats(&st);
     printf("random workload: 3000 operations (%d succeeded, %d no room, %d other/cut), %d power cuts; ends with %u "
            "entries, %u KB free, %u moves\n", ok_ops, nospc, other, cuts, st.entries, st.free / 1024, st.moves);
+
+    /* 8. the index update borrows no pool scratch. A torn write restores s_ix. */
+    memset(s_flash, 0xFF, sizeof s_flash);
+    boot();
+    file_t u1 = mk("u1", 2000, 200, 100, 0, 1, 201, 0);
+    file_t u2 = mk("u2", 2000, 200, 100, 0, 1, 202, 0);
+    CHECK(pex_install_mem(u1.p, u1.n, 0) >= 0, "u1 installed: %s", pex_errmsg());
+    CHECK(pex_install_mem(u2.p, u2.n, 0) >= 0, "u2 installed: %s", pex_errmsg());
+    void *fill[8] = { 0 };
+    int nf = 0;
+    for (int guard = 0; pex_scratch_avail() >= 3072 && nf < 8 && guard < 8; guard++) {
+        size_t av = pex_scratch_avail();
+        size_t want = av > 4096 ? (av - 2048) & ~(size_t)7u : 256;
+        if (want < 8) { want = 8; }
+        void *p = pex_alloc_host(want);
+        CHECK(p != NULL, "filler of %zu (avail %zu)", want, av);
+        if (!p) { break; }
+        fill[nf++] = p;
+    }
+    size_t left = pex_scratch_avail();
+    CHECK(left < 3072 && left >= sizeof(pex__hdr_t) + 8, "gap %zu is under an index copy and over the header", left);
+    CHECK(pex_uninstall("u2") == PEX_OK, "uninstall with no index scratch: %s", pex_errmsg());
+    CHECK(pex_installed_find("u2", NULL) == PEX_ENOENT, "u2 gone");
+    CHECK(pex_install_mem(u2.p, u2.n, 0) >= 0, "install with no index scratch: %s", pex_errmsg());
+    CHECK(pex_installed_find("u2", NULL) >= 0, "u2 back");
+    for (int i = 0; i < nf; i++) { pex__free(fill[i]); }
+    boot();
+    CHECK(pex_installed_find("u1", NULL) >= 0 && pex_installed_find("u2", NULL) >= 0, "both survive a reboot");
+    s_cut = s_ops;
+    int cut_rc = pex_uninstall("u2");
+    CHECK(cut_rc == PEX_EIO, "cut uninstall: %d %s", cut_rc, pex_errmsg());
+    CHECK(pex_installed_find("u2", NULL) >= 0, "RAM index restored after the failed write");
+    s_cut = -1;
+    s_dead = 0;
+    boot();
+    CHECK(pex_installed_find("u2", NULL) >= 0, "flash index unchanged by the cut");
+    CHECK(pex_uninstall("u2") == PEX_OK, "clean uninstall after the cut: %s", pex_errmsg());
+    CHECK(pex_installed_find("u2", NULL) == PEX_ENOENT, "u2 removed");
+    all_good("index without scratch");
 
     printf("%d/%d checks passed\n", checks - fails, checks);
     return fails != 0;
