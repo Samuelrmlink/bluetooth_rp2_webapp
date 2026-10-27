@@ -1517,7 +1517,7 @@ typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
 | `int pex_bt_scan(uint32_t duration_ms, int active)` | `28bd958f` | 1.0 | 0 = until pex_bt_scan_stop |
 | `void pex_bt_scan_stop(void)` | `55276ce8` | 1.0 |  |
 | `int pex_bt_scanning(void)` | `97771765` | 1.0 |  |
-| `int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128)` | `faf0eced` | 1.0 | the scan table, filtered (either rule matches; NULLs = all); count |
+| `int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128)` | `faf0eced` | 1.0 | the scan table from the front, in registry order, not by RSSI. Either filter matches; NULLs mean every LE device. Stops at max, so an unfiltered caller that passes less than the registry size never sees the rest |
 | `int pex_bt_uuids128(const uint8_t *addr, char (*out)[37], int max)` | `587ac1fb` | 1.0 |  |
 | `int pex_bt_addr(const char *str, uint8_t *addr)` | `572b4ac9` | 1.0 | parse "AA:BB:.." |
 | `void pex_bt_addr_str(const uint8_t *addr, char *out)` | `ba7cf7e5` | 1.0 | 18 bytes |

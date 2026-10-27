@@ -29,7 +29,7 @@ Add a row when a session uses another unit.
 
 - [ ] **H3 — Pinecil PEX on a Pinecil V2**
   - Gates: [R13](Feature-Roadmap.md) and R14.
-  - The module polls the 56-byte live characteristic and registers `pinecil.set_temp`. The profile is `lua/profiles/pinecil.lua`.
+  - The running driver is the Pinecil PEX module. It polls the 56-byte live characteristic and registers `pinecil.set_temp`. The spec is `lua/profiles/pinecil.lua` until this check is ticked. The scanner manifest is `pex/modules/drivers/pinecil.driver.json`.
   - See: identity (build string), live telemetry, and a setpoint write the iron accepts. A setting the profile marks unconfirmed is not a failure of this check.
   - Seen:
 

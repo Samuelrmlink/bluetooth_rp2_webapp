@@ -733,7 +733,7 @@
         {
           "name": "pex_bt_devices",
           "proto": "int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128)",
-          "doc": "the scan table, filtered (either rule matches; NULLs = all); count"
+          "doc": "the scan table from the front, in registry order, not by RSSI. Either filter matches; NULLs mean every LE device. Stops at max, so an unfiltered caller that passes less than the registry size never sees the rest"
         },
         {
           "name": "pex_bt_uuids128",

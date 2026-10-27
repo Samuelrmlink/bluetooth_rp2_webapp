@@ -43,7 +43,7 @@ These are part of the architecture. They are not tasks.
 
 - [ ] **R8 — Protocols live in PEX, and the Lua files that remain are launchers**
   - Layer: 3 calls layer 2.
-  - Why: The Anker protocol is in the PEX module. `lua/pinecil.lua` is still a launcher, and `lua/profiles/pinecil.lua` still holds that protocol. Crypto, frames, and the device wire protocols stay in the firmware and in PEX modules.
+  - Why: The Anker protocol is in the PEX module. The Pinecil protocol is in the PEX module too. `lua/pinecil.lua` is still a launcher, and `lua/profiles/pinecil.lua` still holds that protocol as the spec. Crypto, frames, and the device wire protocols stay in the firmware and in PEX modules.
   - Needs: R13 and R14. Do not add a launch list that starts Anker on boot.
   - Done when: R14 is ticked.
 
@@ -52,13 +52,14 @@ These are part of the architecture. They are not tasks.
   - Why: `pex/modules/drivers/pinecil_app.c` already scans, connects, reads identity, polls the 56-byte live characteristic, and registers `pinecil.set_temp`. `lua/pinecil.lua` only starts that module. `lua/profiles/pinecil.lua` is still the behavior spec, and it still contains the protocol.
   - Needs: Compare the profile to the module and port the confirmed behavior the module does not yet perform. Settings the profile marks as unconfirmed stay marked. The hardware check is H3 in [Hardware-Testing.md](Hardware-Testing.md).
   - Compared 2026-10-23: the module already performs the confirmed path. It scans for a name starting with `Pinecil`, reads build and the 6-byte serial once, polls the 56-byte bulk live characteristic, and clamps `pinecil.set_temp` to 10..`max_tip_c` (or 450) as a u16 LE write to settings index 0. Sleep temp (`f6d70001`) is not implemented. `pinecil_live.c` marks power source values other than PD, `tip_uv`, `hall_uT`, and the watts divisor as inferred. H3 is still open, so this box stays open.
+  - 2026-10-26: the scanner manifest is `pex/modules/drivers/pinecil.driver.json` (`kind` pex, file `pex/pinecil.m33.pex`). A hunt also accepts the live service UUID when the name is missing, which is the manifest's second rule. `lua/profiles/pinecil.lua` stays the spec until H3.
   - Done when: The confirmed Pinecil behavior runs from the PEX module, and H3 is ticked.
 
 - [ ] **R14 — Retire the old Anker and Pinecil Lua ports**
   - Layer: 3.
   - Why: The live drivers are the PEX modules. The Anker Lua profile and its launchers were a second copy of that protocol.
   - Needs: R13 for Pinecil, and H3 in [Hardware-Testing.md](Hardware-Testing.md). H3 is ticked only after a session on the hardware.
-  - 2026-10-26: the Anker Lua port is retired. `lua/anker.lua`, `lua/anker2.lua`, and `lua/profiles/anker/` are gone. The module is `pex/modules/drivers/anker_app.c`. The scanner manifest is `pex/modules/drivers/anker.driver.json`. `lua/pinecil.lua` and `lua/profiles/pinecil.lua` stay until H3.
+  - 2026-10-26: the Anker Lua port is retired. `lua/anker.lua`, `lua/anker2.lua`, and `lua/profiles/anker/` are gone. The module is `pex/modules/drivers/anker_app.c`. The scanner manifest is `pex/modules/drivers/anker.driver.json`. The Pinecil scanner manifest is `pex/modules/drivers/pinecil.driver.json`. `lua/pinecil.lua` and `lua/profiles/pinecil.lua` stay until H3.
   - Done when: H3 is ticked, and the Pinecil profile is gone or reduced to a pointer at the PEX module. The Pinecil launcher can stay.
 
 - [ ] **R15 — Further PEX optimization, after the modules work**

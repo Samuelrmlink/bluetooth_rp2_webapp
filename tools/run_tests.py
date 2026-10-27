@@ -1241,6 +1241,28 @@ def _kb(v):
     return int(v[:-1]) * 1024 if v.endswith("K") else int(v)
 
 
+def t_pinecil_bt_sim():
+    """test/sim/pinecil_bt.py: the Pinecil PEX module against a mock iron
+    on the blegatt GATT backend. Skips when that mcusim, or a development
+    gateway image, is not on this machine. Does not touch the board."""
+    def fn():
+        mc = os.path.expanduser("~/Work/mcusim-agents/blegatt/target/release/mcusim")
+        if not os.path.exists(mc):
+            return True, "skipped: no blegatt mcusim"
+        b = os.environ.get("BTGW_BUILD", "/tmp/btgw_sdcl_1m")
+        if not os.path.exists(os.path.join(b, "btgw.elf")):
+            return True, "skipped: no gateway image (set BTGW_BUILD)"
+        rc, out = sh("python3 test/sim/pinecil_bt.py")
+        m = re.search(r"(\d+) checks, (\d+) failed", out)
+        if rc == 77:
+            return True, "skipped"
+        if not m:
+            return False, (out.strip().splitlines() or ["no output"])[-1][:90]
+        first = next((l for l in out.splitlines() if l.startswith("FAIL")), "")
+        return rc == 0, f"{m.group(1)} checks" + (f", {m.group(2)} failed: {first[:60]}" if rc else "")
+    return fn
+
+
 def t_lua_net_fs_sim(radio):
     """test/sim/lua_net_fs.py: the Lua file/json/http/sys APIs and POST
     /api/op on the real firmware in mcusim (USB-NCM, local servers only), or
@@ -1555,6 +1577,7 @@ def main():
         step(3, "SD builds in mcusim: identify/fail/retry, slices, /api/sd", t_sd_gateway_sim)
         step(3, "Lua file/json/http/sys + /api/op in mcusim (USB-NCM)", t_lua_net_fs_sim(False))
         step(3, "Lua over Wi-Fi + BLE in mcusim: SNTP, DNS, uuids128", t_lua_net_fs_sim(True))
+        step(3, "Pinecil PEX against a mock iron (blegatt GATT)", t_pinecil_bt_sim())
         step(3, "pre-PEX LittleFS migration in mcusim (SD copy, power cuts)", t_lfs_migrate_sim)
         step(3, "PEX runtime without Lua in mcusim: RP2350 + RP2040, both code models", t_pex_sim)
 

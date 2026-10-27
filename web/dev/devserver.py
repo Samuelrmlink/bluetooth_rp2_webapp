@@ -83,11 +83,13 @@ def _png(w, h):
 
 def _seed_fs():
     fs = {}
-    for rel in ["lua/ac_pulse.lua", "lua/pinecil.lua",
-                "lua/profiles/pinecil.lua", "lua/profiles/pinecil/driver.json"]:
+    for rel in ["lua/ac_pulse.lua", "lua/pinecil.lua", "lua/profiles/pinecil.lua"]:
         path = os.path.join(REPO, rel)
         if os.path.exists(path):
             fs[rel] = open(path, "rb").read()
+    manifest = os.path.join(REPO, "pex/modules/drivers/pinecil.driver.json")
+    if os.path.exists(manifest):
+        fs["pex/pinecil.driver.json"] = open(manifest, "rb").read()
     # Editor fixture only. Not a file in the repo.
     fs["lua/note.lua"] = b"-- editor fixture\nreturn 1\n"
     fs["cfg/wifi.json"] = b'{"mode":"auto","networks":[{"ssid":"bench"}]}'
@@ -107,9 +109,16 @@ def _seed_fs():
 
 def _mime(path):
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-    return {"js": "text/javascript", "css": "text/css", "html": "text/html", "json": "application/json",
-            "svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    return {"js": "text/javascript", "mjs": "text/javascript", "css": "text/css", "html": "text/html",
+            "json": "application/json", "svg": "image/svg+xml", "png": "image/png",
+            "jpg": "image/jpeg", "jpeg": "image/jpeg", "ico": "image/x-icon", "wasm": "application/wasm",
+            "txt": "text/plain", "csv": "text/csv", "log": "text/plain",
             "lua": "text/plain"}.get(ext, "application/octet-stream")
+
+def _sd_request(url):
+    """True for /api/sd... and for the public read prefix /sd and /sd/<path>. Not /sdk."""
+    p = url.split("?", 1)[0].split("#", 1)[0]
+    return p.startswith("/api/sd") or p == "/sd" or p.startswith("/sd/")
 
 def fnv1a(b):
     h = 2166136261
@@ -893,7 +902,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.split("?")[0] == "/ws":
             return self._ws()
-        if self.path.startswith("/api/sd"):
+        if _sd_request(self.path):
             return self._sd("GET")
         if self.path.startswith("/api/fs"):
             return self._fs("GET")
@@ -909,9 +918,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self._reply(200, body if isinstance(body, bytes) else body.encode(), ctype)
         return super().do_GET()
 
-    def do_PUT(self): self._sd("PUT") if self.path.startswith("/api/sd") else self._fs("PUT")
-    def do_DELETE(self): self._sd("DELETE") if self.path.startswith("/api/sd") else self._fs("DELETE")
-    def do_POST(self): self._sd("POST") if self.path.startswith("/api/sd") else self._fs("POST")
+    def do_PUT(self): self._sd("PUT") if _sd_request(self.path) else self._fs("PUT")
+    def do_DELETE(self): self._sd("DELETE") if _sd_request(self.path) else self._fs("DELETE")
+    def do_POST(self): self._sd("POST") if _sd_request(self.path) else self._fs("POST")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -999,7 +1008,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     # /api/sd, as src/sd/sd_api.c + http.c answer it (docs/sd.md): status,
     # format (done ~1 s later), bench, files GET/PUT/DELETE, mkdir (PUT .../),
-    # rename. The card's state is switchable with the mock-only op test.sd.
+    # rename. GET /sd and GET /sd/<path> are the same read as /api/sd/files.
+    # The card's state is switchable with the mock-only op test.sd.
     def _sd(self, method):
         from urllib.parse import unquote, urlparse
         sd = STATE["sd"]
@@ -1031,6 +1041,9 @@ class Handler(SimpleHTTPRequestHandler):
             sd["bench"] = {"state": "done", "mb": 10, "chunk": 4096, "done_kb": 10000, "write_kBps": 2100,
                            "read_kBps": 5400, "card_busy_max_us": 41000, "error": ""}
             return self._reply(202, {"ok": True})
+        # Same order as the firmware: a write to /sd is refused before the card gate.
+        if (route == "/sd" or route.startswith("/sd/")) and method != "GET":
+            return err(404, "GET")
         st = _sd_state()
         if st != "ok":
             return err(503, {"none": "no card", "settling": "card settling", "formatting": "formatting"}.get(st, "card not mounted"),
@@ -1056,9 +1069,16 @@ class Handler(SimpleHTTPRequestHandler):
             parts = b.split("/")
             for i in range(1, len(parts)): dirs.add("/".join(parts[:i]))
             return self._reply(200, {"ok": True})
-        if not (route == "/api/sd/files" or route.startswith("/api/sd/files/")): return err(404, "not found")
-        trailing = route.endswith("/") and route != "/api/sd/files/"
-        path = clean(route[len("/api/sd/files"):])
+        public = route == "/sd" or route.startswith("/sd/")
+        files_route = route == "/api/sd/files" or route.startswith("/api/sd/files/")
+        if not public and not files_route: return err(404, "not found")
+        if public and method != "GET": return err(404, "GET")
+        if public:
+            trailing = False
+            path = clean(route[len("/sd"):])
+        else:
+            trailing = route.endswith("/") and route != "/api/sd/files/"
+            path = clean(route[len("/api/sd/files"):])
         if path is None: return err(400, "bad path")
         if method == "PUT":
             if not path: return err(400, "bad path")

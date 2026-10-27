@@ -103,9 +103,18 @@ typedef struct {
 } sess_t;
 
 static sess_t S[2];
-static pex_bt_dev_t s_devs[8];
-static uint8_t s_dec[640];
-static char s_emit[3072];
+/* pex_bt_devices returns the first `max` LE devices in registry order, not
+ * by RSSI. The gateway keeps 48 (BT_REGISTRY_MAX). A shorter list hides a
+ * charger behind other advertisers, which is the normal case in a car.
+ * Decrypt and the JSON scratch are unused while a slot is only hunting, and
+ * link events are delivered after the tick, so they share this object. A
+ * separate 48-entry table would grow RW past the bytes reserved at boot. */
+#define ANKER_SCAN_MAX 48
+static union {
+    pex_bt_dev_t dev[ANKER_SCAN_MAX];
+    uint8_t dec[640];
+    char emit[3072];
+} s_io;
 static uint8_t g_priv[32];
 static char g_user[48], g_tz[48], g_client[24], g_region[8];
 static char g_target[24], g_target2[24];
@@ -339,7 +348,7 @@ static void publish(sess_t *s, const uint8_t *body, size_t n) {
     anker_emit em = { NULL, em_str, em_i64, em_num, em_bool, em_obj, em_end, em_hex };
     for (int pass = 0; pass < 2; pass++) {
         pex_jw_t w;
-        pex_jw_init(&w, s_emit, sizeof s_emit);
+        pex_jw_init(&w, s_io.emit, sizeof s_io.emit);
         pex_jw_obj(&w, NULL);
         em.ctx = &w;
         s_pub = s;
@@ -358,7 +367,7 @@ static void publish(sess_t *s, const uint8_t *body, size_t n) {
         pex_jw_end(&w);
         int len = pex_jw_finish(&w);
         if (len >= 0) {
-            pex_bus_emit("profile.anker.telemetry", s_emit);
+            pex_bus_emit("profile.anker.telemetry", s_io.emit);
             s->sample_ms = pex_ms();
             s->have_sample = 1;
             s->first_report = 0;
@@ -585,12 +594,12 @@ static void release_sessions(void) {
         }
         if (s->have_sample && s->addr_str[0]) {
             pex_jw_t w;
-            pex_jw_init(&w, s_emit, sizeof s_emit);
+            pex_jw_init(&w, s_io.emit, sizeof s_io.emit);
             pex_jw_obj(&w, NULL);
             pex_jw_str(&w, "addr", s->addr_str);
             if (s->code[0]) { pex_jw_str(&w, "product_code", s->code); }
             pex_jw_end(&w);
-            if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.gone", s_emit); }
+            if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.gone", s_io.emit); }
         }
         s->st = ST_OFF;
         s->streaming = 0;
@@ -907,21 +916,21 @@ static void start_connect(sess_t *s) {
 }
 
 static void hunt_look(sess_t *s) {
-    int n = pex_bt_devices(s_devs, 8, NULL, NULL);
+    int n = pex_bt_devices(s_io.dev, ANKER_SCAN_MAX, NULL, NULL);
     if (n < 0) { n = 0; }
-    if (n > 8) { n = 8; }
+    if (n > ANKER_SCAN_MAX) { n = ANKER_SCAN_MAX; }
     for (int i = 0; i < n; i++) {
         int ff09 = 0;
-        for (uint8_t u = 0; u < s_devs[i].n_uuid16 && u < 4; u++) {
-            if (s_devs[i].uuid16[u] == 0xFF09) { ff09 = 1; }
+        for (uint8_t u = 0; u < s_io.dev[i].n_uuid16 && u < 4; u++) {
+            if (s_io.dev[i].uuid16[u] == 0xFF09) { ff09 = 1; }
         }
         anker_adv_t a;
-        if (!anker_adv_identify(s_devs[i].mfg, s_devs[i].mfg_len, s_devs[i].addr, ff09, &a, NULL)) {
+        if (!anker_adv_identify(s_io.dev[i].mfg, s_io.dev[i].mfg_len, s_io.dev[i].addr, ff09, &a, NULL)) {
             continue;
         }
-        if (claimed_by_other(slot_of(s), s_devs[i].addr)) { continue; }
-        if (!match_target(s->target, s_devs[i].addr, a.product_type)) { continue; }
-        memcpy(s->addr, s_devs[i].addr, 6);
+        if (claimed_by_other(slot_of(s), s_io.dev[i].addr)) { continue; }
+        if (!match_target(s->target, s_io.dev[i].addr, a.product_type)) { continue; }
+        memcpy(s->addr, s_io.dev[i].addr, 6);
         pex_bt_addr_str(s->addr, s->addr_str);
         copy_str(s->product_type, sizeof s->product_type, a.product_type);
         copy_str(s->sku, sizeof s->sku, a.sku);
@@ -969,7 +978,7 @@ static void note_readback(sess_t *s, const q_job_t *j) {
 static void hist_emit(sess_t *s, int done, const char *err, const uint8_t *rec, size_t rn,
                        int n, int last, int span) {
     pex_jw_t w;
-    pex_jw_init(&w, s_emit, sizeof s_emit);
+    pex_jw_init(&w, s_io.emit, sizeof s_io.emit);
     pex_jw_obj(&w, NULL);
     pex_jw_str(&w, "addr", s->addr_str);
     pex_jw_int(&w, "id", (int64_t)s->hist_seq);
@@ -993,7 +1002,7 @@ static void hist_emit(sess_t *s, int done, const char *err, const uint8_t *rec, 
         if (rec && rn) { pex_jw_hex(&w, "hex", rec, rn); }
     }
     pex_jw_end(&w);
-    if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.history", s_emit); }
+    if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.history", s_io.emit); }
 }
 
 static int hist_parse(const uint8_t *body, size_t len, int *last, int *n, int *span,
@@ -1092,7 +1101,7 @@ static const char *ss_step_name(uint8_t step) {
 
 static void ss_emit(sess_t *s, const ss_job_t *j, int ok) {
     pex_jw_t w;
-    pex_jw_init(&w, s_emit, sizeof s_emit);
+    pex_jw_init(&w, s_io.emit, sizeof s_io.emit);
     pex_jw_obj(&w, NULL);
     pex_jw_str(&w, "addr", s->addr_str);
     pex_jw_str(&w, "step", ss_step_name(j->step));
@@ -1108,7 +1117,7 @@ static void ss_emit(sess_t *s, const ss_job_t *j, int ok) {
         pex_jw_str(&w, "error", s->fail_why == WHY_TIMEOUT ? "timeout" : "no reply");
     }
     pex_jw_end(&w);
-    if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.screensaver", s_emit); }
+    if (pex_jw_finish(&w) >= 0) { pex_bus_emit("profile.anker.screensaver", s_io.emit); }
 }
 
 static void dequeue_ss(sess_t *s) {
@@ -1363,31 +1372,31 @@ static void on_bt(void *arg, const pex_bt_event_t *ev) {
     size_t pn = 0;
     int rr = pex_codec_reasm_push(s->reasm, &f, &pay, &pn);
     if (rr <= 0 || !pay) { return; }
-    if (pn > sizeof s_dec) { pn = sizeof s_dec; }
-    memcpy(s_dec, pay, pn);
+    if (pn > sizeof s_io.dec) { pn = sizeof s_io.dec; }
+    memcpy(s_io.dec, pay, pn);
     int encrypted = f.encrypted;
     int outn = (int)pn;
     s->opaque = 0;
     if (encrypted) {
         if (s->have_session) {
             if (s->cipher == CIP_GCM) {
-                outn = pex_codec_gcm_decrypt(s->key, 16, s->iv, s_dec, pn, s->body, sizeof s->body);
+                outn = pex_codec_gcm_decrypt(s->key, 16, s->iv, s_io.dec, pn, s->body, sizeof s->body);
             } else {
                 size_t ol = 0;
-                int rc = pex_codec_cbc(0, s->key, s->keylen, s->iv, s_dec, pn, s->body, sizeof s->body, &ol);
+                int rc = pex_codec_cbc(0, s->key, s->keylen, s->iv, s_io.dec, pn, s->body, sizeof s->body, &ol);
                 outn = rc < 0 ? rc : (int)ol;
             }
         } else if (s->neg_on) {
-            outn = anker_neg_decrypt(s_dec, pn, s->body, sizeof s->body);
+            outn = anker_neg_decrypt(s_io.dec, pn, s->body, sizeof s->body);
         } else {
             s->opaque = 1;
             if (pn > sizeof s->body) { pn = sizeof s->body; }
-            memcpy(s->body, s_dec, pn);
+            memcpy(s->body, s_io.dec, pn);
             outn = (int)pn;
         }
     } else {
         if (pn > sizeof s->body) { pn = sizeof s->body; }
-        memcpy(s->body, s_dec, pn);
+        memcpy(s->body, s_io.dec, pn);
         outn = (int)pn;
     }
     if (outn < 0) { return; }
