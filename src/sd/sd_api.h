@@ -37,7 +37,10 @@
 #define SD_PATH_MAX 96
 
 enum sd_op {
-    SD_OP_GET = 1, /* a file's contents, or a directory's JSON listing */
+    SD_OP_GET = 1, /* a file's contents, or a directory's JSON listing.
+                    * sd_xfer_as_site() makes a public /sd read resolve like
+                    * the LittleFS pages: name.gz first, then a directory's
+                    * index.html. */
     SD_OP_PUT,     /* upload; creates parent directories */
     SD_OP_DELETE,  /* a file or an empty directory */
     SD_OP_RENAME,
@@ -82,11 +85,15 @@ bool sd_path_clean(char *path, size_t cap);
 /* -1 with *r filled (busy, bad path) or a slot. `len` is the upload's
  * Content-Length (PUT). path2 is the rename target. */
 int sd_xfer_start(enum sd_op op, const char *path, const char *path2, uint64_t len, struct sd_reply *r);
+/* Call while the slot is still OPENING, before the worker runs it. */
+void sd_xfer_as_site(int x);
 enum sd_xstate sd_xfer_state(int x);
 /* GET, from SDX_STREAM: UINT64_MAX for a listing (no Content-Length, the
  * body ends with the connection). */
 uint64_t sd_xfer_size(int x);
 const char *sd_xfer_mime(int x);
+/* True from SDX_STREAM when the bytes are a stored .gz file. */
+bool sd_xfer_gzip(int x);
 const char *sd_xfer_name(int x); /* the file's own name, for Content-Disposition */
 /* DONE / FAIL: the answer. A PUT's 200 body is built by the caller from
  * sd_xfer_size() (bytes written). */

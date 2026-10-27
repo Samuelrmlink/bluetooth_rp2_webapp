@@ -167,6 +167,33 @@ body {
   border-color: var(--border);
 }
 
+/* Other web apps. Filled by js/launchers.js from a folder manifest or from
+   app.addLauncher. Empty, it takes no space. Text, not an icon: the label
+   comes from the app, and this page does not keep a sprite for it. */
+#launchers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+#launchers:empty { display: none; }
+.app-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.app-link:hover { border-color: var(--dim); }
+
 .disconnected {
   color: var(--dim);
 }
