@@ -1032,7 +1032,7 @@ def _sd_stack_in(d):
     # meter (test/host/sd_worker_uc.c) counts their calls between yields.
     rc, out = sh(f"gcc -O1 -g -Wall -Wextra -no-pie -finstrument-functions "
                  f"-finstrument-functions-exclude-file-list=test/host,/usr/ "
-                 f"-DSPIBUS_HOST -DCONFIG_SD_DETECT=22 -Isrc -Ithird_party/fatfs "
+                 f"-DSPIBUS_HOST -DCONFIG_SD_DETECT=22 -DFS_FLASH_OFF=0 -Isrc -Ithird_party/fatfs "
                  f"-Itest/host -o {binp} test/host/sd_stack_test.c {' '.join(SD_STACK_SRCS)}")
     if rc:
         errs = [l for l in out.splitlines() if "error:" in l]

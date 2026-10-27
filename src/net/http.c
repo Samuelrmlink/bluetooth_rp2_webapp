@@ -1171,7 +1171,7 @@ static int wifi_routes(struct tcp_pcb *tpcb, const char *method, const char *pat
  *   POST   /api/sd/format {fs,cluster}
  *   POST   /api/sd/bench {mb}
  *   GET    /api/sd/files[/<path>]     a file, or a folder's listing
- *   GET    /sd[/<path>]               the same read, at a public URL
+ *   GET    /sd[/<path>]               a page: .gz preferred, a folder's index.html
  *   PUT    /api/sd/files/<path>       upload (parents made); <path>/ = mkdir
  *   DELETE /api/sd/files/<path>
  *   POST   /api/sd/rename {from,to}
@@ -1232,10 +1232,10 @@ static bool sd_public_prefix(const char *path) {
            (path[3] == 0 || path[3] == '/' || path[3] == '?' || path[3] == '#');
 }
 
-/* GET /sd and GET /sd/<path> are a read-only alias of GET /api/sd/files.
- * A file comes back as its bytes; a directory is the JSON listing. Writes
- * stay on /api/sd/files. There is no .gz preference: that is a LittleFS
- * shipping convention, not a property of the card. */
+/* GET /sd and GET /sd/<path> serve a page the way LittleFS does. name.gz is
+ * preferred and sent with Content-Encoding: gzip. A directory, including
+ * the card root, serves index.html. Writes and folder listings stay on
+ * /api/sd/files. */
 static int sd_public_get(http_conn_t *c, struct tcp_pcb *tpcb, const char *method, const char *path) {
     if (strcmp(method, "GET") != 0) {
         return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"GET\"}");
@@ -1263,6 +1263,7 @@ static int sd_public_get(http_conn_t *c, struct tcp_pcb *tpcb, const char *metho
     if (x < 0) {
         return sd_http_err(tpcb, &r);
     }
+    sd_xfer_as_site(x);
     return sd_hold_conn(c, x, SD_OP_GET);
 }
 
@@ -1450,17 +1451,19 @@ static void sd_service(http_conn_t *c) {
     }
     if (c->sd_op == SD_OP_GET && (st == SDX_STREAM || st == SDX_DONE || (st == SDX_FAIL && c->sd_hdr_sent))) {
         if (!c->sd_hdr_sent) {
-            char hdr[360], cl[40] = "";
+            char hdr[480], cl[40] = "";
             uint64_t size = sd_xfer_size(x);
             if (size != UINT64_MAX) {
                 snprintf(cl, sizeof(cl), "Content-Length: %llu\r\n", (unsigned long long)size);
             }
+            const char *enc = sd_xfer_gzip(x) ? "Content-Encoding: gzip\r\n" : "";
             int hl = snprintf(hdr, sizeof(hdr),
-                              "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n%sCache-Control: no-store\r\n"
+                              "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n%s%sCache-Control: no-store\r\n"
                               "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: %s\r\n"
                               "Connection: close\r\n\r\n",
-                              sd_xfer_mime(x), cl, cors_methods());
-            if (tcp_sndbuf(tpcb) < hl || tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+                              sd_xfer_mime(x), enc, cl, cors_methods());
+            if (hl <= 0 || (size_t)hl >= sizeof(hdr) || tcp_sndbuf(tpcb) < hl ||
+                tcp_write(tpcb, hdr, (uint16_t)hl, TCP_WRITE_FLAG_COPY) != ERR_OK) {
                 return;
             }
             c->sd_hdr_sent = true;
@@ -1729,7 +1732,7 @@ static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, co
                               "PUT /api/fs/<folder>/  (mkdir)\n"
                               "POST /api/op  {\"op\":..,\"params\":{..}} -> the WebSocket reply\n"
 #if CONFIG_SD
-                              "GET /sd[/<path>]  (same read as /api/sd/files)\n"
+                              "GET /sd[/<path>]  (a page: index.html, .gz preferred)\n"
                               "GET /api/sd  GET/PUT/DELETE /api/sd/files/<path>  POST /api/sd/rename|format|bench\n"
 #endif
                               "WS " WS_PATH "  JSON API, e.g. {\"id\":1,\"op\":\"sys.info\"}\n");

@@ -1008,7 +1008,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     # /api/sd, as src/sd/sd_api.c + http.c answer it (docs/sd.md): status,
     # format (done ~1 s later), bench, files GET/PUT/DELETE, mkdir (PUT .../),
-    # rename. GET /sd and GET /sd/<path> are the same read as /api/sd/files.
+    # rename. GET /sd serves a page: name.gz first, then a folder's index.html.
     # The card's state is switchable with the mock-only op test.sd.
     def _sd(self, method):
         from urllib.parse import unquote, urlparse
@@ -1097,8 +1097,24 @@ class Handler(SimpleHTTPRequestHandler):
             if any(k.startswith(path + "/") for k in list(files) + list(dirs)): return err(409, "directory not empty")
             if path in dirs: dirs.discard(path); return self._reply(200, {"ok": True})
             return err(404, "not found")
+        def send_stored(stored, gzip):
+            plain = stored[:-3] if stored.endswith(".gz") else stored
+            extra = {"Content-Encoding": "gzip"} if gzip else None
+            return self._reply(200, files[stored], _mime(plain), extra)
+        def site_pick(base):
+            if base and not base.endswith(".gz") and (base + ".gz") in files:
+                return base + ".gz", True
+            if base in files:
+                return base, base.endswith(".gz")
+            return None, False
+        if public:
+            chosen, gz = site_pick(path) if path else (None, False)
+            if not chosen:
+                chosen, gz = site_pick((path + "/index.html") if path else "index.html")
+            if not chosen: return err(404, "not found")
+            return send_stored(chosen, gz)
         if path in files:
-            return self._reply(200, files[path], _mime(path))
+            return send_stored(path, path.endswith(".gz"))
         if path and path not in dirs and not any(k.startswith(path + "/") for k in files): return err(404, "not found")
         pre = path + "/" if path else ""
         names = {}

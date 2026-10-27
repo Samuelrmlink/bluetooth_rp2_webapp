@@ -25,6 +25,10 @@
 #include "sd/sd_worker.h"
 #include "sdcard_sim.h"
 
+/* The editor watcher lives in the firmware image. This test does not link it. */
+void fs_watch_note_sd(const char *rel, const char *op) { (void)rel; (void)op; }
+bool fs_watch_sd_slice(void) { return false; }
+
 static int checks, failed;
 static const char *tag = "";
 #define CHECK(c, msg) do { checks++; if (!(c)) { failed++; printf("FAIL [%s] %s:%d %s\n", tag, __FILE__, __LINE__, msg); } } while (0)
@@ -262,16 +266,20 @@ static int put(const char *path, const uint8_t *data, size_t n) {
     return st;
 }
 
-/* GET into out (cap); returns status, *len bytes. */
-static int get(const char *path, uint8_t *out, size_t cap, size_t *len) {
+/* GET into out (cap); returns status, *len bytes. site resolves like /sd. */
+static int get_ex(const char *path, uint8_t *out, size_t cap, size_t *len, bool site, bool *gzip,
+                  const char **mime) {
     struct sd_reply r;
     char p[SD_PATH_MAX];
     snprintf(p, sizeof p, "%s", path);
     *len = 0;
+    if (gzip) { *gzip = false; }
+    if (mime) { *mime = NULL; }
     if (!sd_path_clean(p, sizeof p)) { return 400; }
     if (!sd_api_gate(&r)) { return r.status; }
     int x = sd_xfer_start(SD_OP_GET, p, NULL, 0, &r);
     if (x < 0) { return r.status; }
+    if (site) { sd_xfer_as_site(x); }
     enum sd_xstate s = settle(x);
     if (s == SDX_FAIL) {
         sd_xfer_result(x, &r);
@@ -294,10 +302,26 @@ static int get(const char *path, uint8_t *out, size_t cap, size_t *len) {
         }
         pass();
     }
+    bool g = sd_xfer_gzip(x);
+    const char *m = sd_xfer_mime(x);
     sd_xfer_result(x, &r);
     int st = sd_xfer_state(x) == SDX_DONE ? 200 : r.status;
     sd_xfer_release(x);
+    if (gzip) { *gzip = g; }
+    if (mime) { *mime = m; }
     return st;
+}
+
+static int get(const char *path, uint8_t *out, size_t cap, size_t *len) {
+    return get_ex(path, out, cap, len, false, NULL, NULL);
+}
+
+static int get_site(const char *path, uint8_t *out, size_t cap, size_t *len, bool *gzip, const char **mime) {
+    return get_ex(path, out, cap, len, true, gzip, mime);
+}
+
+static int get_meta(const char *path, uint8_t *out, size_t cap, size_t *len, bool *gzip, const char **mime) {
+    return get_ex(path, out, cap, len, false, gzip, mime);
 }
 
 static int simple(enum sd_op op, const char *a, const char *b) {
@@ -389,6 +413,45 @@ static void stack(const char *fs) {
     CHECK(simple(SD_OP_RENAME, "hello.txt", "a/b/c/hi.txt") == 200, "rename into the folder");
     CHECK(get("a/b/c/hi.txt", back, sizeof back, &n) == 200 && n == 9 && !memcmp(back, "hi there\n", 9), "renamed file reads");
     CHECK(get("hello.txt", back, sizeof back, &n) == 404, "the old name is gone (404)");
+    {
+        /* Public /sd: a folder serves index.html, and the .gz copy wins. */
+        static const uint8_t page[] = {0x1f, 0x8b, 'p', 'a', 'g', 'e'};
+        static const uint8_t script[] = {0x1f, 0x8b, 'j', 's'};
+        static const uint8_t plain_page[] = {'<', 'p', '>', 'h', 'i', '<', '/', 'p', '>'};
+        bool gz = false;
+        const char *mime = NULL;
+        CHECK(put("apps/printer/index.html.gz", page, sizeof page) == 200, "PUT a gzipped index");
+        CHECK(put("apps/printer/app.js.gz", script, sizeof script) == 200, "PUT a gzipped script");
+        CHECK(put("apps/printer/plain.txt", (const uint8_t *)"plain\n", 6) == 200, "PUT a plain card file");
+        CHECK(put("apps/other/index.html", plain_page, sizeof plain_page) == 200, "PUT an uncompressed index");
+        CHECK(put("apps/both/index.html", plain_page, sizeof plain_page) == 200, "PUT a plain index beside a gz");
+        CHECK(put("apps/both/index.html.gz", page, sizeof page) == 200, "PUT the gzipped twin");
+        CHECK(get_site("apps/printer", back, sizeof back, &n, &gz, &mime) == 200 && n == sizeof page &&
+              !memcmp(back, page, n) && gz && mime && strstr(mime, "text/html"),
+              "/sd/apps/printer serves index.html.gz");
+        CHECK(get_site("apps/printer/", back, sizeof back, &n, &gz, &mime) == 200 && n == sizeof page && gz,
+              "a trailing slash is the same folder");
+        CHECK(get_site("apps/printer/app.js", back, sizeof back, &n, &gz, &mime) == 200 && n == sizeof script &&
+              !memcmp(back, script, n) && gz && mime && strstr(mime, "javascript"),
+              "/sd prefers app.js.gz and types it as javascript");
+        CHECK(get_site("apps/printer/plain.txt", back, sizeof back, &n, &gz, &mime) == 200 && n == 6 && !gz &&
+              !memcmp(back, "plain\n", 6),
+              "a file with no .gz twin is served as stored");
+        CHECK(get_site("apps/other", back, sizeof back, &n, &gz, &mime) == 200 && n == sizeof plain_page && !gz &&
+              !memcmp(back, plain_page, n),
+              "a folder whose index is not gzipped still serves it");
+        CHECK(get_site("apps/both", back, sizeof back, &n, &gz, &mime) == 200 && gz && n == sizeof page &&
+              !memcmp(back, page, n),
+              "index.html.gz wins over index.html");
+        CHECK(simple(SD_OP_MKDIR, "apps/empty", NULL) == 200 &&
+              get_site("apps/empty", back, sizeof back, &n, &gz, &mime) == 404,
+              "a folder with no index is 404");
+        CHECK(get("apps/printer", back, sizeof back, &n) == 200 && memmem(back, n, "index.html.gz", 13),
+              "the file API still lists the folder");
+        CHECK(get_meta("apps/printer/index.html.gz", back, sizeof back, &n, &gz, &mime) == 200 && gz && n == sizeof page &&
+              mime && strstr(mime, "text/html"),
+              "a direct .gz read is marked gzip and typed as html");
+    }
     CHECK(simple(SD_OP_DELETE, "a/b", NULL) == 409, "deleting a non-empty folder: 409");
     CHECK(simple(SD_OP_DELETE, "a/b/c/hi.txt", NULL) == 200 && simple(SD_OP_DELETE, "a/b/c", NULL) == 200, "delete file, then folder");
     CHECK(simple(SD_OP_DELETE, "nope.txt", NULL) == 404, "delete a missing file: 404");

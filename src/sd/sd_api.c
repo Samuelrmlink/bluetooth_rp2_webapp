@@ -34,6 +34,8 @@ struct xfer {
     uint64_t len;  /* PUT: Content-Length */
     uint64_t size; /* GET: file size (UINT64_MAX: listing); PUT: bytes written */
     const char *mime;
+    bool site; /* public /sd: prefer .gz and a directory's index.html */
+    bool gzip; /* the bytes are a .gz file */
     struct sd_reply res;
     uint32_t wr, rd; /* free-running ring positions */
     uint8_t buf[SD_XFER_BUF];
@@ -190,6 +192,14 @@ int sd_xfer_start(enum sd_op op, const char *path, const char *path2, uint64_t l
     return x;
 }
 
+void sd_xfer_as_site(int x) {
+    sdw_lock();
+    if ((unsigned)x < SD_XFERS && s_x[x].state == SDX_OPENING) {
+        s_x[x].site = true;
+    }
+    sdw_unlock();
+}
+
 enum sd_xstate sd_xfer_state(int x) {
     sdw_lock();
     int s = s_x[x].state;
@@ -203,6 +213,10 @@ uint64_t sd_xfer_size(int x) {
 
 const char *sd_xfer_mime(int x) {
     return s_x[x].mime ? s_x[x].mime : "application/octet-stream";
+}
+
+bool sd_xfer_gzip(int x) {
+    return s_x[x].gzip;
 }
 
 const char *sd_xfer_name(int x) {
@@ -487,8 +501,23 @@ static bool out(struct xfer *t, const char *s, size_t n) {
     return true;
 }
 
+static bool ends_gz(const char *s) {
+    size_t n = strlen(s);
+    return n >= 3 && strcasecmp(s + n - 3, ".gz") == 0;
+}
+
 static const char *mime_of(const char *name) {
-    const char *e = strrchr(name, '.');
+    char tmp[SD_PATH_MAX];
+    size_t n = strlen(name);
+    if (ends_gz(name)) {
+        n -= 3; /* index.html.gz is html, the same as LittleFS */
+    }
+    if (n >= sizeof tmp) {
+        return "application/octet-stream";
+    }
+    memcpy(tmp, name, n);
+    tmp[n] = 0;
+    const char *e = strrchr(tmp, '.');
     if (!e) {
         return "application/octet-stream";
     }
@@ -601,12 +630,47 @@ static void run_list(struct xfer *t) {
     finish(t, SDX_DONE, 200, 0, NULL);
 }
 
-static void run_get(struct xfer *t) {
-    bool any = false;
-    if (t->path[0] == 0 || ls_list(t->path, probe_cb, &any) >= 0) {
-        run_list(t);
-        return;
+static bool file_openable(const char *path) {
+    if (!path[0]) {
+        return false;
     }
+    ls_file *f = ls_open(path, LS_RD);
+    if (!f) {
+        return false; /* missing, or a directory (FatFs refuses that open) */
+    }
+    ls_close(f);
+    return true;
+}
+
+/* name.gz ahead of name. A request that already ends in .gz is that file. */
+static bool site_pick(const char *base, char *out, size_t cap) {
+    if (!base[0] || strlen(base) >= cap) {
+        return false;
+    }
+    if (!ends_gz(base)) {
+        int n = snprintf(out, cap, "%s.gz", base);
+        if (n > 0 && (size_t)n < cap && file_openable(out)) {
+            return true;
+        }
+    }
+    memcpy(out, base, strlen(base) + 1);
+    return file_openable(out);
+}
+
+/* The LittleFS page rule: the file, or the folder's index.html. */
+static bool site_resolve(const char *req, char *out, size_t cap) {
+    if (req[0] && site_pick(req, out, cap)) {
+        return true;
+    }
+    char idx[SD_PATH_MAX];
+    int n = req[0] ? snprintf(idx, sizeof idx, "%s/index.html", req) : snprintf(idx, sizeof idx, "index.html");
+    if (n <= 0 || (size_t)n >= sizeof idx) {
+        return false;
+    }
+    return site_pick(idx, out, cap);
+}
+
+static void run_get_file(struct xfer *t) {
     ls_file *f = ls_open(t->path, LS_RD);
     if (!f) {
         finish(t, SDX_FAIL, 404, 0, "not found");
@@ -615,6 +679,7 @@ static void run_get(struct xfer *t) {
     sdw_lock();
     t->size = ls_size(f);
     t->mime = mime_of(t->path);
+    t->gzip = ends_gz(t->path);
     t->state = SDX_STREAM;
     sdw_unlock();
     uint64_t left = t->size;
@@ -652,6 +717,25 @@ static void run_get(struct xfer *t) {
     }
     ls_close(f);
     finish(t, SDX_DONE, 200, 0, NULL);
+}
+
+static void run_get(struct xfer *t) {
+    if (t->site) {
+        char chosen[SD_PATH_MAX];
+        if (!site_resolve(t->path, chosen, sizeof chosen)) {
+            finish(t, SDX_FAIL, 404, 0, "not found");
+            return;
+        }
+        snprintf(t->path, sizeof t->path, "%s", chosen);
+        run_get_file(t);
+        return;
+    }
+    bool any = false;
+    if (t->path[0] == 0 || ls_list(t->path, probe_cb, &any) >= 0) {
+        run_list(t);
+        return;
+    }
+    run_get_file(t);
 }
 
 /* Freeing a big file's clusters is one long FatFs call (a 1 GB file on the
