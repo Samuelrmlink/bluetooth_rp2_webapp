@@ -451,6 +451,36 @@ static void stack(const char *fs) {
         CHECK(get_meta("apps/printer/index.html.gz", back, sizeof back, &n, &gz, &mime) == 200 && gz && n == sizeof page &&
               mime && strstr(mime, "text/html"),
               "a direct .gz read is marked gzip and typed as html");
+        /* Two slots, and the third is the 503 the HTTP server waits through. */
+        struct sd_reply busy;
+        char holdp[SD_PATH_MAX];
+        snprintf(holdp, sizeof holdp, "apps/printer/plain.txt");
+        CHECK(sd_path_clean(holdp, sizeof holdp) && sd_api_gate(&busy), "the card takes another GET");
+        int h0 = sd_xfer_start(SD_OP_GET, holdp, NULL, 0, &busy);
+        int h1 = sd_xfer_start(SD_OP_GET, holdp, NULL, 0, &busy);
+        CHECK(h0 >= 0 && h1 >= 0 && h0 != h1, "two GETs can hold the two slots");
+        enum sd_xstate hs = settle(h0);
+        for (int i = 0; i < 1000 && hs != SDX_DONE && hs != SDX_FAIL; i++) {
+            const uint8_t *q;
+            if (sd_xfer_peek(h0, &q)) { sd_xfer_consume(h0, sd_xfer_peek(h0, &q)); }
+            else { pass(); }
+            hs = sd_xfer_state(h0);
+        }
+        hs = settle(h1);
+        for (int i = 0; i < 1000 && hs != SDX_DONE && hs != SDX_FAIL; i++) {
+            const uint8_t *q;
+            if (sd_xfer_peek(h1, &q)) { sd_xfer_consume(h1, sd_xfer_peek(h1, &q)); }
+            else { pass(); }
+            hs = sd_xfer_state(h1);
+        }
+        int h2 = sd_xfer_start(SD_OP_GET, holdp, NULL, 0, &busy);
+        CHECK(h2 < 0 && busy.status == 503 && busy.retry_after == 1 && strcmp(busy.error, "card busy") == 0,
+              "a third GET is card busy, which HTTP queues");
+        sd_xfer_release(h0);
+        h2 = sd_xfer_start(SD_OP_GET, holdp, NULL, 0, &busy);
+        CHECK(h2 >= 0, "releasing a slot lets the next GET start");
+        sd_xfer_release(h1);
+        sd_xfer_release(h2);
     }
     CHECK(simple(SD_OP_DELETE, "a/b", NULL) == 409, "deleting a non-empty folder: 409");
     CHECK(simple(SD_OP_DELETE, "a/b/c/hi.txt", NULL) == 200 && simple(SD_OP_DELETE, "a/b/c", NULL) == 200, "delete file, then folder");

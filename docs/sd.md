@@ -214,7 +214,7 @@ compiled in. On a build without it, that URL is an ordinary LittleFS path.
 | `POST` | `/api/sd/format` | `{"fs":"exfat"\|"fat32","cluster":N}` (0/absent = default). `202`, then follow `format` in the status. `409` while one runs |
 | `POST` | `/api/sd/bench` | `{"mb":N}` (default 10). `202`; results in the status `bench` |
 | `GET` | `/api/sd/files[/<path>]` | A folder: `{"dir":"…","files":[{"name":"…","dir":true},{"name":"…","size":123}]}` (streamed, no Content-Length). A file: its bytes with Content-Length and a type by extension |
-| `GET` | `/sd[/<path>]` | A page, the same rule as LittleFS. `name.gz` is preferred over `name` and answered with `Content-Encoding: gzip` and the type of the name without `.gz`. A folder, including `/sd` and `/sd/`, serves `index.html` (or `index.html.gz`). A folder with no index is `404`. `PUT`, `DELETE`, and `POST` answer `404` with `{"error":"GET"}`. `/sdk` is not this route. Folder listings stay on `/api/sd/files` |
+| `GET` | `/sd[/<path>]` | A page, the same rule as LittleFS. `name.gz` is preferred over `name` and answered with `Content-Encoding: gzip` and the type of the name without `.gz`. A folder, including `/sd` and `/sd/`, serves `index.html` (or `index.html.gz`). A folder with no index is `404`. A GET that finds both transfer slots busy waits on the connection until one frees. `PUT`, `DELETE`, and `POST` answer `404` with `{"error":"GET"}`. `/sdk` is not this route. Folder listings stay on `/api/sd/files` |
 | `PUT` | `/api/sd/files/<path>` | Upload, streamed to the card with TCP back-pressure; parents created; an existing file replaced. `{"ok":true,"bytes":n}`. `507` before writing if it cannot fit |
 | `PUT` | `/api/sd/files/<path>/` | Make a folder (and its parents). `{"ok":true,"dir":true}` (added here; km003c has no mkdir) |
 | `DELETE` | `/api/sd/files/<path>` | A file or an empty folder |
@@ -229,7 +229,7 @@ Errors are `{"ok":false,"error":"…","card":"<state>"}` with `Connection: close
 | | Status |
 |---|---|
 | no card / settling / not mountable / formatting | `503` with `Retry-After` 5 / 2 / — / 5 |
-| the transfer slots are busy | `503`, `Retry-After: 1` |
+| the transfer slots are busy | a `GET` waits on its connection until a slot frees. `PUT`, `DELETE`, and rename still answer `503`, `Retry-After: 1` |
 | a non-empty folder; an existing rename target; PUT onto a folder | `409` |
 | not found | `404` |
 | card full | `507` |
@@ -274,7 +274,7 @@ Tier 0 (host, `tools/run_tests.py`):
   1–64 block I/O at the edges, CRC and write errors retried, long busy
   (and the W5500 getting the bus meanwhile), a dead command, a pulled and
   reinserted card, no MISO conflict on the shared bus.
-* `sd_stack_test` (401 checks): worker → API → store → FatFs → driver →
+* `sd_stack_test` (417 checks): worker → API → store → FatFs → driver →
   card, both buses, FAT32 and exFAT on a 300 MiB card: upload, download,
   listing, a 300-file folder (made, listed, emptied), mkdir, rename,
   delete, the error map, bench, pull + settle + remount. The resulting

@@ -96,6 +96,9 @@ typedef struct {
 #if CONFIG_SD
     /* an /api/sd transfer this connection is waiting on (sd_service) */
     bool sd_on;
+    /* A GET found both transfer slots taken. The request stays on this
+     * connection until one frees; a browser will not retry a 503 on a script. */
+    bool sd_wait;
     bool sd_hdr_sent;
     bool sd_in_ended;
     bool taking_sd_body;
@@ -233,7 +236,7 @@ static void conn_reset(http_conn_t *c) {
 static bool conn_held(const http_conn_t *c) {
     return c->sending_file || c->sending_tar || c->sending_remove || c->closing || c->pending_file || c->is_ws
 #if CONFIG_SD
-           || c->sd_on
+           || c->sd_on || c->sd_wait
 #endif
         ;
 }
@@ -1220,10 +1223,31 @@ static char s_sdp1[192], s_sdp2[192];
 /* Hold a connection on transfer x. */
 static err_t sd_hold_conn(http_conn_t *c, int x, enum sd_op op) {
     c->sd_on = true;
+    c->sd_wait = false;
     c->sd_x = (uint8_t)x;
     c->sd_op = (uint8_t)op;
     c->retries = 0;
     return ERR_OK;      /* held: http_sd_pump answers */
+}
+
+/* sd_xfer_start's "no slot" answer. A missing card, a format, and a card
+ * that is still settling use other 503s and are not this. */
+static bool sd_slots_busy(const struct sd_reply *r) {
+    return r->status == 503 && r->retry_after == 1 && strcmp(r->error, "card busy") == 0;
+}
+
+/* Keep the GET on this connection. http_sd_pump starts it when a slot frees.
+ * `method` and `path` may already be this connection's own copies. */
+static int sd_park_get(http_conn_t *c, const char *method, const char *path) {
+    if (method != c->method) {
+        snprintf(c->method, sizeof c->method, "%s", method);
+    }
+    if (path != c->path) {
+        snprintf(c->path, sizeof c->path, "%s", path);
+    }
+    c->sd_wait = true;
+    c->retries = 0;
+    return ERR_OK;
 }
 
 /* /sd, /sd/, /sd?..., /sd/<path>. Not /sdk or any longer sibling. */
@@ -1235,7 +1259,8 @@ static bool sd_public_prefix(const char *path) {
 /* GET /sd and GET /sd/<path> serve a page the way LittleFS does. name.gz is
  * preferred and sent with Content-Encoding: gzip. A directory, including
  * the card root, serves index.html. Writes and folder listings stay on
- * /api/sd/files. */
+ * /api/sd/files. Both slots busy: the GET waits on the connection, the same
+ * way a LittleFS read waits for a file handle. */
 static int sd_public_get(http_conn_t *c, struct tcp_pcb *tpcb, const char *method, const char *path) {
     if (strcmp(method, "GET") != 0) {
         return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"GET\"}");
@@ -1261,6 +1286,9 @@ static int sd_public_get(http_conn_t *c, struct tcp_pcb *tpcb, const char *metho
     }
     int x = sd_xfer_start(SD_OP_GET, p1, NULL, 0, &r);
     if (x < 0) {
+        if (sd_slots_busy(&r)) {
+            return sd_park_get(c, method, path);
+        }
         return sd_http_err(tpcb, &r);
     }
     sd_xfer_as_site(x);
@@ -1339,6 +1367,9 @@ static int sd_routes(http_conn_t *c, struct tcp_pcb *tpcb, const char *method, c
     }
     int x = sd_xfer_start(op, p1, p2, 0, &r);
     if (x < 0) {
+        if (op == SD_OP_GET && sd_slots_busy(&r)) {
+            return sd_park_get(c, method, path);
+        }
         return sd_http_err(tpcb, &r);
     }
     return sd_hold_conn(c, x, op);
@@ -1522,12 +1553,40 @@ static void sd_service(http_conn_t *c) {
     }
 }
 
+static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, const char *path,
+                    const char *body, size_t body_len);
+
+/* Start queued GETs. One pass takes every free slot, then stops: the next
+ * waiter would only be told the card is busy again. */
+static void sd_kick_waiters(void) {
+    for (int i = 0; i < HTTP_CONNS; i++) {
+        http_conn_t *c = &conns[i];
+        if (!c->pcb || !c->sd_wait) {
+            continue;
+        }
+        c->sd_wait = false;
+        c->retries = 0;
+        struct tcp_pcb *tpcb = c->pcb;
+        err_t e = dispatch(tpcb, c, c->method, c->path, "", 0);
+        if (e == ERR_ABRT) {
+            continue;
+        }
+        if (c->sd_wait) {
+            break;
+        }
+        if (!conn_held(c)) {
+            conn_drop(tpcb);
+        }
+    }
+}
+
 void http_sd_pump(void) {
     for (int i = 0; i < HTTP_CONNS; i++) {
         if (conns[i].pcb && conns[i].sd_on) {
             sd_service(&conns[i]);
         }
     }
+    sd_kick_waiters();
 }
 #else
 void http_sd_pump(void) {
@@ -1789,7 +1848,13 @@ static err_t http_poll(void *arg, struct tcp_pcb *tpcb) {
     }
     /* A batch delete holds the connection with no bytes in flight. The 1 Hz
      * poll would otherwise abort it after HTTP_MAX_RETRIES. */
-    if (c->sending_remove) {
+    /* A queued card GET has no bytes in flight. The poll would otherwise
+     * abort it after HTTP_MAX_RETRIES, behind a long download. */
+    if (c->sending_remove
+#if CONFIG_SD
+        || c->sd_wait
+#endif
+       ) {
         c->retries = 0;
     }
     if (c->retries < 255) {

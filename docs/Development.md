@@ -88,7 +88,7 @@ Confirm over the LAN or the WireGuard address when you can. The buy writes flash
 
 Static files are LittleFS objects served by `src/net/http.c`. `resolve_static()` prefers `<name>.gz` and answers with `Content-Encoding: gzip`. A browser decompresses that. A client that does not, such as Python `urllib`, receives the gzip bytes (`1f 8b`).
 
-The SD card is a second tree, on builds with `CONFIG_SD`. `GET /sd/<path>` serves a page the same way LittleFS does: `name.gz` is preferred, `Content-Encoding: gzip` marks those bytes, and a directory (including `/sd`) serves `index.html`. A directory with no index is `404`. `GET /api/sd/files/<dir>` is still the JSON listing. Writes stay on `/api/sd/files`. A `.gz` file read through that API is also marked `Content-Encoding: gzip`, and its type is the name without `.gz`.
+The SD card is a second tree, on builds with `CONFIG_SD`. `GET /sd/<path>` serves a page the same way LittleFS does: `name.gz` is preferred, `Content-Encoding: gzip` marks those bytes, and a directory (including `/sd`) serves `index.html`. A directory with no index is `404`. `GET /api/sd/files/<dir>` is still the JSON listing. Writes stay on `/api/sd/files`. A `.gz` file read through that API is also marked `Content-Encoding: gzip`, and its type is the name without `.gz`. A GET that finds both transfer slots busy waits on the connection until one frees. PUT and DELETE still answer `503`.
 
 ```sh
 python3 tools/make_release.py
