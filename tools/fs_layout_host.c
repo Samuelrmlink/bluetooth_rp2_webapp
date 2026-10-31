@@ -102,7 +102,10 @@ int main(int argc, char **argv) {
             }
             check(flipped > 0, "a mutated table was accepted");
         }
-        if (old) { check(!fs_layout_pt_matches(old, on), "old 864 KiB table was accepted"); }
+        /* partitions.json is already the destination map (1 MiB slots,
+         * LittleFS at 0x250000). The mover used to prove that the live
+         * 864 KiB table was NOT that map. It now proves the live table is. */
+        if (old) { check(fs_layout_pt_matches(old, on), "live partition table is not the mover destination"); }
         free(next);
         free(old);
     }

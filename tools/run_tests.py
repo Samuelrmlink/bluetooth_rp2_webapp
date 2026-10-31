@@ -193,7 +193,9 @@ def t_wifi_radio_window():
         return False, "begin_join() no longer refuses while Bluetooth has the radio"
     if "le_release_radio(" not in (_fn_body(src, "win_open") or ""):
         return False, "win_open() does not release the radio"
-    i = src.find("bool wifi_bt_hold(void)")
+    i = src.find("bool wifi_bt_hold_base(void)")
+    if i < 0:
+        i = src.find("bool wifi_bt_hold(void)")
     if i < 0 or "win_start" not in src[i:src.find("\n}\n", i)]:
         return False, "wifi_bt_hold() does not hold Bluetooth off during a radio window"
     if "WIFI_WIN_MAX_MS" not in src or "win_close(" not in (_fn_body(src, "on_up") or ""):
@@ -1512,19 +1514,19 @@ def t_fs_layout():
     """The mover's addresses abut, a started move never formats 0x200000, and
     the picobin parser accepts partitions-next.json only.
 
-    partitions.json, fs.h and the linker length stay on the 864 KiB / 2 MiB
-    map. This image mounts the old volume until the SD state says otherwise,
-    so those four copies are not switched here (t_ota_partition_layout)."""
+    The live map is already the 1 MiB slot / LittleFS-at-0x250000 layout.
+    Merging the mover must not move fs.h or the linker length again.
+    t_ota_partition_layout checks that map against partitions.json."""
     import tempfile
     fsc = open(os.path.join(ROOT, "src/fs/fs.c")).read()
     if "g_freeze_old" not in fsc or "not formatting (layout mover decides)" not in fsc:
         return False, "fs.c is missing the layout mount guard"
     hdr = open(os.path.join(ROOT, "src/fs/fs.h")).read()
-    if "FS_FLASH_OFF (2u * 1024u * 1024u)" not in hdr:
-        return False, "FS_FLASH_OFF is no longer 2 MiB"
+    if "FS_FLASH_OFF (2368u * 1024u)" not in hdr:
+        return False, "FS_FLASH_OFF is no longer 2368 KiB"
     ld = open(os.path.join(ROOT, "linker/pico_flash_region.ld")).read()
-    if "LENGTH = 864 * 1024" not in ld:
-        return False, "linker FLASH length is no longer 864 KiB"
+    if "LENGTH = 1024 * 1024" not in ld:
+        return False, "linker FLASH length is no longer 1 MiB"
     picotool = os.environ.get("PICOTOOL") or \
         "/home/samuel/Work/bluetooth_rp2_webapp/build-bnep/_deps/picotool/picotool"
     if not os.access(picotool, os.X_OK):
