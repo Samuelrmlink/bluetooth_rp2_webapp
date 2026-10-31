@@ -1,6 +1,12 @@
-# PEX — portable executable modules for microcontrollers (DRAFT 0.7)
+# PEX — portable executable modules for microcontrollers (spec 1.1)
 
-Status: **draft 0.7 -- format 1.0, the RAM-mode runtime and XIP are
+Status: **spec 1.1.** The version is `format_major.minor` (§12). 1.0 is the
+released format. 1.1 adds the streamed install (§16, §19) and does not change
+the header, so a module stamped 1.0 still loads and runs. The firmware
+reports this version as its runtime string. The 0.x numbers below are drafts
+of format 1.0, not an older major of this scheme.
+
+Status of draft 0.7: **format 1.0, the RAM-mode runtime and XIP are
 implemented.** 0.7: modules are installed into the PEX flash partition and
 run in place (§16: the index, placement, compaction, power-fail safety,
 model A relocated to its flash address); the gateway's pool is static and
@@ -102,7 +108,12 @@ Every structure is 4-byte aligned.
 | 12 | 4 | `file_size` | total bytes incl. signature |
 
 A loader reads these 16 bytes first and can refuse a file (wrong magic,
-major, target, size) before reading anything else.
+major, target, size) before reading anything else. It accepts every minor of
+its own major, including an older minor. A different major is refused, in
+either direction: a firmware on an older major will not run a module built
+for the new major, and a runtime whose major has moved on will not run a
+module built for the old one. A minor bump is a feature added to a released
+spec. Older modules of that major still run.
 
 ### 4.2 Header (format 1.0, after the prefix)
 
@@ -157,6 +168,14 @@ Order in the file (as `pexlink` writes it; a loader must not depend on it,
 except that `SIG` is last): prefix + header, section table, the section
 payloads (each 4-aligned), the image (8-aligned), `SIG`.
 
+A file the streamed install will accept (§16) has `section_table_off ==
+header_size`, and the `RELOC` and `META` payloads lie entirely before the
+image. `IMPORTS`, `EXPORTS`, `INIT`, `FINI`, and `DEBUG` may follow the
+image. The stream refuses anything else with "re-link with pexlink" and
+writes nothing. `pex_install` over a random-access reader still accepts any
+order except that `SIG` is last, including a section table that does not
+begin at byte 92.
+
 ### 4.4 Multi-target ("fat") files -- later **[D, Q8]**
 
 v1 files hold one target. A later minor revision may add a container -- a
@@ -178,6 +197,12 @@ All little-endian, 4-aligned, and bounded by the section's `size`.
   from their link address to RW offsets), and the loader adds that segment's
   base: `*w += bit31 ? rw_base : code_base`. (0.5 had the bit on RW entries
   only; model A code also holds literal-pool words that point at data.)
+  The RO list is sorted ascending as `u32`, so code entries (bit 31 clear)
+  come before RW entries. Both linkers already write it that way. An install
+  refuses an unsorted list ("RO relocations not sorted: re-link with
+  pexlink"). A streamed install also refuses a relocation word that straddles
+  a 256-byte page; `pexlink` keeps every entry 4-aligned inside a page, and
+  the random-access reader skips a straddling word.
 - **IMPORTS**: `u16 n_groups, u16 n_imports`; `n_groups` x `{u16 id, u8
   major, u8 minor}` (the newest minor of the group any import needs); then
   `n_imports` x `{u32 name_hash, u16 group, u16 flags, u32 slot}` -- `slot` is
@@ -786,11 +811,24 @@ Only for firmware with Lua (`pex/lua`, `CONFIG_PEX_LUA`). In priority order:
 
 | Version | Where | Changes when |
 |---|---|---|
-| `format_major.minor` | bytes 4-7 of every file | this spec changes (major: incompatible layout) |
-| `api_major.minor` | header | the firmware's exported host API changes |
+| `format_major.minor` | bytes 4-7 of every file; the firmware reports the same number | the spec (§4.1) |
+| `api_major.minor` | header and `pex_api_version()` | the module import table, separate from the spec version |
 | per-group versions | `IMPORTS` / host table | one API group changes |
 | `module_version` | header | the module's author releases |
 | `build_id` | header | any byte of the image changes |
+
+The spec version bumps from a **released** version. A major bump means a
+module built for the previous major may not run on the newer runtime. A
+minor bump means the released spec gained a feature and a module of an older
+minor of the same major still runs. `PEX_RT_VERSION` is that number, so
+`pex.list`'s `runtime` is the spec version. The string `"0.6"` on firmware
+that predates 1.1 is the draft label for format 1.0, not major 0.
+
+`api_major` must equal the firmware's. A file's `api_minor` must be less
+than or equal to the firmware's, so an API minor bump means new imports and
+a file stamped with it does not load on older firmware. 1.1 does not change
+the import table, so the API stays 1.0. `host->format_minor` is the runtime's
+spec minor.
 
 ## 13. Open questions
 
@@ -1030,8 +1068,11 @@ the installed copy (`xip:<name>`; `{ram:true}` loads the lfs file instead);
 `{pending:true}` and report through the event `pex.sd_done {op, path, ok,
 name | error, msg}`. A load still reads the whole file into the pool
 through the storage worker's job slot (a long-term block, freed afterwards).
-An install streams the card through that same 4 KB transfer ring and does
-not allocate the file: the installed copy runs from the partition.
+An install from `sd:/` pushes each completed read (at most 4 KB) through
+`pex_install_write` and does not copy the file into the pool: the installed
+copy runs from the partition. The main loop runs between those reads. One
+write erases at most one sector and programs at most sixteen pages, and the
+signature is checked once, over the stream (§16).
 Autostart and `require` find installed modules first.
 `pex.list` adds `pool.static` and `xip {size, free, largest, modules,
 rw_area, rw_room, flash_ops}`. `rw_room` is the gap under the model-A suffix.
@@ -1055,10 +1096,14 @@ the old filesystem.
 
 **Flash writes** go the way of LittleFS and OTA: `flash_range_erase/program`
 inside `flash_safe_execute` (core 1 parked), the watchdog fed per operation.
-An install blocks the main loop for its erase/program time: on the real
-part ~45 ms per 4 KB sector and ~0.8 ms per page, so ~0.6 s for 41 KB plus
-the index update, and the signature checks (before and after, in place);
-compacting the whole partition is several seconds.
+On the real part an erase is ~45 ms per 4 KB sector and a program ~0.8 ms
+per page. An `sd:/` install spreads that across reads, so one pass of the
+loop does at most one sector plus its pages; the index update is one more
+erase and program at `pex_install_end`. A session with no completed card
+read for 8 seconds is aborted by the gateway. `pex_install` over a reader
+still does the whole file in one call, with a signature check of the source
+and a second check of the installed copy. Compacting the whole partition is
+several seconds.
 
 **Remote test** (0.7): `pex_remote_test.py` adds the pool checks, a 41 KB
 module loaded into RAM, and the XIP part -- install hello/arith/big/counter,
@@ -1105,11 +1150,18 @@ Space no entry covers is free -- what a cut left half-written is free again.
 - **A**: the RO words are relocated while the file is written -- code words to
   its flash address, RW words to a **fixed RW address at the top of the
   pool** (`pool end - aoff`). That reservation is a suffix of the pool, not a
-  heap block. Mount sets it from every installed model-A module. An install
-  grows the suffix to the new high-water mark after the header checks and
-  before any sector write, so the module can run in place immediately
-  (`xip_ready` true). A grow that does not fit fails the install and writes
-  nothing. An uninstall returns the unused tail only after the index commit;
+  heap block. Mount sets it from every installed model-A module.
+  `pex_install` over a reader grows the suffix to the new high-water mark
+  after the header checks and before any sector write, so the module can run
+  in place immediately (`xip_ready` true). A grow that does not fit fails
+  that install and writes nothing. The push session grows the suffix once
+  `META` names the module and before any page that overlaps the image is
+  programmed. A large `RELOC` may already have programmed raw pages that lie
+  entirely before the image; those sectors stay free if a later failure
+  commits no index entry, and a failure after the suffix grew restores the
+  previous suffix. A grow that does not fit writes nothing when `META` ends
+  inside the first page. An uninstall returns the unused tail only after the
+  index commit;
   a hole in the middle stays, because the flash words of the modules above it
   already point there. `rw_room` is the gap under that suffix, which is what
   the next install can still reserve. The entry records the bases, so a reader
@@ -1120,6 +1172,39 @@ Space no entry covers is free -- what a cut left half-written is free again.
   the next load. The RO list must be sorted (pexlink always wrote it so; the
   install checks). Model B is what to install; model A works.
 - `RAM_ONLY` files are refused; `XIP_OK` is informational.
+
+**The same build.** Both `pex_install` and the push session skip a write when
+the new file is the same build as an installed entry of the same name. The
+same build means the same `build_id` and the same `file_crc32`, and the
+installed copy is signed if the new file is signed. `file_crc32` is read from
+the flash header at `sector * 4096 + 72`; the index format does not change.
+`file_crc32` excludes `SIG`, so a second signature over identical pre-`SIG`
+bytes (another key, both copies signed) is the same build and is skipped.
+The push session returns `PEX_DONE` from `write` as soon as `META` confirms
+the name, before the rest of the file, so that early stop cannot see a new
+`SIG`. Replacing an unsigned copy with a signed one is not the same build:
+the section table grew, so `file_crc32` changes, and the signed-bit clause
+would refuse the skip even if the CRC matched. A change that touches only
+`META` keeps `build_id` and changes `file_crc32`, so it is installed again.
+If `build_id` and `file_crc32` match an installed entry whose name does not,
+the install is `PEX_EFORMAT`. The reader zeros the 24-byte name buffer before
+`META` is read, so unused name bytes in the index are zero on both paths.
+
+**Push install.** `pex_install_begin`, `pex_install_write`, `pex_install_end`,
+and `pex_install_abort` (`pex/runtime/pex_rt.h`) install the same file in
+order, at any chunk size, in one host block of at most 2 KB. They are host
+calls, not a module import, so `api_major` does not change. The host feeds
+the session; it is not a state machine inside `pex_poll`. `PEX_DONE` (6) is
+returned only by `write`, when the build is already installed: stop sending.
+It is not an error and not a slot. `pex_install` still returns the slot.
+`end` returns that slot and frees the session; `abort` commits nothing and
+frees it. A second `end` is a use after free. While a session is open,
+another install, an uninstall, a compaction, and a second begin return
+`PEX_EBUSY`. Loading and unloading are not locked. The streamed path requires
+the file order in §4.3; `pex_install` over a reader does not.
+`PEX_INSTALL_NO_COMPACT` still means fail with `PEX_ENOSPC` rather than move
+other files. The gateway passes 0, and it aborts a session that has had no
+completed `sd:/` read for 8 seconds.
 
 **Compaction** (on demand, and by an install that finds enough free space
 but not in one run): entries in order of position slide down into the free
@@ -1137,29 +1222,39 @@ of the flash copy, with the code pointer in place (nothing copied, RO
 relocations already applied) and RW from the pool; the CRC is checked over
 the original bytes on every load; the signature was checked at install.
 
-**Trust.** Installing verifies the file (CRC, signature, policy: an unsigned
+**Trust.** `pex_install` verifies the file (CRC, signature, policy: an unsigned
 file is never installed on a signed-only device), then verifies the written
-copy again in place; `pex_xip_verify` repeats that at any time. An index
+copy again in place, including a second signature check. The push session
+checks the signature once, over the stream, then checks that the flash copy's
+CRC-32 and SHA-256 match that stream and that the stored `SIG` bytes match
+the bytes that arrived. It does not run ECDSA a second time. Both paths set
+"verified at install" only after that flash check. `pex_xip_verify` repeats a
+full in-place check (CRC and signature) at any time. An index
 copy damaged other than by a cut (a flipped bit) falls back to the older
 copy, which may name files whose sectors were reused since: such a module
 fails its CRC at load and is refused (uninstall it).
 
-**Tested.** On the build host (`pex/test/unit/pex_xip_unit.c`, ASan/UBSan):
-synthetic modules of any size, a power cut (a torn erase or program) at
-**every** flash operation of installs, replacements, uninstalls and an
-overlapping compaction, a second cut during the recovery, damaged index
-copies, a moved pool, and 3000 random operations with random cuts -- after
-each cut and reboot the index is the state before or after and every file
-verifies and loads (24,592 checks). In mcusim: the test hosts install and
-run in place on RP2350 (through ATRANS1) and RP2040, both code models
-(`run_sim.py`); the gateway firmware (`gw_sim.py`, scenario `xip`) with the
-simulator SIGKILLed during installs and during an overlapping compaction --
-every restart consistent, interrupted moves resumed.
+**Tested.** On the build host (`pex/test/unit/pex_xip_unit.c`, `gcc -O1`, and
+again with ASan/UBSan and leak detection left off): synthetic modules of any
+size, a power cut (a torn erase or program) at **every** flash operation of
+installs, replacements, uninstalls and an overlapping compaction, a second
+cut during the recovery, damaged index copies, a moved pool, the push session
+against the reader (chunk sizes 1, 7, 256, 4096, and the whole file;
+same-build, including another key over the same pre-`SIG` bytes; META-only
+and unsigned-to-signed reinstalls; order refusals the reader still accepts),
+and 3000 random operations with random cuts -- after each cut and reboot the
+index is the state before or after and every file verifies and loads (24,969
+checks, both runs). In mcusim (`pex/test/run_sim.py`): the test hosts install
+and run in place on RP2350 (through ATRANS1) and RP2040, both code models,
+261/261 (m33 128, m0p 128); that run's host unit reports the same 24,969.
+The gateway firmware (`gw_sim.py`, scenario `xip`) was not re-run for this
+change. Its earlier result, with the simulator SIGKILLed during installs and
+during an overlapping compaction, was every restart consistent and
+interrupted moves resumed.
 
 **Left for later**: `stack_hint` from a call graph; `DEPS`; fat files (§4.4);
 the raw `lua54_*` group; the planned HAL groups (gpio, i2c, spi, uart, pio,
-dma, timer, pwm, adc, crypto); async op replies (Q11); an install that does
-not block the loop (a state machine in `pex_poll`); growing the model-A RW
+dma, timer, pwm, adc, crypto); async op replies (Q11); growing the model-A RW
 area without a reboot; `require` searching `sd:/`.
 
 ### 16.1 What 0.6 listed as left for XIP (for the record; all of it done in 0.7 except the last item)
@@ -1226,6 +1321,25 @@ area without a reboot; `require` searching `sd:/`.
   when that call has interrupts masked. The gateway's budget is
   `CONFIG_PEX_SLICE_MS`.
 - Q10 and Q12 decided.
+
+## 19. Changes in 1.1
+
+- Spec 1.1, from released 1.0. Minor, not major: a module stamped 1.0 still
+  loads and runs. The loader compares format major only. The header gained no
+  fields. `api_major.minor` stays 1.0, because a module imports nothing new;
+  stamping a higher API minor would make that file refuse to load on a 1.0
+  firmware. `PEX_RT_VERSION` is `"1.1"`.
+- Streamed install (§4.3, §4.5, §15.1, §16). `pexlink` already wrote the
+  section table immediately after the 92-byte header, put `RELOC` and `META`
+  before the image, and sorted the RO list. A relink stamps `format_minor`
+  1; an already-built 1.0 file is unchanged and still installs. `pex_install`
+  over a reader still accepts an older order and a section table that does
+  not start at byte 92. The same-build rule installs more files than it used
+  to (an unsigned copy replaced by a signed one, and a change that touches
+  only `META`) and does not refuse a file `pexlink` already emitted.
+  `PEX_DONE` and the index lock are host-side. A second signature over the
+  same pre-`SIG` bytes is the same build under that rule, because
+  `file_crc32` excludes `SIG` and the stream stops at `META`.
 
 ## Appendix A. The v1 host API (generated)
 

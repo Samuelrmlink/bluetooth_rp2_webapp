@@ -53,8 +53,9 @@ const pex_flash_t *pex_gw_flash(void);         /* NULL when the build has none *
 void pex_gw_xip_window(void);                  /* ATRANS1 -> the partition (RP2350) */
 uint32_t pex_gw_xip_flash_ops(void);
 int pex_gw_install_path(const char *name_or_path);   /* a name, lfs:/... ; slot or PEX_E* */
-/* sd:/ : read the file into the pool asynchronously, then install or load it;
- * PEX_EPENDING, then the event pex.sd_done */
+/* sd:/ : a load reads the file into the pool. An install pushes each read
+ * through pex_install_write and does not copy the file. PEX_EPENDING, then
+ * the event pex.sd_done. */
 int pex_gw_sd_begin(const char *path, const char *as, bool install);
 void pex_gw_sd_poll(void);
 bool pex_gw_sd_busy(void);

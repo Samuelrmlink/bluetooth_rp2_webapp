@@ -34,7 +34,7 @@
 extern "C" {
 #endif
 
-#define PEX_RT_VERSION "0.6"
+#define PEX_RT_VERSION "1.1"   /* spec format_major.minor; "0.6" was the draft label for format 1.0 */
 
 /* ---- host API tables (generated from host_api.json: pex_host_<group>.c) -- */
 typedef struct { uint32_t hash; const void *addr; } pex_hsym_t;
@@ -219,13 +219,32 @@ pex_mod_t *pex_mod_at(uint32_t addr, uint32_t *off);
  * journal in the index, resumed by pex_xip_mount() after a power cut. */
 #define PEX_INSTALL_NO_COMPACT 1u    /* fail with PEX_ENOSPC rather than move other files */
 
+/* pex_install_write() only. The build is already installed: stop sending.
+ * Not an error, and not a slot index. pex_install() never returns it. */
+#define PEX_DONE 6
+
 /* Install a file (validated first: CRC, signature, policy -- an unsigned
- * file is refused under signed-only). Same build already installed: returns
- * its slot. An installed module of the same name is replaced (refused while
- * it is loaded from flash). Returns the slot (>= 0) or a PEX_E* code. */
+ * file is refused under signed-only). The same build is the same build id
+ * and file_crc32, and the installed copy is signed when this file is: that
+ * slot is returned and nothing is written. A different signature over the
+ * same bytes is still that build (file_crc32 does not cover SIG). An
+ * installed module of the same name is replaced (refused while it is loaded
+ * from flash). Returns the slot (>= 0) or a PEX_E* code. */
 int pex_install(const pex_reader_t *rd, uint32_t flags);
 int pex_install_mem(const void *buf, uint32_t len, uint32_t flags);
-int pex_uninstall(const char *name);  /* PEX_EBUSY while loaded from flash */
+
+/* Push the same install, in file order, any chunk size. One host block
+ * (about 1.5 KB) holds the session across calls. While it is open, another
+ * install, an uninstall, a compaction and a second begin return PEX_EBUSY.
+ * Loading and unloading do not. end() and abort() free the session; abort()
+ * commits nothing. A host should abort a session that sits idle. */
+typedef struct pex_install pex_install_t;
+pex_install_t *pex_install_begin(uint32_t flags);                 /* NULL: see pex_errmsg() */
+int pex_install_write(pex_install_t *s, const void *p, uint32_t n); /* PEX_OK, PEX_DONE, or PEX_E* */
+int pex_install_end(pex_install_t *s);                            /* the slot, as pex_install() */
+void pex_install_abort(pex_install_t *s);
+
+int pex_uninstall(const char *name);  /* PEX_EBUSY while loaded from flash, or while a session is open */
 
 typedef struct {
     char name[24];

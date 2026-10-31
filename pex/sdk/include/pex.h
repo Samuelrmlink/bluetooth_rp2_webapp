@@ -29,7 +29,7 @@ extern "C" {
 /* ---- format (spec 4) ----------------------------------------------------- */
 #define PEX_MAGIC          0x1A584550u     /* 'P' 'E' 'X' 0x1A, little-endian */
 #define PEX_FORMAT_MAJOR   1
-#define PEX_FORMAT_MINOR   0
+#define PEX_FORMAT_MINOR   1       /* 1.1: streamed install; a 1.0 module still loads */
 #define PEX_HEADER_SIZE    92u
 
 /* targets (spec 5) */

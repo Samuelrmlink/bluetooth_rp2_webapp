@@ -28,10 +28,10 @@ handling: --key, else $BTGW_OTA_KEY, else ~/.config/btgw/ota-signing.pem).
 import argparse, hashlib, json, os, struct, subprocess, sys, tempfile, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOL = "pexlink 0.6"
+TOOL = "pexlink 1.1"
 
 MAGIC = b"PEX\x1a"
-FORMAT_MAJOR, FORMAT_MINOR = 1, 0
+FORMAT_MAJOR, FORMAT_MINOR = 1, 1
 HEADER_SIZE = 92
 CRC_OFF = 72
 

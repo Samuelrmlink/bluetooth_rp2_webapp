@@ -96,7 +96,7 @@ void sdw_service(void) {
 #define FSIZE (FSEC * 4096u)
 static uint8_t s_flash[FSIZE];
 static long s_ops, s_cut = -1;         /* cut at the s_cut-th operation (0-based); -1 never */
-static int s_dead;
+static int s_dead, s_bad_prog;         /* s_bad_prog: XOR one stored byte after a good program */
 static unsigned s_rng = 1;
 static unsigned rnd(void) { s_rng = s_rng * 1103515245u + 12345u; return s_rng >> 8; }
 
@@ -119,6 +119,10 @@ static int fl_prog(void *ctx, uint32_t off, const void *src, uint32_t n) {
     uint32_t k = n;
     if (s_ops++ == s_cut) { k = rnd() % (n + 1); s_dead = 1; }
     for (uint32_t i = 0; i < k; i++) { s_flash[off + i] &= p[i]; }   /* NOR: 1 -> 0 only */
+    if (s_bad_prog && k == n && n > 80) {
+        s_flash[off + 80] ^= 0x01;     /* the page programmed; the call still succeeds */
+        s_bad_prog = 0;
+    }
     return k == n ? 0 : -1;
 }
 static const pex_flash_t s_fl = { FSIZE, 0x10400000u, (uintptr_t)s_flash, fl_erase, fl_prog, NULL };
@@ -299,6 +303,169 @@ static void cut_everywhere(const char *what, op_fn op, void *arg, int double_cut
     boot();
     op(arg);                           /* leave the "after" state for the next step */
     boot();
+}
+
+/* Compliant file: the section table sits on the header, and META and RELOC
+ * end before the image. mk() stays at sec_off 96 for the reader path. */
+typedef struct {
+    const char *name;
+    uint32_t text, ro, data, bss, seed, every;
+    int pic, sign, debug_after, reloc_after, meta_after, unsorted, meta_pad_flip;
+} mkopt_t;
+typedef struct {
+    uint8_t *p;
+    uint32_t n, image_off, meta_off, meta_end, sig_off, crc;
+    char name[24];
+} cfile_t;
+
+static void sec_ent(uint8_t *b, uint32_t at, uint16_t type, uint32_t off, uint32_t sz) {
+    w16(b + at, type);
+    w16(b + at + 2, 0);
+    w32(b + at + 4, off);
+    w32(b + at + 8, sz);
+}
+
+static cfile_t mkc(mkopt_t o) {
+    cfile_t f;
+    memset(&f, 0, sizeof f);
+    snprintf(f.name, sizeof f.name, "%s", o.name ? o.name : "module");
+    uint32_t text = o.text & ~3u, ro = o.ro & ~3u, data = o.data & ~3u;
+    uint32_t code = text + ro, img = code + data;
+    uint32_t nro_c = 0, nro_w = 0;
+    uint32_t *roc = calloc(code / 4 + 3, 4), *row = calloc(code / 4 + 3, 4);
+    if (!o.pic && o.every) {
+        for (uint32_t w = 1; w * 4 + 4 <= code; w += o.every) {
+            if ((w / o.every) & 1) { row[nro_w++] = (w * 4) | PEX_RELOC_TO_RW; }
+            else { roc[nro_c++] = w * 4; }
+        }
+    }
+    uint32_t nro = nro_c + nro_w;
+    if (o.unsorted && nro < 2) { roc[nro_c++] = 0; roc[nro_c++] = 4; nro = nro_c; }
+    uint32_t nl = (uint32_t)strlen(f.name);
+    uint32_t meta_sz = 4 + ((nl + 3) & ~3u);
+    uint32_t reloc_sz = 8 + 4 * nro;
+    uint32_t debug_sz = o.debug_after ? 8 : 0;
+    uint32_t nsec = 2u + (o.debug_after ? 1u : 0u) + (o.sign ? 1u : 0u);
+    uint32_t sec_off = PEX_HEADER_SIZE;
+    uint32_t cursor = sec_off + 12 * nsec;
+    uint32_t meta_off = 0, reloc_off = 0, debug_off = 0;
+    if (!o.meta_after) { meta_off = cursor; cursor += meta_sz; }
+    if (!o.reloc_after) { reloc_off = cursor; cursor += reloc_sz; }
+    uint32_t image_off = (cursor + 7u) & ~7u;
+    cursor = image_off + img;
+    if (o.meta_after) { meta_off = cursor; cursor += meta_sz; }
+    if (o.reloc_after) { reloc_off = cursor; cursor += reloc_sz; }
+    if (o.debug_after) { debug_off = cursor; cursor += debug_sz; }
+    uint32_t sig_off = cursor;
+    uint32_t size = cursor + (o.sign ? 68u : 0u);
+    f.p = calloc(size ? size : 1, 1);
+    f.n = size;
+    f.image_off = image_off;
+    f.meta_off = meta_off;
+    f.meta_end = meta_off + meta_sz;
+    f.sig_off = sig_off;
+    uint8_t *b = f.p;
+    uint32_t flags = o.pic ? (PEX_F_PIC | PEX_F_XIP_OK) : 0;
+    w32(b, PEX_MAGIC); w16(b + 4, 1); w16(b + 6, 0); w16(b + 8, PEX_HEADER_SIZE); w16(b + 10, PEX_TARGET_ARMV8M_MAIN);
+    w32(b + 12, size); w32(b + 16, 5); w16(b + 20, PEX_API_MAJOR); w16(b + 22, PEX_API_MINOR);
+    w32(b + 24, flags); w32(b + 28, 0x01020003u); w32(b + 32, img);
+    w32(b + 36, text); w32(b + 40, ro); w32(b + 44, data); w32(b + 48, o.bss); w32(b + 52, 0); w32(b + 56, 0);
+    w32(b + 60, nsec); w32(b + 64, sec_off); w32(b + 68, image_off);
+    uint32_t at = sec_off;
+    sec_ent(b, at, PEX_SEC_META, meta_off, meta_sz); at += 12;
+    sec_ent(b, at, PEX_SEC_RELOC, reloc_off, reloc_sz); at += 12;
+    if (o.debug_after) { sec_ent(b, at, PEX_SEC_DEBUG, debug_off, debug_sz); at += 12; }
+    if (o.sign) { sec_ent(b, at, PEX_SEC_SIG, sig_off, 68); }
+    w16(b + meta_off, PEX_META_NAME); w16(b + meta_off + 2, (uint16_t)nl); memcpy(b + meta_off + 4, f.name, nl);
+    if (o.meta_pad_flip && (nl & 3u)) { b[meta_off + 4 + nl] ^= 0x5A; }
+    w32(b + reloc_off, nro); w32(b + reloc_off + 4, 0);
+    for (uint32_t i = 0; i < nro_c; i++) { w32(b + reloc_off + 8 + 4 * i, roc[i]); }
+    for (uint32_t i = 0; i < nro_w; i++) { w32(b + reloc_off + 8 + 4 * (nro_c + i), row[i]); }
+    if (o.unsorted && nro >= 2) {
+        uint32_t x0, x1;
+        memcpy(&x0, b + reloc_off + 8, 4);
+        memcpy(&x1, b + reloc_off + 12, 4);
+        w32(b + reloc_off + 8, x1); w32(b + reloc_off + 12, x0);
+    }
+    uint32_t x = o.seed ? o.seed : 1;
+    for (uint32_t i = 0; i + 4 <= img; i += 4) { x = x * 1664525u + 1013904223u; w32(b + image_off + i, x); }
+    for (uint32_t i = 0; i < nro_c; i++) { w32(b + image_off + roc[i], (rnd() % (code ? code : 4)) & ~3u); }
+    for (uint32_t i = 0; i < nro_w; i++) {
+        w32(b + image_off + (row[i] & 0x7FFFFFFFu), (rnd() % (data + o.bss + 4)) & ~3u);
+    }
+    pex_sha256_t sh;
+    uint8_t d[32];
+    pex_sha256_init(&sh);
+    pex_sha256_update(&sh, b + image_off, img);
+    pex_sha256_final(&sh, d);
+    memcpy(b + 76, d, 16);
+    w32(b + 72, 0);
+    w32(b + 72, pex_crc32_update(0, b, sig_off));
+    memcpy(&f.crc, b + 72, 4);
+    if (o.sign) {
+        pex_sha256_init(&sh);
+        pex_sha256_update(&sh, b, sig_off);
+        pex_sha256_final(&sh, d);
+        w16(b + sig_off, 1); w16(b + sig_off + 2, 1);
+        memcpy(b + sig_off + 4, d, 32);
+        memcpy(b + sig_off + 36, d, 32);
+    }
+    free(roc);
+    free(row);
+    return f;
+}
+
+static int test_verify(uint16_t alg, uint16_t key, const uint8_t digest[32], const uint8_t *sig, uint32_t n) {
+    (void)key;
+    if (alg != 1 || n != 64 || memcmp(sig, digest, 32) != 0) { return -1; }
+    if (memcmp(sig + 32, digest, 32) == 0) { return 0; }
+    if ((sig[32] ^ digest[0]) == 0xFF && memcmp(sig + 33, digest + 1, 31) == 0) { return 0; }
+    return -1;
+}
+
+static void fresh(void) {
+    memset(s_flash, 0xFF, sizeof s_flash);
+    s_bad_prog = 0;
+    boot();
+    pex__cfg.verify = test_verify;
+}
+
+static int stream_file(const uint8_t *p, uint32_t n, uint32_t chunk) {
+    pex_install_t *s = pex_install_begin(0);
+    if (!s) { return pex__errcode ? pex__errcode : PEX_ENOMEM; }
+    for (uint32_t off = 0; off < n;) {
+        uint32_t c = n - off;
+        if (chunk && c > chunk) { c = chunk; }
+        int rc = pex_install_write(s, p + off, c);
+        if (rc == PEX_DONE) { break; }
+        if (rc != PEX_OK) { return pex_install_end(s); }
+        off += c;
+    }
+    return pex_install_end(s);
+}
+
+static int ent_eq(const pex_installed_t *a, const pex_installed_t *b) {
+    return strcmp(a->name, b->name) == 0 && memcmp(a->build_id, b->build_id, 16) == 0 &&
+           a->version == b->version && a->flags == b->flags && a->target == b->target &&
+           a->offset == b->offset && a->file_size == b->file_size && a->code_size == b->code_size &&
+           a->rw_size == b->rw_size && a->code == b->code && a->signed_ == b->signed_ &&
+           a->xip_ready == b->xip_ready && a->loaded == b->loaded;
+}
+
+static int flash_eq(void) {
+    for (uint32_t i = 0; i < FSIZE; i++) {
+        if (s_flash[i] != s_snapshot[i]) {
+            printf("  flash differs at %u: got %02x want %02x\n", i, s_flash[i], s_snapshot[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint32_t flash_crc(const pex_installed_t *e) {
+    uint32_t v;
+    memcpy(&v, s_flash + e->offset + 72, 4);
+    return v;
 }
 
 int main(void) {
@@ -609,6 +776,264 @@ int main(void) {
     uint32_t used = mb.pool_free - ma_s.pool_free;
     CHECK(used < card.n / 2, "pool drop %u is the RW suffix, not the %u-byte file", used, card.n);
     all_good("sd stream");
+
+    /* 11. push install: same flash bytes as the reader, and the new refusals */
+    fresh();
+    mkopt_t opt_bu = { "bu", 500, 0, 16, 8, 11, 0, 1, 0, 0, 0, 0, 0, 0 };
+    mkopt_t opt_bs = { "bs", 500, 0, 16, 8, 12, 0, 1, 1, 0, 0, 0, 0, 0 };
+    mkopt_t opt_au = { "au", 800, 200, 40, 24, 21, 8, 0, 0, 0, 0, 0, 0, 0 };
+    mkopt_t opt_as = { "as", 800, 200, 40, 24, 22, 8, 0, 1, 0, 0, 0, 0, 0 };
+    cfile_t files[4] = { mkc(opt_bu), mkc(opt_bs), mkc(opt_au), mkc(opt_as) };
+    const char *tags[4] = { "B unsigned", "B signed", "A unsigned", "A signed" };
+    uint32_t chunks[5];
+    for (int fi = 0; fi < 4; fi++) {
+        cfile_t *cf = &files[fi];
+        CHECK(cf->p && cf->meta_end > PEX_HEADER_SIZE && cf->meta_end <= cf->image_off, "%s layout", tags[fi]);
+        fresh();
+        int base = pex_install_mem(cf->p, cf->n, 0);
+        CHECK(base >= 0, "%s reader: %d %s", tags[fi], base, pex_errmsg());
+        pex_installed_t want;
+        CHECK(pex_installed(base, &want) == PEX_OK, "%s entry", tags[fi]);
+        memcpy(s_snapshot, s_flash, FSIZE);
+        chunks[0] = 1; chunks[1] = 7; chunks[2] = 256; chunks[3] = 4096; chunks[4] = cf->n;
+        for (int ci = 0; ci < 5; ci++) {
+            fresh();
+            int slot = stream_file(cf->p, cf->n, chunks[ci]);
+            CHECK(slot >= 0, "%s chunk %u: %d %s", tags[fi], chunks[ci], slot, pex_errmsg());
+            pex_installed_t got;
+            CHECK(pex_installed(slot, &got) == PEX_OK && ent_eq(&got, &want), "%s chunk %u entry", tags[fi], chunks[ci]);
+            CHECK(flash_eq(), "%s chunk %u flash", tags[fi], chunks[ci]);
+        }
+    }
+    all_good("push A/B");
+
+    /* same build: stop at META, no flash write. A 4096 write may return PEX_DONE early. */
+    fresh();
+    int same = pex_install_mem(files[0].p, files[0].n, 0);
+    CHECK(same == 0, "seed install %d %s", same, pex_errmsg());
+    long op_same = s_ops;
+    pex_install_t *sess = pex_install_begin(0);
+    CHECK(sess != NULL, "begin: %s", pex_errmsg());
+    uint32_t ate = 0;
+    int wrc = PEX_OK;
+    while (sess && ate < files[0].n) {
+        wrc = pex_install_write(sess, files[0].p + ate, 1);
+        ate++;
+        if (wrc != PEX_OK) { break; }
+    }
+    CHECK(wrc == PEX_DONE && ate == files[0].meta_end && ate < files[0].image_off,
+          "1-byte stop at %u meta %u image %u rc %d", ate, files[0].meta_end, files[0].image_off, wrc);
+    CHECK(s_ops == op_same, "same build wrote flash (%ld)", s_ops - op_same);
+    CHECK(pex_install_end(sess) == same, "same build slot");
+    sess = pex_install_begin(0);
+    wrc = pex_install_write(sess, files[0].p, files[0].n > 4096 ? 4096 : files[0].n);
+    CHECK(wrc == PEX_DONE && s_ops == op_same, "4096 same-build rc %d ops %ld", wrc, s_ops - op_same);
+    CHECK(pex_install_end(sess) == same, "4096 same-build slot");
+    CHECK(pex_install_mem(files[0].p, files[0].n, 0) == same && s_ops == op_same, "reader same build still skips");
+
+    /* META-only: same build id, different file_crc32, reinstalled by both paths. */
+    mkopt_t opt_m0 = { "meta1", 128, 0, 8, 0, 31, 0, 1, 0, 0, 0, 0, 0, 0 };
+    mkopt_t opt_m1 = opt_m0;
+    opt_m1.meta_pad_flip = 1;
+    cfile_t meta0 = mkc(opt_m0), meta1 = mkc(opt_m1);
+    CHECK(memcmp(meta0.p + 76, meta1.p + 76, 16) == 0 && meta0.crc != meta1.crc, "meta-only changes the crc");
+    fresh();
+    CHECK(pex_install_mem(meta0.p, meta0.n, 0) >= 0, "meta0: %s", pex_errmsg());
+    op_same = s_ops;
+    CHECK(stream_file(meta1.p, meta1.n, 7) >= 0, "meta1 stream: %s", pex_errmsg());
+    CHECK(s_ops > op_same, "meta1 was not skipped");
+    CHECK(pex_installed_find("meta1", &in) >= 0 && flash_crc(&in) == meta1.crc, "stream stored the new crc");
+    fresh();
+    CHECK(pex_install_mem(meta0.p, meta0.n, 0) >= 0, "meta0 again: %s", pex_errmsg());
+    op_same = s_ops;
+    CHECK(pex_install_mem(meta1.p, meta1.n, 0) >= 0 && s_ops > op_same, "reader meta1: %s", pex_errmsg());
+    CHECK(pex_installed_find("meta1", &in) >= 0 && flash_crc(&in) == meta1.crc, "reader stored the new crc");
+
+    /* Unsigned, then a signature over the same image: not the same build. */
+    mkopt_t opt_u = { "sig1", 160, 0, 8, 0, 41, 0, 1, 0, 0, 0, 0, 0, 0 };
+    mkopt_t opt_sg = opt_u;
+    opt_sg.sign = 1;
+    cfile_t uns = mkc(opt_u), sig = mkc(opt_sg);
+    CHECK(memcmp(uns.p + 76, sig.p + 76, 16) == 0 && uns.crc != sig.crc, "signing changes the crc");
+    fresh();
+    CHECK(pex_install_mem(uns.p, uns.n, 0) >= 0, "unsigned: %s", pex_errmsg());
+    op_same = s_ops;
+    CHECK(stream_file(sig.p, sig.n, 64) >= 0, "signed stream: %s", pex_errmsg());
+    CHECK(s_ops > op_same && pex_installed_find("sig1", &in) >= 0 && in.signed_, "signed stream replaced it");
+    fresh();
+    CHECK(pex_install_mem(uns.p, uns.n, 0) >= 0 && pex_install_mem(sig.p, sig.n, 0) >= 0, "reader resign: %s", pex_errmsg());
+    CHECK(pex_installed_find("sig1", &in) >= 0 && in.signed_ && flash_crc(&in) == sig.crc, "reader stored the signed file");
+
+    /* Another key over the same pre-SIG bytes is still that build. */
+    cfile_t alt = sig;
+    alt.p = malloc(sig.n);
+    CHECK(alt.p != NULL, "alt copy");
+    if (alt.p) {
+        memcpy(alt.p, sig.p, sig.n);
+        alt.p[sig.sig_off + 36] ^= 0xFF;
+        fresh();
+        CHECK(pex_install_mem(sig.p, sig.n, 0) == 0, "first signature: %s", pex_errmsg());
+        op_same = s_ops;
+        CHECK(stream_file(alt.p, alt.n, 1) == 0 && s_ops == op_same, "other key skipped: %s", pex_errmsg());
+        CHECK(pex_install_mem(alt.p, alt.n, 0) == 0 && s_ops == op_same, "reader skips the other key too");
+    }
+
+    /* Refusals before any flash write. */
+    fresh();
+    uint8_t *bad = malloc(files[2].n);
+    memcpy(bad, files[2].p, files[2].n);
+    w16(bad + 10, 0x0004);
+    op_same = s_ops;
+    CHECK(stream_file(bad, files[2].n, 13) == PEX_ETARGET && s_ops == op_same, "wrong target: %s", pex_errmsg());
+    memcpy(bad, files[2].p, files[2].n);
+    uint32_t ram_flags;
+    memcpy(&ram_flags, bad + 24, 4);
+    w32(bad + 24, ram_flags | PEX_F_RAM_ONLY);
+    CHECK(stream_file(bad, files[2].n, 13) == PEX_ENOTSUP && s_ops == op_same, "RAM_ONLY: %s", pex_errmsg());
+    CHECK(strstr(pex_errmsg(), "RAM_ONLY") != NULL, "RAM_ONLY msg: %s", pex_errmsg());
+    memcpy(bad, files[2].p, files[2].n);
+    w32(bad + 12, 64u * 4096u);
+    CHECK(stream_file(bad, files[2].n, 13) == PEX_ENOSPC && s_ops == op_same, "no room: %s", pex_errmsg());
+    CHECK(pex_installed_find("au", NULL) == PEX_ENOENT, "refusals installed nothing");
+
+    /* Old sec_off (mk) is refused by the stream and still installed by the reader. */
+    file_t old96 = mk("old96", 200, 0, 8, 0, 1, 7, 0);
+    op_same = s_ops;
+    int old_rc = stream_file(old96.p, old96.n, 16);
+    CHECK(old_rc == PEX_EFORMAT && s_ops == op_same && strstr(pex_errmsg(), "re-link with pexlink"),
+          "sec_off 96: %d %s", old_rc, pex_errmsg());
+    CHECK(pex_install_mem(old96.p, old96.n, 0) >= 0, "reader still takes sec_off 96: %s", pex_errmsg());
+
+    mkopt_t opt_ra = { "ra", 64, 0, 8, 0, 51, 0, 1, 0, 0, 1, 0, 0, 0 };
+    mkopt_t opt_ma = { "ma", 64, 0, 8, 0, 52, 0, 1, 0, 0, 0, 1, 0, 0 };
+    mkopt_t opt_dbg = { "dbg", 64, 0, 8, 0, 53, 0, 1, 0, 1, 0, 0, 0, 0 };
+    mkopt_t opt_uns = { "uns", 64, 0, 8, 0, 54, 4, 0, 0, 0, 0, 0, 1, 0 };
+    cfile_t ra = mkc(opt_ra), meta_af = mkc(opt_ma), dbg = mkc(opt_dbg), unsrt = mkc(opt_uns);
+    fresh();
+    op_same = s_ops;
+    int ra_rc = stream_file(ra.p, ra.n, 9);
+    CHECK(ra_rc == PEX_EFORMAT && s_ops == op_same && strstr(pex_errmsg(), "re-link with pexlink"),
+          "RELOC after image: %d %s", ra_rc, pex_errmsg());
+    CHECK(pex_install_mem(ra.p, ra.n, 0) >= 0, "reader takes RELOC after the image: %s", pex_errmsg());
+    fresh();
+    op_same = s_ops;
+    int ma_rc = stream_file(meta_af.p, meta_af.n, 9);
+    CHECK(ma_rc == PEX_EFORMAT && s_ops == op_same && strstr(pex_errmsg(), "re-link with pexlink"),
+          "META after image: %d %s", ma_rc, pex_errmsg());
+    CHECK(pex_install_mem(meta_af.p, meta_af.n, 0) >= 0, "reader takes META after the image: %s", pex_errmsg());
+    fresh();
+    CHECK(stream_file(dbg.p, dbg.n, 5) >= 0, "DEBUG after the image: %s", pex_errmsg());
+    fresh();
+    int un_rc = stream_file(unsrt.p, unsrt.n, 3);
+    CHECK(un_rc == PEX_EFORMAT && strstr(pex_errmsg(), "re-link with pexlink"), "unsorted stream: %d %s", un_rc, pex_errmsg());
+    CHECK(pex_install_mem(unsrt.p, unsrt.n, 0) == PEX_EFORMAT && strstr(pex_errmsg(), "re-link with pexlink"),
+          "unsorted reader: %s", pex_errmsg());
+
+    /* RW reservation: META ends in the first page, so a refusal erases nothing. */
+    fresh();
+    pex_xip_stats(&st);
+    uint32_t area0 = st.rw_area;
+    void *fillp[128];
+    int nfill = 0;
+    while (nfill < 128 && pex__pool_gap() > 4096) {
+        void *p = pex_alloc_host(2048);
+        if (!p) { break; }
+        fillp[nfill++] = p;
+    }
+    CHECK(pex__pool_gap() > 2048 && pex__pool_gap() <= 4096, "gap %u for the session, not the RW", (unsigned)pex__pool_gap());
+    mkopt_t opt_huge = { "huge2", 64, 0, 8, 20000, 61, 0, 0, 0, 0, 0, 0, 0, 0 };
+    cfile_t huge2 = mkc(opt_huge);
+    CHECK(huge2.meta_end < 256, "META ends in the first page (%u)", huge2.meta_end);
+    op_same = s_ops;
+    int hrc = stream_file(huge2.p, huge2.n, 32);
+    CHECK(hrc == PEX_ENOMEM && strstr(pex_errmsg(), "RW reservation"), "stream RW: %d %s", hrc, pex_errmsg());
+    CHECK(s_ops == op_same, "ENOMEM erased %ld", s_ops - op_same);
+    pex_xip_stats(&st);
+    CHECK(st.rw_area == area0 && pex_installed_find("huge2", NULL) == PEX_ENOENT, "suffix unchanged");
+    (void)fillp;
+
+    /* Index lock, abort, a torn byte, a bad page, remount. */
+    fresh();
+    mkopt_t opt_lock = { "lock", 96, 0, 8, 0, 71, 0, 1, 0, 0, 0, 0, 0, 0 };
+    cfile_t lock = mkc(opt_lock);
+    sess = pex_install_begin(0);
+    ate = 0;
+    wrc = PEX_OK;
+    while (sess && ate < lock.meta_end) {
+        uint32_t c = lock.meta_end - ate;
+        if (c > 5) { c = 5; }
+        wrc = pex_install_write(sess, lock.p + ate, c);
+        ate += c;
+        if (wrc != PEX_OK) { break; }
+    }
+    CHECK(wrc == PEX_OK && ate == lock.meta_end, "fed META rc %d ate %u", wrc, ate);
+    cfile_t otherf = mkc((mkopt_t){ "other", 64, 0, 8, 0, 72, 0, 1, 0, 0, 0, 0, 0, 0 });
+    CHECK(pex_install_mem(otherf.p, otherf.n, 0) == PEX_EBUSY && strstr(pex_errmsg(), "lock"), "install locked: %s", pex_errmsg());
+    CHECK(pex_uninstall("lock") == PEX_EBUSY && strstr(pex_errmsg(), "lock"), "uninstall locked: %s", pex_errmsg());
+    CHECK(pex_xip_compact() == PEX_EBUSY && strstr(pex_errmsg(), "lock"), "compact locked: %s", pex_errmsg());
+    CHECK(pex_install_begin(0) == NULL && strstr(pex_errmsg(), "lock"), "second begin: %s", pex_errmsg());
+    int lerr = 0;
+    pex_mod_t *lm = pex_load_mem(lock.p, lock.n, NULL, &lerr);
+    CHECK(lm != NULL, "load during the session: %d %s", lerr, pex_errmsg());
+    if (lm) { CHECK(pex_unload(lm) == PEX_OK, "unload during the session"); }
+    pex_install_abort(sess);
+    CHECK(pex_installed_find("lock", NULL) == PEX_ENOENT, "abort committed nothing");
+    CHECK(stream_file(lock.p, lock.n, 128) >= 0, "the run is reusable: %s", pex_errmsg());
+
+    fresh();
+    sess = pex_install_begin(0);
+    CHECK(pex_install_write(sess, lock.p, lock.n / 2) == PEX_OK, "partial: %s", pex_errmsg());
+    pex_install_abort(sess);
+    CHECK(pex_installed_find("lock", NULL) == PEX_ENOENT, "mid abort");
+    CHECK(stream_file(lock.p, lock.n, 64) >= 0, "install after abort: %s", pex_errmsg());
+
+    fresh();
+    sess = pex_install_begin(0);
+    CHECK(pex_install_write(sess, lock.p, 80) == PEX_OK, "before remount: %s", pex_errmsg());
+    boot();
+    pex__cfg.verify = test_verify;
+    CHECK(pex_installed_find("lock", NULL) == PEX_ENOENT, "remount dropped the session");
+    CHECK(stream_file(lock.p, lock.n, 32) >= 0, "install after remount: %s", pex_errmsg());
+
+    fresh();
+    uint8_t *torn = malloc(lock.n);
+    memcpy(torn, lock.p, lock.n);
+    torn[lock.image_off + 4] ^= 0x01;
+    CHECK(stream_file(torn, lock.n, 17) == PEX_ECRC, "torn byte: %s", pex_errmsg());
+    CHECK(pex_installed_find("lock", NULL) == PEX_ENOENT, "torn byte committed nothing");
+
+    fresh();
+    s_bad_prog = 1;
+    int badp = stream_file(lock.p, lock.n, 256);
+    CHECK(badp == PEX_ECRC, "bad page: %d %s", badp, pex_errmsg());
+    CHECK(pex_installed_find("lock", NULL) == PEX_ENOENT && s_bad_prog == 0, "bad page committed nothing");
+
+    /* The glue's contract: a hole smaller than the file still holds the session. */
+    fresh();
+    mkopt_t opt_wide = { "wide", 7000, 0, 16, 0, 81, 0, 1, 0, 0, 0, 0, 0, 0 };
+    cfile_t wide = mkc(opt_wide);
+    CHECK(wide.n > 4096, "wide file %u", wide.n);
+    nfill = 0;
+    while (nfill < 128 && pex__pool_gap() > 3000) {
+        uint32_t gap = pex__pool_gap();
+        uint32_t take = gap > 3000u + 8192u ? 8192u : (gap - 2800u) & ~7u;
+        if (take < 64) { break; }
+        void *p = pex_alloc_host(take);
+        if (!p) { break; }
+        fillp[nfill++] = p;
+    }
+    pex_mem_stats_t hole;
+    pex_pool_stats(&hole);
+    CHECK(hole.pool_largest < wide.n && hole.pool_largest >= 2200, "hole %u file %u", hole.pool_largest, wide.n);
+    CHECK(pex_alloc_host(wide.n) == NULL, "the file does not fit in the pool");
+    CHECK(stream_file(wide.p, wide.n, 4096) >= 0, "4 KB session install: %s", pex_errmsg());
+    CHECK(pex_installed_find("wide", &in) >= 0, "wide installed");
+
+    free(bad); free(torn); free(alt.p); free(old96.p);
+    free(meta0.p); free(meta1.p); free(uns.p); free(sig.p);
+    free(ra.p); free(meta_af.p); free(dbg.p); free(unsrt.p); free(huge2.p);
+    free(lock.p); free(otherf.p); free(wide.p);
+    for (int fi = 0; fi < 4; fi++) { free(files[fi].p); }
 
     printf("%d/%d checks passed\n", checks - fails, checks);
     return fails != 0;
