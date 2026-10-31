@@ -37,6 +37,7 @@ static int net_n = 0;
 static char ap_ssid[CFG_SSID_MAX + 1] = "BTGW-Setup";
 static char ap_psk[CFG_PSK_MAX + 1] = "btgw-setup";
 static char mode[8] = "auto";
+static char coex[8] = "window";   /* WiFi joins vs open BLE links: window | live */
 static bool dirty = false;
 static bool loaded = false;
 
@@ -149,14 +150,18 @@ static bool valid_psk(const char *s) {
     return strchr(s, '"') == NULL && strchr(s, '\\') == NULL;
 }
 
+static bool valid_coex(const char *c) {
+    return c && (strcmp(c, "window") == 0 || strcmp(c, "live") == 0);
+}
+
 /* --- load / store --------------------------------------------------------- */
 
 static bool persist(void) {
     static char buf[CFG_BUF];
     size_t n = 0;
     n += (size_t)snprintf(buf + n, sizeof(buf) - n,
-                          "{\"mode\":\"%s\",\"ap_ssid\":\"%s\",\"ap_psk\":\"%s\",\"nets\":[",
-                          mode, ap_ssid, ap_psk);
+                          "{\"mode\":\"%s\",\"coex\":\"%s\",\"ap_ssid\":\"%s\",\"ap_psk\":\"%s\",\"nets\":[",
+                          mode, coex, ap_ssid, ap_psk);
     for (int i = 0; i < net_n; i++) {
         if (n + CFG_TAIL_MARGIN >= sizeof(buf)) {
             break; /* refuse to emit a half-written entry */
@@ -219,6 +224,10 @@ void cfg_load(void) {
          * up, wrote the config it had just read, and killed its own WiFi
          * before it finished booting. */
         snprintf(mode, sizeof(mode), "%s", tmp);
+    }
+    /* Absent (older files) or unknown: the default, "window". Not dirty, as above. */
+    if (json_str_from(buf, "coex", tmp, sizeof(tmp)) && valid_coex(tmp)) {
+        snprintf(coex, sizeof(coex), "%s", tmp);
     }
     if (json_str_from(buf, "ap_ssid", tmp, sizeof(tmp)) && valid_ssid(tmp)) {
         snprintf(ap_ssid, sizeof(ap_ssid), "%s", tmp);
@@ -598,6 +607,18 @@ bool cfg_set_mode(const char *m) {
         return true;
     }
     snprintf(mode, sizeof(mode), "%s", m);
+    dirty = true;
+    return true;
+}
+
+const char *cfg_coex(void) {
+    return coex;
+}
+
+bool cfg_set_coex(const char *c) {
+    if (!valid_coex(c)) return false;
+    if (strcmp(coex, c) == 0) return true;   /* no change, no write (see cfg_set_mode) */
+    snprintf(coex, sizeof(coex), "%s", c);
     dirty = true;
     return true;
 }

@@ -52,6 +52,18 @@ bool le_negotiation_pending(void);
  * the negotiation hold for the device it names. */
 void le_on_profile_telemetry(const char *topic, const char *json);
 
+/*
+ * Give the radio up for a WiFi join: stop a scan, cancel a pending connect,
+ * disconnect every link. Disconnects complete asynchronously -- poll
+ * le_radio_busy() for the result. Returns the number of links asked to close.
+ * Profiles see an ordinary link loss and reconnect once WiFi lets them
+ * (wifi_bt_hold() refuses new scans/connects meanwhile).
+ */
+int le_release_radio(const char *why);
+
+/* Open links right now (for measurement; le_radio_busy() is the gate). */
+int le_link_count(void);
+
 /* Connect by address. addr_type comes from the scan table -- you cannot assume
  * public, and guessing produces a connect that never completes. Returns false
  * while another connect or a GATT discovery is still in progress. */

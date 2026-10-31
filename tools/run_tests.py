@@ -177,6 +177,62 @@ def t_sd_guards():
         return False, f"GPL SDIO source in the tree: {out.split()[0]}"
     return True, "worker-only, trailing-clock releases, pins reserved, no GPL SDIO code"
 
+def t_wifi_radio_window():
+    """A lost station can rejoin while Bluetooth holds links -- by a bounded
+    radio window, never by joining under BLE.
+
+    begin_join() must still refuse while le_radio_busy() (a join under BLE
+    wedges the driver); the window must actually free the radio
+    (le_release_radio), hold new BLE scans/connects off while open
+    (wifi_bt_hold), be bounded (WIFI_WIN_MAX_MS) and close on success and on
+    loss. Without it a gateway that keeps the C1000 connected could never
+    rejoin a different AP (2026-10-15)."""
+    src = open(os.path.join(ROOT, "src/net/wifi.c")).read()
+    body = _fn_body(src, "begin_join")
+    if body is None or "le_radio_busy()" not in body:
+        return False, "begin_join() no longer refuses while Bluetooth has the radio"
+    if "le_release_radio(" not in (_fn_body(src, "win_open") or ""):
+        return False, "win_open() does not release the radio"
+    i = src.find("bool wifi_bt_hold(void)")
+    if i < 0 or "win_start" not in src[i:src.find("\n}\n", i)]:
+        return False, "wifi_bt_hold() does not hold Bluetooth off during a radio window"
+    if "WIFI_WIN_MAX_MS" not in src or "win_close(" not in (_fn_body(src, "on_up") or ""):
+        return False, "the radio window is unbounded or never closes on success"
+    if "win_close(" not in (_fn_body(src, "on_lost") or ""):
+        return False, "the radio window does not close when the join fails"
+    if "no interface up; re-enabling the station" not in src:
+        return False, "the no-interface safety net is gone: scans can fail forever with the AP down and the station parked"
+    # coex "live" (2026-10-15): joins with links open, but a BLE scan still
+    # blocks; it is a saved, opt-in setting -- window stays the default.
+    if "le_scanning()" not in body:
+        return False, "begin_join() no longer waits out a BLE scan in coex live"
+    cfg = open(os.path.join(ROOT, "src/config/config.c")).read()
+    if not re.search(r'static\s+char\s+coex\[\d+\]\s*=\s*"window"', cfg):
+        return False, "coex live became the default without a decision"
+    i = cfg.find("static bool persist(void)")
+    if i < 0 or '\\"coex\\"' not in cfg[i:cfg.find("\n}\n", i)]:
+        return False, "the coex setting is no longer saved in cfg/wifi.json"
+    if "cfg_coex()" not in src:
+        return False, "wifi.c does not read the saved coex setting"
+    c = open(os.path.join(ROOT, "src/bt/le/central.c")).read()
+    if "int le_release_radio(" not in c:
+        return False, "central.c has no le_release_radio()"
+    return True, "joins never run under BLE; a bounded window frees the radio and holds BLE off"
+
+
+def t_bond_slots():
+    """Bonds live in any of le_device_db_max_count() slots, with holes after
+    a removal. Walking 0..le_device_db_count() (the number of VALID entries)
+    listed an empty slot as 00:00:00:00:00:00 type 254 and hid the real bond
+    above it, so it could not be removed either (2026-10-15)."""
+    src = open(os.path.join(ROOT, "src/bt/le/bond.c")).read()
+    if re.search(r"=\s*le_device_db_count\(\)", src):
+        return False, "bond.c bounds a slot walk by le_device_db_count()"
+    if src.count("le_device_db_max_count()") < 2 or "bond_addr_real(" not in src:
+        return False, "bond list/remove do not walk every slot and skip empty ones"
+    if "BD_ADDR_TYPE_UNKNOWN" not in src:
+        return False, "empty bond slots are not rejected"
+    return True, "every bond slot walked, empty ones skipped"
 
 def t_wifi_ap_is_independent():
     """The SoftAP is a parallel service, not a state the station has to leave.
@@ -1521,6 +1577,8 @@ def main():
     step(0, "TLS config: real handshakes on 127.0.0.1, session memory", t_tls_mem)
     step(0, "wireguard is never the default route", t_wireguard_is_never_default)
     step(0, "the SoftAP is independent of the station", t_wifi_ap_is_independent)
+    step(0, "WiFi rejoins under Bluetooth only through a radio window", t_wifi_radio_window)
+    step(0, "bonds: every slot listed, empty slots skipped", t_bond_slots)
     step(0, "wifi mode both exists everywhere", t_wifi_mode_both_everywhere)
     step(0, "only uplink.c sets the default route", t_only_uplink_sets_default)
     step(0, "uplink metrics and policy from scripted pings", t_uplink_policy)

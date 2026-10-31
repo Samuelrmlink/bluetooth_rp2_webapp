@@ -114,7 +114,12 @@ static void op_wifi_mode(const char *params, api_reply_fn reply, void *ctx, long
         /* Asks for the arrangement; wifi_poll() is what moves the radio. */
         wifi_apply_mode();
     }
-    snprintf(buf, sizeof buf, "{\"mode\":\"%s\"}", cfg_mode());
+    char coex[12];
+    if (api_json_str(params, "coex", coex, sizeof coex) && !wifi_set_coex(coex)) {
+        api_reply_err(reply, ctx, id, "bad_request", "coex must be window or live");
+        return;
+    }
+    snprintf(buf, sizeof buf, "{\"mode\":\"%s\",\"coex\":\"%s\"}", cfg_mode(), wifi_coex());
     api_reply_ok(reply, ctx, id, buf);
 }
 

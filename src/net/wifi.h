@@ -56,6 +56,12 @@ bool wifi_connect(const char *ssid, const char *psk);
  * changing the mode or the AP credentials. */
 void wifi_apply_mode(void);
 
+/* Bluetooth coexistence for joins (saved in cfg/wifi.json, default "window"):
+ *   window  a join under open BLE links takes a bounded radio window (links closed)
+ *   live    join with the BLE links kept up (a BLE scan still makes it wait) */
+const char *wifi_coex(void);
+bool wifi_set_coex(const char *name);
+
 /* True in mode "off": the WiFi side of the shared radio is down on purpose,
  * so the CYW43439 is Bluetooth's alone. The station/AP state machine must not
  * run in this mode -- its idle rescan would put the radio back on the air. */

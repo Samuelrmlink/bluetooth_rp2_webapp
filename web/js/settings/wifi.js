@@ -29,6 +29,14 @@ export class WifiSection extends PolledSection {
           <option value="both">Station and hotspot</option>
           <option value="off">Off</option>
         </select></div>
+      <div class="row"><label for="w-coex">Bluetooth during join</label>
+        <select id="w-coex">
+          <option value="window">Pause Bluetooth links</option>
+          <option value="live">Keep Bluetooth links up</option>
+        </select></div>
+      <div class="dim">How WiFi rejoins while Bluetooth devices are connected. Pause:
+        the links drop for the join (up to 30 s) and then reconnect. Keep up: the join
+        runs alongside them; only a Bluetooth scan makes it wait. Saved on the device.</div>
       <hr>
       <div class="row"><strong>Networks in range</strong><span class="spacer"></span><button type="button" class="pane-btn w-scan">Scan</button></div>
       <div class="kv-list w-aps"></div>
@@ -50,11 +58,13 @@ export class WifiSection extends PolledSection {
       </form>`);
     const q = (s) => d.querySelector(s);
     Object.assign(this, {
-      _status: q('.w-status'), _error: q('.w-error'), _mode: q('#w-mode'), _aps: q('.w-aps'),
+      _status: q('.w-status'), _error: q('.w-error'), _mode: q('#w-mode'), _coex: q('#w-coex'), _aps: q('.w-aps'),
       _saved: q('.w-saved'), _note: q('.w-note'), _ssid: q('.w-ssid'), _psk: q('.w-psk'),
       _apSsid: q('.w-ap-ssid'), _apPsk: q('.w-ap-psk'),
     });
     this._mode.addEventListener('change', () => this._call('wifi.mode', { mode: this._mode.value }, `mode ${this._mode.value}`));
+    this._coex.addEventListener('change', () => this._call('wifi.mode', { coex: this._coex.value },
+      this._coex.value === 'live' ? 'joins keep Bluetooth links up' : 'joins pause Bluetooth links'));
     q('.w-scan').addEventListener('click', () => this._call('wifi.scan', {}, 'scanning…'));
     q('.w-join').addEventListener('submit', (e) => { e.preventDefault(); this._join(this._ssid.value.trim(), this._psk.value); });
     q('.w-ap').addEventListener('submit', (e) => {
@@ -93,10 +103,12 @@ export class WifiSection extends PolledSection {
       ['Mode', `${st.mode}${st.want && st.want !== st.mode ? ` (want ${st.want})` : ''}`],
       ['Radio', st.driver ? 'up' : 'down'],
       ['Hotspot', st.ap ? `up · ${st.ap_ip} · ${st.ap_clients ?? 0} client(s)` : 'down'],
+      ['Last join', st.last_join_ms ? `${(st.last_join_ms / 1000).toFixed(1)} s with ${st.last_join_links ?? 0} Bluetooth link(s) up` : null],
     ]);
     this._error.hidden = !st.error;
     this._error.textContent = st.error ? `last error: ${st.error}` : '';
     if (document.activeElement !== this._mode && st.want) this._mode.value = st.want;
+    if (document.activeElement !== this._coex && st.coex) this._coex.value = st.coex;
     if (document.activeElement !== this._apSsid) this._apSsid.value = st.ap_ssid || '';
     if (document.activeElement !== this._apPsk) this._apPsk.value = st.ap_psk || '';
 

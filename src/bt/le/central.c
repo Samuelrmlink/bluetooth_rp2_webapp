@@ -414,6 +414,36 @@ int le_link_slot(const char *addr) {
 
 /* Defined here rather than beside le_scanning() because it needs links[],
  * which is declared just above. */
+int le_link_count(void) {
+    int n = 0;
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) { if (links[i].active) n++; }
+    return n;
+}
+
+int le_release_radio(const char *why) {
+    if (!bt_stack_up()) { return 0; }
+    if (s_scanning) {
+        gap_stop_scan();
+        s_scanning = false;
+        s_scan_until_ms = 0;
+        api_emit("scan.done", "{\"reason\":\"wifi\"}");
+    }
+    if (s_connecting) {
+        gap_connect_cancel();
+        s_connecting = false;
+        api_emit("dev.connect_failed", "{\"reason\":\"wifi\"}");
+    }
+    int n = 0;
+    for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {
+        if (links[i].active) {
+            gap_disconnect(links[i].con_handle);
+            n++;
+        }
+    }
+    printf("bt: releasing the radio for WiFi (%s): %d link(s) closing\n", why ? why : "?", n);
+    return n;
+}
+
 bool le_radio_busy(void) {
     if (s_scanning || s_connecting) { return true; }
     for (int i = 0; i < CONFIG_BT_MAX_LINKS; i++) {

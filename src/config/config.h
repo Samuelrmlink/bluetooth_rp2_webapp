@@ -63,6 +63,11 @@ bool cfg_set_ap(const char *ssid, const char *psk);
 const char *cfg_mode(void);
 bool cfg_set_mode(const char *mode);
 
+/* How a WiFi join treats open Bluetooth links (cfg/wifi.json "coex"):
+ * "window" (default) or "live". wifi.c reads it on every decision. */
+const char *cfg_coex(void);
+bool cfg_set_coex(const char *coex);
+
 /* --- notifications (cfg/notify.json) --------------------------------------
  *
  * A second record in its own file, so a WiFi save never rewrites the

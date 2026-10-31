@@ -55,6 +55,9 @@
 #if CONFIG_BT_LE
 #include "bt/bt.h"
 #include "bt/le/central.h"
+#if CONFIG_BT_CLASSIC
+bool classic_radio_busy(void);
+#endif
 #endif
 #include "config/config.h"
 
@@ -149,6 +152,13 @@ static uint32_t join_start, last_fail, down_since, boot_start, scan_start;
 static uint32_t last_scan_end;   /* when the most recent scan stopped */
 static bool deferred_for_bt;     /* so the deferral is logged once, not per pass */
 static uint32_t fw_rejoins;      /* links taken over from the radio's own rejoin */
+static uint32_t sta_down_at;     /* when the station last went down (boot counts); 0 = up */
+/* Join with the BLE links kept up (cfg/wifi.json "coex": "live"). */
+static bool coex_live(void) { return strcmp(cfg_coex(), "live") == 0; }
+static uint32_t last_join_ms;    /* begin_join -> station up, the last successful join */
+static int      join_links;      /* BLE links open when the current join began */
+static int      last_join_links; /* ...and for the last successful one */
+static uint32_t joins_live_ok, joins_live_fail;  /* live-mode joins under open links */
 static char ip_str[16] = "0.0.0.0";
 static char last_error[56] = "";
 static char cur_ssid[CFG_SSID_MAX + 1] = "";
@@ -482,6 +492,67 @@ static const cfg_net_t *known_in_scan(void) {
 
 /* --- joining -------------------------------------------------------------- */
 
+#if CONFIG_BT_LE
+/*
+ * THE RADIO WINDOW.
+ *
+ * begin_join() defers while Bluetooth uses the radio (a join under BLE wedges
+ * the driver), and le_radio_busy() counts every open link -- so with the
+ * Anker script holding the C1000, a lost station could NEVER rejoin: not a
+ * different access point, not on the user's Connect (seen 2026-10-15: the AP
+ * went away, a second one was in range and saved, the station sat "idle"
+ * for good). adopt_firmware_rejoin() only covers the SAME AP coming back.
+ *
+ * So WiFi may take the radio for a bounded window: Bluetooth stops scanning,
+ * cancels a connect and closes its links (le_release_radio), new scans and
+ * connects are refused (wifi_bt_hold), the join runs, and when the station is
+ * up -- or the window times out -- Bluetooth is let back and its profiles
+ * reconnect on their own. Opened automatically once the station has been down
+ * WIFI_WIN_AFTER_MS with a saved network in range (backing off after a failed
+ * window), or at once on the user's Connect.
+ */
+#define WIFI_WIN_AFTER_MS        60000u    /* station down this long before BT is interrupted */
+#define WIFI_WIN_MAX_MS          30000u    /* links closing + join + DHCP */
+#define WIFI_WIN_HARD_MS         45000u    /* ...unless a join is still resolving */
+#define WIFI_WIN_BACKOFF_MIN_MS 120000u
+#define WIFI_WIN_BACKOFF_MAX_MS 1800000u
+static uint32_t win_start;                 /* 0 = no window open */
+static uint32_t win_not_before;            /* next automatic window (after a failed one) */
+static uint32_t win_backoff = WIFI_WIN_BACKOFF_MIN_MS;
+static uint32_t win_count, win_ok;
+static const char *win_reason = "";
+
+static void win_open(uint32_t now, const char *reason) {
+    win_start = now ? now : 1;
+    win_reason = reason;
+    win_count++;
+    printf("wifi: taking the radio from Bluetooth for a join (%s)\n", reason);
+    le_release_radio(reason);
+}
+
+static void win_close(uint32_t now, bool joined) {
+    if (!win_start) return;
+    win_start = 0;
+    if (joined) {
+        win_ok++;
+        win_backoff = WIFI_WIN_BACKOFF_MIN_MS;
+        win_not_before = 0;
+        printf("wifi: joined; Bluetooth may have the radio back\n");
+    } else {
+        win_not_before = now + win_backoff;
+        printf("wifi: radio window ended without a join; next automatic one in %lu s\n",
+               (unsigned long)(win_backoff / 1000));
+        win_backoff = win_backoff * 2 > WIFI_WIN_BACKOFF_MAX_MS ? WIFI_WIN_BACKOFF_MAX_MS : win_backoff * 2;
+    }
+}
+
+/* May an automatic window open now? (The user's Connect does not ask.) */
+static bool win_auto_ok(uint32_t now) {
+    return sta_down_at && timed_out(now, sta_down_at, WIFI_WIN_AFTER_MS)
+        && (win_not_before == 0 || (int32_t)(now - win_not_before) >= 0);
+}
+#endif
+
 static void begin_join(const char *ssid, const char *psk) {
     if (!ssid || !ssid[0]) {
         state = ST_IDLE;
@@ -499,7 +570,14 @@ static void begin_join(const char *ssid, const char *psk) {
      * forever then WiFi waits forever, which is the right way round -- a
      * degraded network path beats a board that needs a power cycle.
      */
-    if (bt_radio_busy()) {
+    /* Coex "live" joins while BLE links stay up. A BLE scan still blocks.
+     * Classic paging or inquiry blocks even in that mode. */
+#if CONFIG_BT_CLASSIC
+    if (classic_radio_busy()
+        || (le_radio_busy() && !(coex_live() && !le_scanning()))) {
+#else
+    if (le_radio_busy() && !(coex_live() && !le_scanning())) {
+#endif
         if (!deferred_for_bt) {
             printf("wifi: deferring the join, Bluetooth has the radio\n");
             deferred_for_bt = true;
@@ -525,7 +603,11 @@ static void begin_join(const char *ssid, const char *psk) {
         return;
     }
     snprintf(cur_ssid, sizeof(cur_ssid), "%s", ssid);
-    printf("wifi: joining '%s'\n", ssid);
+#if CONFIG_BT_LE
+    join_links = le_link_count();
+#endif
+    printf("wifi: joining '%s' (%d BLE link(s) open, coex %s)\n", ssid, join_links,
+           coex_live() ? "live" : "window");
     join_start = now_ms();
     state = ST_JOIN;
 }
@@ -535,7 +617,17 @@ static void on_up(void) {
     snprintf(ip_str, sizeof(ip_str), "%s", ip4addr_ntoa(netif_ip4_addr(nif)));
     last_error[0] = 0;
     down_since = 0;
+    sta_down_at = 0;
+    if (state == ST_JOIN) {
+        last_join_ms = now_ms() - join_start;
+        last_join_links = join_links;
+        if (join_links > 0) joins_live_ok++;
+        printf("wifi: joined in %lu ms with %d BLE link(s) open\n", (unsigned long)last_join_ms, join_links);
+    }
     state = ST_UP;
+#if CONFIG_BT_LE
+    win_close(now_ms(), true);
+#endif
     /* Registered here, not at init: the responder announces the netif's
      * address and there isn't one until DHCP completes. */
     mdns_add_netif(nif);
@@ -547,11 +639,16 @@ static void on_up(void) {
 static void on_lost(const char *why) {
     snprintf(last_error, sizeof(last_error), "%s", why);
     printf("wifi: %s\n", why);
+    if (state == ST_JOIN && join_links > 0) joins_live_fail++;
     mdns_remove_netif(sta_netif());
     strcpy(ip_str, "0.0.0.0");
     last_fail = now_ms();
     down_since = 0;
+    if (!sta_down_at) sta_down_at = last_fail ? last_fail : 1;
     state = ST_IDLE;
+#if CONFIG_BT_LE
+    win_close(last_fail, false);
+#endif
 }
 
 /*
@@ -636,6 +733,7 @@ bool wifi_init(void) {
     cyw43_arch_enable_sta_mode();
     apply_radio_power();
     boot_start = now_ms();
+    sta_down_at = boot_start ? boot_start : 1;
     printf("wifi: radio up, mode=%s, %d known network(s)\n", cfg_mode(), cfg_net_count());
     wifi_apply_mode();
     return true;
@@ -745,11 +843,9 @@ bool wifi_connect(const char *ssid, const char *psk) {
      * (scanning or holding a link), and gating the save on that was silently
      * dropping every network the user tried to add. */
     if (!cfg_net_put(ssid, psk)) return false;
-#if CONFIG_BT_LE
-    /* Bluetooth holds the radio: the network is saved, but leave the join to
-     * the state machine (known_in_scan) once the radio is free. */
-    if (bt_radio_busy()) { return true; }
-#endif
+    /* Bluetooth holding the radio no longer stops a requested join: the poll
+     * opens a radio window for it (see THE RADIO WINDOW). The network is
+     * already saved above, so a refused window still keeps the credential. */
     snprintf(pending_ssid, sizeof(pending_ssid), "%s", ssid);
     pending_join = true;
     return true;
@@ -827,6 +923,22 @@ void wifi_poll(void) {
     uint32_t now = now_ms();
     refresh_ap_clients(now);
 
+    /* How long the station has been without a network, whichever way it got
+     * there -- a loss (on_lost), the mode going off and back, a failed join,
+     * boot. Only on_up() clears it. Setting it in on_lost alone missed every
+     * other way down, and the radio window never opened (bench, 2026-10-15). */
+    if (state != ST_UP && !sta_down_at) sta_down_at = now ? now : 1;
+
+#if CONFIG_BT_LE
+    if (win_start && timed_out(now, win_start, state == ST_JOIN ? WIFI_WIN_HARD_MS : WIFI_WIN_MAX_MS)) {
+        if (pending_join) {
+            pending_join = false;
+            snprintf(last_error, sizeof(last_error), "Bluetooth did not release the radio");
+        }
+        win_close(now, false);
+    }
+#endif
+
     /* Deferred work first, one action per pass so a request can never
      * re-enter the radio on top of itself. */
     if (pending_join && !ap_settling(now)) {
@@ -858,7 +970,28 @@ void wifi_poll(void) {
             }
             return;
         }
+#if CONFIG_BT_LE
+        /* Bluetooth has the radio: take it for a bounded window (see THE RADIO
+         * WINDOW) and keep the join pending until its links have closed.
+         * Classic paging or inquiry just waits: releasing BLE links would
+         * not free that radio. */
+#if CONFIG_BT_CLASSIC
+        if (classic_radio_busy()) return;
+#endif
+        if (le_radio_busy() && !(coex_live() && !le_scanning())) {
+            if (coex_live()) return;                /* live: only a BLE scan blocks; wait it out */
+            if (!win_start) win_open(now, "connect");
+            return;
+        }
+#endif
         pending_join = false;
+        if (sta_parked) {
+            /* The AP -> station flip, now that the join can really start. */
+            printf("wifi: '%s' requested, AP down for the join\n", pending_ssid);
+            stop_ap();
+            ap_changed = now;
+            sta_parked = false;
+        }
         const cfg_net_t *k = cfg_net_find(pending_ssid);
         begin_join(pending_ssid, k ? k->psk : NULL);
         return;
@@ -934,6 +1067,15 @@ void wifi_poll(void) {
     switch (state) {
     case ST_IDLE:
         if (ap_only) break;                 /* the station stays down on purpose */
+        /* SAFETY NET: no interface up at all means no scan can ever run, so no
+         * network can ever be found -- the dead end above, by any route. Bring
+         * the station back; scanning (and so recovery) needs an interface. */
+        if (!ap_up && !sta_parked && !sta_enabled()) {
+            printf("wifi: no interface up; re-enabling the station so scans can run\n");
+            cyw43_arch_enable_sta_mode();
+            apply_radio_power();
+            break;
+        }
         if (ap_settling(now)) break;        /* the AP just came up; see WIFI_AP_SETTLE_MS */
         if (sta_parked) {
             /* Parked for an AP start. Stay down until the AP is actually UP
@@ -971,6 +1113,29 @@ void wifi_poll(void) {
         if (scan_done && !scanning) {
             scan_done = false;
             const cfg_net_t *k = known_in_scan();
+#if CONFIG_BT_LE
+            /* A saved network in range but Bluetooth holds the radio: after
+             * WIFI_WIN_AFTER_MS down, take a window and let the pending-join
+             * path run once the links have closed. */
+            if (k && le_radio_busy() && !(coex_live() && !le_scanning())) {
+                /* Bluetooth holds the radio. Never take the AP down (or touch
+                 * the station) for a join that cannot start: the AP flip below
+                 * followed by begin_join's deferral left NO interface up, every
+                 * scan then failed ("scan failed to start") and nothing could
+                 * ever find a network again (bench, 2026-10-15). Join through a
+                 * window when one is allowed; the pending-join path does the AP
+                 * flip once the radio is actually free. */
+                if (!win_start && win_auto_ok(now)) {
+                    snprintf(pending_ssid, sizeof(pending_ssid), "%s", k->ssid);
+                    pending_join = true;
+                    win_open(now, "rejoin");
+                } else if (!deferred_for_bt) {
+                    printf("wifi: '%s' in range; waiting for a radio window\n", k->ssid);
+                    deferred_for_bt = true;
+                }
+                break;
+            }
+#endif
             if (k) {
                 if (sta_parked) {
                     /* The flip. stop_ap() and begin_join() in the same pass
@@ -1038,6 +1203,16 @@ bool wifi_ap_up(void) { return ap_up; }
 
 bool wifi_is_up(void) { return state == ST_UP; }
 
+const char *wifi_coex(void) { return cfg_coex(); }
+
+/* Persisted (cfg/wifi.json, written by cfg_tick); takes effect at the next
+ * join decision -- a window already open runs to its end. */
+bool wifi_set_coex(const char *name) {
+    if (!cfg_set_coex(name)) return false;
+    printf("wifi: coex %s\n", wifi_coex());
+    return true;
+}
+
 /*
  * True while Bluetooth should hold off scanning/connecting, so WiFi gets the
  * shared radio to itself for its initial scan + join. Released as soon as
@@ -1049,6 +1224,9 @@ bool wifi_is_up(void) { return state == ST_UP; }
 #define WIFI_BT_GRACE_MS 60000
 bool wifi_bt_hold_base(void) {
     if (wifi_is_off()) return false;
+#if CONFIG_BT_LE
+    if (win_start) return true;          /* a radio window: no new scans/connects */
+#endif
     if (wifi_is_up())  return false;
     return !timed_out(now_ms(), boot_start, WIFI_BT_GRACE_MS);
 }
@@ -1097,7 +1275,10 @@ int wifi_status_json(char *buf, size_t cap) {
                      * state, the lwIP link, DHCP's state (lwip/prot/dhcp.h),
                      * and whether the join is waiting on Bluetooth. */
                     "\"radio_join\":\"0x%04lx\",\"link\":%s,\"dhcp\":%d,"
-                    "\"join_deferred\":%s,\"fw_rejoins\":%lu}",
+                    "\"join_deferred\":%s,\"fw_rejoins\":%lu,"
+                    "\"bt_window\":\"%s\",\"bt_windows\":%lu,\"bt_windows_ok\":%lu,"
+                    "\"bt_window_next_s\":%ld,\"coex\":\"%s\",\"last_join_ms\":%lu,"
+                    "\"last_join_links\":%d,\"live_joins_ok\":%lu,\"live_joins_fail\":%lu}",
                     driver_up ? "true" : "false", mode_name(), cfg_mode(),
                     cur_ssid, ip_str,
                     ap_up ? "true" : "false", ap_up ? "192.168.4.1" : "",
@@ -1106,7 +1287,16 @@ int wifi_status_json(char *buf, size_t cap) {
                     (unsigned long)cyw43_state.wifi_join_state,
                     netif_is_link_up(sta_netif()) ? "true" : "false",
                     netif_dhcp_data(sta_netif()) ? (int)netif_dhcp_data(sta_netif())->state : -1,
-                    deferred_for_bt ? "true" : "false", (unsigned long)fw_rejoins);
+                    deferred_for_bt ? "true" : "false", (unsigned long)fw_rejoins,
+#if CONFIG_BT_LE
+                    win_start ? win_reason : "closed", (unsigned long)win_count, (unsigned long)win_ok,
+                    win_not_before && (int32_t)(win_not_before - now_ms()) > 0
+                        ? (long)((win_not_before - now_ms()) / 1000) : 0L
+#else
+                    "n/a", 0UL, 0UL, 0L
+#endif
+                    , wifi_coex(), (unsigned long)last_join_ms, last_join_links,
+                    (unsigned long)joins_live_ok, (unsigned long)joins_live_fail);
 }
 
 int wifi_networks_json(char *buf, size_t cap) {
