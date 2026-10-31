@@ -8,5 +8,5 @@
   .pex.fini : ALIGN(4) { KEEP(*(SORT_BY_INIT_PRIORITY(.fini_array.*))) KEEP(*(.fini_array)) } :meta
   /DISCARD/ : {
     *(.ARM.exidx*) *(.ARM.extab*) *(.eh_frame*) *(.preinit_array*) *(.init) *(.fini)
-    *(.comment) *(.note*) *(.gnu.attributes)
+    *(.comment) *(.note*) *(.gnu.attributes) *(.riscv.attributes)
   }

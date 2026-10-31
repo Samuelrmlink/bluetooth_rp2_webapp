@@ -34,9 +34,18 @@ if(NOT kconf_rc EQUAL 0)
 endif()
 message(STATUS "${kconf_out}")
 include(${CMAKE_BINARY_DIR}/config.cmake)
+# These name behavior that is specified and not built. A defconfig that
+# turns one on fails here, so the image cannot claim the feature.
+foreach(_unbuilt NET_GW_LAN NET_MDNS_GW NET_NAT IEEE802154 NET_THREAD CAN CAN_TWAI CAN_MCP2515 CAN_J1939)
+    if(CONFIG_${_unbuilt})
+        message(FATAL_ERROR "CONFIG_${_unbuilt} is specified and not built")
+    endif()
+endforeach()
 # Reconfigure when the option definitions or the defaults change.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_LIST_DIR}/Kconfig
+    ${CMAKE_CURRENT_LIST_DIR}/src/radio/Kconfig
+    ${CMAKE_CURRENT_LIST_DIR}/src/can/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/net/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/bt/Kconfig
     ${CMAKE_CURRENT_LIST_DIR}/src/lua/Kconfig
@@ -53,10 +62,7 @@ add_executable(btgw
     src/main.c
     src/api/api.c
     src/api/json_escape.c
-    src/net/cyw43_wait.c
     src/api/ops.c
-    src/net/http.c
-    src/net/ws.c
     src/fs/fs.c
     src/fs/fs_batch.c
     src/fs/fs_job.c
@@ -94,7 +100,6 @@ target_link_libraries(btgw
     pico_unique_id
     pico_flash
     hardware_flash
-    pico_cyw43_arch_lwip_poll
     pico_lwip
 )
 
@@ -105,9 +110,16 @@ target_link_libraries(btgw
 # once. src/net/cyw43_wait.c services USB before delegating to the real wait,
 # and records how long the driver waited. See that file for why tud_task() is
 # safe to call there and usb_ncm_poll() is not.
-target_link_options(btgw PRIVATE
-    -Wl,--wrap=cyw43_await_background_or_timeout_us
-    -Wl,--wrap=panic)
+if(CONFIG_RADIO_CYW43)
+    target_sources(btgw PRIVATE src/net/cyw43_wait.c)
+    target_link_libraries(btgw pico_cyw43_arch_lwip_poll)
+    target_link_options(btgw PRIVATE
+        -Wl,--wrap=cyw43_await_background_or_timeout_us)
+endif()
+if(CONFIG_NET_HTTP_SERVER)
+    target_sources(btgw PRIVATE src/net/http.c src/net/ws.c src/net/peer_proxy.c)
+endif()
+target_link_options(btgw PRIVATE -Wl,--wrap=panic)
 
 if(CONFIG_BT_LE)
     target_sources(btgw PRIVATE src/bt/bt.c src/bt/registry.c src/bt/le/central.c src/bt/le/gattdb.c src/bt/le/bond.c src/bt/le/gattserver.c)
@@ -353,7 +365,10 @@ if(CONFIG_OTA)
 
     # The WiFi blob lives in its own partition (id 0x776966696669726d), never
     # OTA'd; this also builds btgw_wifi_firmware.uf2 to provision it once.
-    pico_use_wifi_firmware_partition(btgw NO_EMBEDDED_PT)
+    # The blob is the CYW43439 firmware. A target without that radio has none.
+    if(CONFIG_RADIO_CYW43)
+        pico_use_wifi_firmware_partition(btgw NO_EMBEDDED_PT)
+    endif()
 
     # Version: the ROM picks the A/B slot with the higher VERSION item, so
     # every OTA build must carry a larger one. MINOR is the commit count
@@ -453,7 +468,7 @@ if(CONFIG_NET_MDNS)
     # lwIP's responder, vendored with one hook for the firmware's own record
     # groups (third_party/lwip-mdns/VENDORED.txt) -- in place of the SDK's
     # pico_lwip_mdns, which compiles the same three files unmodified.
-    target_sources(btgw PRIVATE src/net/mdns.c src/net/mdns_records.c
+    target_sources(btgw PRIVATE src/net/mdns.c src/net/mdns_browse.c src/net/mdns_records.c
         third_party/lwip-mdns/mdns.c
         third_party/lwip-mdns/mdns_out.c
         third_party/lwip-mdns/mdns_domain.c)

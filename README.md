@@ -134,6 +134,7 @@ curl -X POST http://<addr>/api/op \
 ## Reading next
 
 - [docs/Feature-Roadmap.md](docs/Feature-Roadmap.md) — what changes a layer, in priority order
+- [docs/Capabilities.md](docs/Capabilities.md) — which features each chip runs
 - [docs/Hardware-Testing.md](docs/Hardware-Testing.md) — checks that wait on a device on the bench
 - [docs/Development.md](docs/Development.md) — the build, the upload, the Lua unload contract, and how a feature branch reaches `dev`
 - [OTA.md](OTA.md) — slots, try-before-you-buy, confirm

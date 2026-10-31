@@ -10,8 +10,10 @@
 #include "hardware/watchdog.h"
 #include "hardware/flash.h"
 #include "pico/time.h"
-#include "pico/cyw43_arch.h"
 #include "autoconf.h"
+#if CONFIG_RADIO_CYW43
+#include "pico/cyw43_arch.h"
+#endif
 #if CONFIG_BT_LE
 #include "btstack.h"
 #include "bt/bt.h"     /* bt_stack_up(): never enter BTstack if it was never built */
@@ -319,6 +321,7 @@ int ota_slot_program_page(int which, uint32_t off, const uint8_t page[256]) {
  * starts from a clean radio.
  */
 static void reboot_quiesce(void) {
+#if CONFIG_RADIO_CYW43
     /* Cut power to the CYW43 and do NOTHING else.
      *
      * This used to politely tear the radio down -- hci_power_control(OFF),
@@ -347,6 +350,7 @@ static void reboot_quiesce(void) {
     gpio_set_dir(CYW43_PIN_WL_REG_ON, GPIO_OUT);
     gpio_put(CYW43_PIN_WL_REG_ON, 0);
     busy_wait_ms(20);           /* let its rails fall before the reset */
+#endif
 }
 
 void ota_reboot(bool flash_update_other) {

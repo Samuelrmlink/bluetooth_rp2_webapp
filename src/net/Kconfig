@@ -3,6 +3,7 @@ menu "Networking"
 config NET_WIFI
     bool "Wi-Fi (station + SoftAP)"
     default y
+    depends on RADIO_CYW43
     help
       Compiles the cyw43 station/AP state machine, the /api/wifi routes and
       the credential store in or out entirely. The Bluetooth stack shares the
@@ -49,6 +50,15 @@ config NET_HOSTNAME
       The project name, spelled as a DNS label: a hostname may contain only
       letters, digits and hyphens, so the underscores in "bluetooth_rp2_webapp"
       become hyphens. Reachable as <name>.local once mDNS is up.
+
+config NET_HTTP_SERVER
+    bool "HTTP server and WebSocket API"
+    default y
+    help
+      The page on port 80 and the websocket at /ws (src/net/http.c and
+      src/net/ws.c). The op table in src/api/ops.c stays in every image.
+      This server is one caller of it. On in every current RP2350 image.
+      A later target can leave it off.
 
 config NET_HTTP_CLIENT
     bool "HTTP client for Lua scripts (http.start)"
@@ -185,6 +195,45 @@ config NET_UPLINK
       calls netif_set_default(). Pings the WireGuard endpoint on every
       interface with a gateway and moves the tunnel and new connections to
       the best one.
+
+config NET_GW_LAN
+    bool "Gateway LAN"
+    default n
+    depends on NET_ETH_W5500
+    help
+      The gateway LAN. The first carrier is the W5500 netif e0. The
+      choice is cfg/gw.json: an interface name, or "none". A missing file
+      uses e0 when the W5500 is built in, and none otherwise. A stored
+      "none" stays none. Link-local (169.254/16) stays up for the whole
+      time the link is up. A DHCP lease is a second address. A DHCP
+      router on this LAN is a local uplink only, and it is not advertised.
+      Each board probes that router itself. Specified and not built.
+      Turning this on fails configure.
+
+config NET_MDNS_GW
+    bool "Gateway LAN mDNS (_btgw-gw._udp)"
+    default n
+    depends on NET_MDNS
+    depends on NET_GW_LAN
+    help
+      One _btgw-gw._udp.local instance per internet connection that has a
+      gateway and is not the DHCP router on the gateway LAN. Instance
+      name <hostname>-<iface>. TXT carries iface and metric=<upl_metric>.
+      Wi-Fi, USB-NCM, and Bluetooth NAP are separate instances. Sent about
+      every 2 seconds. A board that hears nothing new for an instance for
+      6 seconds drops that one connection. Other connections from the same
+      board stay. Specified and not built. Turning this on fails configure.
+
+config NET_NAT
+    bool "NAT from the gateway LAN"
+    default n
+    depends on NET_GW_LAN
+    depends on NET_UPLINK
+    help
+      Masquerade from the gateway LAN out the uplink named by a heard
+      _btgw-gw instance. The next hop is the announcer's link-local
+      address. This is not the Lua TCP/UDP proxy (NET_FORWARD). Specified
+      and not built. Turning this on fails configure.
 
 config NET_FORWARD
     bool "Forwarding rules from Lua (TCP proxy + UDP relay)"

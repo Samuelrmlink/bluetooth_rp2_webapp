@@ -8,7 +8,7 @@ test('every built-in window is offered, grouped, and the first visit is arranged
   await expect(page.locator('#tiles .tile')).toHaveCount(3);
   const groups = await page.$$eval('#tiles .tile .pane-pick >> nth=0', (s) =>
     [...s[0].querySelectorAll('optgroup')].map((g) => [g.label, [...g.children].map((o) => o.textContent)]));
-  expect(groups[0]).toEqual(['Tools', ['Editor', 'Scanner', 'GATT', 'GATT Events', 'Console', 'Hardware']]);
+  expect(groups[0]).toEqual(['Tools', ['Local', 'Editor', 'Scanner', 'GATT', 'GATT Events', 'Console', 'Hardware']]);
 });
 
 test('Alt+hjkl moves between windows; ? lists every binding; Alt+S opens Settings', async ({ page }) => {

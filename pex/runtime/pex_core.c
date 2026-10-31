@@ -23,6 +23,8 @@ uint32_t pex__host_target(void) {
     return PEX_TARGET_ARMV8M_BASE;
 #elif defined(__ARM_ARCH_7EM__)
     return PEX_TARGET_ARMV7EM_FP;
+#elif defined(__riscv)
+    return PEX_TARGET_RV32IMAC_C5;
 #else
     return 0;
 #endif

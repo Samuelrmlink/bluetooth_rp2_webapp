@@ -10,6 +10,17 @@ config BOARD_PICO2_W
       dual-mode radio. Unset only when building for an RP2040 Pico W, which
       is supported in principle but not validated.
 
+config BOARD_ESP32_C5
+    bool "Target: ESP32-C5"
+    default n
+    depends on !BOARD_PICO2_W
+    help
+      ESP32-C5, for 5 GHz Wi-Fi. Specified and not built. Pico cmake still
+      configures a Pico board. configs/esp32c5_defconfig waits until an
+      ESP-IDF build exists. The order is in docs/Feature-Roadmap.md.
+
+source "src/radio/Kconfig"
+source "src/can/Kconfig"
 source "src/net/Kconfig"
 source "src/bt/Kconfig"
 source "src/codec/Kconfig"

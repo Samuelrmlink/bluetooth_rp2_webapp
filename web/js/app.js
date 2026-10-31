@@ -47,7 +47,9 @@ function wsUrl() {
   if (q.get('ws')) return q.get('ws');
   const host = q.get('host') || location.hostname;
   const port = q.get('port') || location.port;
-  return `ws://${host}${port ? ':' + port : ''}/ws`;
+  const peer = q.get('peer');
+  const path = peer ? `/ws/peer/${encodeURIComponent(peer)}` : '/ws';
+  return `ws://${host}${port ? ':' + port : ''}${path}`;
 }
 
 class App {
@@ -241,10 +243,14 @@ class App {
 
   _initLayout() {
     const known = [...this.windows.keys()];
-    const stored = readLayoutStore(
-      { mode: 'auto', layout: () => Layout.fromJSON({ tree: DEFAULT_TREE, floating: [] }, known) },
-      known,
-    );
+    const q = new URLSearchParams(location.search);
+    const embed = q.get('embed') === '1';
+    const stored = embed
+      ? { mode: 'auto', layout: Layout.single('editor', known), active: 0 }
+      : readLayoutStore(
+          { mode: 'auto', layout: () => Layout.fromJSON({ tree: DEFAULT_TREE, floating: [] }, known) },
+          known,
+        );
     this._layout = new LayoutManager({
       panes: this._paneList(),
       layout: stored.layout,
@@ -259,10 +265,12 @@ class App {
         return `${kind.charAt(0).toUpperCase()}${kind.slice(1)} · device ${key} (not reporting)`;
       },
     });
-    this._layout.onCommit(() => this._persistLayout());
+    if (!embed) this._layout.onCommit(() => this._persistLayout());
     // The manager builds nothing until asked: apply() is the first render, and
     // it ends in onChange, which runs _afterLayout.
     this._layout.apply();
+    const peer = q.get('peer');
+    if (peer) this._layout.setPaneTitle('editor', peer);
   }
 
   _persistLayout() {

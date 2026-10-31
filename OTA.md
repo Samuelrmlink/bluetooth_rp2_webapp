@@ -300,3 +300,28 @@ address for confirming an update, or re-check with `ota.status` once the link
 is back. Pacing USB across the buy is tracked work; it does not affect the
 revert guarantee (an image that never buys is dropped by the ROM on its next
 boot).
+
+## ESP32-C5
+
+The C5 image is `esp32c5/`, built with ESP-IDF, not with the Pico cmake.
+`CONFIG_OTA` is still the RP2350 boot ROM. The C5 bootloader swaps two
+application partitions, `ota_0` and `ota_1`, through the `otadata`
+partition. Rollback is on, so a new image is pending until it is confirmed.
+
+The release file is the same shape: the app binary with a 64-byte ECDSA
+P-256 signature appended. Sign the ESP-IDF app image with the same key:
+
+```sh
+python3 tools/ota_release.py esp32c5/build/btgw-esp32c5.bin --out btgw-c5.smp.bin
+```
+
+Upload with `smpmgr image upload --format any`. The file starts with the ESP
+image magic `0xE9`, not an MCUboot header. The commands are the RP2350 ones,
+with one difference: the new image does not buy itself. `image state-write
+--confirm` marks it valid and does not reboot. A reboot before that confirm
+boots the previous slot. `state-write` also refuses an image whose
+`esp_app_desc` version is not strictly newer. That string is `PROJECT_VER`
+in `esp32c5/CMakeLists.txt`, currently `1.0.0`.
+
+The image joins a station at boot (default SSID `mcusim`) and listens on
+UDP 1337. It does not include the W5500, WireGuard, or the gateway LAN.

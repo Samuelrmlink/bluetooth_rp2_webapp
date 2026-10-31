@@ -81,6 +81,14 @@ void mdns_announce_all(void);
 
 size_t mdns_status_json(char *dst, size_t cap);
 
+/* _btgw._tcp peers heard on any interface. The table is the querier in
+ * mdns_browse.c. age_ms is how long since the last record of that peer. */
+void mdns_browse_poll(void);
+void mdns_browse_kick(void);
+size_t mdns_peers_json(char *dst, size_t cap);
+/* ip is a dotted quad. False when the name is unknown or has gone quiet. */
+bool mdns_peer_endpoint(const char *name, char *ip, size_t ip_cap, uint16_t *port);
+
 #else
 
 static inline void mdns_start(void) {}
@@ -108,6 +116,14 @@ static inline int mdns_release_all_owned(void) { return 0; }
 static inline void mdns_announce_all(void) {}
 static inline size_t mdns_status_json(char *dst, size_t cap) {
     (void)dst; (void)cap; return 0;
+}
+static inline void mdns_browse_poll(void) {}
+static inline void mdns_browse_kick(void) {}
+static inline size_t mdns_peers_json(char *dst, size_t cap) {
+    (void)dst; (void)cap; return 0;
+}
+static inline bool mdns_peer_endpoint(const char *name, char *ip, size_t ip_cap, uint16_t *port) {
+    (void)name; (void)ip; (void)ip_cap; (void)port; return false;
 }
 
 #endif

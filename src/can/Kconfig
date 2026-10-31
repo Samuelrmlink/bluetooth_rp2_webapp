@@ -1,0 +1,37 @@
+menu "CAN"
+
+config CAN
+    bool "CAN"
+    default n
+    help
+      The shared CAN API, with one driver underneath. Specified and not
+      built. Turning this on fails configure.
+
+config CAN_TWAI
+    bool "ESP32-C5 TWAI"
+    default n
+    depends on CAN
+    depends on BOARD_ESP32_C5
+    help
+      The ESP32-C5 TWAI peripheral. The RP2350 and RP2040 have no TWAI
+      block; they use CAN_MCP2515. Specified and not built. Turning this
+      on fails configure.
+
+config CAN_MCP2515
+    bool "MCP2515 on SPI"
+    default n
+    depends on CAN
+    depends on SPI_BUS
+    help
+      The SPI MCP2515, for the RP2350 and RP2040. Specified and not built.
+      Turning this on fails configure.
+
+config CAN_J1939
+    bool "J1939"
+    default n
+    depends on CAN
+    help
+      J1939 on the shared CAN API, with either driver underneath.
+      Specified and not built. Turning this on fails configure.
+
+endmenu

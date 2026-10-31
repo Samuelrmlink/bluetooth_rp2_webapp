@@ -37,6 +37,7 @@ extern "C" {
 #define PEX_TARGET_ARMV8M_MAIN   0x0002u   /* m33: Cortex-M33 softfp, RP2350 */
 #define PEX_TARGET_ARMV8M_BASE   0x0003u   /* m23 (reserved) */
 #define PEX_TARGET_ARMV7EM_FP    0x0004u   /* m4f */
+#define PEX_TARGET_RV32IMAC_C5   0x0103u   /* c5: rv32imac_zicsr_zifencei, ilp32, ESP32-C5 */
 
 /* target_features */
 #define PEX_FEAT_FPU_SP   (1u << 0)
