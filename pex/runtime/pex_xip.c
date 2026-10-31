@@ -84,6 +84,9 @@ static bool s_mounted;
 static uint32_t s_moves, s_recovered;
 static uint8_t *s_area;             /* model A RW suffix: [pool end - s_area_size, pool end). Not a block. */
 static uint32_t s_area_size;
+static pex_install_t *s_open;       /* the push-install session, or NULL */
+static int s_nest;                  /* the session is inside pex_xip_compact */
+static int index_locked(void);
 
 static uint32_t rd32(const void *p) {
     const uint8_t *b = p;
@@ -431,6 +434,7 @@ static int move_entry(int i, uint32_t dst, uint32_t rw_new, uint32_t aoff_new, u
 
 int pex_xip_compact(void) {
     if (!s_mounted) { pex__err(PEX_ENOTSUP, "no PEX flash partition"); return PEX_ENOTSUP; }
+    if (index_locked()) { return PEX_EBUSY; }
     int order[IX_MAX], n = s_ix->h.n, moved = 0;
     for (int i = 0; i < n; i++) { order[i] = i; }
     for (int i = 1; i < n; i++) {
@@ -511,10 +515,677 @@ static uint32_t assign_aoff(uint32_t size, int skip) {
     return best;
 }
 
+/* ---- push install --------------------------------------------------------------------
+ * The caller feeds the file in order. Header and section table stay in the
+ * session until they parse. RELOC and META must sit before the image (both
+ * linkers already write that); a file that does not is refused here, while
+ * pex_install() still accepts it. Pages are erased and programmed as they
+ * fill, so a 4 KB aligned write is one sector. The RO list is read back from
+ * the destination (or from the page still in hand) and is not buffered.
+ * area_ensure runs once META names the module and before any image page is
+ * programmed. A pre-image page can be programmed before that when RELOC is
+ * large: those bytes are not relocated, and a later failure does not commit
+ * the index. The suffix is restored if it was grown.
+ */
+enum { PH_HDR = 0, PH_BODY = 1, PH_EARLY = 2, PH_FAIL = 3 };
+
+struct pex_install {
+    uint32_t flags;
+    int phase, err, maybe_same, same_hit, decided, ready, area_set, old, erased;
+    int have_meta, name_set, ro_done;
+    uint32_t got, prefix_got, prefix_need, meta_off, meta_end;
+    uint32_t mp, mrec, mtotal, mlen;
+    uint16_t mtag;
+    uint8_t mhdr[4];
+    uint32_t dst, nsec, code_base, rw_base, aoff, area_saved, crc_acc, n_ro, ro_off;
+    uint32_t page_off, page_n, sig_have;
+    char name[24];
+    uint8_t sigb[68];
+    uint8_t digest[32];
+    uint8_t page[PAGE];
+    uint8_t prefix[PEX_HEADER_SIZE + PEX_MAX_SECTIONS * 12];
+    pex__hdr_t hdr;
+    pex_sha256_t sha;
+};
+_Static_assert(sizeof(struct pex_install) <= 2048, "install session stays a small host block");
+
+static int index_locked(void) {
+    if (!s_open || s_nest) { return 0; }
+    pex__err(PEX_EBUSY, "an install of %s is in progress", s_open->name[0] ? s_open->name : "a module");
+    return PEX_EBUSY;
+}
+
+/* build id and file_crc32, and the installed copy is signed if the new file is.
+ * file_crc32 lives in the installed header; the index format does not change.
+ * SIG is outside the CRC, so another key over the same bytes still matches. */
+static int same_build(const ix_ent_t *e, const uint8_t bid[16], uint32_t crc, int new_signed) {
+    if (memcmp(e->build_id, bid, 16) != 0) { return 0; }
+    if (rd32(fptr(e->sec * SEC + 72)) != crc) { return 0; }
+    if (new_signed && !(e->state & ES_SIGNED)) { return 0; }
+    return 1;
+}
+
+static int sess_fail(pex_install_t *s, int rc) {
+    s->phase = PH_FAIL;
+    s->err = rc;
+    return rc;
+}
+
+static void sess_close(pex_install_t *s, int restore) {
+    if (restore && s->area_set && area_ensure(s->area_saved) != PEX_OK) {
+        pex__logf(PEX_LOG_ERR, "pex: xip: could not restore the %lu-byte RW reservation", (unsigned long)s->area_saved);
+    }
+    if (s_open == s) { s_open = NULL; }
+    pex__free(s);
+}
+
+static void hash_bytes(pex_install_t *s, const uint8_t *p, uint32_t n, uint32_t off) {
+    while (n) {
+        if (off >= s->hdr.sig_off) {
+            if (s->hdr.sig >= 0) {
+                const pex__sec_t *sg = &s->hdr.sec[s->hdr.sig];
+                if (off < sg->off + sg->size && s->sig_have == off - sg->off && s->sig_have < sizeof s->sigb) {
+                    uint32_t m = n;
+                    if (s->sig_have + m > sg->size) { m = sg->size - s->sig_have; }
+                    if (s->sig_have + m > sizeof s->sigb) { m = (uint32_t)sizeof s->sigb - s->sig_have; }
+                    memcpy(s->sigb + s->sig_have, p, m);
+                    s->sig_have += m;
+                }
+            }
+            return;
+        }
+        uint32_t k = n;
+        if (off + k > s->hdr.sig_off) { k = s->hdr.sig_off - off; }
+        uint8_t buf[128];
+        uint32_t left = k;
+        const uint8_t *q = p;
+        uint32_t o = off;
+        while (left) {
+            uint32_t c = left < sizeof buf ? left : (uint32_t)sizeof buf;
+            memcpy(buf, q, c);
+            pex_sha256_update(&s->sha, buf, c);
+            for (uint32_t i = 0; i < 4; i++) {
+                if (o <= 72u + i && 72u + i < o + c) { buf[72u + i - o] = 0; }
+            }
+            s->crc_acc = pex_crc32_update(s->crc_acc, buf, c);
+            q += c;
+            o += c;
+            left -= c;
+        }
+        p += k;
+        off += k;
+        n -= k;
+    }
+}
+
+static void meta_byte(pex_install_t *s, uint8_t b) {
+    if (s->name_set) { s->mp++; return; }
+    uint32_t pos = s->mp++;
+    uint32_t rel = pos - s->mrec;
+    if (rel < 4) {
+        s->mhdr[rel] = b;
+        if (rel == 3) {
+            s->mtag = rd16(s->mhdr);
+            s->mlen = rd16(s->mhdr + 2);
+            s->mtotal = (4u + s->mlen + 3u) & ~3u;
+            /* A record that runs past META is not a name (pex__meta_name stops). */
+            if (s->mrec + s->mtotal > s->meta_end - s->meta_off) { s->mtag = 0xFFFF; }
+        }
+        return;
+    }
+    if (s->mtag == PEX_META_NAME && rel - 4 < 23 && rel - 4 < s->mlen) {
+        s->name[rel - 4] = (char)b;
+        s->name[rel - 3] = 0;
+    }
+    if (rel + 1 == s->mtotal) {
+        s->mrec = pos + 1;
+        if (s->mtag == PEX_META_NAME) { s->name_set = 1; }
+    }
+}
+
+static void meta_feed(pex_install_t *s, const uint8_t *p, uint32_t n, uint32_t off) {
+    if (!s->have_meta || off + n <= s->meta_off || off >= s->meta_end) { return; }
+    uint32_t skip = off < s->meta_off ? s->meta_off - off : 0;
+    uint32_t m = n - skip;
+    if (off + skip + m > s->meta_end) { m = s->meta_end - (off + skip); }
+    for (uint32_t i = 0; i < m; i++) { meta_byte(s, p[skip + i]); }
+}
+
+static int ro_fetch(const pex_install_t *s, uint32_t off, uint8_t *dst, uint32_t n) {
+    while (n) {
+        if (s->page_n && off >= s->page_off && off < s->page_off + s->page_n) {
+            uint32_t k = s->page_off + s->page_n - off;
+            if (k > n) { k = n; }
+            memcpy(dst, s->page + (off - s->page_off), k);
+            off += k;
+            dst += k;
+            n -= k;
+            continue;
+        }
+        if (off >= s->hdr.file_size) { return PEX_EIO; }
+        uint32_t sec = off / SEC, in = off % SEC, k = SEC - in;
+        if (k > n) { k = n; }
+        memcpy(dst, fptr((s->dst + sec) * SEC + in), k);
+        off += k;
+        dst += k;
+        n -= k;
+    }
+    return PEX_OK;
+}
+
+static int ro_word(const pex_install_t *s, uint32_t i, uint32_t *v) {
+    uint8_t b[4];
+    if (ro_fetch(s, s->ro_off + 4 * i, b, 4)) { return PEX_EIO; }
+    *v = rd32(b);
+    return PEX_OK;
+}
+
+static int ro_prepare(pex_install_t *s) {
+    s->ro_done = 1;
+    const pex__sec_t *sr = pex__find_sec(&s->hdr, PEX_SEC_RELOC);
+    if (!sr || sr->size < 8) { s->n_ro = 0; return PEX_OK; }
+    uint8_t b[8];
+    if (ro_fetch(s, sr->off, b, 8)) { return PEX_EIO; }
+    s->n_ro = rd32(b);
+    s->ro_off = sr->off + 8;
+    if (s->n_ro > (sr->size - 8) / 4) { pex__err(PEX_EFORMAT, "RELOC truncated"); return PEX_EFORMAT; }
+    if (s->n_ro && (s->hdr.flags & PEX_F_PIC)) {
+        pex__err(PEX_ERELOC, "position-independent module with %lu RO relocations: refused (spec 6.2)",
+                 (unsigned long)s->n_ro);
+        return PEX_ERELOC;
+    }
+    uint32_t prev = 0;
+    for (uint32_t i = 0; i < s->n_ro; i++) {
+        uint32_t v;
+        if (ro_word(s, i, &v)) { return PEX_EIO; }
+        if (i && v < prev) { pex__err(PEX_EFORMAT, "RO relocations not sorted: re-link with pexlink"); return PEX_EFORMAT; }
+        prev = v;
+    }
+    return PEX_OK;
+}
+
+static int relocate_page(pex_install_t *s, uint32_t valid) {
+    if (!s->ro_done) {
+        int rc = ro_prepare(s);
+        if (rc) { return rc; }
+    }
+    if (!s->n_ro) { return PEX_OK; }
+    for (uint32_t i = 0; i < s->n_ro; i++) {
+        uint32_t v;
+        if (ro_word(s, i, &v)) { return PEX_EIO; }
+        uint32_t fo = s->hdr.image_off + (v & 0x7FFFFFFFu);
+        if (fo + 4 <= s->page_off || fo >= s->page_off + valid) { continue; }
+        if (fo < s->page_off || fo + 4 > s->page_off + valid) {
+            pex__err(PEX_EFORMAT, "a relocation straddles a page: re-link with pexlink");
+            return PEX_EFORMAT;
+        }
+        uint32_t base = (v & PEX_RELOC_TO_RW) ? s->rw_base : s->code_base;
+        uint32_t x = rd32(s->page + (fo - s->page_off)) + base;
+        memcpy(s->page + (fo - s->page_off), &x, 4);
+    }
+    return PEX_OK;
+}
+
+static int emit_page(pex_install_t *s, uint32_t valid) {
+    if (!valid) { return PEX_OK; }
+    if (valid < PAGE) { memset(s->page + valid, 0xFF, PAGE - valid); }
+    uint32_t img_lo = s->hdr.image_off;
+    uint32_t img_hi = img_lo + s->hdr.image_size;
+    int overlaps = s->page_off < img_hi && s->page_off + valid > img_lo;
+    if (overlaps && !s->ready) { pex__err(PEX_ESTATE, "image page before the module name was known"); return PEX_ESTATE; }
+    /* Same words as write_sector: RO entries point into text/ro, and that
+     * range is fully received before an image page is emitted. A header page
+     * in the same sector is stored raw; the list is not read early. */
+    uint32_t code_lo = s->hdr.image_off;
+    uint32_t code_hi = code_lo + s->hdr.text + s->hdr.ro;
+    int code_page = s->page_off < code_hi && s->page_off + valid > code_lo;
+    if (code_page && (s->code_base || s->rw_base)) {
+        int rc = relocate_page(s, valid);
+        if (rc) { return rc; }
+    }
+    uint32_t sec = s->page_off / SEC;
+    if (s->erased != (int)sec) {
+        if (fl_erase((s->dst + sec) * SEC)) {
+            pex__err(PEX_EIO, "flash write failed (sector %lu)", (unsigned long)(s->dst + sec));
+            return PEX_EIO;
+        }
+        s->erased = (int)sec;
+    }
+    int blank = 1;
+    for (uint32_t i = 0; i < PAGE; i++) {
+        if (s->page[i] != 0xFF) { blank = 0; break; }
+    }
+    if (!blank && fl_prog((s->dst + sec) * SEC + (s->page_off % SEC), s->page, PAGE)) {
+        pex__err(PEX_EIO, "flash write failed (sector %lu)", (unsigned long)(s->dst + sec));
+        return PEX_EIO;
+    }
+    return PEX_OK;
+}
+
+static int sess_store(pex_install_t *s, const uint8_t *p, uint32_t n) {
+    while (n) {
+        if (s->page_n == 0) {
+            s->page_off = s->got;
+            memset(s->page, 0xFF, PAGE);
+        }
+        uint32_t filled = s->got - s->page_off;
+        uint32_t space = PAGE - filled;
+        uint32_t take = n < space ? n : space;
+        memcpy(s->page + filled, p, take);
+        s->page_n = filled + take;
+        s->got += take;
+        p += take;
+        n -= take;
+        if (s->page_n == PAGE) {
+            int rc = emit_page(s, PAGE);
+            if (rc) { return rc; }
+            s->page_n = 0;
+        }
+    }
+    return PEX_OK;
+}
+
+static int sess_reserve(pex_install_t *s) {
+    const char *nm = s->name[0] ? s->name : "module";
+    uint32_t nsec = (s->hdr.file_size + SEC - 1) / SEC;
+    if (!nsec || s->hdr.file_size < PEX_HEADER_SIZE) { pex__err(PEX_EFORMAT, "file is too small"); return PEX_EFORMAT; }
+    uint32_t ft = 0, lg = 0;
+    int run = find_run(nsec, -1, &ft, &lg);
+    if (run < 0 && !(s->flags & PEX_INSTALL_NO_COMPACT) && ft >= nsec) {
+        pex__logf(PEX_LOG_INFO, "pex: xip: %s needs %lu sectors, largest free run %lu of %lu free: compacting", nm,
+                  (unsigned long)nsec, (unsigned long)lg, (unsigned long)ft);
+        s_nest++;
+        int moved = pex_xip_compact();
+        s_nest--;
+        if (moved < 0) { return moved; }
+        run = find_run(nsec, -1, &ft, &lg);
+    }
+    if (run < 0) {
+        pex__err(PEX_ENOSPC, "%s needs %lu KB; the PEX partition has %lu KB free, %lu KB in one piece", nm,
+                 (unsigned long)(nsec * 4), (unsigned long)(ft * 4), (unsigned long)(lg * 4));
+        return PEX_ENOSPC;
+    }
+    s->dst = (uint32_t)run;
+    s->nsec = nsec;
+    return PEX_OK;
+}
+
+static int sess_decide(pex_install_t *s) {
+    s->decided = 1;
+    if (!s->name_set || !s->name[0]) {
+        memset(s->name, 0, sizeof s->name);
+        memcpy(s->name, "module", 6);
+    }
+    if (s->maybe_same) {
+        for (int i = 0; i < s_ix->h.n; i++) {
+            if (same_build(&s_ix->e[i], s->hdr.build_id, s->hdr.crc, s->hdr.sig >= 0) &&
+                strncmp(s_ix->e[i].name, s->name, sizeof s_ix->e[i].name) == 0) {
+                s->same_hit = i;
+                s->phase = PH_EARLY;
+                return PEX_DONE;
+            }
+        }
+        pex__err(PEX_EFORMAT, "file_crc32 matches an installed build but the name is %s", s->name);
+        return sess_fail(s, PEX_EFORMAT);
+    }
+    s->old = find_name(s->name);
+    if (s->old >= 0 && in_use(s->old)) {
+        pex__err(PEX_EBUSY, "%s runs from its installed copy: unload it first", s->name);
+        return sess_fail(s, PEX_EBUSY);
+    }
+    if (s->old < 0 && s_ix->h.n >= IX_MAX) {
+        pex__err(PEX_ENOSPC, "the PEX index is full (%d modules)", IX_MAX);
+        return sess_fail(s, PEX_ENOSPC);
+    }
+    if (!(s->hdr.flags & PEX_F_PIC)) {
+        uint32_t rw_size = s->hdr.data + s->hdr.bss;
+        s->aoff = assign_aoff(rw_size, s->old);
+        s->rw_base = (uint32_t)(uintptr_t)(pex__pool_end() - s->aoff - rwsz(rw_size));
+        s->code_base = (uint32_t)(F->exec_base + s->dst * SEC + s->hdr.image_off);
+        uint32_t need = area_need_replacing(s->old, s->aoff, rw_size);
+        s->area_saved = s_area_size;
+        uint32_t gap = pex__pool_gap();
+        if (area_ensure(need) != PEX_OK) {
+            uint32_t more = need > s->area_saved ? need - s->area_saved : need;
+            pex__err(PEX_ENOMEM, "this module needs %lu more bytes of RW reservation; the pool has %lu free below it",
+                     (unsigned long)more, (unsigned long)gap);
+            return sess_fail(s, PEX_ENOMEM);
+        }
+        s->area_set = 1;
+    }
+    s->ready = 1;
+    return PEX_OK;
+}
+
+static int payload_before_image(pex_install_t *s, uint16_t type, const char *what) {
+    const pex__sec_t *sec = pex__find_sec(&s->hdr, type);
+    if (!sec) { return PEX_OK; }
+    /* off past the image must be rejected before the subtraction underflows. */
+    if (sec->off < s->prefix_need || sec->off > s->hdr.image_off ||
+        sec->size > s->hdr.image_off - sec->off) {
+        pex__err(PEX_EFORMAT, "%s is not before the image: re-link with pexlink", what);
+        return PEX_EFORMAT;
+    }
+    return PEX_OK;
+}
+
+typedef struct { const uint8_t *p; uint32_t n; } pref_t;
+static int pref_read(void *ctx, uint32_t off, void *dst, uint32_t n) {
+    pref_t *b = ctx;
+    if (n > b->n || off > b->n - n) { return -1; }
+    memcpy(dst, b->p + off, n);
+    return (int)n;
+}
+
+static int header_ready(pex_install_t *s) {
+    pref_t b = { s->prefix, s->prefix_got };
+    pex_reader_t rd = { pref_read, &b, 0 };
+    int rc = pex__parse_header(&rd, &s->hdr);
+    if (rc) { return sess_fail(s, rc); }
+    if (s->hdr.image_off < s->prefix_need) {
+        pex__err(PEX_EFORMAT, "the image overlaps the section table: re-link with pexlink");
+        return sess_fail(s, PEX_EFORMAT);
+    }
+    if ((rc = payload_before_image(s, PEX_SEC_RELOC, "RELOC")) || (rc = payload_before_image(s, PEX_SEC_META, "META"))) {
+        return sess_fail(s, rc);
+    }
+    if (s->hdr.flags & PEX_F_RAM_ONLY) {
+        pex__err(PEX_ENOTSUP, "RAM_ONLY: not installable");
+        return sess_fail(s, PEX_ENOTSUP);
+    }
+    const pex__sec_t *sm = pex__find_sec(&s->hdr, PEX_SEC_META);
+    if (sm) {
+        s->have_meta = 1;
+        s->meta_off = sm->off;
+        s->meta_end = sm->off + sm->size;
+    } else {
+        s->meta_end = s->prefix_need;
+    }
+    s->maybe_same = 0;
+    for (int i = 0; i < s_ix->h.n; i++) {
+        if (same_build(&s_ix->e[i], s->hdr.build_id, s->hdr.crc, s->hdr.sig >= 0)) { s->maybe_same = 1; break; }
+    }
+    s->phase = PH_BODY;
+    if (s->maybe_same) {
+        s->got = s->prefix_got;
+        meta_feed(s, s->prefix, s->prefix_got, 0);
+        if (s->got >= s->meta_end) { return sess_decide(s); }
+        return PEX_OK;
+    }
+    rc = sess_reserve(s);
+    if (rc) { return sess_fail(s, rc); }
+    pex_sha256_init(&s->sha);
+    hash_bytes(s, s->prefix, s->prefix_got, 0);
+    rc = sess_store(s, s->prefix, s->prefix_got);
+    if (rc) { return sess_fail(s, rc); }
+    meta_feed(s, s->prefix, s->prefix_got, 0);
+    if (s->got >= s->meta_end) { return sess_decide(s); }
+    return PEX_OK;
+}
+
+static int hdr_absorb(pex_install_t *s, const uint8_t *p, uint32_t n, uint32_t *used) {
+    *used = 0;
+    if (s->prefix_need == 0) {
+        uint32_t want = PEX_HEADER_SIZE;
+        if (s->prefix_got < want) {
+            uint32_t take = want - s->prefix_got;
+            if (take > n) { take = n; }
+            memcpy(s->prefix + s->prefix_got, p, take);
+            s->prefix_got += take;
+            *used = take;
+            if (s->prefix_got < want) { return PEX_OK; }
+            p += take;
+            n -= take;
+        }
+        if (rd32(s->prefix) != PEX_MAGIC) { pex__err(PEX_EFORMAT, "not a .pex (bad magic)"); return sess_fail(s, PEX_EFORMAT); }
+        uint16_t hsize = rd16(s->prefix + 8);
+        if (hsize != PEX_HEADER_SIZE) {
+            pex__err(PEX_EFORMAT, "header is %u bytes: re-link with pexlink", hsize);
+            return sess_fail(s, PEX_EFORMAT);
+        }
+        uint32_t nsec = rd32(s->prefix + 60), soff = rd32(s->prefix + 64);
+        if (soff != hsize) {
+            pex__err(PEX_EFORMAT, "section table is not right after the header: re-link with pexlink");
+            return sess_fail(s, PEX_EFORMAT);
+        }
+        if (nsec > PEX_MAX_SECTIONS) { pex__err(PEX_EFORMAT, "too many sections"); return sess_fail(s, PEX_EFORMAT); }
+        uint32_t need = soff + nsec * 12u;
+        if (need < soff || need > sizeof s->prefix) {
+            pex__err(PEX_EFORMAT, "section table does not fit");
+            return sess_fail(s, PEX_EFORMAT);
+        }
+        s->prefix_need = need;
+    }
+    if (s->prefix_got < s->prefix_need) {
+        uint32_t take = s->prefix_need - s->prefix_got;
+        if (take > n) { take = n; }
+        memcpy(s->prefix + s->prefix_got, p, take);
+        s->prefix_got += take;
+        *used += take;
+        if (s->prefix_got < s->prefix_need) { return PEX_OK; }
+    }
+    return header_ready(s);
+}
+
+static int finish_page(pex_install_t *s) {
+    if (!s->page_n) { return PEX_OK; }
+    int rc = emit_page(s, s->page_n);
+    s->page_n = 0;
+    return rc;
+}
+
+static int check_stream(pex_install_t *s) {
+    pex_sha256_final(&s->sha, s->digest);
+    if (s->crc_acc != s->hdr.crc) {
+        pex__err(PEX_ECRC, "CRC 0x%08lx, header says 0x%08lx: the file is corrupted", (unsigned long)s->crc_acc,
+                 (unsigned long)s->hdr.crc);
+        return PEX_ECRC;
+    }
+    if (s->hdr.sig >= 0) {
+        const pex__sec_t *sg = &s->hdr.sec[s->hdr.sig];
+        if (sg->size != sizeof s->sigb || s->sig_have != sizeof s->sigb) {
+            pex__err(PEX_ESIG, "malformed SIG section");
+            return PEX_ESIG;
+        }
+        if (!pex__cfg.verify) { pex__err(PEX_ESIG, "signed, but this host has no signature verifier"); return PEX_ESIG; }
+        int rc = pex__cfg.verify(rd16(s->sigb), rd16(s->sigb + 2), s->digest, s->sigb + 4, 64);
+        if (rc) {
+            pex__err(PEX_ESIG, "signature does not verify (alg %u, key %u)", rd16(s->sigb), rd16(s->sigb + 2));
+            return PEX_ESIG;
+        }
+    } else {
+        if (s->hdr.flags & PEX_F_NEEDS_SIG) { pex__err(PEX_EUNSIGNED, "module requires a signature and has none"); return PEX_EUNSIGNED; }
+        if (!(pex__cfg.policy & PEX_POLICY_ALLOW_UNSIGNED)) {
+            pex__err(PEX_EUNSIGNED, "unsigned, and this host loads signed modules only");
+            return PEX_EUNSIGNED;
+        }
+    }
+    return PEX_OK;
+}
+
+/* The flash copy, un-relocated, must hash to the stream. No second signature check. */
+static int flash_matches(pex_install_t *s, const ix_ent_t *ne) {
+    xf_t x;
+    xf_of(&x, ne);
+    if (xf_setup(&x) || x.file_size != ne->file_size) {
+        pex__err(PEX_EIO, "%s: the installed copy does not read back", s->name);
+        return PEX_EIO;
+    }
+    uint32_t crc = 0;
+    pex_sha256_t sh;
+    pex_sha256_init(&sh);
+    uint8_t buf[128];
+    for (uint32_t off = 0; off < s->hdr.sig_off;) {
+        uint32_t n = s->hdr.sig_off - off;
+        if (n > sizeof buf) { n = (uint32_t)sizeof buf; }
+        if (xf_read(&x, off, buf, n) != (int)n) {
+            pex__err(PEX_EIO, "%s: the installed copy does not read back", s->name);
+            return PEX_EIO;
+        }
+        pex_sha256_update(&sh, buf, n);
+        for (uint32_t i = 0; i < 4; i++) {
+            if (off <= 72u + i && 72u + i < off + n) { buf[72u + i - off] = 0; }
+        }
+        crc = pex_crc32_update(crc, buf, n);
+        off += n;
+    }
+    uint8_t dig[32];
+    pex_sha256_final(&sh, dig);
+    if (crc != s->crc_acc || memcmp(dig, s->digest, 32) != 0) {
+        pex__err(PEX_ECRC, "%s: the installed copy does not match what was written", s->name);
+        return PEX_ECRC;
+    }
+    /* SIG is outside the hash. Compare the bytes; do not verify a second time. */
+    if (s->hdr.sig >= 0) {
+        const pex__sec_t *sg = &s->hdr.sec[s->hdr.sig];
+        uint8_t b[68];
+        if (sg->size != sizeof b || ro_fetch(s, sg->off, b, sizeof b) || memcmp(b, s->sigb, sizeof b) != 0) {
+            pex__err(PEX_ECRC, "%s: the installed copy does not match what was written", s->name);
+            return PEX_ECRC;
+        }
+    }
+    return PEX_OK;
+}
+
+pex_install_t *pex_install_begin(uint32_t flags) {
+    pex__err(PEX_OK, "ok");
+    if (!s_mounted) { pex__err(PEX_ENOTSUP, "this host has no PEX flash partition"); return NULL; }
+    if (index_locked()) { return NULL; }
+    pex_install_t *s = pex__alloc(sizeof *s, 8, PEX_OWNER_HOST, 1);
+    if (!s) { pex__err(PEX_ENOMEM, "PEX pool full (install)"); return NULL; }
+    memset(s, 0, sizeof *s);
+    s->flags = flags;
+    s->old = -1;
+    s->erased = -1;
+    s->same_hit = -1;
+    s_open = s;
+    return s;
+}
+
+int pex_install_write(pex_install_t *s, const void *pv, uint32_t n) {
+    if (!s || s != s_open) { pex__err(PEX_EINVAL, "no install session"); return PEX_EINVAL; }
+    if (s->phase == PH_EARLY) { return PEX_DONE; }
+    if (s->phase == PH_FAIL) { return s->err; }
+    if (!n) { return PEX_OK; }
+    if (!pv) { pex__err(PEX_EINVAL, "no install bytes"); return sess_fail(s, PEX_EINVAL); }
+    const uint8_t *p = pv;
+    while (n && s->phase == PH_HDR) {
+        uint32_t used = 0;
+        hdr_absorb(s, p, n, &used);
+        p += used;
+        n -= used;
+        if (s->phase != PH_HDR) { break; }
+        if (!used) { break; }
+    }
+    if (s->phase == PH_EARLY) { return PEX_DONE; }
+    if (s->phase == PH_FAIL) { return s->err; }
+    while (n && s->phase == PH_BODY) {
+        if (s->got > s->hdr.file_size) {
+            pex__err(PEX_EFORMAT, "the file is longer than its header says");
+            return sess_fail(s, PEX_EFORMAT);
+        }
+        if (s->got == s->hdr.file_size) {
+            pex__err(PEX_EFORMAT, "the file is longer than its header says");
+            return sess_fail(s, PEX_EFORMAT);
+        }
+        uint32_t lim = n;
+        if (lim > s->hdr.file_size - s->got) { lim = s->hdr.file_size - s->got; }
+        if (!s->decided && s->got < s->meta_end && s->got + lim > s->meta_end) { lim = s->meta_end - s->got; }
+        int rc;
+        if (s->maybe_same && !s->decided) {
+            meta_feed(s, p, lim, s->got);
+            s->got += lim;
+            rc = PEX_OK;
+        } else {
+            hash_bytes(s, p, lim, s->got);
+            meta_feed(s, p, lim, s->got);
+            rc = sess_store(s, p, lim);
+        }
+        if (rc) { return sess_fail(s, rc); }
+        p += lim;
+        n -= lim;
+        if (!s->decided && s->got >= s->meta_end) {
+            rc = sess_decide(s);
+            if (rc) { return rc; }
+        }
+    }
+    return PEX_OK;
+}
+
+int pex_install_end(pex_install_t *s) {
+    if (!s || s != s_open) { pex__err(PEX_EINVAL, "no install session"); return PEX_EINVAL; }
+    if (s->phase == PH_EARLY) {
+        int slot = s->same_hit;
+        pex__logf(PEX_LOG_INFO, "pex: xip: %s (this build) is already installed", s->name);
+        sess_close(s, 0);
+        return slot;
+    }
+    if (s->phase == PH_FAIL) {
+        int rc = s->err ? s->err : PEX_EIO;
+        pex__logf(PEX_LOG_WARN, "pex: xip: install refused: %s (%s)", pex_errmsg(), pex_strerror(rc));
+        sess_close(s, 1);
+        return rc;
+    }
+    int rc = PEX_OK;
+    if (s->phase != PH_BODY || s->got != s->hdr.file_size) {
+        pex__err(PEX_EIO, "short read at %lu of %lu", (unsigned long)s->got, (unsigned long)s->hdr.file_size);
+        rc = PEX_EIO;
+    } else if (!s->decided || !s->ready) {
+        pex__err(PEX_EFORMAT, "the stream ended before META");
+        rc = PEX_EFORMAT;
+    } else if ((rc = finish_page(s)) == PEX_OK && (rc = check_stream(s)) == PEX_OK) {
+        int a = !(s->hdr.flags & PEX_F_PIC);
+        ix_ent_t ne;
+        memset(&ne, 0, sizeof ne);
+        memcpy(ne.build_id, s->hdr.build_id, 16);
+        memcpy(ne.name, s->name, sizeof ne.name);
+        ne.sec = s->dst;
+        ne.file_size = s->hdr.file_size;
+        ne.version = s->hdr.version;
+        ne.flags = s->hdr.flags;
+        ne.target = s->hdr.target;
+        ne.image_off = s->hdr.image_off;
+        ne.code_size = s->hdr.text + s->hdr.ro;
+        ne.rw_size = s->hdr.data + s->hdr.bss;
+        ne.code_base = s->code_base;
+        ne.rw_base = s->rw_base;
+        ne.aoff = s->aoff;
+        ne.state = (s->hdr.sig >= 0 ? ES_SIGNED : 0) | ES_VERIFIED;
+        rc = flash_matches(s, &ne);
+        if (!rc) {
+            if (s->old >= 0) {
+                memmove(&s_ix->e[s->old], &s_ix->e[s->old + 1], (s_ix->h.n - s->old - 1) * sizeof(ix_ent_t));
+                s_ix->h.n--;
+            }
+            int slot = s_ix->h.n;
+            s_ix->e[s_ix->h.n++] = ne;
+            rc = commit();
+            if (!rc) {
+                pex__logf(PEX_LOG_INFO, "pex: xip: installed %s v%lu.%lu.%lu (model %c, %lu bytes) at 0x%05lx%s%s", s->name,
+                          (unsigned long)(ne.version >> 24), (unsigned long)((ne.version >> 16) & 0xFF),
+                          (unsigned long)(ne.version & 0xFFFF), a ? 'A' : 'B', (unsigned long)ne.file_size,
+                          (unsigned long)(s->dst * SEC), s->old >= 0 ? ", replacing the previous version" : "",
+                          a && !area_covers(&ne) ? " (in place after the next boot: RW address not reserved yet)" : "");
+                sess_close(s, 0);
+                return slot;
+            }
+        }
+    }
+    pex__logf(PEX_LOG_WARN, "pex: xip: install refused: %s (%s)", pex_errmsg(), pex_strerror(rc));
+    sess_close(s, 1);
+    return rc;
+}
+
+void pex_install_abort(pex_install_t *s) {
+    if (!s || s != s_open) { return; }
+    sess_close(s, 1);
+}
+
 /* ---- install ------------------------------------------------------------------------ */
 int pex_install(const pex_reader_t *rd, uint32_t flags) {
     pex__err(PEX_OK, "ok");
     if (!s_mounted) { pex__err(PEX_ENOTSUP, "this host has no PEX flash partition"); return PEX_ENOTSUP; }
+    if (index_locked()) { return PEX_EBUSY; }
     if (!rd || !rd->read) { pex__err(PEX_EINVAL, "no reader"); return PEX_EINVAL; }
     pex_arena_t *tmp = pex__scratch_begin(sizeof(pex__hdr_t), PEX_OWNER_HOST);
     pex__hdr_t *h = tmp ? pex__scratch_alloc(tmp, sizeof *h) : NULL;
@@ -526,6 +1197,7 @@ int pex_install(const pex_reader_t *rd, uint32_t flags) {
     int rc = pex__parse_header(rd, h);
     if (!rc) { rc = pex__integrity(rd, h, false); }
     char name[24];
+    memset(name, 0, sizeof name);
     if (!rc) {
         pex__meta_name(rd, h, name);
         if (!name[0]) { strcpy(name, "module"); }
@@ -536,7 +1208,8 @@ int pex_install(const pex_reader_t *rd, uint32_t flags) {
     bool a = false;
     if (!rc) {
         for (int i = 0; i < s_ix->h.n; i++) {
-            if (memcmp(s_ix->e[i].build_id, h->build_id, 16) == 0 && strcmp(s_ix->e[i].name, name) == 0) {
+            if (same_build(&s_ix->e[i], h->build_id, h->crc, h->sig >= 0) &&
+                strncmp(s_ix->e[i].name, name, sizeof s_ix->e[i].name) == 0) {
                 pex__logf(PEX_LOG_INFO, "pex: xip: %s (this build) is already installed", name);
                 pex__scratch_end(tmp);
                 return i;
@@ -700,6 +1373,7 @@ int pex_install_mem(const void *buf, uint32_t len, uint32_t flags) {
 int pex_uninstall(const char *name) {
     pex__err(PEX_OK, "ok");
     if (!s_mounted) { pex__err(PEX_ENOTSUP, "this host has no PEX flash partition"); return PEX_ENOTSUP; }
+    if (index_locked()) { return PEX_EBUSY; }
     int i = name ? find_name(name) : -1;
     if (i < 0) { pex__err(PEX_ENOENT, "%s is not installed", name ? name : "?"); return PEX_ENOENT; }
     if (in_use(i)) { pex__err(PEX_EBUSY, "%s runs from its installed copy: unload it first", name); return PEX_EBUSY; }
@@ -956,6 +1630,9 @@ static int mount(void) {
 }
 
 int pex__xip_mount_cfg(void) {
+    /* pex_init has already reset the pool, so a session block is gone. */
+    s_open = NULL;
+    s_nest = 0;
     F = pex__cfg.flash;
     s_ix = NULL;
     pex__pool_set_suffix(0);
@@ -969,6 +1646,8 @@ int pex_xip_mount(void) {
     for (pex_mod_t *m = pex__mods; m; m = m->next) {
         if (m->code && m->code->xip) { pex__err(PEX_EBUSY, "%s runs from flash", m->name); return PEX_EBUSY; }
     }
+    if (s_open) { pex__free(s_open); s_open = NULL; }
+    s_nest = 0;
     if (s_ix) { pex__free(s_ix); s_ix = NULL; }
     pex__pool_set_suffix(0);
     s_area = NULL;

@@ -1,6 +1,6 @@
 // pexlink -- ELF (linked with a PEX linker script) -> .pex
 //
-// A JavaScript port of pex/tools/pexlink.py `link` (tool string "pexlink 0.6").
+// A JavaScript port of pex/tools/pexlink.py `link` (tool string "pexlink 1.1").
 // The browser must not shell out to host Python, and must not hold the OTA
 // signing key: this module refuses --sign. Host signing stays
 // `python3 pex/tools/pexlink.py sign`.
@@ -14,8 +14,9 @@
 import { sha256 } from './sha256.js';
 import { renderDis, renderMap } from './pexmap.js';
 
-export const TOOL = 'pexlink 0.6';
+export const TOOL = 'pexlink 1.1';
 const MAGIC = [0x50, 0x45, 0x58, 0x1a];
+const FORMAT_MAJOR = 1, FORMAT_MINOR = 1;
 const HEADER_SIZE = 92;
 const CRC_OFF = 72;
 
@@ -573,7 +574,7 @@ export async function linkElf(elfBytes, opts = {}) {
   const fileSize = sigOff;
   const feats = opts.features == null ? FEATURES[target] : (opts.features >>> 0);
   let hdr = Uint8Array.from(MAGIC);
-  hdr = concat([hdr, pack('HHHHI', [1, 0, HEADER_SIZE, TARGETS[target], fileSize])]);
+  hdr = concat([hdr, pack('HHHHI', [FORMAT_MAJOR, FORMAT_MINOR, HEADER_SIZE, TARGETS[target], fileSize])]);
   hdr = concat([hdr, pack('IHHII', [feats, api.api.major, api.api.minor, flags >>> 0, moduleVersion])]);
   hdr = concat([hdr, pack('IIIIIII', [img.length, textSize, roSize >>> 0, dataSize >>> 0, bssSize >>> 0, stack >>> 0, entry])]);
   hdr = concat([hdr, pack('IIII', [nsec, HEADER_SIZE, imageOff, 0])]);

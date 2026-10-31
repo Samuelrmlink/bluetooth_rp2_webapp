@@ -10,7 +10,7 @@ test('thumb listing names a known push, and the map records the install formula'
   assert.match(dis, /<pex_main>:/);
   assert.match(dis, /push \{r7, lr\}/);
   const map = renderMap({
-    tool: 'pexlink 0.6', name: 'hello', arch: 'm33', imageOff: 0x80,
+    tool: 'pexlink 1.1', name: 'hello', arch: 'm33', imageOff: 0x80,
     text: 4, ro: 0, data: 0, bss: 0, symbols: [{ name: 'pex_main', value: 1, kind: 'T' }],
   });
   assert.match(map, /0x10400000 \+ partition_offset \+ image_off/);

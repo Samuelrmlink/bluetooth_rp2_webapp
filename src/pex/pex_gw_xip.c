@@ -38,8 +38,6 @@
 #if CONFIG_SD
 #include "sd/sd_api.h"
 #include "sd/sd_jobs.h"
-#include "pex_sd_read.h"
-#include "sd/sd_store.h"
 #endif
 
 #if CONFIG_PEX_XIP
@@ -155,24 +153,33 @@ int pex_gw_install_path(const char *name_or_path) {
 }
 
 /* ---- the SD card ------------------------------------------------------------------- */
-/* Load reads the whole file into the pool. Install streams through the 4 KB
- * transfer ring: after OPEN it waits until a ring is free, then pex_install
- * reads the card directly. */
+/* Load reads the whole file into the pool. Install pushes each completed read
+ * (at most SDJ_BUF) into pex_install_write and does not allocate the file.
+ * A session with no completed read for 8 seconds is aborted. */
 #if CONFIG_SD
+extern int pex__errcode;
+
 typedef struct {
-    int stage;                      /* 0 idle, 1 open, 2 read (load), 3 wait for a ring (install) */
+    int stage;                      /* 0 idle, 1 open, 2 read */
     bool install;
     bool posted;
     uint32_t token;
     int file;
     uint32_t size, got;
-    uint8_t *buf;                   /* pex_alloc_host: long-term, freed at the end */
+    uint8_t *buf;                   /* load only: pex_alloc_host, freed at the end */
+    uint64_t idle_us;               /* last completed read, or begin */
+    pex_install_t *sess;
     char path[SDJ_PATH_MAX + 1];
     char as[24];
 } sdload_t;
 static sdload_t s_sd;
 
 static void sd_done(int rc, const char *name) {
+    if (s_sd.sess) {
+        pex_install_t *s = s_sd.sess;
+        s_sd.sess = NULL;
+        pex_install_abort(s);
+    }
     char ev[220];
     if (rc >= 0) {
         snprintf(ev, sizeof ev, "{\"op\":\"%s\",\"path\":\"sd:/%s\",\"ok\":true,\"name\":\"%s\"}",
@@ -214,23 +221,17 @@ int pex_gw_sd_begin(const char *path, const char *as, bool install) {
 
 void pex_gw_sd_poll(void) {
     if (!s_sd.stage) { return; }
+    if (s_sd.sess && s_sd.idle_us && time_us_64() - s_sd.idle_us > 8000000ull) {
+        if (s_sd.posted) {
+            sdj_abandon(s_sd.token);
+            s_sd.posted = false;
+        }
+        pex_seterr(PEX_EIO, "no SD read for 8 seconds");
+        sd_done(PEX_EIO, NULL);
+        return;
+    }
     sdj_t j;
     if (!s_sd.posted) {
-        if (s_sd.stage == 3) {
-            /* Both rings can be held by card GETs. The main loop has to run
-             * HTTP before one is free, so a miss waits for the next pass. */
-            int ring = sd_xfer_borrow();
-            if (ring < 0) { return; }
-            sd_xfer_return(ring);
-            pex_sd_cursor_t cur = { .file = s_sd.file, .size = s_sd.size, .pos = 0, .pos_valid = 0 };
-            pex_reader_t rd = { pex_sd_pread, &cur, s_sd.size };
-            int rc = pex_install(&rd, 0);
-            char name[24] = "";
-            pex_installed_t in;
-            if (rc >= 0 && pex_installed(rc, &in) == PEX_OK) { snprintf(name, sizeof name, "%s", in.name); }
-            sd_done(rc, name);
-            return;
-        }
         memset(&j, 0, sizeof j);
         if (s_sd.stage == 1) {
             j.op = SDJ_OPEN;
@@ -265,7 +266,14 @@ void pex_gw_sd_poll(void) {
         }
         s_sd.size = (uint32_t)j.size;
         if (s_sd.install) {
-            s_sd.stage = 3;
+            s_sd.sess = pex_install_begin(0);
+            if (!s_sd.sess) {
+                int rc = pex__errcode ? pex__errcode : PEX_ENOMEM;
+                sd_done(rc, NULL);
+                return;
+            }
+            s_sd.idle_us = time_us_64();
+            s_sd.stage = 2;
             return;
         }
         s_sd.buf = pex_alloc_host(s_sd.size);
@@ -282,6 +290,36 @@ void pex_gw_sd_poll(void) {
     }
     uint32_t n = (uint32_t)j.rc;
     if (n > s_sd.size - s_sd.got) { n = s_sd.size - s_sd.got; }
+    if (s_sd.install) {
+        /* The job buffer is valid until sdj_finish. PEX_DONE means the build
+         * is already installed: do not read the rest of the card. */
+        int rc = pex_install_write(s_sd.sess, sdj_buf(), n);
+        sdj_finish(s_sd.token);
+        s_sd.idle_us = time_us_64();
+        s_sd.got += n;
+        if (rc != PEX_OK && rc != PEX_DONE) {
+            pex_install_t *s = s_sd.sess;
+            s_sd.sess = NULL;
+            int e = pex_install_end(s);
+            sd_done(e < 0 ? e : rc, NULL);
+            return;
+        }
+        if (n == 0 && s_sd.got < s_sd.size && rc != PEX_DONE) {
+            pex_seterr(PEX_EIO, "short read at %lu of %lu", (unsigned long)s_sd.got, (unsigned long)s_sd.size);
+            sd_done(PEX_EIO, NULL);
+            return;
+        }
+        if (rc == PEX_DONE || s_sd.got >= s_sd.size) {
+            pex_install_t *s = s_sd.sess;
+            s_sd.sess = NULL;
+            int slot = pex_install_end(s);
+            char name[24] = "";
+            pex_installed_t in;
+            if (slot >= 0 && pex_installed(slot, &in) == PEX_OK) { snprintf(name, sizeof name, "%s", in.name); }
+            sd_done(slot, name);
+        }
+        return;
+    }
     memcpy(s_sd.buf + s_sd.got, sdj_buf(), n);
     sdj_finish(s_sd.token);
     s_sd.got += n;
@@ -291,7 +329,6 @@ void pex_gw_sd_poll(void) {
         return;
     }
     if (s_sd.got < s_sd.size) { return; }
-    /* A load. Install streams from stage 3 and does not stage the file. */
     pex_load_opts_t o = { .name = s_sd.as[0] ? s_sd.as : NULL };
     int rc;
     char name[24] = "";
