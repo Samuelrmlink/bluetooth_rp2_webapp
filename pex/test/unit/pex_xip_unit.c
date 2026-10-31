@@ -10,8 +10,10 @@
  * un-relocated), and loads. The modules are synthesised (any size, model A
  * with RO relocations to code and to RW across many sectors).
  *
- *   gcc -DPEX_FORCE_TARGET=2 -DPEX_FORCE_FEATURES=5 -I pex/runtime -I pex/sdk/include -I <gen> \
- *       pex_xip_unit.c pex_core.c pex_load.c pex_mem.c pex_sched.c pex_hash.c pex_xip.c groups/pex_json.c \
+ *   gcc -DPEX_FORCE_TARGET=2 -DPEX_FORCE_FEATURES=5 -DPEX_SD_READ_TEST \
+ *       -I pex/runtime -I pex/sdk/include -I src/pex -I <gen> \
+ *       pex_xip_unit.c pex_core.c pex_load.c pex_mem.c pex_sched.c pex_hash.c pex_xip.c \
+ *       src/pex/pex_sd_read.c groups/pex_json.c \
  *       <gen>/pex_host_{core,log,mem,sched,pex,json}.c
  */
 #include <stdarg.h>
@@ -19,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "pex_internal.h"
+#include "pex_sd_read.h"
 
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FAIL %s:%d %s ", __FILE__, __LINE__, #c); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -38,6 +41,55 @@ uint64_t pex_tramp(uint32_t sb, uint32_t fn, uint32_t a0, uint32_t a1, uint32_t 
 }
 uintptr_t pex_get_sp(void) { return 0; }
 size_t pex_scratch_avail(void);
+
+/* Card reader: pex_sd_read.c pumps sdw_service. The job stays posted until then,
+ * and each READ is at most 4 KB, including a later seek back to the header. */
+static const uint8_t *s_fix;
+static uint32_t s_fix_n, s_pos, s_max_read;
+static int s_job_on, s_job_done, s_pos_known, s_seeks, s_reads, s_services;
+static sdj_t s_job;
+static uint8_t s_job_buf[4096];
+
+bool sdj_post(const sdj_t *req, uint32_t *token) {
+    if (s_job_on || !req || !token) { return false; }
+    s_job = *req;
+    s_job.rc = -1;
+    s_job_on = 1;
+    s_job_done = 0;
+    *token = 1;
+    return true;
+}
+enum sdj_state sdj_poll(uint32_t token, sdj_t *out) {
+    if (!s_job_on || token != 1) { return SDJ_IDLE; }
+    if (!s_job_done) { return SDJ_POSTED; }
+    if (out) { *out = s_job; }
+    return SDJ_DONE;
+}
+void sdj_finish(uint32_t token) { (void)token; s_job_on = 0; s_job_done = 0; }
+uint8_t *sdj_buf(void) { return s_job_buf; }
+void sdw_service(void) {
+    if (!s_job_on || s_job_done) { return; }
+    s_services++;
+    if (s_job.op == SDJ_SEEK) {
+        s_seeks++;
+        if (s_job.pos > s_fix_n) { s_job.rc = -1; }
+        else { s_pos = (uint32_t)s_job.pos; s_pos_known = 1; s_job.rc = 0; }
+    } else if (s_job.op == SDJ_READ) {
+        s_reads++;
+        uint32_t n = s_job.len > 4096 ? 4096 : s_job.len;
+        if (n > s_max_read) { s_max_read = n; }
+        if (!s_pos_known || s_pos > s_fix_n) { s_job.rc = -1; }
+        else {
+            if (n > s_fix_n - s_pos) { n = s_fix_n - s_pos; }
+            memcpy(s_job_buf, s_fix + s_pos, n);
+            s_pos += n;
+            s_job.rc = (int)n;
+        }
+    } else {
+        s_job.rc = -1;
+    }
+    s_job_done = 1;
+}
 
 /* ---- NOR flash with power cuts -------------------------------------------------- */
 #define FSEC 40u                       /* partition sectors */
@@ -265,16 +317,43 @@ int main(void) {
     s = pex_install_mem(a1.p, a1.n, 0);
     CHECK(s == 1, "install a1 -> %d %s", s, pex_errmsg());
     pex_installed_t in;
-    CHECK(pex_installed_find("a1", &in) == 1 && !in.xip_ready, "a1 installed, RW not reserved before a reboot");
+    CHECK(pex_installed_find("a1", &in) == 1 && in.xip_ready, "a1 installed, RW reserved without a reboot");
     /* model A in flash differs from the file (relocated) but verifies */
     CHECK(memcmp(s_flash + in.offset, a1.p, a1.n) != 0, "a1 is relocated in flash");
     CHECK(pex_xip_verify("a1") == PEX_OK, "a1 verifies in place: %s", pex_errmsg());
     CHECK(pex_installed_find("b1", &in) == 0 && memcmp(s_flash + in.offset, b1.p, b1.n) == 0, "b1 stored as is");
     int err;
+    CHECK(pex_installed_find("a1", &in) >= 0, "a1 record");
     pex_mod_t *m = pex_load_installed("a1", NULL, &err);
     pex_info_t inf;
-    CHECK(m && pex_info(m, &inf) == 0 && !inf.xip, "a1 before a reboot: RAM copy");
+    CHECK(m && pex_info(m, &inf) == 0 && inf.xip && inf.code == in.code, "a1 in place without a reboot");
+    /* a second model A while the first is loaded */
+    file_t a2 = mk("a2", 4000, 1000, 800, 200, 0, 23, 5);
+    pex_xip_stats_t room;
+    pex_xip_stats(&room);
+    uint32_t area_one = room.rw_area, room_one = room.rw_room;
+    s = pex_install_mem(a2.p, a2.n, 0);
+    CHECK(s >= 0, "install a2 while a1 is loaded -> %d %s", s, pex_errmsg());
+    CHECK(pex_installed_find("a1", &in) >= 0 && in.xip_ready, "a1 still ready");
+    CHECK(pex_installed_find("a2", &in) >= 0 && in.xip_ready, "a2 ready without a reboot");
+    pex_mod_t *ma = pex_load_installed("a2", NULL, &err);
+    CHECK(ma && pex_info(ma, &inf) == 0 && inf.xip, "a2 in place while a1 is loaded: %s", pex_errmsg());
+    if (ma) { pex_unload(ma); }
+    pex_xip_stats(&room);
+    CHECK(room.rw_area > area_one && room.rw_room < room_one, "a2 grew the suffix (%u -> %u, room %u -> %u)",
+          area_one, room.rw_area, room_one, room.rw_room);
+    uint32_t area_both = room.rw_area, room_both = room.rw_room;
+    CHECK(pex_uninstall("a2") == PEX_OK, "uninstall the highest: %s", pex_errmsg());
+    pex_xip_stats(&room);
+    CHECK(room.rw_area == area_one && room.rw_room > room_both, "highest uninstall returns the tail (%u, room %u)",
+          room.rw_area, room.rw_room);
+    CHECK(pex_install_mem(a2.p, a2.n, 0) >= 0, "a2 again: %s", pex_errmsg());
     if (m) { pex_unload(m); }
+    CHECK(pex_uninstall("a1") == PEX_OK, "uninstall the lower module: %s", pex_errmsg());
+    pex_xip_stats(&room);
+    CHECK(room.rw_area == area_both, "a hole in the middle does not shrink the suffix (%u vs %u)", room.rw_area, area_both);
+    CHECK(pex_uninstall("a2") == PEX_OK, "uninstall a2: %s", pex_errmsg());
+    CHECK(pex_install_mem(a1.p, a1.n, 0) >= 0, "a1 reinstalled: %s", pex_errmsg());
     boot();
     CHECK(pex_installed_find("a1", &in) == 1 && in.xip_ready, "a1 after a reboot: RW reserved");
     m = pex_load_installed("a1", NULL, &err);
@@ -441,6 +520,80 @@ int main(void) {
     CHECK(pex_uninstall("u2") == PEX_OK, "clean uninstall after the cut: %s", pex_errmsg());
     CHECK(pex_installed_find("u2", NULL) == PEX_ENOENT, "u2 removed");
     all_good("index without scratch");
+
+    /* 9. suffix: no room refuses before a write; a failed commit rolls it back */
+    memset(s_flash, 0xFF, sizeof s_flash);
+    boot();
+    file_t grow1 = mk("s1", 1500, 100, 200, 100, 0, 301, 4);
+    file_t grow2 = mk("s2", 1500, 100, 400, 4000, 0, 302, 4);
+    CHECK(pex_install_mem(grow1.p, grow1.n, 0) >= 0, "s1: %s", pex_errmsg());
+    pex_xip_stats(&st);
+    uint32_t saved_area = st.rw_area;
+    int saved_n = (int)st.entries;
+    long op0 = s_ops;
+    CHECK(pex_install_mem(grow2.p, grow2.n, 0) >= 0, "s2 grows: %s", pex_errmsg());
+    long delta = s_ops - op0;
+    /* The last op is the index program. A torn program can still be a valid
+     * index: the CRC covers the header and the entries, not the zero tail.
+     * Cutting the erase before it cannot publish the new copy. */
+    CHECK(delta >= 2, "s2 took %ld flash ops", delta);
+    CHECK(pex_uninstall("s2") == PEX_OK, "drop s2: %s", pex_errmsg());
+    pex_xip_stats(&st);
+    CHECK(st.rw_area == saved_area, "suffix back to s1 (%u vs %u)", st.rw_area, saved_area);
+    s_cut = s_ops + delta - 2;
+    int grow_rc = pex_install_mem(grow2.p, grow2.n, 0);
+    CHECK(grow_rc == PEX_EIO, "cut on the index erase: %d %s", grow_rc, pex_errmsg());
+    pex_xip_stats(&st);
+    CHECK(st.rw_area == saved_area && pex_installed_find("s2", NULL) == PEX_ENOENT,
+          "failed commit restored the suffix (%u) and left s2 out", st.rw_area);
+    s_cut = -1;
+    s_dead = 0;
+    boot();
+    pex_xip_stats(&st);
+    CHECK(st.rw_area == saved_area && st.entries == (uint32_t)saved_n, "flash index never took s2");
+    void *fillb[128];
+    int nf2 = 0;
+    while (nf2 < 128 && pex__pool_gap() > 3000) {
+        void *p = pex_alloc_host(2048);
+        if (!p) { break; }
+        fillb[nf2++] = p;
+    }
+    CHECK(pex__pool_gap() <= 3000 && pex_scratch_avail() > sizeof(pex__hdr_t),
+          "gap %u still holds the install header", (unsigned)pex__pool_gap());
+    file_t huge = mk("huge", 800, 0, 8, 20000, 0, 303, 0);
+    int nrc = pex_install_mem(huge.p, huge.n, 0);
+    CHECK(nrc == PEX_ENOMEM, "no room for RW: %d %s", nrc, pex_errmsg());
+    CHECK(strstr(pex_errmsg(), "RW reservation") != NULL, "msg: %s", pex_errmsg());
+    pex_xip_stats(&st);
+    CHECK(st.rw_area == saved_area && st.entries == (uint32_t)saved_n && pex_installed_find("huge", NULL) == PEX_ENOENT,
+          "ENOMEM wrote nothing (area %u entries %u)", st.rw_area, st.entries);
+    for (int i = 0; i < nf2; i++) { pex__free(fillb[i]); }
+    all_good("rw room");
+
+    /* 10. an sd:/ install streams 4 KB slices and does not allocate the file */
+    memset(s_flash, 0xFF, sizeof s_flash);
+    boot();
+    file_t card = mk("card", 9000, 2000, 300, 100, 0, 401, 6);
+    CHECK(card.n > 4096, "fixture spans a second slice (%u)", card.n);
+    s_fix = card.p;
+    s_fix_n = card.n;
+    s_pos = 0;
+    s_pos_known = 0;
+    s_seeks = s_reads = s_services = 0;
+    s_max_read = 0;
+    pex_mem_stats_t mb, ma_s;
+    pex_pool_stats(&mb);
+    pex_sd_cursor_t cur = { .file = 1, .size = card.n, .pos = 0, .pos_valid = 0 };
+    pex_reader_t rd = { pex_sd_pread, &cur, card.n };
+    int cr = pex_install(&rd, 0);
+    pex_pool_stats(&ma_s);
+    CHECK(cr >= 0, "streamed install: %d %s", cr, pex_errmsg());
+    CHECK(pex_installed_find("card", &in) >= 0 && in.xip_ready, "card is ready");
+    CHECK(s_reads > 1 && s_max_read <= 4096 && s_seeks >= 1 && s_services >= s_reads,
+          "slices %d max %u seeks %d services %d", s_reads, s_max_read, s_seeks, s_services);
+    uint32_t used = mb.pool_free - ma_s.pool_free;
+    CHECK(used < card.n / 2, "pool drop %u is the RW suffix, not the %u-byte file", used, card.n);
+    all_good("sd stream");
 
     printf("%d/%d checks passed\n", checks - fails, checks);
     return fails != 0;

@@ -498,9 +498,9 @@ static void xip_suite(const char *model) {
     pex_info_t inf;
     if (m) { pex_info(m, &inf); }
     if (!pic) {
-        /* model A: its RW address is reserved at mount -- before a "reboot" it loads into RAM */
-        result("xip.reloc_ram_until_reboot", m && !inf.xip && pex_call0(m, sym(m, "big_check")) == 0, "%s",
-               m ? (inf.xip ? "in place?" : "") : pex_errmsg());
+        /* model A: install reserves the RW suffix before any sector write */
+        result("xip.reloc_ready_without_reboot", m && inf.xip && pex_call0(m, sym(m, "big_check")) == 0, "%s",
+               m ? (inf.xip ? "" : "not in place") : pex_errmsg());
         if (m) { pex_unload(m); }
         result("xip.remount", pex_xip_mount() == PEX_OK, "%s", pex_errmsg());
         m = pex_load_installed("big", NULL, &err);
@@ -526,7 +526,6 @@ static void xip_suite(const char *model) {
     /* arith in place: every relocation kind, ctor/dtor, libgcc -- signed */
     snprintf(nb, sizeof nb, "sig/%s_arith.%s.pex", model, TGT);
     slot = install_b(nb, 0);
-    if (!pic) { pex_xip_mount(); }
     m = slot >= 0 ? pex_load_installed("arith", NULL, &err) : NULL;
     if (m) { pex_info(m, &inf); }
     result("xip.arith_in_place", m && inf.xip && pex_call0(m, sym(m, "arith_selftest")) == 0 &&
@@ -537,7 +536,6 @@ static void xip_suite(const char *model) {
     /* counter: model B instances share the flash copy */
     snprintf(nb, sizeof nb, "%s/counter.%s.pex", model, TGT);
     slot = install_b(nb, 0);
-    if (!pic) { pex_xip_mount(); }
     pex_mod_t *a = pex_load_installed("counter", NULL, &err), *b = pex_load_installed("counter", NULL, &err);
     if (a && b) {
         pex_info_t ia, ib;
@@ -556,7 +554,6 @@ static void xip_suite(const char *model) {
     /* app on the loop, from flash */
     snprintf(nb, sizeof nb, "%s/app.%s.pex", model, TGT);
     install_b(nb, 0);
-    if (!pic) { pex_xip_mount(); }
     m = pex_load_installed("app", NULL, &err);
     if (m) {
         pex_start(m, "{\"ticks\":4,\"period\":5}");
@@ -573,7 +570,6 @@ static void xip_suite(const char *model) {
     /* a fault in flash code is attributed */
     snprintf(nb, sizeof nb, "%s/crash.%s.pex", model, TGT);
     install_b(nb, 0);
-    if (!pic) { pex_xip_mount(); }
     m = pex_load_installed("crash", NULL, &err);
     if (m) {
         pex_info(m, &inf);
@@ -600,7 +596,6 @@ static void xip_suite(const char *model) {
     pex_uninstall("counter");
     int mv = pex_xip_compact();
     pex_xip_stats(&st);
-    if (!pic) { pex_xip_mount(); }
     m = pex_load_installed("big", NULL, &err);
     result("xip.compacted_still_runs", mv >= 1 && st.largest == st.free && m && pex_call0(m, sym(m, "big_check")) == 0,
            "moved %d, free %lu largest %lu %s", mv, (unsigned long)st.free, (unsigned long)st.largest, m ? "" : pex_errmsg());

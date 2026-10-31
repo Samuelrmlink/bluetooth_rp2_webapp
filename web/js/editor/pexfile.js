@@ -604,13 +604,6 @@ export function sdLoadPath(editorPath) {
   return `sd:/${p.slice(3)}`;
 }
 
-export const POOL_BYTES = 48 * 1024;
-
-/** The largest file an sd: install can stage. The pool is 48 KB; a known free block is tighter. */
-export function sdInstallCap(poolLargest) {
-  return typeof poolLargest === 'number' ? poolLargest : POOL_BYTES;
-}
-
 export function verifiedPexRel(name, arch) {
   return `sd/pex/good/${name}.${arch}.pex`;
 }
@@ -621,16 +614,13 @@ export function verifiedNoteRel(name, arch) {
 
 /**
  * The one question before an install.
- * `loaded` asks to unload and replace. A file larger than the pool cannot
- * be installed from the card: the firmware reads that file into the RAM
- * pool. The PEX partition is where the installed image goes, and the file
- * is not copied to LittleFS to get there.
+ * `loaded` asks to unload and replace. An sd: install streams the file
+ * through a 4 KB window, so the file size is not the pool limit. The PEX
+ * partition is where the installed image goes, and the file is not copied
+ * to LittleFS to get there. A RAM load is a different question (ramDecision).
  */
-export function flashConfirm({ name, arch, loaded = false, bytes = 0, poolCap = POOL_BYTES, sdPath = '' }) {
+export function flashConfirm({ name, arch, loaded = false, sdPath = '' }) {
   const signed = name === 'anker' ? ' This replaces the running signed module.' : '';
-  if (bytes > poolCap && sdPath) {
-    return `${name}.${arch}.pex is ${bytes} bytes. The PEX RAM pool has ${poolCap} bytes in one piece, so this file cannot be installed from the card. It is not copied to internal storage.`;
-  }
   if (loaded) {
     return `Unload ${name} and replace the installed module?${signed} Cancel leaves it loaded. The new file stays on the card.`;
   }

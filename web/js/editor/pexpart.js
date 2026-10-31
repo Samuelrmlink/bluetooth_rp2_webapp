@@ -39,6 +39,7 @@ export function partitionModel(info) {
     size, sectors, indexBytes, used: Math.max(0, data - free), free, largest,
     fragmented: free > largest,
     rwArea: Number(info?.rw_area) || 0,
+    rwRoom: Number(info?.rw_room) || 0,
     seq: info?.seq,
     moves: Number(info?.moves) || 0,
     modules, cells,
@@ -109,7 +110,7 @@ export class PexPartition {
     const act = partitionActions(mod, mod ? states[mod.name] : '');
     head.append(
       el('div', 'ed-px-sum',
-        `${bytes(m.size)} partition · index ${bytes(m.indexBytes)} · used ${bytes(m.used)} · free ${bytes(m.free)} · largest run ${bytes(m.largest)} · RW area ${bytes(m.rwArea)}`),
+        `${bytes(m.size)} partition · index ${bytes(m.indexBytes)} · used ${bytes(m.used)} · free ${bytes(m.free)} · largest run ${bytes(m.largest)} · RW area ${bytes(m.rwArea)} · RW room ${bytes(m.rwRoom)}`),
       el('button', 'pane-btn ed-px-start', 'Start'),
       el('button', 'pane-btn ed-px-stop', 'Stop'),
       el('button', 'pane-btn ed-px-remove', 'Uninstall'),

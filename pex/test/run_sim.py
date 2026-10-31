@@ -104,10 +104,13 @@ def unit_tests(work):
             os.path.join(gen, f"pex_host_{g}.c")])
     rt = os.path.join(PEX, "runtime")
     exe = os.path.join(work, "pex_xip_unit")
-    r = sh(["gcc", "-O1", "-Wall", "-Wextra", "-DPEX_FORCE_TARGET=2", "-DPEX_FORCE_FEATURES=5", "-fsanitize=address,undefined",
-            "-I", rt, "-I", os.path.join(PEX, "sdk", "include"), "-I", gen, os.path.join(HERE, "unit", "pex_xip_unit.c")]
+    r = sh(["gcc", "-O1", "-Wall", "-Wextra", "-DPEX_FORCE_TARGET=2", "-DPEX_FORCE_FEATURES=5", "-DPEX_SD_READ_TEST",
+            "-fsanitize=address,undefined",
+            "-I", rt, "-I", os.path.join(PEX, "sdk", "include"), "-I", os.path.join(os.path.dirname(PEX), "src", "pex"),
+            "-I", gen, os.path.join(HERE, "unit", "pex_xip_unit.c")]
            + [os.path.join(rt, f) for f in ("pex_core.c", "pex_load.c", "pex_mem.c", "pex_sched.c", "pex_hash.c", "pex_xip.c",
                                           os.path.join("groups", "pex_json.c"))]
+           + [os.path.join(os.path.dirname(PEX), "src", "pex", "pex_sd_read.c")]
            + [os.path.join(gen, f"pex_host_{g}.c") for g in ("core", "log", "mem", "sched", "pex", "json")] + ["-o", exe])
     if r.returncode:
         return out + [("unit.xip.build", False, r.stderr[-300:])]

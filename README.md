@@ -38,7 +38,7 @@ UART is not an SMP transport. USB serial is not one either: `pico_enable_stdio_u
 
 Native freestanding C for a device protocol: Anker, Pinecil, a switch, a sensor, another device. A module calls the firmware only through the host API (`pex/host_api.json`, `pex/sdk/include/pex.h`). It does not call the pico-sdk.
 
-A module usually executes in place from the PEX flash partition. A smaller binary can run from the RAM pool instead. That pool is 48 KB on the `pico2w` and `pico2w_sd` images, so a module the size of the signed Anker app stays in flash. The format is [docs/pex-format.md](docs/pex-format.md).
+A module usually executes in place from the PEX flash partition. A smaller binary can run from the RAM pool instead. That pool is 64 KB on the `pico2w` and `pico2w_sd` images (the Lua arena on those images is 100 KB), so a module the size of the signed Anker app stays in flash. The format is [docs/pex-format.md](docs/pex-format.md).
 
 Stop ends the module's tasks and leaves the code loaded, including any ops it registered. Unload runs deinit and drops those ops. The file in `pex/` and an installed copy in the partition stay until uninstall. The editor's Stop button does both. Lua's `pex.stop` only stops, so a script can pause a module and start it again.
 

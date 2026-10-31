@@ -21,7 +21,9 @@ config PEX_POOL_KB
       and from the C heap. The shipped configs take it out of the Lua
       arena's budget (CONFIG_LUA_HEAP_KB) now that native modules do the
       work and Lua is a launcher; installed modules (XIP) need only their
-      RW here.
+      RW here. The bench image is 64 KB, with CONFIG_LUA_HEAP_KB at 100:
+      16 KB moved across, and the Lua-plus-pool sum stays 164 KB so the
+      C heap gap does not change.
 
       0 keeps the v1 behaviour: a pool of up to PEX_HEAP_POOL_KB taken from
       the C heap on first use.

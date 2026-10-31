@@ -235,7 +235,7 @@ typedef struct {
     uint32_t code_size, rw_size;
     uintptr_t code;                /* where its code runs */
     bool signed_, loaded;          /* loaded: a module runs from this copy now */
-    bool xip_ready;                /* model A: its RW address is reserved (else it loads into RAM until a reboot) */
+    bool xip_ready;                /* model A: the live suffix covers its RW (else a load copies it into RAM) */
 } pex_installed_t;
 int pex_installed(int i, pex_installed_t *out);            /* i-th; PEX_ENOENT past the end */
 int pex_installed_find(const char *name, pex_installed_t *out);   /* slot, or PEX_ENOENT */
@@ -253,6 +253,7 @@ typedef struct {
     uint32_t entries, seq;
     uint32_t moves, recovered;     /* since mount: files moved; 1 if a move was resumed at mount */
     uint32_t rw_area;              /* bytes reserved at the pool's top for model A RW */
+    uint32_t rw_room;              /* gap under that suffix: what the next install can still reserve */
 } pex_xip_stats_t;
 int pex_xip_stats(pex_xip_stats_t *out);
 /* Read the index again (pex_init does this). Resumes an interrupted move.
