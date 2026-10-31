@@ -1022,7 +1022,7 @@ merge the SD image is 861.6 KB of the 864 KiB slot: **~22.6 KB left**.
 **Ops** (0.7): `pex.install {name | path}` (a name means
 `lfs:/pex/<name>.<arch>.pex`; `sd:/...` is read asynchronously), 
 `pex.installed` (the partition: size, free, largest run, each module with
-offset, size, model, signed, loaded, xip_ready), `pex.uninstall {name}`
+offset, code_addr, size, model, signed, loaded, xip_ready), `pex.uninstall {name}`
 (refused while it runs from flash), `pex.compact`, `pex.verify {name}` (CRC
 and signature of the installed copy, in place). `pex.load {name}` prefers
 the installed copy (`xip:<name>`; `{ram:true}` loads the lfs file instead);
@@ -1032,7 +1032,11 @@ name | error, msg}` -- the file is read into the pool through the storage
 worker's job slot (a long-term block, freed afterwards), then loaded or
 installed. Autostart and `require` find installed modules first.
 `pex.list` adds `pool.static` and `xip {size, free, largest, modules,
-rw_area, flash_ops}`.
+rw_area, flash_ops}`. Each loaded module in that list includes `code_addr`
+and `rw_addr`. Those are the instance: a RAM copy reports its pool address.
+`pex.installed` `code_addr` stays the flash execution address (model A: the
+relocated address stored in the index; model B: `exec_base + sector + image_off`,
+because that file is not relocated and its index `code_base` stays 0).
 
 **Where the partition is seen.** Booted from an A/B slot, the ROM maps the
 slot at 0x10000000 through QMI ATRANS0 and leaves the rest of the first 4 MB

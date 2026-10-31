@@ -279,6 +279,21 @@ int main(void) {
     CHECK(pex_installed_find("a1", &in) == 1 && in.xip_ready, "a1 after a reboot: RW reserved");
     m = pex_load_installed("a1", NULL, &err);
     CHECK(m && pex_info(m, &inf) == 0 && inf.xip && inf.code == in.code, "a1 in place");
+    {
+        char js[2048], list[2048], want[80];
+        pex_installed_t b1in;
+        CHECK(pex_installed_json(js, sizeof js) > 0, "installed json");
+        snprintf(want, sizeof want, "\"code_addr\":%lu,", (unsigned long)in.code);
+        CHECK(strstr(js, want) != NULL, "installed a1 flash address %s", want);
+        CHECK(pex_installed_find("b1", &b1in) == 0 && b1in.code != 0, "b1 flash address");
+        snprintf(want, sizeof want, "\"code_addr\":%lu,", (unsigned long)b1in.code);
+        CHECK(strstr(js, want) != NULL, "installed b1 flash address %s", want);
+        CHECK(pex_list_json(list, sizeof list) > 0, "list json");
+        snprintf(want, sizeof want, "\"code_addr\":%lu,", (unsigned long)inf.code);
+        CHECK(strstr(list, want) != NULL, "list code %s", want);
+        snprintf(want, sizeof want, "\"rw_addr\":%lu,", (unsigned long)inf.rw);
+        CHECK(strstr(list, want) != NULL, "list rw %s", want);
+    }
     pex_mod_t *m2 = pex_load_installed("a1", NULL, &err);
     CHECK(m2 && pex_info(m2, &inf) == 0 && !inf.xip, "a second a1: RAM copy (the flash copy is bound to one RW)");
     if (m2) { pex_unload(m2); }
