@@ -1,0 +1,17 @@
+menu "Filesystem"
+
+config FS_LAYOUT
+    bool "Flash-layout mover (1 MiB slots, 512 KiB PEX)"
+    default n
+    depends on SD && OTA
+    help
+      One-shot mover for the Pico 2 W 4 MB part. The image still links into
+      the 864 KiB slot and still mounts LittleFS at 2 MiB. It relocates the
+      filesystem, the Wi-Fi blob and the PEX region only when
+      sd:/.layout-migrate/ARM is present and the running image has been
+      bought. It does not write the new partition table on that boot.
+
+      Leave this off in every other defconfig. Turning it on does not change
+      partitions.json, FS_FLASH_OFF, or the linker length.
+
+endmenu

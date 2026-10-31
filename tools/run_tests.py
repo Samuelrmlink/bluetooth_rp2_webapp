@@ -1379,6 +1379,51 @@ def t_ota_partition_layout():
                   f"{d['FS_SIZE'] // 1024} KB @ 2048 KB, PEX {d['FS_PEX_SIZE'] // 1024} KB @ {d['FS_PEX_OFF'] // 1024} KB")
 
 
+def t_fs_layout():
+    """The mover's addresses abut, a started move never formats 0x200000, and
+    the picobin parser accepts partitions-next.json only.
+
+    partitions.json, fs.h and the linker length stay on the 864 KiB / 2 MiB
+    map. This image mounts the old volume until the SD state says otherwise,
+    so those four copies are not switched here (t_ota_partition_layout)."""
+    import tempfile
+    fsc = open(os.path.join(ROOT, "src/fs/fs.c")).read()
+    if "g_freeze_old" not in fsc or "not formatting (layout mover decides)" not in fsc:
+        return False, "fs.c is missing the layout mount guard"
+    hdr = open(os.path.join(ROOT, "src/fs/fs.h")).read()
+    if "FS_FLASH_OFF (2u * 1024u * 1024u)" not in hdr:
+        return False, "FS_FLASH_OFF is no longer 2 MiB"
+    ld = open(os.path.join(ROOT, "linker/pico_flash_region.ld")).read()
+    if "LENGTH = 864 * 1024" not in ld:
+        return False, "linker FLASH length is no longer 864 KiB"
+    picotool = os.environ.get("PICOTOOL") or \
+        "/home/samuel/Work/bluetooth_rp2_webapp/build-bnep/_deps/picotool/picotool"
+    if not os.access(picotool, os.X_OK):
+        found = shutil.which("picotool")
+        picotool = found if found and os.access(found, os.X_OK) else None
+    if not picotool:
+        return False, "picotool 2.3.0 not found"
+    d = tempfile.mkdtemp(prefix="btgw_layout_")
+    try:
+        newb = os.path.join(d, "next.bin")
+        oldb = os.path.join(d, "old.bin")
+        rc, out = sh(f"{picotool} partition create partitions-next.json {newb}")
+        if rc:
+            return False, (out.strip().splitlines() or ["picotool next"])[-1][:90]
+        rc, out = sh(f"{picotool} partition create partitions.json {oldb}")
+        if rc:
+            return False, (out.strip().splitlines() or ["picotool old"])[-1][:90]
+        host = os.path.join(d, "host")
+        rc, out = sh("gcc -std=c11 -Wall -Wextra -Werror -Isrc/fs "
+                     f"tools/fs_layout_host.c src/fs/fs_layout_decide.c -o {host} && {host} {newb} {oldb}")
+        if rc:
+            return False, (out.strip().splitlines() or ["host"])[-1][:90]
+        last = out.strip().splitlines()[-1]
+        return True, last
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def t_ota_keys():
     """Only the public key is in the tree; nothing tracked holds private material."""
     hdr = open(os.path.join(ROOT, "src/ota/ota_pubkey.h")).read()
@@ -1460,6 +1505,7 @@ def main():
     step(0, "wg_is_confirmed is declared, reported and consulted", t_wg_confirmed_exists)
     step(0, "DHCP servers bind their own address", t_dhcp_binds_specific_ip)
     step(0, "OTA flash layout is consistent", t_ota_partition_layout)
+    step(0, "layout mover map, decide, and next partition table", t_fs_layout)
     step(0, "OTA keys: public in tree, private out", t_ota_keys)
     step(0, "SMP writes flash from the loop only", t_ota_flash_from_loop_only)
     step(0, "anker model schemas match their filenames", t_anker_model_schemas)
