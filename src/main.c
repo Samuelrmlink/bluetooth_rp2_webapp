@@ -17,12 +17,14 @@
 #include <stdio.h>
 
 #include "pico/stdlib.h"
-#include "pico/cyw43_arch.h"
 #include "hardware/watchdog.h"
 #include "api/api.h"
 #include "ota/ota_slot.h"     /* ota_reboot, for sys.reboot */
 
 #include "autoconf.h"
+#if CONFIG_RADIO_CYW43
+#include "pico/cyw43_arch.h"
+#endif
 #include "app_config.h"
 #include "fs/fs.h"
 #include "fs/fs_migrate.h"
@@ -142,6 +144,7 @@ int main(void) {
         cfg_load();
     }
 
+#if CONFIG_RADIO_CYW43
     /* Brings up cyw43 + lwIP + BTstack on one async_context_poll. */
     if (cyw43_arch_init()) {
         printf("cyw43: init failed -- no Wi-Fi and no Bluetooth this boot\n");
@@ -159,6 +162,7 @@ int main(void) {
         }
 #endif
     }
+#endif
 
 #if CONFIG_NET_MDNS
     /* BEFORE any interface is brought up.
@@ -215,14 +219,18 @@ int main(void) {
      * eth_init(): on SPI the card may share the W5500's bus. */
     sd_init();
 #endif
+#if CONFIG_NET_HTTP_SERVER
     http_server_start();
+#endif
     ops_init_all();
 #if CONFIG_OTA
     /* After the network: the SMP socket serves every interface, and the
      * try-before-you-buy gate inside ota_tick() counts loop passes from here. */
     ota_init();
 #endif
+#if CONFIG_NET_HTTP_SERVER
     printf("http: listening on :80  (ws at /ws)\n");
+#endif
 
     /* A pass longer than this means USB went unserviced long enough to
      * matter. TinyUSB tolerates a few tens of ms; the host starts giving up
@@ -282,7 +290,9 @@ int main(void) {
          * it produced or took for the HTTP side. */
         crumb(CRUMB_LOOP_SD);
         sd_poll();
+#if CONFIG_NET_HTTP_SERVER
         http_sd_pump();
+#endif
 #endif
         /* After the worker's turn, so a note it just queued is in this pass.
          * LittleFS notes are queued on the write itself and leave here too. */
@@ -292,7 +302,9 @@ int main(void) {
         fs_remove_pump();
         fs_watch_poll();
         fs_job_poll();
+#if CONFIG_NET_HTTP_SERVER
         http_jobs_pump();
+#endif
         /* Drives cyw43, lwIP timers and the BTstack run loop in one call. */
 #if CONFIG_NET_WIFI
         /* wifi_poll() makes that same call and THEN advances the station/AP
@@ -303,7 +315,7 @@ int main(void) {
          * complained, because every individual piece was working. */
         crumb(CRUMB_LOOP_WIFI);
         wifi_poll();
-#else
+#elif CONFIG_RADIO_CYW43
         cyw43_arch_poll();
 #endif
 
@@ -352,10 +364,15 @@ int main(void) {
         crumb(CRUMB_LOOP_CFG);
         cfg_tick();
         fs_migrate_tick();
+#if CONFIG_NET_HTTP_SERVER
         /* Coalesce whatever the pass produced into as few segments as possible;
          * the per-line tcp_output() was removed deliberately. */
         crumb(CRUMB_LOOP_WS);
         http_flush_ws();
+#endif
+#if CONFIG_NET_MDNS
+        mdns_browse_poll();
+#endif
         crumb(CRUMB_LOOP_END);
 
         /*

@@ -11,6 +11,7 @@ config OTA
       reverts to the old slot unless the new firmware buys itself after a
       healthy start. Also exposes the os, stat and fs groups. Requires the
       partition table in partitions.json to be provisioned once (tools/
-      provision.sh).
+      provision.sh). The ESP32-C5 image is not this symbol. It is the
+      ESP-IDF project in esp32c5/, and that bootloader swaps ota_0 and ota_1.
 
 endmenu

@@ -3,10 +3,11 @@ menu "Bluetooth"
 config BT_LE
     bool "Bluetooth Low Energy (central)"
     default y
+    depends on RADIO_CYW43
     help
       Scanning, connecting, GATT discovery, read/write/subscribe and SMP
       bonding, via BTstack's gatt_client. This is the transport the project
-      leads with.
+      leads with. On the Pico the controller is the CYW43439 (RADIO_CYW43).
 
 config BT_CLASSIC
     bool "Bluetooth Classic (RFCOMM)"

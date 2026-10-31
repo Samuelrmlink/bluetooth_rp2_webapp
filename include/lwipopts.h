@@ -98,7 +98,7 @@ void sntp_time_set_us(uint32_t sec, uint32_t us);
  * netif to actually receive queries, not just an AP-multicast leftover. */
 #define LWIP_IGMP                   1
 #define LWIP_MDNS_RESPONDER         1
-#define LWIP_MDNS_SEARCH            0
+#define LWIP_MDNS_SEARCH            1
 #define MDNS_MAX_SERVICES           4
 /* mDNS claims one slot per consumer; with WiFi on, the cyw43 STA and AP
    netifs want their own. Set here rather than as a -D, because every value

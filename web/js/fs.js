@@ -22,11 +22,21 @@
 const params = new URLSearchParams(location.search);
 const HOST = params.get('host') || location.hostname || 'localhost';
 const PORT = params.get('port') || location.port || (location.protocol === 'https:' ? 443 : 80);
+const PEER = params.get('peer');
 const SAME_ORIGIN =
   HOST === location.hostname && String(PORT) === String(location.port || (location.protocol === 'https:' ? 443 : 80));
 
+/* ?peer= names a board found by mDNS. Filesystem calls go through this
+ * page's /api/peer/<name>/ proxy. Static paths (an extension script) stay
+ * on the page that is hosting the UI. */
+function withPeer(path) {
+  if (!PEER || !String(path).startsWith('/api/')) return path;
+  return `/api/peer/${encodeURIComponent(PEER)}${path}`;
+}
+
 export function apiUrl(path) {
-  return SAME_ORIGIN ? path : `${location.protocol}//${HOST}:${PORT}${path}`;
+  const p = withPeer(path);
+  return SAME_ORIGIN ? p : `${location.protocol}//${HOST}:${PORT}${p}`;
 }
 
 // The device serves at most 1 MiB per file (FS_FILE_MAX in src/fs/fs.h) and

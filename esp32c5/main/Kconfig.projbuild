@@ -1,0 +1,5 @@
+menu "BTGW ESP32-C5"
+
+comment "Station credentials are cfg/wifi.json on the littlefs partition, the same file the RP2350 store writes. This image does not compile a network in. An empty store does not join."
+
+endmenu

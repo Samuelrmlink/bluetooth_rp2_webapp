@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pexlink -- ELF (linked with a PEX linker script) -> .pex  (spec docs/pex-format.md)
 
-  pexlink.py link  <module.elf> -o <out.pex> --target m33|m0p --model reloc|pic
+  pexlink.py link  <module.elf> -o <out.pex> --target m33|m0p|c5 --model reloc|pic
                    --api pex/host_api.json [--name N] [--version 1.2.3]
                    [--kind lib|app|lua] [--desc TEXT] [--flags reentrant,unload-on-exit,
                    needs-sig,ram-only,xip-ok] [--su FILE.su ...] [--stack-hint N]
@@ -35,9 +35,9 @@ FORMAT_MAJOR, FORMAT_MINOR = 1, 1
 HEADER_SIZE = 92
 CRC_OFF = 72
 
-TARGETS = {"m0p": 0x0001, "m33": 0x0002, "m23": 0x0003, "m4f": 0x0004}
+TARGETS = {"m0p": 0x0001, "m33": 0x0002, "m23": 0x0003, "m4f": 0x0004, "c5": 0x0103}
 TARGET_NAMES = {v: k for k, v in TARGETS.items()}
-FEATURES = {"m33": 0b101, "m0p": 0}            # FPU_SP | DSP for the M33 build
+FEATURES = {"m33": 0b101, "m0p": 0, "c5": 0}   # FPU_SP | DSP for the M33 build; c5 has no FPU
 FEAT_NAMES = ["fpu-sp", "fpu-dp", "dsp", "cmse"]
 
 F = dict(pic=1 << 0, xip_ok=1 << 1, ram_only=1 << 2, lua_module=1 << 3, app=1 << 4,
@@ -118,8 +118,8 @@ class Elf:
             raise LinkError(f"{path}: not a little-endian ELF32 file")
         (self.type, self.machine, _, self.entry, _, shoff, self.flags, _, _, _, shentsize, shnum,
          shstrndx) = struct.unpack_from("<HHIIIIIHHHHHH", d, 16)
-        if self.machine != 40:
-            raise LinkError(f"{path}: not an ARM ELF")
+        if self.machine not in (40, 243):
+            raise LinkError(f"{path}: not an ARM (40) or RISC-V (243) ELF, machine {self.machine}")
         self.sh = []
         for i in range(shnum):
             name, typ, flags, addr, off, size, link, info, align, entsize = struct.unpack_from(
@@ -153,6 +153,110 @@ class Elf:
             if s["name"] == name:
                 return s
         return None
+
+
+# RISC-V ELF32. Calls and auipc/lo12 pairs are already applied by ld; the
+# loader only fixes R_RISCV_32 words. HI20/LO12 are absolute and would be
+# wrong once the span moves, so a medlow or relaxing build fails here.
+# gcc emits R_RISCV_CALL_PLT (19) for every call to a global symbol. With
+# --emit-relocs that type survives even after ld rewrites the auipc+jalr
+# into a direct call inside this image. There is no PLT in that case.
+RV_PCREL = {16, 17, 18, 23, 24, 25}          # BRANCH JAL CALL PCREL_HI20 LO12_I LO12_S
+RV_IGNORE = {0, 51}                           # NONE, RELAX (bytes are final with -mno-relax)
+RV_BAD = {
+    26: "R_RISCV_HI20; build -mcmodel=medany so addresses are R_RISCV_32 words",
+    27: "R_RISCV_LO12_I; build -mcmodel=medany",
+    28: "R_RISCV_LO12_S; build -mcmodel=medany",
+    43: "R_RISCV_ALIGN; relaxation is on. Pass -mno-relax",
+}
+
+
+def collect_riscv(elf, img, code_end, rw_vma, rw_size, ro_list, rw_list):
+    errors = []
+
+    def seg_of_shndx(ndx):
+        if ndx == 0:
+            return "undef"
+        if ndx >= 0xFF00:
+            return "abs"
+        n = elf.sh[ndx]["name"]
+        if n in (".text", ".rodata"):
+            return "code"
+        if n in (".data", ".bss", ".sdata", ".sbss"):
+            return "rw"
+        if n.startswith(".pex."):
+            return "meta"
+        return "other:" + n
+
+    for rs in elf.sh:
+        if rs["type"] == 9:
+            errors.append(f"{rs['name']}: REL relocations are not expected on RISC-V (want RELA)")
+            continue
+        if rs["type"] != 4:
+            continue
+        tgt = elf.sh[rs["info"]]
+        tname = tgt["name"]
+        if tname.startswith(".pex.") or not (tgt["flags"] & 2):
+            continue
+        place_seg = "code" if tname in (".text", ".rodata") else "rw" if tname in (".data", ".sdata") else None
+        if place_seg is None:
+            errors.append(f"relocations in unexpected section {tname}")
+            continue
+        symtab = elf.sh[rs["link"]]
+        for k in range(rs["size"] // 12):
+            r_off, r_info, r_addend = struct.unpack_from("<IIi", elf.d, rs["off"] + k * 12)
+            typ, si = r_info & 0xFF, r_info >> 8
+            nm, val, size, info, other, shndx = struct.unpack_from("<IIIBBH", elf.d, symtab["off"] + si * 16)
+            sname = elf.cstr(elf.sh[symtab["link"]]["off"] + nm) or (
+                elf.sh[shndx]["name"] if 0 < shndx < 0xFF00 else "?")
+            bind = info >> 4
+            sseg = seg_of_shndx(shndx)
+            at = f"{tname}+0x{r_off:x}"
+            if typ in RV_IGNORE or typ in RV_PCREL:
+                continue
+            if typ == 19:  # CALL_PLT: ignore a resolved in-image call; reject a real PLT
+                plt = 0 < shndx < 0xFF00 and elf.sh[shndx]["name"].startswith(".plt")
+                if sseg == "undef" or plt:
+                    errors.append(
+                        f"{at}: R_RISCV_CALL_PLT to '{sname}' needs a PLT this loader does not copy")
+                continue
+            if typ in RV_BAD:
+                errors.append(f"{at}: {RV_BAD[typ]} (against '{sname}')")
+                continue
+            if sseg == "undef":
+                if bind == 2 and typ == 1:
+                    continue
+                errors.append(f"{at}: relocation {typ} to undefined symbol '{sname}'")
+                continue
+            if typ != 1:
+                errors.append(f"{at}: unsupported relocation R_RISCV type {typ} against '{sname}'")
+                continue
+            if sseg == "abs":
+                errors.append(f"{at}: absolute word refers to the absolute symbol '{sname}'")
+                continue
+            if sseg not in ("code", "rw"):
+                errors.append(f"{at}: absolute word refers to '{sname}' in {sseg}")
+                continue
+            w_off = r_off if place_seg == "code" else code_end + (r_off - rw_vma)
+            v = struct.unpack_from("<I", img, w_off)[0]
+            if v == 0 and r_addend:
+                v = r_addend & 0xFFFFFFFF
+                struct.pack_into("<I", img, w_off, v)
+            if sseg == "rw":
+                nv = v - rw_vma
+                if not (0 <= nv <= rw_size):
+                    errors.append(f"{at}: word 0x{v:08x} to '{sname}' lies outside RW")
+                    continue
+                struct.pack_into("<I", img, w_off, nv)
+            elif not (0 <= v <= code_end):
+                errors.append(f"{at}: word 0x{v:08x} to '{sname}' lies outside the code")
+                continue
+            bit = TO_RW if sseg == "rw" else 0
+            if place_seg == "code":
+                ro_list.append(r_off | bit)
+            else:
+                rw_list.append((r_off - rw_vma) | bit)
+    return errors
 
 
 # ---------------------------------------------------------------- linking
@@ -203,6 +307,9 @@ def build(a):
     bss_size = rw_end - rw_vma - data_size
     if model == "reloc" and rw_vma < code_end:
         raise LinkError("model A: RW overlaps the code")
+    if a.target == "c5" and rw_vma != code_end:
+        raise LinkError(f"c5: .data must start where the code ends "
+                        f"(0x{rw_vma:x} != 0x{code_end:x}); the load is one contiguous span")
     rw_size = data_size + bss_size
 
     # The image: text | rodata | data, as one buffer.
@@ -245,7 +352,11 @@ def build(a):
         return f"{best[0]}+0x{off - best[1]:x}" if best else f"{sname}+0x{off:x}"
 
     ro_list, rw_list, errors = [], [], []
+    if elf.machine == 243:
+        errors.extend(collect_riscv(elf, img, code_end, rw_vma, rw_size, ro_list, rw_list))
     for rs in elf.sh:
+        if elf.machine == 243:
+            break
         if rs["type"] == 4:
             raise LinkError(f"{rs['name']}: RELA relocations are not expected on ARM")
         if rs["type"] != 9:     # SHT_REL
@@ -388,7 +499,10 @@ def build(a):
             v = struct.unpack_from("<I", b, i)[0]
             if v in (0, 0xFFFFFFFF):
                 continue
-            if seg_of_addr(v & ~1, 1) != "code" or not (v & 1):
+            if a.target == "c5":
+                if v & 3 or not (0 < v < code_end):
+                    raise LinkError(f"{name}: entry 0x{v:08x} is not a 4-byte-aligned function in the code")
+            elif seg_of_addr(v & ~1, 1) != "code" or not (v & 1):
                 raise LinkError(f"{name}: entry 0x{v:08x} is not a Thumb function in the code")
             out.append(v)
         return out
@@ -398,7 +512,11 @@ def build(a):
     entry = 0
     if main and main["shndx"] and main["shndx"] < 0xFF00:
         entry = main["value"]
-        if not entry & 1:
+        if a.target == "c5":
+            if entry & 3 or entry == 0:
+                raise LinkError("c5 pex_main must be 4-byte aligned and not at address 0 "
+                                "(the c5 linker script puts a nop first)")
+        elif not entry & 1:
             raise LinkError("pex_main is not a Thumb function")
 
     # ---- metadata
@@ -721,7 +839,7 @@ def main():
     l = sp.add_parser("link")
     l.add_argument("elf")
     l.add_argument("-o", "--output", required=True)
-    l.add_argument("--target", choices=["m33", "m0p"], required=True)
+    l.add_argument("--target", choices=["m33", "m0p", "c5"], required=True)
     l.add_argument("--model", choices=["reloc", "pic"], required=True)
     l.add_argument("--api", default=os.path.join(HERE, "..", "host_api.json"))
     l.add_argument("--name")

@@ -271,6 +271,13 @@ size_t mdns_status_json(char *dst, size_t cap) {
 static void add_default_http(void) {
     static const char *const http_txt[] = { "path=/" };
     mdns_service_add(NULL, "_http", false, 80, http_txt, 1);
+    /* So a board that does serve the web app can be found the same way it
+     * finds a board that only has the websocket. assets=1 means this one
+     * has the pages. */
+    static const char *const btgw_txt[] = {
+        "board=pico2w", "ws=/ws", "api=/api", "assets=1"
+    };
+    mdns_service_add(NULL, "_btgw", false, 80, btgw_txt, 4);
 }
 
 /* --- record groups (src/net/mdns_records.c) -------------------------------
@@ -391,9 +398,24 @@ static void op_mdns_groups(const char *params, api_reply_fn reply, void *ctx, lo
     api_reply_ok(reply, ctx, id, mops_buf);
 }
 
+static void op_mdns_peers(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    mdns_peers_json(mops_buf, mops_buf_size);
+    api_reply_ok(reply, ctx, id, mops_buf);
+}
+
+static void op_mdns_browse(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    mdns_browse_kick();
+    mdns_peers_json(mops_buf, mops_buf_size);
+    api_reply_ok(reply, ctx, id, mops_buf);
+}
+
 static const op_def_t mdns_ops[] = {
     { "mdns.status", op_mdns_status },
     { "mdns.groups", op_mdns_groups },
+    { "mdns.peers", op_mdns_peers },
+    { "mdns.browse", op_mdns_browse },
     { NULL, NULL }
 };
 

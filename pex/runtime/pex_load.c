@@ -48,8 +48,19 @@ static const char *tname(uint32_t t) {
     case PEX_TARGET_ARMV8M_MAIN: return "m33";
     case PEX_TARGET_ARMV8M_BASE: return "m23";
     case PEX_TARGET_ARMV7EM_FP: return "m4f";
+    case PEX_TARGET_RV32IMAC_C5: return "c5";
     }
     return "?";
+}
+
+/* ARM entry offsets carry the Thumb bit. RISC-V offsets are 4-byte aligned
+ * and must not be 0: entry 0 means "no entry" on every architecture. */
+static bool fn_off_ok(uint32_t f, uint32_t lim) {
+#if defined(__riscv)
+    return (f & 3u) == 0 && f != 0 && f < lim;
+#else
+    return (f & 1u) != 0 && (f & ~1u) < lim;
+#endif
 }
 
 int pex__rread(const pex_reader_t *rd, uint32_t off, void *dst, uint32_t n) {
@@ -146,7 +157,7 @@ int pex__parse_header(const pex_reader_t *rd, pex__hdr_t *h) {
         h->image_size > h->sig_off - h->image_off || (h->image_off & 3) || (h->text & 3) || (h->ro & 3)) {
         return fail(PEX_EFORMAT, "image layout inconsistent");
     }
-    if (h->entry && (!(h->entry & 1) || (h->entry & ~1u) >= h->text)) {
+    if (h->entry && !fn_off_ok(h->entry, h->text)) {
         return fail(PEX_EFORMAT, "entry outside the code");
     }
     if (pex__cfg.max_stack && h->stack > pex__cfg.max_stack) {
@@ -605,7 +616,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     for (uint32_t i = 0; i < nfini; i++) {
         if (pex__rread(rd, sf->off + 4 + 4 * i, b8, 4)) { pex__err(PEX_EIO, "read error"); FAIL(PEX_EIO); }
         m->fini[i] = rd32(b8);
-        if ((m->fini[i] & ~1u) >= m->text_size || !(m->fini[i] & 1)) { pex__err(PEX_EFORMAT, "bad FINI entry"); FAIL(PEX_EFORMAT); }
+        if (!fn_off_ok(m->fini[i], m->text_size)) { pex__err(PEX_EFORMAT, "bad FINI entry"); FAIL(PEX_EFORMAT); }
     }
     char *desc = m->strings + strsz + 1;
     if (descl) { pex__rread(rd, desc_off, desc, descl); }
@@ -629,6 +640,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         }
     }
     bool shared = c != NULL;
+    bool span_rw = false;
     if (!c) {
         c = pex__alloc(sizeof *c, 8, PEX_OWNER_RT, 1);
         if (!c) { pex__err(PEX_ENOMEM, "PEX pool full"); FAIL(PEX_ENOMEM); }
@@ -639,7 +651,17 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
             c->base = (uint8_t *)xl->code;      /* in place: nothing to copy, RO relocations already applied */
             c->xip = 1;
         } else {
+#if defined(__riscv)
+            /* medany PC-relative refs stay valid only when code and RW keep
+             * the link-time distance. One span: code, then data, then bss. */
+            {
+                uint32_t span = m->code_size + (m->rw_size ? m->rw_size : 4);
+                c->base = pex__alloc(span ? span : 4, 8, PEX_OWNER_RT, 1);
+                span_rw = c->base != NULL;
+            }
+#else
             c->base = pex__alloc(m->code_size ? m->code_size : 4, 8, PEX_OWNER_RT, 1);
+#endif
             if (!c->base) {
                 pex__free(c);
                 pex__err(PEX_ENOMEM, "PEX pool full: %lu bytes of code", (unsigned long)m->code_size);
@@ -658,6 +680,8 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
     /* ---- RW: data copied, bss zeroed (model A in flash: at the address its code was relocated for) */
     if (xl && xl->rw) {
         m->rw = (uint8_t *)xl->rw;
+    } else if (span_rw) {
+        m->rw = c->base + m->code_size;   /* inside the code span; not a second block */
     } else {
         m->rw = pex__alloc(m->rw_size ? m->rw_size : 4, 8, id, 1);
     }
@@ -703,7 +727,11 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         const uint8_t *e = imp + 4 + 4 * ng + 12 * k;
         *(uint32_t *)(m->rw + rd32(e + 8)) = addrs[k];
     }
-    if (!shared && !c->xip) { pex_port_code_sync(c->base, c->size); }
+    if (!shared && !c->xip) {
+        uint32_t sync_n = c->size;
+        if (span_rw) { sync_n = m->code_size + (m->rw_size ? m->rw_size : 4); }
+        pex_port_code_sync(c->base, sync_n);
+    }
 
     m->host.size = sizeof m->host;
     m->host.api_major = PEX_API_MAJOR;
@@ -735,7 +763,7 @@ pex_mod_t *pex_load(const pex_reader_t *rd, const pex_load_opts_t *opts, int *er
         for (uint32_t i = 0; i < n; i++) {
             if (pex__rread(rd, init_off + 4 + 4 * i, b8, 4)) { pex__err(PEX_EIO, "read error"); rc = PEX_EIO; goto undo; }
             uint32_t f = rd32(b8);
-            if (!(f & 1) || (f & ~1u) >= m->text_size) { pex__err(PEX_EFORMAT, "bad INIT entry"); rc = PEX_EFORMAT; goto undo; }
+            if (!fn_off_ok(f, m->text_size)) { pex__err(PEX_EFORMAT, "bad INIT entry"); rc = PEX_EFORMAT; goto undo; }
             pex_call(m, (uint32_t)(uintptr_t)c->base + f, 0, 0, 0, 0);
             if (m->state == PEX_ST_FAULTED) { pex__err(PEX_EFAULT, "a constructor faulted"); rc = PEX_EFAULT; goto undo; }
         }

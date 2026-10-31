@@ -99,7 +99,11 @@ static uint16_t rd16(const void *p) {
 static const uint8_t *fptr(uint32_t off) { return (const uint8_t *)(F->read_base + off); }
 static uint32_t nsec_total(void) { return F->size / SEC; }
 static uint32_t nsec_of(const ix_ent_t *e) { return (e->file_size + SEC - 1) / SEC; }
-static bool model_a(const ix_ent_t *e) { return !(e->flags & PEX_F_PIC); }
+/* rv32imac-c5 is model A in the file (absolute words) but the partition
+ * stores those bytes unchanged. The loader copies code and RW as one span. */
+static bool model_a(const ix_ent_t *e) {
+    return !(e->flags & PEX_F_PIC) && e->target != PEX_TARGET_RV32IMAC_C5;
+}
 static uint32_t rwsz(uint32_t rw_size) { return AL8(rw_size ? rw_size : 4); }
 
 /* ---- the index ---------------------------------------------------------------- */
@@ -1224,7 +1228,7 @@ int pex_install(const pex_reader_t *rd, uint32_t flags) {
             rc = PEX_ENOSPC;
         }
     }
-    a = !rc && !(h->flags & PEX_F_PIC);
+    a = !rc && !(h->flags & PEX_F_PIC) && h->target != PEX_TARGET_RV32IMAC_C5;
     uint32_t ro_off = 0, n_ro = 0, split = 0;
     const pex__sec_t *sr = rc ? NULL : pex__find_sec(h, PEX_SEC_RELOC);
     if (sr && sr->size >= 8) {
@@ -1404,7 +1408,10 @@ pex_mod_t *pex_load_installed(const char *name, const pex_load_opts_t *opts, int
     pex__xload_t xl = { 0 };
     bool ram = false;
     const char *why = "";
-    if (model_a(&s_ix->e[i])) {
+    if (s_ix->e[i].target == PEX_TARGET_RV32IMAC_C5) {
+        ram = true;
+        why = "rv32imac-c5 runs from a contiguous RAM copy";
+    } else if (model_a(&s_ix->e[i])) {
         if (in_use(i)) {
             ram = true;
             why = "its flash copy is bound to the RW of the instance already running";

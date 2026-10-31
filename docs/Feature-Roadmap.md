@@ -20,6 +20,81 @@ These are part of the architecture. They are not tasks.
 
 - **Slots.** On RP2350 the QSPI XIP controller maps either slot onto `0x10000000`, so both slots are the same linked image. On RP2040 each slot executes at its own flash offset, so each slot is a separate image linked for that address. This tree builds the RP2350 image. The bench Pico 2 W uses 1 MiB slots, 1200 KiB LittleFS, and a 512 KiB PEX partition. See [../README.md](../README.md) layer 0, [../OTA.md](../OTA.md), and [flash-layout.md](flash-layout.md).
 
+## ESP32-C5 and the gateway LAN
+
+Recorded architecture. The C5 port and the gateway LAN behavior are not in a Pico image. These are not Now items, and they have no `R` number. The symbols exist so a later image can turn the pieces on. Pico cmake still builds a Pico board. There is no `configs/esp32c5_defconfig`. Which features each chip runs today is the table in [Capabilities.md](Capabilities.md).
+
+`BOARD_ESP32_C5` defaults off and depends on `BOARD_PICO2_W` being off. Current Pico images keep `CONFIG_NET_HTTP_SERVER` and `CONFIG_RADIO_CYW43` on. `CONFIG_BT_LE` stays on for the Pico, because that option still compiles the Pico BTstack path. A C5 defconfig turns `CONFIG_BT_LE` off until the C5 controller is the code behind it. `CONFIG_OTA` stays the RP2350 boot-ROM path. Configure fails if any of these are on, because the behavior is specified and not built: `NET_GW_LAN`, `NET_MDNS_GW`, `NET_NAT`, `IEEE802154`, `NET_THREAD`, `CAN`, `CAN_TWAI`, `CAN_MCP2515`, `CAN_J1939`.
+
+### On every C5 build
+
+OTA stays. The ESP-IDF project in `esp32c5/` is a station and an MCUmgr endpoint. It joins one compiled-in SSID, listens on UDP 1337, and the bootloader swaps `ota_0` and `ota_1`. Rollback is on. A new image stays unconfirmed until `image state-write --confirm`, and that confirm does not reboot. The image has been linked. It has not been flashed. Later C5 images keep this swap.
+
+PEX stays too. The loader is not in `esp32c5/` yet. When it lands, a C5 build loads `c5` modules. See the target below.
+
+Lua stays off. `LUA_ENABLE` defaults off, and a C5 image leaves it that way. The runtime is still part of the port, as its own step, so a later image can turn it on.
+
+### Not on the C5 image yet
+
+None of this is in `esp32c5/`.
+
+- Station credential store, band selection, and SoftAP. The linked image uses one SSID from Kconfig.
+- W5500 on SPI, DHCP and link-local on `e0`, the uplink metric, and WireGuard.
+- Gateway LAN, the per-connection mDNS advertisements, NAT, and `gw.peers`, `gw.hostname`, `gw.forward`.
+- HTTP server and the websocket API. The LittleFS cfg store (`cfg/wifi.json`, `cfg/wireguard.json`, and the later `cfg/gw.json` and `cfg/hostname.json`). The C5 image stores OTA slot hashes in NVS.
+- SD card.
+- BLE on the C5 controller. `CONFIG_BT_LE` still compiles the Pico BTstack path, so it stays off until the C5 controller is the code behind it.
+- 802.15.4, then Thread.
+- `CAN_TWAI` and `CAN_J1939`.
+- PEX, required above. The target is reserved. The loader, the runtime port, and `pexlink` do not emit it yet.
+
+### Not on the C5 chip
+
+- CDC-NCM and RNDIS. The USB port is the Serial/JTAG controller. Those network gadgets need a USB device controller, which this chip does not have. Provisioning stays on station Wi-Fi. The console stays USB Serial/JTAG.
+- Bluetooth Classic, including RFCOMM and NAP. The C5 controller is LE and 802.15.4.
+- `CAN_MCP2515`. That part is the SPI controller for the RP2350 and RP2040, which have no TWAI peripheral.
+
+### Gateway LAN
+
+`NET_GW_LAN` depends on `NET_ETH_W5500`. The carrier is the W5500 netif `e0` unless `cfg/gw.json` names another interface or `"none"`. A missing file uses `e0` when the W5500 is in the image, and `none` otherwise. A stored `"none"` stays `none`. Announcements, the peer list, and NAT exist only while the chosen interface is up.
+
+`cfg/hostname.json` stores the mDNS name. A missing file uses `RP2-<serial>` on the RP2350 and RP2040, and `ESP32C5-<serial>` on the C5. The serial is the chip id in hex. A name written by `mdns.hostname` or by `gw.hostname` is stored and stays. Until this feature is in the image, the compile-time hostname remains `bluetooth-rp2-webapp`.
+
+The gateway LAN holds a link-local address (169.254/16) for the whole time the link is up. A DHCP lease is a second address. Discovery uses the link-local address. lwIP keeps one IPv4 address on a netif, so the implementation adds a second address.
+
+A DHCP router on that LAN is a local uplink. The board probes it with `upl_metric` and `upl_choose` may select it. It is not advertised. Every board probes that router for itself.
+
+Every other internet connection that has a gateway is its own mDNS instance on the gateway LAN, about every 2 seconds: `_btgw-gw._udp.local`, instance `<hostname>-<iface>`, TXT `iface` and `metric=<upl_metric>`. Wi-Fi, USB-NCM when it has a gateway, and Bluetooth NAP are separate instances. A connection with no gateway is not advertised. Silence for 6 seconds (three intervals) drops that one instance. Other connections from the same board stay while their own advertisements continue.
+
+A heard instance is a viable uplink. The next hop is the announcer's link-local address, and the traffic leaves through the iface named in the TXT. `NET_NAT` masquerades from the gateway LAN out that iface and does not send that traffic back onto the gateway LAN. `NET_FORWARD` stays the Lua TCP/UDP proxy. The WireGuard netif stays its own route. Uplink selection still decides the path, including a next hop that is another board.
+
+Websocket ops, when `NET_GW_LAN` and `NET_HTTP_SERVER` are both on:
+
+- `gw.peers` returns the mDNS names heard on the configured gateway LAN interface, and under each name the connections still viable (`iface`, `metric`, link-local address, age of the last advertisement).
+- `gw.hostname` with no params returns the active name and whether it came from the file or from the serial formula. With `{ "name": "..." }` it stores the name and applies it.
+- `gw.forward` `{ "proto": "tcp"|"udp", "listen": N, "to": "<mdns name>", "port": N }` listens on this board and relays to that port on that advertised board, at the link-local address from the peer list. The rule belongs to the firmware. It lasts until `gw.unforward` or reboot. The target has to be a name `gw.peers` currently returns. `net.forward` still takes an IP address for a script.
+
+A C5 image with the HTTP server off still advertises and still selects peers for WireGuard. It has no browser API until the server is on.
+
+### Port order
+
+Shared policy stays in `src/net`. Pico port files are `spibus_pico.c`, `sd_port_pico.c`, `pex_port_pico.c`, and the CYW43439 link. The C5 does not link `CONFIG_RADIO_CYW43`. Each step is gated and stays off on the Pico.
+
+1. Station Wi-Fi on the C5 (2.4 GHz and 5 GHz), the W5500 on SPI, WireGuard, a cfg store, DHCP and link-local on `e0`, and the existing uplink metric. `CONFIG_NET_HTTP_SERVER` off. `CONFIG_BT_LE` off. Lua off. The MCUmgr partition swap from `esp32c5/` stays in this image and in every later one. The bring-up console is USB Serial/JTAG. The Pico cable is CDC-NCM, and the C5 USB port cannot present that gadget.
+2. The PEX target below. Every C5 build loads `c5` modules once this lands. It needs a flash region for installed modules.
+3. Gateway LAN (`NET_GW_LAN`, `NET_MDNS_GW`) and NAT (`NET_NAT`), so a C5 with 5 GHz Wi-Fi can be the uplink for Pico boards on the same switch. The C5 probes a DHCP router on that LAN for itself and does not advertise it.
+4. `CONFIG_NET_HTTP_SERVER`, including `gw.peers`, `gw.hostname`, and `gw.forward`, when the image has room.
+5. `CONFIG_BT_LE` on the C5 controller.
+6. `IEEE802154`, then `NET_THREAD`.
+7. `CAN_TWAI` and `CAN_J1939` on the C5. The RP2350 and RP2040 get `CAN_MCP2515` under the same `CAN` and `CAN_J1939` symbols.
+8. Lua. `LUA_ENABLE` stays default off on the C5. Turning it on is this step. The default C5 build leaves it off. Pico product defconfigs keep it on.
+
+### PEX target `rv32imac-c5`
+
+PEX is part of every C5 build, in the same way OTA is. A C5 module is its own target. The reserved Hazard3 ids `0x0101` (`rv32imac`) and `0x0102` (`rv32imac-zcb-zcmp`) stay the RP2350 RISC-V mode. The C5 id is `0x0103`, target `rv32imac-c5`, short name `c5`, file `<name>.c5.pex`. The ISA is the ESP-IDF toolchain march for this chip, `rv32imac_zicsr_zifencei`, ABI `ilp32`. The host API stays the integer calling convention, so the FPU feature bit stays clear. Zcmp stays out of the module ABI because this core's Zcmp has errata (`SOC_CPU_ZCMP_WORKAROUND`).
+
+The loader accepts only an exact target id. An `m33` file and a Hazard3 `rv32` file both stay refused on a C5 firmware. v1 of the format stays ARM-only until three pieces exist: a `pex/runtime` port beside `port/pico`, a PEX flash region in the C5 partition table, and `pexlink` emitting the new file. The first code model is model A with `R_RISCV_32` only. Model B waits. `pexcc` keeps emitting `m33` until that target is implemented. The id is reserved in [pex-format.md](pex-format.md) section 5. The constant is not in `pex.h` until the loader accepts it.
+
 ## Now
 
 - [ ] **R5 — A PEX build finishes, and signing stays on the host**

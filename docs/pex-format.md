@@ -231,13 +231,14 @@ All little-endian, 4-aligned, and bounded by the section's `size`.
 | 0x0004 | `armv7em-fp` | Cortex-M4F | AAPCS, softfp | HC32F460 (KM003C) |
 | 0x0101 | `rv32imac` | Hazard3 (RP2350 RISC-V mode) | ilp32 | RP2350 |
 | 0x0102 | `rv32imac-zcb-zcmp` | Hazard3 with Zcb/Zcmp | ilp32 | RP2350 |
+| 0x0103 | `rv32imac-c5` | Espressif RV32 (`rv32imac_zicsr_zifencei`) | ilp32 | ESP32-C5 (reserved; the loader does not accept it yet) |
 
 Rules:
 
 - **The target must match exactly** **[D, Q1]**: an M33 firmware loads only
   `armv8m-main-fp` modules, an RP2040 firmware only `armv6m` ones -- no
   "Thumb-1 runs on v8-M too" fallback.
-- **v1 is ARM only** **[D, Q2]**: the RISC-V ids stay reserved.
+- **v1 is ARM only** **[D, Q2]**: the RISC-V ids stay reserved. `0x0101` and `0x0102` are the Hazard3 ids. `0x0103` is the ESP32-C5 id (`rv32imac-c5`, short name `c5`). A file for one of those ids does not load on a firmware built for another. Zcmp is not part of `rv32imac-c5`.
 - The short arch name is part of the file name **[D]**:
   `<module>.<arch>.pex`, e.g. `driver.m33.pex`, `driver.m0p.pex`.
 
@@ -248,6 +249,7 @@ Rules:
 | `armv8m-base` | `m23` |
 | `armv7em-fp` | `m4f` |
 | `rv32imac`, `rv32imac-zcb-zcmp` | `rv32`, `rv32zc` (reserved) |
+| `rv32imac-c5` | `c5` (reserved) |
 
   The header's `target` field is authoritative; the name only lets a loader
   pick the right file without opening the others.
@@ -353,7 +355,8 @@ address. The header's `PIC` flag says which one a file uses.
   placed 4-byte aligned (8 if it contains `ldrd`/`strd` on 8-byte data); the
   header's `entry` and every export are image offsets.
 - For RISC-V targets (later): model A with `R_RISCV_32` only; model B with
-  `-fPIC`-style GP/`auipc` addressing. **[Q2: later]**
+  `-fPIC`-style GP/`auipc` addressing. The ESP32-C5 target (`rv32imac-c5`),
+  when it is built, starts as model A. **[Q2: later]**
 
 ### 6.4 Where the image runs
 

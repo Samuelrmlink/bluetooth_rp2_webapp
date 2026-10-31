@@ -31,15 +31,12 @@
 #endif
 
 #include "net/usb_ncm.h"
+#include "net/peer_proxy.h"
 
 #define HTTP_HDR 1024
-/* A request's path. SD names arrive percent-encoded (/api/sd/files/...), so
- * an SD build takes twice the usual; others keep the 96 they always had. */
-#if CONFIG_SD
-#define HTTP_PATH 192
-#else
-#define HTTP_PATH 96
-#endif
+/* A request path. /api/peer/<name>/api/... and percent-encoded SD names
+ * both need more than a bare file path. 223 characters plus the NUL. */
+#define HTTP_PATH 224
 #define HTTP_CONNS 8
 #define FILE_CHUNK 1460
 #define HTTP_POLL_INT 2
@@ -247,6 +244,10 @@ static void conn_drop(struct tcp_pcb *tpcb) {
         conn_cleanup(c);
         conn_reset(c);
     }
+}
+
+void http_conn_release(struct tcp_pcb *tpcb) {
+    conn_drop(tpcb);
 }
 
 static http_conn_t *conn_for(struct tcp_pcb *tpcb) {
@@ -1966,11 +1967,18 @@ static err_t http_recv(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t er
 
         char method[8] = {0};
         char path[HTTP_PATH] = {0};
-#if CONFIG_SD
-        sscanf(c->hdr, "%7s %191s", method, path);
-#else
-        sscanf(c->hdr, "%7s %95s", method, path);
-#endif
+        sscanf(c->hdr, "%7s %223s", method, path);
+
+        /* /ws/peer/ and /api/peer/ are answered by the proxy, which replaces
+         * this pcb's callbacks. The first pbuf is copied there; free it here. */
+        if (peer_proxy_wants(path)) {
+            bool took = peer_proxy_begin(tpcb, c->hdr, method, path, p, offset);
+            pbuf_free(p);
+            if (!took) {
+                conn_drop(tpcb);
+            }
+            return ERR_OK;
+        }
 
         if (try_ws_upgrade(c, tpcb, method, path)) {
             /* Any bytes past the header in this same pbuf are the start

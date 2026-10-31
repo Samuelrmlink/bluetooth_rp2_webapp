@@ -1,0 +1,13 @@
+# 4 MiB flash, the size mcusim gives an ESP32-C5 and the small C5 modules.
+# Two application slots. The bootloader swaps them through otadata.
+# Name,     Type, SubType, Offset,  Size,     Flags
+nvs,        data, nvs,     0x9000,  0x6000,
+otadata,    data, ota,     0xf000,  0x2000,
+phy_init,   data, phy,     0x11000, 0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x180000,
+ota_1,      app,  ota_1,   0x1a0000, 0x180000,
+# Same littlefs geometry as the RP2350 volume (4 KB blocks). Smaller, because
+# this image does not store the web assets. PEX modules live in their own
+# partition, raw, and the loader copies a c5 module into RAM.
+littlefs,   data, 0x81,    0x320000, 0x60000,
+pex,        data, 0x82,    0x380000, 0x80000,

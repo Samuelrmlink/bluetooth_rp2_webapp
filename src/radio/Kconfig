@@ -1,0 +1,28 @@
+menu "Radios"
+
+config RADIO_CYW43
+    bool "CYW43439 radio (Pico W Wi-Fi and Bluetooth)"
+    default y if BOARD_PICO2_W
+    help
+      Links pico_cyw43_arch_lwip_poll and the USB-servicing wrap of
+      cyw43_await_background_or_timeout_us. NET_WIFI and BT_LE on the Pico
+      use this chip. A later target leaves it off. Current Pico images
+      keep it.
+
+config IEEE802154
+    bool "802.15.4 MAC"
+    default n
+    help
+      The 802.15.4 MAC. On the ESP32-C5 this is the built-in radio. There
+      is no RP2350 driver. Specified and not built. Turning this on fails
+      configure.
+
+config NET_THREAD
+    bool "Thread over 802.15.4"
+    default n
+    depends on IEEE802154
+    help
+      Thread on the 802.15.4 MAC. Specified and not built. Turning this
+      on fails configure.
+
+endmenu
