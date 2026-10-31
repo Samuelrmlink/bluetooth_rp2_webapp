@@ -159,8 +159,9 @@ function checkScalar(key, body, lineNo, errors) {
     errors.push({ line: lineNo, message: 'version has a character the linker will not take' });
     return null;
   }
-  if (key === 'kind' && body !== 'app' && body !== 'lua') {
-    errors.push({ line: lineNo, message: 'kind is app or lua' });
+  // lib: a module other modules call (PEX_EXPORT); neither an app nor a Lua module.
+  if (key === 'kind' && body !== 'app' && body !== 'lua' && body !== 'lib') {
+    errors.push({ line: lineNo, message: 'kind is app, lua, or lib' });
     return null;
   }
   if (key === 'model' && body !== 'reloc' && body !== 'pic') {

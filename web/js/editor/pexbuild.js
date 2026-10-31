@@ -19,6 +19,14 @@ const SD = [
   'pex-cc/modinc/string.h',
 ];
 
+// Newer packs carry these too: the generated host API the SDK pex.h includes,
+// and the libc stand-ins pexcc gained. An older pack without them still loads.
+const SD_OPTIONAL = [
+  'pex-cc/include/pex_api.h',
+  'pex-cc/modinc/stdbool.h',
+  'pex-cc/modinc/stdarg.h',
+];
+
 let toolchain = null;
 
 async function fetchBytes(path) {
@@ -43,19 +51,33 @@ async function loadToolchain(onStatus) {
   onStatus?.('Fetching the compiler from the SD card…');
   const blobs = {};
   for (const path of SD) blobs[path] = await fetchBytes(path);
+  for (const path of SD_OPTIONAL) {
+    try { blobs[path] = await fetchBytes(path); } catch { /* an older pack */ }
+  }
   const api = JSON.parse(new TextDecoder().decode(blobs['pex-cc/host_api.json']));
+  const modinc = {
+    'stddef.h': blobs['pex-cc/modinc/stddef.h'],
+    'stdint.h': blobs['pex-cc/modinc/stdint.h'],
+    'string.h': blobs['pex-cc/modinc/string.h'],
+  };
+  if (blobs['pex-cc/modinc/stdbool.h']) modinc['stdbool.h'] = blobs['pex-cc/modinc/stdbool.h'];
+  if (blobs['pex-cc/modinc/stdarg.h']) modinc['stdarg.h'] = blobs['pex-cc/modinc/stdarg.h'];
   toolchain = {
     wasm: blobs['pex-cc/pexcc.wasm'],
     api,
     files: {},
     includePex: blobs['pex-cc/include/pex.h'],
-    modinc: {
-      'stddef.h': blobs['pex-cc/modinc/stddef.h'],
-      'stdint.h': blobs['pex-cc/modinc/stdint.h'],
-      'string.h': blobs['pex-cc/modinc/string.h'],
-    },
+    includeApi: blobs['pex-cc/include/pex_api.h'] || null,
+    modinc,
   };
   return toolchain;
+}
+
+/** The toolchain's /include: pex.h, and pex_api.h when the pack has it. */
+function toolInclude(tc) {
+  const out = { 'pex.h': tc.includePex };
+  if (tc.includeApi) out['pex_api.h'] = tc.includeApi;
+  return out;
 }
 
 async function driverBytes(tc, file) {
@@ -93,7 +115,7 @@ export async function buildPex(source, name, onStatus, openFile, siblingRoot) {
   onStatus?.('Compiling…');
   const names = mod ? mod.sources : [base];
   const elf = await compileToElf(tc.wasm, [
-    { guest: '/include', files: { 'pex.h': tc.includePex } },
+    { guest: '/include', files: toolInclude(tc) },
     { guest: '/modinc', files: tc.modinc },
     { guest: '/src', files: srcFiles },
   ], names.map((file) => `/src/${file}`));
@@ -127,7 +149,7 @@ export async function buildModule({
   const tc = await loadToolchain(onStatus);
   onStatus?.('Compiling…');
   const elf = await compileToElf(tc.wasm, [
-    { guest: '/include', files: { ...include, 'pex.h': tc.includePex } },
+    { guest: '/include', files: { ...include, ...toolInclude(tc) } },
     { guest: '/modinc', files: tc.modinc },
     { guest: '/p', files: tree },
   ], inputs);

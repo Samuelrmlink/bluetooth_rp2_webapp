@@ -308,3 +308,11 @@ test('guest files keep the project path, and the board header is board.h', () =>
   assert.ok(g.include['main.h'] instanceof Uint8Array);
   assert.ok(g.include['pico2_w.h'] instanceof Uint8Array);
 });
+
+test('kind lib is a module other modules call; any other kind is refused', () => {
+  const lib = parsePexfile('name helper\nversion 1.0.0\nkind lib\nmodel reloc\nsrc helper/helper.c\n\ntarget pico2_w\n  board pico2_w\n');
+  assert.deepEqual(lib.errors, []);
+  assert.equal(lib.project.kind, 'lib');
+  const bad = parsePexfile('name x\nkind driver\nsrc a.c\n');
+  assert.ok(bad.errors.some((e) => e.message === 'kind is app, lua, or lib'));
+});
