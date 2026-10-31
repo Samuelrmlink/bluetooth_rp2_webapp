@@ -1,0 +1,42 @@
+{
+  "_comment": "Next RP2350 map, written only by the layout mover after the new filesystem is up. The image that performs the move still links and mounts the OLD map (partitions.json, 864 KiB slots, LittleFS at 2 MiB). Do not point provision scripts at this file until the board is on it. See src/fs/fs_layout_map.h.",
+  "version": [1, 0],
+  "unpartitioned": {
+    "families": ["absolute"],
+    "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+  },
+  "partitions": [
+    {
+      "name": "Main A", "id": 0,
+      "start": "64K", "size": "1024K",
+      "families": ["rp2350-arm-s"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+    },
+    {
+      "name": "Main B", "id": 0,
+      "size": "1024K",
+      "families": ["rp2350-arm-s"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" },
+      "link": ["a", 0]
+    },
+    {
+      "name": "Wi-Fi Firmware", "id": "0x776966696669726d",
+      "start": "2112K", "size": "256K",
+      "families": ["cyw43-firmware"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" },
+      "no_reboot_on_uf2_download": true
+    },
+    {
+      "name": "LittleFS", "id": "0x6c66730000000000",
+      "start": "2368K", "size": "1200K",
+      "families": ["data"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+    },
+    {
+      "name": "PEX", "id": "0x7065780000000000",
+      "start": "3568K", "size": "512K",
+      "families": ["data"],
+      "permissions": { "secure": "rw", "nonsecure": "rw", "bootloader": "rw" }
+    }
+  ]
+}

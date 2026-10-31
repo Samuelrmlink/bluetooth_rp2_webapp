@@ -26,6 +26,10 @@
 #include "app_config.h"
 #include "fs/fs.h"
 #include "fs/fs_migrate.h"
+#include "fs/fs_layout.h"
+#if CONFIG_FS_LAYOUT
+#include "fs/fs_internal.h"   /* fs_is_mounted, after the mover retargets */
+#endif
 #include "fs/fs_watch.h"
 #include "config/config.h"
 #include "net/http.h"
@@ -115,12 +119,25 @@ int main(void) {
     /* Nothing here is fatal. A board with a corrupt filesystem should still
      * come up far enough to be talked to and fixed, so every failure is a log
      * line and the loop still runs. */
-    if (!fs_init()) {
+    bool fs_up = fs_init();
+#if CONFIG_FS_LAYOUT
+    /* Before cfg_load and before the radio. A normal boot with no arm file
+     * returns immediately. The move, when armed, restores cfg/ and only then
+     * falls through to cfg_load. */
+    fs_layout_boot();
+    fs_up = fs_is_mounted();
+#endif
+    if (!fs_up) {
         printf("fs: unavailable (the API still serves, the filesystem does not)\n");
     } else {
         /* BEFORE any config is read: a filesystem in the pre-PEX layout is
          * moved here (through the SD card), so Wi-Fi, Ethernet and WireGuard
-         * come up from the restored cfg/. Does nothing on a migrated one. */
+         * come up from the restored cfg/. Does nothing on a migrated one.
+         * The layout mover has its own volume; the old migrator must not
+         * format it. */
+#if CONFIG_FS_LAYOUT
+        if (!fs_layout_suppress_migrate())
+#endif
         fs_migrate_boot();
         cfg_load();
     }

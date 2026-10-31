@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "autoconf.h"
+#include "fs/fs_layout.h"
 #include "fs/fs.h"
 #include "fs/fs_internal.h"
 #include "hardware/watchdog.h"
@@ -998,6 +999,12 @@ void fs_migrate_tick(void) {
 }
 
 int fs_migrate_json(char *buf, size_t cap) {
+#if CONFIG_FS_LAYOUT
+    /* Once the new volume is mounted, sys.info reports 1200 KiB and the
+     * moved PEX region. Before that the line below still says "done". */
+    int lay = fs_layout_status_json(buf, cap);
+    if (lay > 0) { return lay; }
+#endif
     const char *m = s_kind == MIG_NONE ? "none"
                   : s_kind == MIG_DONE ? "done"
                   : s_msg;
