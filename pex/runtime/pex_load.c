@@ -961,16 +961,18 @@ static size_t mod_json(pex_mod_t *m, char *dst, size_t cap, bool full) {
            pex_state_name((pex_state_t)m->state), (unsigned long)(m->version >> 24),
            (unsigned long)((m->version >> 16) & 0xFF), (unsigned long)(m->version & 0xFFFF));
     for (int i = 0; i < (full ? 16 : 8); i++) { APPEND("%02x", m->build_id[i]); }
-    APPEND("\",\"model\":\"%s\",\"xip\":%s,\"app\":%s,\"lua\":%s,\"code\":%lu,\"rw\":%lu,\"shared\":%s,\"active\":%d,\"refs\":%d,"
+    APPEND("\",\"model\":\"%s\",\"xip\":%s,\"app\":%s,\"lua\":%s,\"code\":%lu,\"rw\":%lu,"
+           "\"code_addr\":%lu,\"rw_addr\":%lu,\"shared\":%s,\"active\":%d,\"refs\":%d,"
            "\"tasks\":%d,\"long\":%lu,\"blocks\":%lu,\"scratch_peak\":%lu", (m->flags & PEX_F_PIC) ? "pic" : "reloc",
            m->code->xip ? "true" : "false", (m->flags & PEX_F_APP) ? "true" : "false", (m->flags & PEX_F_LUA_MODULE) ? "true" : "false",
-           (unsigned long)m->code_size, (unsigned long)m->rw_size, m->code->users > 1 ? "true" : "false", m->active,
+           (unsigned long)m->code_size, (unsigned long)m->rw_size,
+           (unsigned long)(uintptr_t)m->code->base, (unsigned long)(uintptr_t)m->rw,
+           m->code->users > 1 ? "true" : "false", m->active,
            m->refs, m->tasks, (unsigned long)m->long_bytes, (unsigned long)m->long_blocks,
            (unsigned long)m->scratch_peak);
     if (full) {
-        APPEND(",\"target\":\"%s\",\"flags\":%lu,\"code_addr\":%lu,\"rw_addr\":%lu,\"exit_code\":%d,\"desc\":\"",
-               tname(m->target), (unsigned long)m->flags, (unsigned long)(uintptr_t)m->code->base,
-               (unsigned long)(uintptr_t)m->rw, m->exit_code);
+        APPEND(",\"target\":\"%s\",\"flags\":%lu,\"exit_code\":%d,\"desc\":\"",
+               tname(m->target), (unsigned long)m->flags, m->exit_code);
         for (const char *p = m->desc; p && *p; p++) {
             if (*p == '"' || *p == '\\') { APPEND("\\%c", *p); } else if ((uint8_t)*p >= 0x20) { APPEND("%c", *p); }
         }

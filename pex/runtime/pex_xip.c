@@ -810,6 +810,8 @@ static void fill(int i, pex_installed_t *o) {
     o->file_size = e->file_size;
     o->code_size = e->code_size;
     o->rw_size = e->rw_size;
+    /* Where the installed copy executes. Model A stores this same address as
+     * code_base. Model B leaves code_base at 0; the bytes still run here. */
     o->code = code_addr(e);
     o->signed_ = (e->state & ES_SIGNED) != 0;
     o->loaded = in_use(i);
@@ -867,9 +869,9 @@ int pex_installed_json(char *dst, size_t cap) {
                (unsigned long)(in.version >> 24), (unsigned long)((in.version >> 16) & 0xFF),
                (unsigned long)(in.version & 0xFFFF));
         for (int k = 0; k < 8; k++) { APPEND("%02x", in.build_id[k]); }
-        APPEND("\",\"model\":\"%s\",\"offset\":%lu,\"size\":%lu,\"code\":%lu,\"rw\":%lu,\"signed\":%s,\"loaded\":%s,"
+        APPEND("\",\"model\":\"%s\",\"offset\":%lu,\"code_addr\":%lu,\"size\":%lu,\"code\":%lu,\"rw\":%lu,\"signed\":%s,\"loaded\":%s,"
                "\"xip_ready\":%s}", (in.flags & PEX_F_PIC) ? "pic" : "reloc", (unsigned long)in.offset,
-               (unsigned long)in.file_size, (unsigned long)in.code_size, (unsigned long)in.rw_size,
+               (unsigned long)in.code, (unsigned long)in.file_size, (unsigned long)in.code_size, (unsigned long)in.rw_size,
                in.signed_ ? "true" : "false", in.loaded ? "true" : "false", in.xip_ready ? "true" : "false");
     }
     APPEND("]}");
