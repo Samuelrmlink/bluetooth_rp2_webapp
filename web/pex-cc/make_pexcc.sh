@@ -9,7 +9,7 @@
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-PEXCC=$(cd "$ROOT/../pexcc" && pwd)
+PEXCC=${PEXCC:-$(cd "$ROOT/../pexcc" && pwd)}
 CACHE="$HERE/../.pex-cc"
 DRV="$ROOT/pex/modules/drivers"
 
@@ -18,7 +18,11 @@ rm -rf "$CACHE"
 mkdir -p "$CACHE/include" "$CACHE/modinc" "$CACHE/drivers"
 cp "$PEXCC/build/pexcc.wasm" "$CACHE/pexcc.wasm"
 cp "$PEXCC/include/pex.h" "$CACHE/include/pex.h"
-cp "$PEXCC/modinc/stddef.h" "$PEXCC/modinc/stdint.h" "$PEXCC/modinc/string.h" "$CACHE/modinc/"
+# The SDK pex.h includes pex_api.h: generated here from this repo's
+# host_api.json, so the page compiles against the API it links against.
+python3 "$ROOT/pex/tools/gen_host_api.py" header "$ROOT/pex/host_api.json" "$CACHE/include/pex_api.h"
+cp "$PEXCC/modinc/stddef.h" "$PEXCC/modinc/stdint.h" "$PEXCC/modinc/string.h" \
+   "$PEXCC/modinc/stdbool.h" "$PEXCC/modinc/stdarg.h" "$CACHE/modinc/"
 cp "$ROOT/pex/host_api.json" "$CACHE/host_api.json"
 cp "$DRV"/anker_app.c "$DRV"/anker_adv.c "$DRV"/anker_adv.h \
    "$DRV"/anker_wire.c "$DRV"/anker_wire.h \
