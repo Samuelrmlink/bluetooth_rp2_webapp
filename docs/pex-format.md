@@ -991,8 +991,8 @@ lwIP trim came with feature/lua-net-fs):
 
 | region | 0.6 (fw 1.212) | 0.7 | what decides it |
 |---|---|---|---|
-| Lua arena (`CONFIG_LUA_HEAP_KB`) | 176 KB | **116 KB** | the launcher + a BLE driver script + a few scripts, measured below |
-| PEX pool (`CONFIG_PEX_POOL_KB`) | 10 KB from the C heap, on first use | **48 KB static** | module RW, their memory, RAM-loaded code (a 41 KB module loads into RAM) |
+| Lua arena (`CONFIG_LUA_HEAP_KB`) | 176 KB | **100 KB** | was 116 KB for the removed Anker Lua profile; 16 KB of that moved to the pool. The 0.7 measurement below is the 116 KB arena |
+| PEX pool (`CONFIG_PEX_POOL_KB`) | 10 KB from the C heap, on first use | **64 KB static** | was 48 KB. Module RW, their memory, RAM-loaded code. The Lua-plus-pool sum stays 164 KB |
 | TLS pool (`CONFIG_NET_TLS_POOL_KB`) | -- (in the arena) | 40 KB | one TLS session, measured 31-33 KB (lua-net-fs) |
 | lwIP `MEM_SIZE` / pbuf pool | 48 KB / 24 | 32 KB / 16 | measured peaks 16.8 KB / 6 (lua-net-fs) |
 | C heap | ~19 KB, 8 KB after the v1 pool | ~17 KB, none of it PEX's | pico_malloc panics when it runs out |
@@ -1028,11 +1028,13 @@ and signature of the installed copy, in place). `pex.load {name}` prefers
 the installed copy (`xip:<name>`; `{ram:true}` loads the lfs file instead);
 `pex.load {path:"sd:/..."}` and `pex.install {path:"sd:/..."}` reply
 `{pending:true}` and report through the event `pex.sd_done {op, path, ok,
-name | error, msg}` -- the file is read into the pool through the storage
-worker's job slot (a long-term block, freed afterwards), then loaded or
-installed. Autostart and `require` find installed modules first.
+name | error, msg}`. A load still reads the whole file into the pool
+through the storage worker's job slot (a long-term block, freed afterwards).
+An install streams the card through that same 4 KB transfer ring and does
+not allocate the file: the installed copy runs from the partition.
+Autostart and `require` find installed modules first.
 `pex.list` adds `pool.static` and `xip {size, free, largest, modules,
-rw_area, flash_ops}`.
+rw_area, rw_room, flash_ops}`. `rw_room` is the gap under the model-A suffix.
 
 **Where the partition is seen.** Booted from an A/B slot, the ROM maps the
 slot at 0x10000000 through QMI ATRANS0 and leaves the rest of the first 4 MB
@@ -1097,14 +1099,19 @@ Space no entry covers is free -- what a cut left half-written is free again.
   instance from the pool).
 - **A**: the RO words are relocated while the file is written -- code words to
   its flash address, RW words to a **fixed RW address at the top of the
-  pool** (`pool end - aoff`): at mount the runtime reserves the area every
-  installed model-A module's RW needs (the first block of an empty pool lands
-  at its very top). The entry records the bases, so a reader that subtracts
-  them gives back the signed file: that is how the copy is verified in place,
-  loaded into RAM when it cannot run in place, and read as the source of a
-  move. Model A installed after the mount loads into RAM until the next boot
-  (`xip_ready` false); a second instance loads into RAM (the flash copy is
-  bound to one RW); a firmware whose pool moved re-relocates a fresh copy on
+  pool** (`pool end - aoff`). That reservation is a suffix of the pool, not a
+  heap block. Mount sets it from every installed model-A module. An install
+  grows the suffix to the new high-water mark after the header checks and
+  before any sector write, so the module can run in place immediately
+  (`xip_ready` true). A grow that does not fit fails the install and writes
+  nothing. An uninstall returns the unused tail only after the index commit;
+  a hole in the middle stays, because the flash words of the modules above it
+  already point there. `rw_room` is the gap under that suffix, which is what
+  the next install can still reserve. The entry records the bases, so a reader
+  that subtracts them gives back the signed file: that is how the copy is
+  verified in place, loaded into RAM when it cannot run in place, and read as
+  the source of a move. A second instance loads into RAM (the flash copy is
+  bound to one RW). A firmware whose pool moved re-relocates a fresh copy on
   the next load. The RO list must be sorted (pexlink always wrote it so; the
   install checks). Model B is what to install; model A works.
 - `RAM_ONLY` files are refused; `XIP_OK` is informational.

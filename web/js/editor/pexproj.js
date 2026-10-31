@@ -6,7 +6,7 @@ import {
   parsePexfile, parseBoard, findPexfile, findBoard, bindTarget, selectTarget,
   macroLines, prefixSource, artifactRel, logRel, joinProject, sdLoadPath,
   flashConfirm, ramDecision, layoutGuest, BuildLog, badRel,
-  sdInstallCap, verifiedPexRel, verifiedNoteRel,
+  verifiedPexRel, verifiedNoteRel,
 } from './pexfile.js';
 import { badSdPath } from './pexbuilddlg.js';
 import { imageOffOf, installMapNote } from './pexmap.js';
@@ -140,19 +140,10 @@ export function pexOpError(msg) {
 }
 
 /**
- * An sd: install reads the whole file into the RAM pool, then writes the
- * image into the PEX partition. A file that does not fit in the pool is
- * refused. It is not copied onto LittleFS.
- */
-export function poolInstallError({ name, arch, bytes, cap }) {
-  return `${name}.${arch}.pex is ${bytes} bytes. Installing from the card reads the whole file into the PEX RAM pool (${cap} bytes in one piece), then writes it to the PEX partition. It was not copied to LittleFS.`;
-}
-
-/**
  * Install a module that already sits on the card. pex.install of an sd:
- * path reads the whole file into the PEX pool and answers on pex.sd_done.
- * The caller refuses a file larger than that pool. This does not copy the
- * file to LittleFS and does not start the module.
+ * path streams the file through the 4 KB transfer ring and answers on
+ * pex.sd_done. This does not copy the file to LittleFS and does not start
+ * the module. A RAM load is the path that still needs the whole file in the pool.
  */
 export async function installFromCard({ ws, sdPath, name }) {
   return waitSd(ws, () => ws.call('pex.install', { path: sdPath, name }));
@@ -184,13 +175,11 @@ async function installedOffset(ws, name) {
 
 /**
  * Install only when the module is not loaded. A file on the card is
- * installed from its sd: path. A file larger than the pool is refused
- * rather than copied to LittleFS. A module the build already wrote on
- * LittleFS is installed by name, which streams it into the PEX partition.
+ * installed from its sd: path (a 4 KB window, not the whole file in the
+ * pool). A module the build already wrote on LittleFS is installed by name.
  */
-export async function installCandidate({ ws, name, arch, bytes, sdPath, cap }) {
+export async function installCandidate({ ws, name, sdPath }) {
   if (sdPath) {
-    if (bytes.length > cap) throw new Error(poolInstallError({ name, arch, bytes: bytes.length, cap }));
     await waitSd(ws, () => ws.call('pex.install', { path: sdPath, name }));
     const hit = await installedOffset(ws, name);
     return hit || { name };
@@ -219,16 +208,10 @@ export async function restoreVerified({
   const got = await read(path);
   if (!got?.ok) return { ok: false, error: got?.error || `${path} was not found` };
   const bytes = got.bytes instanceof Uint8Array ? got.bytes : new Uint8Array(got.bytes || []);
-  const cap = sdInstallCap(poolLargest);
   const fromCard = sdLoadPath(path);
-  // Refuse before the confirm, and before unload. A file that does not fit
-  // the pool cannot be installed from the card on this firmware.
-  if (fromCard && bytes.length > cap) {
-    return { ok: false, error: poolInstallError({ name, arch, bytes: bytes.length, cap }) };
-  }
   const busy = loaded || running;
   if (!confirm(flashConfirm({
-    name, arch, loaded: busy, bytes: bytes.length, poolCap: cap, sdPath: fromCard || '',
+    name, arch, loaded: busy, sdPath: fromCard || '',
   }))) {
     return { ok: false, cancelled: true, error: busy ? `Left ${name} loaded.` : 'Restore cancelled.' };
   }
@@ -241,7 +224,7 @@ export async function restoreVerified({
   }
   if (!ws) return { ok: false, error: 'not connected' };
   const inst = await installCandidate({
-    ws, name, arch, bytes, sdPath: fromCard, cap,
+    ws, name, sdPath: fromCard,
   });
   let man = { ok: true, skipped: true };
   try { man = await deployDriverManifest(write, name); }
@@ -450,18 +433,10 @@ export async function executeTarget({
       return finish(true);
     }
 
-    const cap = sdInstallCap(poolLargest);
     const sdPath = sdLoadPath(artifact);
-    if (sdPath && bytes.length > cap) {
-      note('error', poolInstallError({
-        name: project.name, arch: target.arch, bytes: bytes.length, cap,
-      }));
-      return finish(false);
-    }
     const busy = running || loaded;
     const ok = confirm(flashConfirm({
-      name: project.name, arch: target.arch, loaded: busy,
-      bytes: bytes.length, poolCap: cap, sdPath: sdPath || '',
+      name: project.name, arch: target.arch, loaded: busy, sdPath: sdPath || '',
     }));
     if (!ok) {
       note('info', busy
@@ -487,7 +462,7 @@ export async function executeTarget({
     }
     if (!ws) throw new Error('not connected');
     const inst = await installCandidate({
-      ws, name: project.name, arch: target.arch, bytes, sdPath, cap,
+      ws, name: project.name, sdPath,
     });
     let man = { ok: true, skipped: true };
     try { man = await deployDriverManifest(write, project.name); }

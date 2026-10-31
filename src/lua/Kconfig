@@ -24,7 +24,9 @@ config LUA_HEAP_KB
       failed with "not enough memory" the moment any other script was also
       loaded -- which is the normal state of a board being worked on.
 
-      The cost is bss, which this part has to spare.
+      The bytes are .bss. On the SD + Classic link the heap gap under
+      __end__ is the scarce resource, so this arena and the PEX pool move
+      together and keep a constant sum.
 
       Raised again to 160 for the advertisement-driven Anker stack, and this
       time the earlier advice -- split it into modules rather than raise the
@@ -39,6 +41,14 @@ config LUA_HEAP_KB
       ~68 TLV item tables every few seconds. Live heap was flat across polls,
       which is how you tell the two apart. A first-fit arena cannot do much
       about that except have room to breathe.
+
+      That profile is gone. The bench image (pico2w_sd_classic and the other
+      configs that were 116/48) is 100 KB here and 64 KB in CONFIG_PEX_POOL_KB.
+      16 KB moved to the PEX pool. The sum stays 164 KB, so the gap under
+      __end__ does not change. 100 KB is the first cut. A smaller arena waits
+      on script.stats / script.heap while the remaining scripts compile and
+      sit resident. pico2w_noanker stays at 96 KB with the pool taken from
+      the C heap. The default above is still 160.
 
 config LUA_HOOK_BUDGET
     int "Instructions per scheduler slice before a script is forced to yield"

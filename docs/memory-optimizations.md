@@ -428,9 +428,12 @@ library is more machinery than the bytes.
 ### The Lua arena, once the drivers are PEX
 
 `CONFIG_LUA_HEAP_KB` is already the switch. Each step is 1,024 bytes of
-`.bss` and no flash. The Kconfig default is still 160. The SD image sets
-116. The help text says the cost "is bss, which this part has to spare."
-On the SD + Classic link that sentence is no longer true.
+`.bss` and no flash. The Kconfig default is still 160. The SD + Classic
+image, and the other defconfigs that were 116/48, now set Lua to 100 KB
+and the PEX pool to 64 KB. The sum stays 164 KB, so the gap under `__end__`
+does not change. 16 KB moved to the pool for model-A RW. 100 KB is the
+first cut. A smaller arena waits on `script.stats` / `script.heap` while
+`pinecil.lua` and `ac_pulse.lua` compile and sit resident.
 
 The 116 KB number paid for the Lua Anker profile, not for a launcher.
 `src/lua/Kconfig` records it: compiling the 28 KB A2687 profile peaked at
@@ -448,7 +451,7 @@ The files that remain, measured before that removal:
 | `lua/ac_pulse.lua` | 5,556 | still a Lua script; it calls the loaded Anker module |
 | `lua/profiles/pinecil.lua` | 7,231 | still a Lua profile |
 
-The two Anker launchers (557 and 553 bytes) and the 28,575-byte profile are gone. They never needed to stay once the module owned the protocol. The TLV tables that fragmented the arena are in the PEX module, whose RW is the 48 KB `PEX_POOL_KB` block. That pool stays. Shrinking the arena does not shrink it, and setting the pool to 0 puts those bytes on the C heap.
+The two Anker launchers (557 and 553 bytes) and the 28,575-byte profile are gone. They never needed to stay once the module owned the protocol. The TLV tables that fragmented the arena are in the PEX module, whose RW is the PEX pool. That pool is now 64 KB, the old 48 KB plus the 16 KB this cut moved. Shrinking the arena further does not shrink the pool, and setting the pool to 0 puts those bytes on the C heap.
 
 On the failed image the arena is the whole SRAM lever this workload can
 give. `__end__` is 3,312 bytes past RAM, and the 8,192-byte gap floor needs
@@ -541,7 +544,7 @@ Left in place on purpose:
 
 | Knob | Why it stays |
 |---|---|
-| `PEX_POOL_KB` 48 | Installed modules execute in place and keep their RW here. The drivers that left Lua land here. `0` takes the pool from the C heap instead, and the heap gap is what `pico_malloc` panics on. Moving the 48 KB off `.bss` makes the link succeed and the boot fail |
+| `PEX_POOL_KB` 64 | Installed modules execute in place and keep their RW here. The drivers that left Lua land here. This 64 KB is the old 48 KB plus 16 KB from the Lua arena (now 100 KB); the sum stays 164 KB so the heap gap does not move. `0` takes the pool from the C heap instead, and the heap gap is what `pico_malloc` panics on. Moving the pool off `.bss` makes the link succeed and the boot fail |
 | `NET_TLS_POOL_KB` 40, if TLS stays | Measured session peak 31–33 KB. The pool is the reason HTTPS survived a fragmented arena |
 | `LWIP_MEM_SIZE_KB` 32 and `PBUF_POOL_SIZE` 16 | Already the measured cut. `include/lwipopts.h` records peaks of 16.8 KB and 6 pbufs, and records an earlier `.bss` growth that panicked in `km_ipc_init` with no network frame in the backtrace |
 | `BT_MAX_LINKS` 4 | The feature is several Classic sessions at once. Each LE slot is 5,052 bytes, not the ~1 KB the help text describes |

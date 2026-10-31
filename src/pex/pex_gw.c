@@ -526,13 +526,13 @@ static void op_list(const char *params, api_reply_fn reply, void *ctx, long id) 
     size_t cap = api_scratch_size(), n = 0;
     pex_mem_stats_t ps = { 0 };
     if (s_up) { pex_pool_stats(&ps); }
-    char pf[200], xs[160] = "null";
+    char pf[200], xs[220] = "null";
     prev_fault_json(pf, sizeof pf);
     pex_xip_stats_t st;
     if (s_up && pex_xip_stats(&st) == PEX_OK) {
-        snprintf(xs, sizeof xs, "{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"modules\":%lu,\"rw_area\":%lu,\"flash_ops\":%lu}",
+        snprintf(xs, sizeof xs, "{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"modules\":%lu,\"rw_area\":%lu,\"rw_room\":%lu,\"flash_ops\":%lu}",
                  (unsigned long)st.size, (unsigned long)st.free, (unsigned long)st.largest, (unsigned long)st.entries,
-                 (unsigned long)st.rw_area, (unsigned long)pex_gw_xip_flash_ops());
+                 (unsigned long)st.rw_area, (unsigned long)st.rw_room, (unsigned long)pex_gw_xip_flash_ops());
     }
     n += (size_t)snprintf(b + n, cap - n, "{\"runtime\":\"%s\",\"api\":\"%d.%d\",\"arch\":\"%s\",\"up\":%s,\"policy\":\"%s\","
                           "\"pool\":{\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"configured_kb\":%d,\"static\":%s},\"xip\":%s,\"c_heap_free\":%lu,\"c_heap_top\":%lu,\"prev_fault\":%s,\"modules\":",

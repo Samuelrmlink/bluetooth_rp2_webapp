@@ -82,7 +82,7 @@ static ix_t *s_ix;                  /* the committed index (IX_BYTES, pool) */
 static int s_cur = -1;              /* copy holding it */
 static bool s_mounted;
 static uint32_t s_moves, s_recovered;
-static uint8_t *s_area;             /* model A RW area: [pool end - s_area_size, pool end) */
+static uint8_t *s_area;             /* model A RW suffix: [pool end - s_area_size, pool end). Not a block. */
 static uint32_t s_area_size;
 
 static uint32_t rd32(const void *p) {
@@ -462,6 +462,27 @@ static uint32_t area_need(const ix_t *x) {
     return need;
 }
 
+/* High-water mark with entry `skip` left out and one new model-A slot added.
+ * skip < 0 keeps every current entry. */
+static uint32_t area_need_replacing(int skip, uint32_t aoff, uint32_t rw_size) {
+    uint32_t need = aoff + rwsz(rw_size);
+    for (int i = 0; i < s_ix->h.n; i++) {
+        const ix_ent_t *e = &s_ix->e[i];
+        if (i == skip || !model_a(e)) { continue; }
+        if (e->aoff + rwsz(e->rw_size) > need) { need = e->aoff + rwsz(e->rw_size); }
+    }
+    return need;
+}
+
+/* The suffix is not a block. Growing fails when the gap is short of `need`;
+ * shrinking only releases the low end, so loaded modules keep their addresses. */
+static int area_ensure(uint32_t need) {
+    if (pex__pool_set_suffix(need) != 0) { return PEX_ENOMEM; }
+    s_area_size = need ? (need + 7u) & ~7u : 0;
+    s_area = s_area_size ? pex__pool_end() - s_area_size : NULL;
+    return PEX_OK;
+}
+
 static uint8_t *rw_ptr(const ix_ent_t *e) { return pex__pool_end() - e->aoff - rwsz(e->rw_size); }
 /* the address as the code's words hold it (32-bit; on a 64-bit test host only compared) */
 static uint32_t rw_want(const ix_ent_t *e) { return (uint32_t)(uintptr_t)rw_ptr(e); }
@@ -573,11 +594,24 @@ int pex_install(const pex_reader_t *rd, uint32_t flags) {
         }
         dst = (uint32_t)run;
     }
+    uint32_t area_saved = s_area_size;
+    int area_set = 0;
     uint32_t code_base = 0, rw_base = 0, aoff = 0, rw_size = rc ? 0 : h->data + h->bss;
     if (!rc && a) {
         code_base = (uint32_t)(F->exec_base + dst * SEC + h->image_off);
         aoff = assign_aoff(rw_size, old);
         rw_base = (uint32_t)(uintptr_t)(pex__pool_end() - aoff - rwsz(rw_size));
+        /* Before any sector write: a failed install must not have moved the suffix. */
+        uint32_t need = area_need_replacing(old, aoff, rw_size);
+        uint32_t gap = pex__pool_gap();
+        if (area_ensure(need) != PEX_OK) {
+            uint32_t more = need > area_saved ? need - area_saved : need;
+            pex__err(PEX_ENOMEM, "this module needs %lu more bytes of RW reservation; the pool has %lu free below it",
+                     (unsigned long)more, (unsigned long)gap);
+            rc = PEX_ENOMEM;
+        } else {
+            area_set = 1;
+        }
     }
     if (!rc) {
         rorr_t rr = { rd, ro_off };
@@ -639,6 +673,9 @@ int pex_install(const pex_reader_t *rd, uint32_t flags) {
         }
     }
     pex__scratch_end(tmp);
+    if (rc && area_set && area_ensure(area_saved) != PEX_OK) {
+        pex__logf(PEX_LOG_ERR, "pex: xip: could not restore the %lu-byte RW reservation", (unsigned long)area_saved);
+    }
     if (rc) {
         pex__logf(PEX_LOG_WARN, "pex: xip: install refused: %s (%s)", pex_errmsg(), pex_strerror(rc));
         return rc;
@@ -669,7 +706,16 @@ int pex_uninstall(const char *name) {
     memmove(&s_ix->e[i], &s_ix->e[i + 1], (s_ix->h.n - i - 1) * sizeof(ix_ent_t));
     s_ix->h.n--;
     int rc = commit();
-    if (!rc) { pex__logf(PEX_LOG_INFO, "pex: xip: uninstalled %s", name); }
+    if (!rc) {
+        /* After the index commit: a crash before this still remounts the old suffix.
+         * A hole in the middle stays; only the unused tail comes back. */
+        uint32_t need = area_need(s_ix);
+        if (area_ensure(need) != PEX_OK) {
+            pex__logf(PEX_LOG_WARN, "pex: xip: uninstalled %s, but %lu bytes of RW reservation stay until the next boot",
+                      name, (unsigned long)(s_area_size - need));
+        }
+        pex__logf(PEX_LOG_INFO, "pex: xip: uninstalled %s", name);
+    }
     return rc;
 }
 
@@ -800,6 +846,7 @@ int pex_xip_stats(pex_xip_stats_t *o) {
     o->moves = s_moves;
     o->recovered = s_recovered;
     o->rw_area = s_area ? s_area_size : 0;
+    o->rw_room = pex__pool_gap();
     return PEX_OK;
 }
 
@@ -810,9 +857,9 @@ int pex_installed_json(char *dst, size_t cap) {
     pex_xip_stats_t st;
     pex_xip_stats(&st);
     APPEND("{\"mounted\":%s,\"size\":%lu,\"free\":%lu,\"largest\":%lu,\"seq\":%lu,\"moves\":%lu,\"recovered\":%lu,"
-           "\"rw_area\":%lu,\"modules\":[", st.mounted ? "true" : "false", (unsigned long)st.size, (unsigned long)st.free,
-           (unsigned long)st.largest, (unsigned long)st.seq, (unsigned long)st.moves, (unsigned long)st.recovered,
-           (unsigned long)st.rw_area);
+           "\"rw_area\":%lu,\"rw_room\":%lu,\"modules\":[", st.mounted ? "true" : "false", (unsigned long)st.size,
+           (unsigned long)st.free, (unsigned long)st.largest, (unsigned long)st.seq, (unsigned long)st.moves,
+           (unsigned long)st.recovered, (unsigned long)st.rw_area, (unsigned long)st.rw_room);
     for (int i = 0; s_mounted && i < s_ix->h.n; i++) {
         pex_installed_t in;
         fill(i, &in);
@@ -847,23 +894,19 @@ static int mount(void) {
     } else if (v0 || v1) {
         src = v0 ? c0 : c1;
     }
-    /* model A RW area first: the first block of an empty pool lands at its very top */
+    /* The suffix is reserved before the index block, which sits on the low side. */
     uint32_t need = src ? area_need(src) : 0;
-    if (need) {
-        s_area = pex__alloc(need, 8, PEX_OWNER_RT, 1);
-        s_area_size = need;
-        if (s_area && s_area + need != pex__pool_end()) {
-            pex__free(s_area);
-            s_area = NULL;
-        }
-        if (!s_area) {
-            pex__logf(PEX_LOG_WARN, "pex: xip: could not reserve %lu bytes at the top of the pool: model A modules load into RAM",
-                      (unsigned long)need);
-        }
+    if (need && area_ensure(need) != PEX_OK) {
+        pex__logf(PEX_LOG_WARN, "pex: xip: could not reserve %lu bytes at the top of the pool: model A modules load into RAM",
+                  (unsigned long)need);
+        s_area = NULL;
+        s_area_size = 0;
     }
     s_ix = pex__alloc(IX_BYTES, 8, PEX_OWNER_RT, 1);
     if (!s_ix) {
-        if (s_area) { pex__free(s_area); s_area = NULL; }
+        pex__pool_set_suffix(0);
+        s_area = NULL;
+        s_area_size = 0;
         pex__logf(PEX_LOG_ERR, "pex: xip: no pool memory for the index");
         return PEX_ENOMEM;
     }
@@ -915,6 +958,7 @@ static int mount(void) {
 int pex__xip_mount_cfg(void) {
     F = pex__cfg.flash;
     s_ix = NULL;
+    pex__pool_set_suffix(0);
     s_area = NULL;
     s_area_size = 0;
     return mount();
@@ -926,7 +970,8 @@ int pex_xip_mount(void) {
         if (m->code && m->code->xip) { pex__err(PEX_EBUSY, "%s runs from flash", m->name); return PEX_EBUSY; }
     }
     if (s_ix) { pex__free(s_ix); s_ix = NULL; }
-    if (s_area) { pex__free(s_area); s_area = NULL; }
+    pex__pool_set_suffix(0);
+    s_area = NULL;
     s_area_size = 0;
     F = pex__cfg.flash;
     return mount();

@@ -282,7 +282,7 @@ test('a running module is not installed until unload succeeds', async () => {
   assert.equal(calls.some((c) => c.op === 'pex.install'), false);
 });
 
-test('a file larger than the pool is not copied to LittleFS and is not installed', async () => {
+test('a card file larger than the pool is still installed from the card', async () => {
   const w = world();
   const spec = await loadProject({
     filePath: 'sd/projects/blink/src/main.c', readText: w.readText, arch: 'm33', board: 'pico2_w',
@@ -305,26 +305,35 @@ test('a file larger than the pool is not copied to LittleFS and is not installed
       imageOff: 128,
     }),
   });
-  assert.equal(result.ok, false);
-  assert.match(result.error, /not copied to LittleFS/);
-  assert.match(result.log, /not copied to LittleFS/);
-  assert.equal(asked, false);
-  assert.equal(unloaded, false);
+  assert.equal(result.ok, true, result.log);
+  assert.equal(asked, true);
+  assert.equal(unloaded, true);
   assert.equal(w.writes.some((x) => x.path === 'pex/blink.m33.pex'), false);
-  assert.equal(calls.some((c) => c.op === 'pex.install'), false);
+  assert.equal(calls.some((c) => c.op === 'pex.install'), true);
 });
 
-test('installCandidate refuses a card file that does not fit the pool', async () => {
-  let called = false;
-  await assert.rejects(
-    () => installCandidate({
-      ws: { call: async () => { called = true; return {}; } },
-      name: 'anker', arch: 'm33', bytes: new Uint8Array(100),
-      sdPath: 'sd:/projects/anker/build/anker.m33.pex', cap: 40,
-    }),
-    /not copied to LittleFS/,
-  );
-  assert.equal(called, false);
+test('installCandidate streams a card file without a pool-size gate', async () => {
+  const calls = [];
+  const hit = await installCandidate({
+    ws: {
+      call: async (op, params) => {
+        calls.push({ op, params });
+        if (op === 'pex.install') return { pending: true };
+        if (op === 'pex.installed') {
+          return { modules: [{ name: 'anker', offset: 4096, xip_ready: true }] };
+        }
+        return {};
+      },
+      on: (topic, fn) => {
+        if (topic === 'pex.sd_done') queueMicrotask(() => fn({ ok: true, name: 'anker' }));
+        return () => {};
+      },
+    },
+    name: 'anker', arch: 'm33', bytes: new Uint8Array(100),
+    sdPath: 'sd:/projects/anker/build/anker.m33.pex', cap: 40,
+  });
+  assert.equal(calls.some((c) => c.op === 'pex.install' && c.params.path.startsWith('sd:/')), true);
+  assert.equal(hit.xip_ready, true);
 });
 
 test('a card file that fits is installed from the card, and anker gets its manifest', async () => {
@@ -388,7 +397,7 @@ test('mark verified keeps the previous file until the new copy is on the card', 
 
   let confirmed = false;
   let unloaded = false;
-  const tooBig = await restoreVerified({
+  const streamed = await restoreVerified({
     name: 'anker', arch: 'm33', loaded: true, running: true, poolLargest: 64,
     confirm: () => { confirmed = true; return true; },
     unload: async () => { unloaded = true; return { unloaded: true }; },
@@ -396,8 +405,7 @@ test('mark verified keeps the previous file until the new copy is on the card', 
     write: async () => ({ ok: true }),
     ws: { call: async () => ({ xip_ready: true }), on: () => () => {} },
   });
-  assert.equal(tooBig.ok, false);
-  assert.match(tooBig.error, /not copied to LittleFS/);
-  assert.equal(confirmed, false);
-  assert.equal(unloaded, false);
+  assert.equal(streamed.ok, true, streamed.error);
+  assert.equal(confirmed, true);
+  assert.equal(unloaded, true);
 });

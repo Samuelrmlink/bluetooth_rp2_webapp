@@ -279,12 +279,15 @@ test('macros: arch, board, board defines, then target defines, then the header',
   assert.equal(artifactRel({ name: 'blink' }, { out: 'build/ram', arch: 'm33' }), 'build/ram/blink.m33.pex');
 });
 
-test('flash confirm installs a small file from the card and refuses one the pool cannot hold', () => {
+test('flash confirm installs from the card even when the file is larger than the pool', () => {
   assert.match(flashConfirm({ name: 'blink', arch: 'm33', bytes: 4, sdPath: 'sd:/projects/blink/build/pico2_w/blink.m33.pex' }), /sd:\/projects\/blink/);
   assert.doesNotMatch(flashConfirm({ name: 'blink', arch: 'm33', bytes: 4 }), /signed/);
   assert.match(flashConfirm({
     name: 'blink', arch: 'm33', bytes: 80000, poolCap: 1024, sdPath: 'sd:/x/blink.m33.pex',
-  }), /not copied to internal storage/);
+  }), /Install sd:\/x\/blink\.m33\.pex/);
+  assert.doesNotMatch(flashConfirm({
+    name: 'blink', arch: 'm33', bytes: 80000, poolCap: 1024, sdPath: 'sd:/x/blink.m33.pex',
+  }), /cannot be installed/);
   assert.match(flashConfirm({ name: 'blink', arch: 'm33', bytes: 80000 }), /Install blink\.m33\.pex/);
   assert.match(flashConfirm({ name: 'anker', arch: 'm33', loaded: true }), /Unload anker/);
   assert.match(flashConfirm({ name: 'anker', arch: 'm33', loaded: true }), /replaces the running signed module/);

@@ -1931,19 +1931,17 @@ export class EditorWindow {
   }
 
   // A .pex that is not pex/<name>.<arch>.pex, including one in a build
-  // directory on the card. Firmware reads an sd: install into the PEX RAM
-  // pool. A file larger than that pool is refused. It is not copied to LittleFS.
+  // directory on the card. Firmware streams an sd: install through a 4 KB
+  // window. It is not copied to LittleFS. A RAM load is the path that
+  // still needs the whole file in the pool.
   async _pexInstallFrom(path) {
     const base = path.split('/').pop();
     return this._pexRun(`Installing ${base}`, async (job) => {
-      const { pexIdentity, installFromCard, poolInstallError } = await import('../editor/pexproj.js');
-      const { sdLoadPath, sdInstallCap } = await import('../editor/pexfile.js');
+      const { pexIdentity, installFromCard } = await import('../editor/pexproj.js');
+      const { sdLoadPath } = await import('../editor/pexfile.js');
       const id = pexIdentity(path);
       const sdPath = sdLoadPath(path);
       if (!id || !sdPath) throw new Error('Install from the card needs a file named name.arch.pex under sd/.');
-      const size = this.tree.find(path)?.size || 0;
-      const cap = sdInstallCap(this.pexPool?.largest);
-      if (size > cap) throw new Error(poolInstallError({ name: id.name, arch: id.arch, bytes: size, cap }));
       const key = `pex/${id.name}.${id.arch}.pex`;
       const state = this.pexStates?.[key];
       if (state) {

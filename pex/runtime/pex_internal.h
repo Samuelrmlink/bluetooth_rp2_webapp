@@ -85,6 +85,10 @@ typedef struct {
 extern const pex__xload_t *pex__xload;
 int pex__xip_mount_cfg(void);     /* from pex_init */
 uint8_t *pex__pool_end(void);
+/* Model-A RW suffix: [pool end - n, pool end). 0 on success. Growing needs
+ * the gap; shrinking only releases the low end of the tail. */
+int pex__pool_set_suffix(uint32_t n);
+uint32_t pex__pool_gap(void);
 
 /* globals */
 extern pex_config_t pex__cfg;

@@ -135,7 +135,7 @@ python3 pex/tools/pexlink.py dump /tmp/anker.m33.pex
 
 `--key` selects a PEM. Otherwise the tool uses `$BTGW_OTA_KEY`, then `~/.config/btgw/ota-signing.pem`. `link --sign` signs while linking. Development images already load the unsigned file. The configure lines are under Firmware image above.
 
-On the device the file lives at `pex/<name>.<arch>.pex` on LittleFS. `pex.install` copies it into the PEX partition. `pex.load` then `pex.start` run it. `pex.load` of an `sd:` path reads the whole file into the RAM pool and does not install it. The pool on the SD image is 48 KB (`CONFIG_PEX_POOL_KB`). A file larger than `pool.largest` from `pex.list` cannot take that path. The signed Anker module is one of those: it executes in place from the partition.
+On the device the file lives at `pex/<name>.<arch>.pex` on LittleFS. `pex.install` copies it into the PEX partition. `pex.load` then `pex.start` run it. `pex.load` of an `sd:` path reads the whole file into the RAM pool and does not install it. `pex.install` of an `sd:` path streams the file through a 4 KB window and does not put the file in the pool. The pool on the SD image is 64 KB (`CONFIG_PEX_POOL_KB`). A RAM load of a file larger than `pool.largest` from `pex.list` is refused. The signed Anker module executes in place from the partition.
 
 `pex.stop` ends tasks and leaves ops registered. `pex.unload` runs deinit and drops the ops. The editor Stop button sends stop, then unload. Uninstall removes the partition copy. Deleting `pex/<name>.<arch>.pex` is a separate step.
 

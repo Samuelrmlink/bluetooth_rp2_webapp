@@ -393,7 +393,8 @@ if(CONFIG_PEX)
     endif()
     pex_runtime_add(btgw GROUPS ${_pex_groups} NO_PICO_PORT SIG_UECC)
     target_sources(btgw PRIVATE ${CMAKE_CURRENT_LIST_DIR}/pex/runtime/port/pico/pex_port_pico.c
-        src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c)
+        src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c
+        src/pex/pex_sd_read.c)
     if(CONFIG_PROTO_ANKER_CRYPTO)
         target_sources(btgw PRIVATE src/pex/pex_gw_codec.c)
     endif()
@@ -418,6 +419,7 @@ if(CONFIG_PEX)
     # micro-ecc: the OTA key checks module signatures (spec 10).
     target_include_directories(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc)
     set_property(SOURCE src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c
+        src/pex/pex_sd_read.c
         src/pex/pex_gw_net.c src/pex/pex_gw_bt.c src/pex/pex_gw_classic.c src/pex/pex_gw_lua.c APPEND PROPERTY COMPILE_OPTIONS -Os)
     # Paying for PEX (~38 KB) in the 864 KiB slot, measured on the SD build
     # (2026-10-21; it had ~8 KB left): code that is not on a hot path goes
