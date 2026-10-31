@@ -136,41 +136,25 @@ static void flash_do(flash_job_t *j) {
 
 #define BD_BLOCKS_MAX (FS_REGION_SIZE / FS_BLOCK)
 
-/* g_fs_off stays FS_FLASH_OFF unless the layout mover retargets a mount that
- * has already passed its point of no return. g_read_max is that volume's
- * block count, so a mount at 0x250000 cannot be talked into a block count
- * that runs through PEX or the BTstack NVM. */
-static uint32_t g_fs_off = FS_FLASH_OFF;
-static uint32_t g_read_max = BD_BLOCKS_MAX;
-static bool g_freeze_old;
-
-static int bd_range_ok(lfs_block_t block) {
-    if (block >= g_read_max) { return 0; }
-    uint32_t end = g_fs_off + ((uint32_t)block + 1u) * FS_BLOCK;
-    /* The NVM at 0x3FC000 is not a filesystem block on either map. */
-    if (end > PICO_FLASH_SIZE_BYTES || end > 0x3FC000u) { return 0; }
-    return 1;
-}
-
 static int bd_read(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
                    void *buffer, lfs_size_t size) {
     (void)c;
-    if (!bd_range_ok(block) || off + size > FS_BLOCK) { return LFS_ERR_IO; }
+    if (block >= BD_BLOCKS_MAX || off + size > FS_BLOCK) { return LFS_ERR_IO; }
     /* NOT XIP_BASE. Booted from an A/B partition, the ROM translates the
      * first 4 MB XIP window so the running slot appears at 0x10000000 and
      * leaves a HOLE past it -- a plain read of 0x10200000 would fault. The
      * no-translate alias reads flash by storage address, which is what the
      * SDK's own partition reader and BTstack's flash bank use on RP2350. */
-    memcpy(buffer, (const uint8_t *)(FS_READ_BASE + g_fs_off + block * FS_BLOCK + off), size);
+    memcpy(buffer, (const uint8_t *)(FS_READ_BASE + FS_FLASH_OFF + block * FS_BLOCK + off), size);
     return 0;
 }
 
 static int bd_prog(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
                    const void *buffer, lfs_size_t size) {
     (void)c;
-    if (block >= g_blocks || !bd_range_ok(block) || off + size > FS_BLOCK) { return LFS_ERR_IO; }
+    if (block >= g_blocks || off + size > FS_BLOCK) { return LFS_ERR_IO; }
     flash_job_t j = {
-        .off = g_fs_off + block * FS_BLOCK + off,
+        .off = FS_FLASH_OFF + block * FS_BLOCK + off,
         .data = buffer,
         .len = size,
         .prog = 1,
@@ -181,9 +165,9 @@ static int bd_prog(const struct lfs_config *c, lfs_block_t block, lfs_off_t off,
 
 static int bd_erase(const struct lfs_config *c, lfs_block_t block) {
     (void)c;
-    if (block >= g_blocks || !bd_range_ok(block)) { return LFS_ERR_IO; }
+    if (block >= g_blocks) { return LFS_ERR_IO; }
     flash_job_t j = {
-        .off = g_fs_off + block * FS_BLOCK,
+        .off = FS_FLASH_OFF + block * FS_BLOCK,
         .data = NULL,
         .len = FS_BLOCK,
         .prog = 0,
@@ -300,11 +284,11 @@ static void cfg_init(uint32_t blocks) {
  * the superblock's own geometry (block_count 0) and left for fs_migrate.c. */
 static int mount_as_found(void) {
     cfg_init(0);
-    g_blocks = g_read_max;                  /* reads only until the count is known */
+    g_blocks = BD_BLOCKS_MAX;               /* reads only until the count is known */
     int err = lfs_mount(&lfs, &cfg);
     if (err) { return err; }
     struct lfs_fsinfo fi;
-    if (lfs_fs_stat(&lfs, &fi) < 0 || fi.block_count == 0 || fi.block_count > g_read_max) {
+    if (lfs_fs_stat(&lfs, &fi) < 0 || fi.block_count == 0 || fi.block_count > BD_BLOCKS_MAX) {
         lfs_unmount(&lfs);
         return LFS_ERR_CORRUPT;
     }
@@ -326,13 +310,6 @@ bool fs_init(void) {
         return true;
     }
     if (err) {
-#if CONFIG_FS_LAYOUT
-        /* The layout mover formats the old volume only when no move has
-         * started, and it never formats 0x200000 once the SD state says the
-         * move has. A mount failure here is not a reason to erase. */
-        printf("fs: mount %d, not formatting (layout mover decides)\n", err);
-        return false;
-#else
         cfg_init(FS_SIZE / FS_BLOCK);
         g_blocks = FS_SIZE / FS_BLOCK;
         printf("fs: mount %d, formatting\n", err);
@@ -346,11 +323,10 @@ bool fs_init(void) {
             printf("fs: remount failed %d\n", err);
             return false;
         }
-#endif
     }
     mounted = true;
-    printf("fs: mounted %uKiB at flash 0x%lx\n", (unsigned)(g_blocks * FS_BLOCK / 1024u),
-           (unsigned long)g_fs_off);
+    printf("fs: mounted %uKiB at flash 0x%lx\n", (unsigned)(FS_SIZE / 1024u),
+           (unsigned long)FS_FLASH_OFF);
     return true;
 }
 
@@ -387,19 +363,9 @@ lfs_t *fs_lfs(void) { return mounted ? &lfs : NULL; }
 /* Nothing may be open: the migration runs at boot, before anything else
  * touches the filesystem. */
 int fs_reformat(uint32_t blocks) {
-    if (g_freeze_old && g_fs_off == FS_FLASH_OFF) {
-        printf("fs: refused to format 0x%lx (layout move has started)\n", (unsigned long)g_fs_off);
-        return LFS_ERR_IO;
-    }
-    if (blocks == 0 || (uint64_t)g_fs_off + (uint64_t)blocks * FS_BLOCK > 0x3FC000u) {
-        printf("fs: refused to format 0x%lx (%lu blocks)\n",
-               (unsigned long)g_fs_off, (unsigned long)blocks);
-        return LFS_ERR_INVAL;
-    }
     if (mounted) { lfs_unmount(&lfs); }
     mounted = false;
     g_legacy = false;
-    g_read_max = blocks;
     cfg_init(blocks);
     g_blocks = blocks;
     int err = lfs_format(&lfs, &cfg);
@@ -407,45 +373,6 @@ int fs_reformat(uint32_t blocks) {
     err = lfs_mount(&lfs, &cfg);
     if (err) { return err; }
     mounted = true;
-    return 0;
-}
-
-bool fs_is_mounted(void) { return mounted; }
-
-void fs_unmount(void) {
-    if (mounted) { lfs_unmount(&lfs); }
-    mounted = false;
-    g_legacy = false;
-}
-
-void fs_set_flash_off(uint32_t off, uint32_t read_max_blocks) {
-    g_fs_off = off;
-    g_read_max = read_max_blocks ? read_max_blocks : BD_BLOCKS_MAX;
-}
-
-uint32_t fs_flash_off(void) { return g_fs_off; }
-
-void fs_freeze_old(bool freeze) { g_freeze_old = freeze; }
-
-int fs_mount_at(uint32_t off, uint32_t blocks) {
-    if (blocks == 0 || blocks > BD_BLOCKS_MAX) { return LFS_ERR_INVAL; }
-    if ((uint64_t)off + (uint64_t)blocks * FS_BLOCK > 0x3FC000u) { return LFS_ERR_INVAL; }
-    fs_unmount();
-    g_fs_off = off;
-    g_read_max = blocks;
-    cfg_init(blocks);
-    g_blocks = blocks;
-    int err = lfs_mount(&lfs, &cfg);
-    if (err) { return err; }
-    struct lfs_fsinfo fi;
-    if (lfs_fs_stat(&lfs, &fi) < 0 || fi.block_count != blocks) {
-        lfs_unmount(&lfs);
-        return LFS_ERR_CORRUPT;
-    }
-    mounted = true;
-    g_legacy = false;
-    printf("fs: mounted %uKiB at flash 0x%lx\n", (unsigned)(blocks * FS_BLOCK / 1024u),
-           (unsigned long)off);
     return 0;
 }
 

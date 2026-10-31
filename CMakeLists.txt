@@ -515,35 +515,4 @@ if(CONFIG_SD)
     set_property(SOURCE third_party/fatfs/ff.c third_party/fatfs/ffunicode.c APPEND PROPERTY COMPILE_OPTIONS -Os)
 endif()
 
-# The image that performs the move still links and mounts the OLD map
-# (partitions.json, 864 KiB slots, LittleFS at 2 MiB). partitions-next.json
-# is embedded and written only by fs.layout_commit, after the tunnel is back.
-if(CONFIG_FS_LAYOUT)
-    set(_lay_pt_bin ${CMAKE_BINARY_DIR}/fs_layout_pt.bin)
-    set(_lay_pt_c ${CMAKE_BINARY_DIR}/fs_layout_pt.c)
-    # picotool is an imported executable produced by the ExternalProject
-    # picotoolBuild. $<TARGET_FILE:picotool> makes ninja look for a rule that
-    # writes that path, and the import has none, so the path is used plain
-    # and the command waits on picotoolBuild.
-    get_target_property(_lay_picotool picotool IMPORTED_LOCATION)
-    add_custom_command(
-        OUTPUT ${_lay_pt_bin}
-        COMMAND ${_lay_picotool} partition create
-                ${CMAKE_CURRENT_LIST_DIR}/partitions-next.json ${_lay_pt_bin}
-        DEPENDS picotoolBuild ${CMAKE_CURRENT_LIST_DIR}/partitions-next.json
-        VERBATIM)
-    add_custom_command(
-        OUTPUT ${_lay_pt_c}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/tools/fs_layout_pt.py
-                ${_lay_pt_bin} ${_lay_pt_c}
-        DEPENDS ${_lay_pt_bin} ${CMAKE_CURRENT_LIST_DIR}/tools/fs_layout_pt.py
-        VERBATIM)
-    target_sources(btgw PRIVATE
-        src/fs/fs_layout_decide.c
-        src/fs/fs_layout.c
-        ${_lay_pt_c})
-    set_property(SOURCE src/fs/fs_layout_decide.c src/fs/fs_layout.c ${_lay_pt_c}
-        APPEND PROPERTY COMPILE_OPTIONS -Os)
-endif()
-
 pico_add_extra_outputs(btgw)

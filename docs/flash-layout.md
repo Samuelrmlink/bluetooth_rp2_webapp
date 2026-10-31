@@ -26,7 +26,7 @@ addresses and one linked for slot B's. This table is the RP2350 map.
 [OTA.md](../OTA.md) has the boot rule.
 
 The bench board is already on the table above. This image mounts the 1200 KiB
-volume at `0x250000` and does not run the layout mover. The earlier shrink,
+volume at `0x250000`. The earlier shrink,
 from 2032 KiB at `0x200000` down to 1776 KiB, is what the rest of this page
 describes. It has finished on that board (`cfg/migrated.json`).
 
