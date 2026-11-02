@@ -44,13 +44,13 @@ config LUA_HEAP_KB
       which is how you tell the two apart. A first-fit arena cannot do much
       about that except have room to breathe.
 
-      That profile is gone. The bench image (pico2w_sd_classic and the other
-      configs that were 116/48) is 100 KB here and 64 KB in CONFIG_PEX_POOL_KB.
-      16 KB moved to the PEX pool. The sum stays 164 KB, so the gap under
-      __end__ does not change. 100 KB is the first cut. A smaller arena waits
-      on script.stats / script.heap while the remaining scripts compile and
-      sit resident. pico2w_noanker stays at 96 KB with the pool taken from
-      the C heap. The default above is still 160.
+      That profile is gone. Images without the SD card stay at 100 KB here
+      and 64 KB in CONFIG_PEX_POOL_KB. pico2w_sd, pico2w_sdspi, and
+      pico2w_pexcc keep the W5500 and set this arena to 64 KB, because
+      100 KB does not link on that image. On the images that stay at 100 KB,
+      16 KB moved to the PEX pool and the sum stays 164 KB. pico2w_noanker
+      stays at 96 KB with the pool taken from the C heap. The default above
+      is still 160.
 
 config LUA_HOOK_BUDGET
     int "Instructions per scheduler slice before a script is forced to yield"
