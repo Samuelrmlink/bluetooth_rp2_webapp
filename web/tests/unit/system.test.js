@@ -29,10 +29,10 @@ test('the arena is fetched 1 KB at a time, in order', async () => {
   assert.deepEqual([a.base, a.header, a.size], [7, 16, 2500]);
 });
 
-test('reboot confirm says a normal boot is what starts the list', () => {
-  assert.match(REBOOT_CONFIRM, /normal one/);
-  assert.match(REBOOT_CONFIRM, /watchdog reboot/);
-  assert.match(REBOOT_CONFIRM, /double reset/);
+test('reboot confirm says a requested reboot starts the list', () => {
+  assert.match(REBOOT_CONFIRM, /start again on this reboot/);
+  assert.match(REBOOT_CONFIRM, /watchdog reset/);
+  assert.match(REBOOT_CONFIRM, /second reset/);
 });
 
 test('what a VM rebuild did, in words', () => {

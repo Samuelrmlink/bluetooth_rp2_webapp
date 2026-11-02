@@ -4,7 +4,7 @@
 // mask and gateway. Passing addr makes this board call the phone's NAP.
 // Passing listen makes the board discoverable so the phone can call it.
 // Both are stored in cfg/nap.json.
-import { makeSection, kvRows, button, PolledSection } from './common.js';
+import { makeSection, kvRows, button, setNote, PolledSection } from './common.js';
 
 export function bdAddrOk(s) {
   return /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/.test(String(s || '').trim());
@@ -107,7 +107,7 @@ export class NapSection extends PolledSection {
         ? `sharing out ${iface}. Turn the phone's Internet access off and on.`
         : 'not sharing');
     } catch (e) {
-      this._setNote(e.message);
+      this._setNote(e.message, true);
     }
     this.soon();
   }
@@ -120,20 +120,15 @@ export class NapSection extends PolledSection {
         ? 'discoverable: a phone can start the link'
         : 'not discoverable: use Scan and Connect');
     } catch (e) {
-      this._setNote(e.message);
+      this._setNote(e.message, true);
     }
     this.soon();
-  }
-
-  onConnect() {
-    const t = this.app.sysInfo?.transports || [];
-    this._d.hidden = !t.includes('bnep');
   }
 
   async _connect() {
     const addr = this._addr.value.trim();
     if (!bdAddrOk(addr)) {
-      this._setNote('address is AA:BB:CC:DD:EE:FF');
+      this._setNote('address is AA:BB:CC:DD:EE:FF', true);
       return;
     }
     try {
@@ -141,7 +136,7 @@ export class NapSection extends PolledSection {
       this._dirty = false;
       this._setStatus(`connecting to ${addr}`);
     } catch (e) {
-      this._setNote(e.message);
+      this._setNote(e.message, true);
     }
     this.soon();
   }
@@ -151,7 +146,7 @@ export class NapSection extends PolledSection {
       await this.ws.call('classic.scan', {});
       this._setNote('scanning…');
     } catch (e) {
-      this._setNote(e.message);
+      this._setNote(e.message, true);
     }
     this.soon();
   }
@@ -162,13 +157,13 @@ export class NapSection extends PolledSection {
     this._setNote(addr);
   }
 
-  _setNote(text) {
-    this._note.textContent = text;
+  _setNote(text, bad) {
+    setNote(this._note, text, bad);
     delete this._note.dataset.nap;
   }
 
   _setStatus(text) {
-    this._note.textContent = text;
+    setNote(this._note, text);
     this._note.dataset.nap = 'status';
   }
 

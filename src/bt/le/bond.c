@@ -122,6 +122,17 @@ bool bond_decline(uint16_t con_handle, const char *by) {
     return true;
 }
 
+/* Same weak hook central.c uses. Kinds match pex/host_api.json. */
+void le_pex_event(int kind, const uint8_t *addr, int chr, const uint8_t *data, uint16_t len, int status)
+    __attribute__((weak));
+
+static void pex_kind(uint16_t con_handle, int kind) {
+    if (!le_pex_event) { return; }
+    bt_device_t *d = bt_registry_by_handle(con_handle);
+    static const uint8_t zero[6];
+    le_pex_event(kind, d ? d->addr : zero, -1, NULL, 0, 0);
+}
+
 static void emit_sec(const char *topic, uint16_t con_handle, const char *extra) {
     bt_device_t *d = bt_registry_by_handle(con_handle);
     char addr[24] = "unknown";
@@ -143,10 +154,18 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
     switch (hci_event_packet_get_type(pkt)) {
         case SM_EVENT_JUST_WORKS_REQUEST:
             h = sm_event_just_works_request_get_handle(pkt);
-            /* Just Works needs no human input, so auto-accept: the decision
-             * about whether to pair at all was already made by the policy. */
+            /* Just Works needs no human input. The GATT client and a peripheral
+             * Security Request start the procedure inside BTstack, so this is
+             * the gate for policy "never": decline instead of confirming. */
+            if (s_policy == BOND_POLICY_NEVER) {
+                emit_sec("security.required", h, "\"policy\":\"never\"");
+                pex_kind(h, 24); /* PEX_BT_PAIR_FAIL */
+                sm_bonding_decline(h);
+                break;
+            }
             sm_just_works_confirm(h);
             emit_sec("security.just_works", h, NULL);
+            pex_kind(h, 20); /* PEX_BT_JUST_WORKS */
             break;
         case SM_EVENT_PASSKEY_INPUT_NUMBER:
             h = sm_event_passkey_input_number_get_handle(pkt);
@@ -154,6 +173,7 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
              * to a script) and sent back -- bond.passkey, or bt.passkey/a
              * bt.on_pairing handler in Lua. */
             emit_sec("security.passkey_request", h, "\"action\":\"input\"");
+            pex_kind(h, 21); /* PEX_BT_PASSKEY */
             if (s_hook) { s_hook(h, BOND_ASK_INPUT, 0); }
             break;
         case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
@@ -163,6 +183,7 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
                 char extra[64];
                 snprintf(extra, sizeof(extra), "\"action\":\"compare\",\"number\":%lu", (unsigned long)num);
                 emit_sec("security.numeric_comparison", h, extra);
+                pex_kind(h, 22); /* PEX_BT_CONFIRM */
                 if (s_hook) { s_hook(h, BOND_ASK_COMPARE, num); }
             }
             break;
@@ -174,6 +195,7 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
                 char extra[64];
                 snprintf(extra, sizeof(extra), "\"action\":\"display\",\"number\":%lu", (unsigned long)num);
                 emit_sec("security.passkey_display", h, extra);
+                pex_kind(h, 25); /* PEX_BT_PASSKEY_DISP */
                 if (s_hook) { s_hook(h, BOND_ASK_DISPLAY, num); }
             }
             break;
@@ -192,12 +214,16 @@ static void sm_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
             }
             if (status == ERROR_CODE_SUCCESS) {
                 emit_sec("security.bonded", h, NULL);
+                pex_kind(h, 23); /* PEX_BT_BONDED */
                 printf("bt: bonded\n");
             } else {
                 char extra[64];
                 snprintf(extra, sizeof(extra), "\"status\":%u,\"reason\":%u", status,
                          sm_event_pairing_complete_get_reason(pkt));
                 emit_sec("security.failed", h, extra);
+                printf("bt: pairing failed status %u reason %u\n", status,
+                       sm_event_pairing_complete_get_reason(pkt));
+                pex_kind(h, 24); /* PEX_BT_PAIR_FAIL */
             }
             break;
         }
@@ -325,4 +351,18 @@ bool bond_forget(const char *addr_str) {
     }
 #endif
     return removed;
+}
+
+void bond_forget_all(void) {
+    int max = le_device_db_max_count();
+    for (int i = 0; i < max; i++) {
+        int type = BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t a;
+        sm_key_t irk;
+        le_device_db_info(i, &type, a, irk);
+        if (bond_addr_real(type, a)) { le_device_db_remove(i); }
+    }
+#if CONFIG_BT_CLASSIC
+    gap_delete_all_link_keys();
+#endif
 }

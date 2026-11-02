@@ -465,7 +465,14 @@ void pex_gw_record_boot_fault(void) {
 
 void pex_gw_poll(void) {
     pex_gw_record_boot_fault();
-    if (!s_up) { return; }
+    if (!s_up) {
+#if CONFIG_BT_LE
+        /* The BLE queue is not part of the module pool. A host listener
+         * (the role console) registers before any module has started it. */
+        pex_gw_bt_poll();
+#endif
+        return;
+    }
     pex_poll();
     pex_gw_fs_poll();
     pex_gw_sd_poll();

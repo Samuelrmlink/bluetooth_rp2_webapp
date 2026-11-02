@@ -22,7 +22,7 @@ The Pico 2 W column is the RP2350 images under `configs/pico2w_*_defconfig`. The
 | USB CDC-NCM | yes, device `192.168.8.1`, host `.16` | no image | no chip |
 | USB RNDIS | absent | absent | no chip |
 | Console | SWD RTT; CDC-ACM off | no image | USB Serial/JTAG |
-| W5500 Ethernet | some images | no image | absent |
+| W5500 Ethernet | some images | no image | Wi-Fi image; SPI2 GPIO8/23/24, CS 10, INT 4, RST 5 |
 | WireGuard | yes | no image | absent |
 | Uplink selection | yes | no image | absent |
 | mDNS responder | yes | no image | absent |
@@ -37,8 +37,8 @@ The Pico 2 W column is the RP2350 images under `configs/pico2w_*_defconfig`. The
 | Classic NAP | some images | no image | no chip |
 | MCUmgr over UDP 1337 | yes | no image | yes |
 | Partition-swap OTA | yes, boot ROM, try-before-you-buy | a separate link per slot; no image | yes, on every C5 build; `ota_0` / `ota_1`, rollback; confirm does not reboot |
-| Gateway LAN, NAT, peer mDNS | specified | no image | specified, and absent from `esp32c5/` |
-| 802.15.4 and Thread | no chip; the symbols fail configure | no chip | specified, and absent from `esp32c5/` |
+| Gateway LAN, NAT, peer mDNS | option | no image | specified, and absent from `esp32c5/` |
+| 802.15.4 and Thread | no chip; the symbols fail configure | no chip | Kconfig choice; the Thread arm fails configure |
 | CAN, TWAI | no chip | no chip | specified, and absent from `esp32c5/` |
 | CAN, MCP2515 | specified | specified; no image | the RP2350 and RP2040 part |
 | J1939 | specified | specified; no image | specified, and absent from `esp32c5/` |

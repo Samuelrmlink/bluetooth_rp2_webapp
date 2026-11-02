@@ -91,6 +91,15 @@ body {
   touch-action: manipulation;
 }
 
+/* One board's editor inside another window. The outer tile already has the
+   title, the connection line and the window controls, so this page is only
+   the editor itself. */
+html.is-embed #toolbar,
+html.is-embed #tabbar,
+html.is-embed .tile-head {
+  display: none;
+}
+
 #toolbar {
   display: flex;
   align-items: center;
@@ -850,10 +859,33 @@ kbd {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   font-weight: 600;
 }
+
+.settings-device {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 400;
+}
+.settings-device[hidden] { display: none; }
+.settings-device select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 280px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.settings-device-note { margin: 8px 2px 0; }
+.sys-lua[hidden] { display: none; }
 
 .modal-close {
   background: none;
@@ -914,8 +946,19 @@ kbd {
   font-size: 12px;
 }
 
-.modal-body .err {
+.modal-body .err,
+.modal-body .dim.err {
   color: var(--red);
+}
+
+.settings-device-note.err,
+.modal-body .dim.err,
+.modal-body .w-error {
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 8px 0;
 }
 
 .modal-body input[type="text"],
@@ -1101,6 +1144,11 @@ kbd {
     min-width: 34px;
     min-height: 34px;
   }
+
+  .dropdown-item {
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
 }
 
 @media (max-width: 767px) {
@@ -1179,11 +1227,29 @@ kbd {
   }
 
   /* The header is the sheet's other grab area, so its text must not be
-     selectable out from under a drag. */
+     selectable out from under a drag. The controls are excluded: Chrome on
+     Android will not open a <select> under user-select: none. */
   #settings-modal .modal-header,
   .app-dialog .modal-header {
     user-select: none;
   }
+
+  #settings-modal .modal-header select,
+  #settings-modal .modal-header input,
+  #settings-modal .modal-header button,
+  .app-dialog .modal-header select,
+  .app-dialog .modal-header input,
+  .app-dialog .modal-header button {
+    -webkit-user-select: auto;
+    user-select: auto;
+  }
+}
+
+/* Drag affordances only. touch-action on the header itself would cover the
+   device <select>, and an ancestor's touch-action cannot be relaxed. */
+.sheet-grab,
+.modal-header > span {
+  touch-action: none;
 }
 
 /* A checkbox drawn as a slide switch — for the one control that is a
@@ -1346,7 +1412,8 @@ input.switch:focus-visible {
   min-width: 0;
 }
 
-.pane-settings .err {
+.pane-settings .err,
+.pane-settings .dim.err {
   color: var(--red);
   font-size: 12px;
   min-height: 1em;

@@ -134,6 +134,8 @@ export class Layout {
         return l._leaf(null);
       }
       if (leavesLeft.n-- <= 0) return l._leaf(null);
+      // The board list used to be a pane named peers. It is the local editor now.
+      if (node === 'peers') node = 'editor';
       if (typeof node === 'string' && (l._known.has(node) || isDevicePane(node)) && !seen.has(node)) {
         seen.add(node);
         l._known.add(node);
@@ -146,10 +148,11 @@ export class Layout {
     const fl = json && Array.isArray(json.floating) ? json.floating : [];
     for (const f of fl) {
       if (!f || typeof f !== 'object' || typeof f.p !== 'string') continue;
-      if ((!l._known.has(f.p) && !isDevicePane(f.p)) || seen.has(f.p)) continue;
-      seen.add(f.p);
-      l._known.add(f.p);
-      l.floating.push(l._float(f.p, f.x, f.y, f.w, f.h));
+      const pane = f.p === 'peers' ? 'editor' : f.p;
+      if ((!l._known.has(pane) && !isDevicePane(pane)) || seen.has(pane)) continue;
+      seen.add(pane);
+      l._known.add(pane);
+      l.floating.push(l._float(pane, f.x, f.y, f.w, f.h));
     }
     return l;
   }

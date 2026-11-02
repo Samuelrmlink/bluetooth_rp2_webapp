@@ -38,6 +38,7 @@ export function fileMenuItems(node, { isOpen = false, script = null, pex = null,
       { id: 'new', label: 'New file here…' },
       { id: 'mkdir', label: 'New folder here…' },
       { id: 'upload', label: 'Upload here…' },
+      { id: 'upload-ws', label: 'Upload here over WebSocket…' },
       { id: 'untar', label: 'Upload archive here… (.tar)' },
       // the device streams tar from flash only
       ...(onSd(node.path) ? [] : [{ id: 'tar', label: 'Download as .tar' }]),
@@ -87,6 +88,7 @@ export function fileMenuItems(node, { isOpen = false, script = null, pex = null,
     out.push({ id: 'pex-partition', label: 'PEX partition…' });
   }
   out.push({ id: 'download', label: 'Download' });
+  out.push({ id: 'download-ws', label: 'Download over WebSocket' });
   if (canCompress(node.path)) out.push({ id: 'compress', label: 'Store compressed (.gz)' });
   else if (isGz(node.path) && imageKind(node.path) !== 'bitmap') out.push({ id: 'decompress', label: 'Store uncompressed' });
   if (hasBak) out.push({ id: 'restore-bak', label: 'Restore .bak (the version before the last save)' });

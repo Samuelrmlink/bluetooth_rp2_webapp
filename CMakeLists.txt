@@ -15,6 +15,8 @@ cmake_minimum_required(VERSION 3.13)
 set(PICOTOOL_FORCE_FETCH_FROM_GIT ON CACHE BOOL "" FORCE)
 
 set(PICO_BOARD pico2_w CACHE STRING "Board type")
+option(BTGW_ROLE_CON "UART console for the BLE role-swap simulator" OFF)
+option(BTGW_ROLE_NET "HTTP role console; leave Wi-Fi up" OFF)
 set(PICO_PLATFORM rp2350-arm-s CACHE STRING "Platform")
 set(APP_DEFCONFIG "${CMAKE_CURRENT_LIST_DIR}/configs/pico2w_defconfig"
     CACHE FILEPATH "Kconfig defaults used when build/.config does not exist yet")
@@ -36,7 +38,7 @@ message(STATUS "${kconf_out}")
 include(${CMAKE_BINARY_DIR}/config.cmake)
 # These name behavior that is specified and not built. A defconfig that
 # turns one on fails here, so the image cannot claim the feature.
-foreach(_unbuilt NET_GW_LAN NET_MDNS_GW NET_NAT IEEE802154 NET_THREAD CAN CAN_TWAI CAN_MCP2515 CAN_J1939)
+foreach(_unbuilt IEEE802154 NET_THREAD CAN CAN_TWAI CAN_MCP2515 CAN_J1939)
     if(CONFIG_${_unbuilt})
         message(FATAL_ERROR "CONFIG_${_unbuilt} is specified and not built")
     endif()
@@ -114,10 +116,12 @@ if(CONFIG_RADIO_CYW43)
     target_sources(btgw PRIVATE src/net/cyw43_wait.c)
     target_link_libraries(btgw pico_cyw43_arch_lwip_poll)
     target_link_options(btgw PRIVATE
-        -Wl,--wrap=cyw43_await_background_or_timeout_us)
+        -Wl,--wrap=cyw43_await_background_or_timeout_us
+        -Wl,--wrap=cyw43_cb_process_ethernet)
 endif()
 if(CONFIG_NET_HTTP_SERVER)
-    target_sources(btgw PRIVATE src/net/http.c src/net/ws.c src/net/peer_proxy.c)
+    target_sources(btgw PRIVATE src/net/http.c src/net/ws.c src/net/peer_proxy.c
+                   src/net/peer_fwd.c src/net/peer_fwd_msg.c)
 endif()
 target_link_options(btgw PRIVATE -Wl,--wrap=panic)
 
@@ -215,6 +219,12 @@ endif()
 if(CONFIG_NET_ETH_W5500)
     target_sources(btgw PRIVATE src/net/w5500.c src/net/eth_w5500.c src/net/eth_cfg.c src/net/eth_ops.c)
 endif()
+if(CONFIG_NET_GW_LAN)
+    target_sources(btgw PRIVATE src/net/gw_core.c src/net/gw_lan.c src/net/gw_ops.c)
+endif()
+if(CONFIG_NET_NAT)
+    target_sources(btgw PRIVATE src/net/gw_nat.c)
+endif()
 # The SD card (src/sd, FatFs). SDIO adds the PIO programs; SPI goes through
 # the bus layer above (CONFIG_SD_BUS_SPI selects CONFIG_SPI_BUS).
 if(CONFIG_SD)
@@ -273,7 +283,7 @@ if(CONFIG_NET_WIFI)
 endif()
 # Wall-clock time (sys.time, TLS dates). sntp_time.c is always built: with
 # SNTP off it just reports "no time".
-target_sources(btgw PRIVATE src/net/sntp_time.c)
+target_sources(btgw PRIVATE src/net/sntp_time.c src/net/ping.c src/net/net_log.c src/net/ws_link.c)
 if(CONFIG_NET_SNTP)
     target_link_libraries(btgw pico_lwip_sntp)
 endif()
@@ -484,9 +494,19 @@ target_compile_definitions(btgw PRIVATE
 )
 
 # The console is RTT over SWD: no UART is wired from the probe, and CDC-ACM is
-# off. See tools/debug.sh.
+# off. See tools/debug.sh. The role-swap simulator build turns UART0 on so
+# mcusim can send the test lines. The product image leaves it off.
 pico_enable_stdio_rtt(btgw 1)
-pico_enable_stdio_uart(btgw 0)
+if(BTGW_ROLE_CON)
+    pico_enable_stdio_uart(btgw 1)
+    target_sources(btgw PRIVATE src/bt/le/role_con.c)
+    target_compile_definitions(btgw PRIVATE BTGW_ROLE_CON=1)
+    if(BTGW_ROLE_NET)
+        target_compile_definitions(btgw PRIVATE BTGW_ROLE_NET=1)
+    endif()
+else()
+    pico_enable_stdio_uart(btgw 0)
+endif()
 pico_enable_stdio_usb(btgw 0)
 
 # Caps FLASH at one A/B slot (864 KiB, partitions.json) so the firmware can

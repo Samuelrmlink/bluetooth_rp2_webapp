@@ -74,6 +74,10 @@ test('no module fitted reads "not present"; unplugged reads "no link"', async ({
 
 test('hidden on a build without the module', async ({ page }) => {
   await ready(page);
-  await page.evaluate(() => { window.__btgwApp.sysInfo.modules = ['sys', 'bt']; for (const s of window.__btgwApp.sections) s.onConnect?.(); });
+  await page.evaluate(() => {
+    const info = { modules: ['sys', 'bt'], transports: ['le'] };
+    window.__btgwApp.sysInfo = info;
+    window.__btgwApp.settingsModal.applyCapabilities(info);
+  });
   await expect(page.locator('#sect-ethernet')).toBeHidden();
 });

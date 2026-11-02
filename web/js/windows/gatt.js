@@ -155,6 +155,12 @@ export class GattWindow {
     this._fill(this.addr);
   }
 
+  // The socket may still be opening when the window is shown (a remote
+  // board dials when one of its windows comes on screen). Fetch then.
+  onConnect() {
+    if (this.addr) this._fill(this.addr);
+  }
+
   // Fetch whatever part of a device's tree the store does not have yet.
   async _fill(addr) {
     const d = addr && this.store.get(addr);

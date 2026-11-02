@@ -69,8 +69,10 @@
 #include "tusb.h"
 
 #include "net/cyw43_wait.h"
+#include "net/mdns.h"
 
 void __real_cyw43_await_background_or_timeout_us(uint32_t timeout_us);
+void __real_cyw43_cb_process_ethernet(void *cb_data, int itf, size_t len, const uint8_t *buf);
 
 /* Two clocks, kept apart on purpose. The first version of this file timed
  * tud_task() and the real wait together, so a 2.75 s reading could have been
@@ -137,4 +139,11 @@ void cyw43_wait_reset_stats(void) {
     wait_max_us = wait_max_at_ms = wait_max_asked_us = usb_max_us = 0;
     wait_total_us = 0;
     wait_calls = 0;
+}
+
+/* The bytes are already in `buf`. Drop mDNS before the driver allocates a
+ * PBUF_POOL buffer. Called from cyw43_ll.c, so --wrap sees the reference. */
+void __wrap_cyw43_cb_process_ethernet(void *cb_data, int itf, size_t len, const uint8_t *buf) {
+    if (buf && mdns_should_drop(buf, len)) return;
+    __real_cyw43_cb_process_ethernet(cb_data, itf, len, buf);
 }

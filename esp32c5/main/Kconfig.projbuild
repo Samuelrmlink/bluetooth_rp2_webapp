@@ -2,4 +2,97 @@ menu "BTGW ESP32-C5"
 
 comment "Station credentials are cfg/wifi.json on the littlefs partition, the same file the RP2350 store writes. This image does not compile a network in. An empty store does not join."
 
+choice C5_RADIO
+    prompt "Radio"
+    default C5_RADIO_WIFI
+    help
+      The ESP32-C5 has one 2.4 GHz radio. An image is Wi-Fi or Thread,
+      not both. A site runs one board of each image and they meet on
+      Ethernet. Software coexistence stays off.
+
+config C5_RADIO_WIFI
+    bool "Wi-Fi (station and SoftAP)"
+    help
+      This image's project name is btgw-esp32c5. 802.15.4 and OpenThread
+      stay out of it.
+
+config C5_RADIO_THREAD
+    bool "Thread (802.15.4)"
+    help
+      Specified and not built. Selecting this fails configure. The image
+      that eventually builds it is named btgw-esp32c5-thread, so a Wi-Fi
+      update cannot arm on a Thread board.
+
+endchoice
+
+config C5_BLE
+    bool "NimBLE central and peripheral"
+    depends on C5_RADIO_WIFI
+    default n
+    select BT_ENABLED
+    select BT_NIMBLE_SECURITY_ENABLE
+    select BT_NIMBLE_SM_SC
+    select BT_NIMBLE_NVS_PERSIST
+    select BT_NIMBLE_DYNAMIC_SERVICE
+    help
+      NimBLE central and peripheral. Off in the product Wi-Fi image.
+      Incompatible with Thread.
+
+      The security manager and LE Secure Connections come on with this
+      symbol. CONFIG_BT_NIMBLE_STATIC_PASSKEY stays off: that option forces
+      MITM and injects a passkey even for Just Works. The application
+      supplies the passkey when NimBLE raises a passkey action. Bonds are
+      stored in NVS. Wi-Fi and BLE share 2.4 GHz through the IDF software
+      coexistence NimBLE expects. 802.15.4 stays off.
+
+      The BT host is a Kconfig choice. select and a second default have no
+      effect on it, so the BLE image also sets CONFIG_BT_NIMBLE_ENABLED.
+      The controller choice already defaults to enabled once Bluetooth is on.
+
+comment "W5500 on SPI2. These pins are the ESP32-C5-DevKitC-1 header, not the Pico wiring. GPIO13/14 are USB, GPIO11/12 are UART0, and GPIO2/3/7/25/26/27/28 are strapping or the RGB LED."
+
+config ETH_W5500_SPI
+    int "SPI host (1 = SPI2, the only general-purpose SPI)"
+    range 1 1
+    default 1
+
+config ETH_W5500_SCK
+    int "SCK GPIO"
+    range 0 28
+    default 8
+
+config ETH_W5500_MOSI
+    int "MOSI GPIO"
+    range 0 28
+    default 23
+
+config ETH_W5500_MISO
+    int "MISO GPIO"
+    range 0 28
+    default 24
+
+config ETH_W5500_CS
+    int "CS GPIO (driven as a plain GPIO)"
+    range 0 28
+    default 10
+
+config ETH_W5500_INT
+    int "INT GPIO (-1 = poll only)"
+    range -1 28
+    default 4
+
+config ETH_W5500_RST
+    int "RST GPIO (-1 = soft reset through MR)"
+    range -1 28
+    default 5
+
+config ETH_W5500_BAUD
+    int "SPI clock (Hz)"
+    range 1000000 40000000
+    default 30000000
+
+config ETH_W5500_MAC_FILTER
+    bool "Hardware MAC filter (own MAC + broadcast + multicast only)"
+    default y
+
 endmenu

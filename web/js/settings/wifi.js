@@ -3,13 +3,30 @@
 // "accepted", and this section learns the outcome by polling wifi.status.
 // Networks heard are merged across sweeps and forgotten after 30 s unseen,
 // because wifi.scan_results only holds the latest sweep.
-import { makeSection, kvRows, button, PolledSection } from './common.js';
+import { makeSection, kvRows, button, setNote, PolledSection } from './common.js';
 
 const AP_TTL_MS = 30000;
 
 function bars(rssi) {
   if (typeof rssi !== 'number') return '';
   return rssi >= -55 ? '▂▄▆█' : rssi >= -65 ? '▂▄▆_' : rssi >= -75 ? '▂▄__' : '▂___';
+}
+
+// A 169.254 address is AutoIP. The station is joined, and DHCP has not
+// given it a lease. `addressing` is null when there is nothing to report.
+export function wifiFacts(st) {
+  const ip = st?.ip && st.ip !== '0.0.0.0' ? st.ip : '';
+  const ll = ip.startsWith('169.254.');
+  const sta = st?.mode === 'sta' || st?.mode === 'apsta';
+  const leased = sta && ip && !ll;
+  return {
+    state: leased ? `joined ${st.ssid || ''}`.trim()
+      : sta && ll ? `joined ${st.ssid || ''}, no DHCP lease`.trim()
+      : st?.ap ? 'hotspot only'
+      : (st?.mode || 'idle'),
+    address: leased || ll ? ip : null,
+    addressing: leased ? 'DHCP lease' : ll ? 'link-local, still asking for a lease' : null,
+  };
 }
 
 export class WifiSection extends PolledSection {
@@ -29,6 +46,7 @@ export class WifiSection extends PolledSection {
           <option value="both">Station and hotspot</option>
           <option value="off">Off</option>
         </select></div>
+      <div class="w-coex" hidden>
       <div class="row"><label for="w-coex">Bluetooth during join</label>
         <select id="w-coex">
           <option value="window">Pause Bluetooth links</option>
@@ -37,6 +55,7 @@ export class WifiSection extends PolledSection {
       <div class="dim">How WiFi rejoins while Bluetooth devices are connected. Pause:
         the links drop for the join (up to 30 s) and then reconnect. Keep up: the join
         runs alongside them; only a Bluetooth scan makes it wait. Saved on the device.</div>
+      </div>
       <hr>
       <div class="row"><strong>Networks in range</strong><span class="spacer"></span><button type="button" class="pane-btn w-scan">Scan</button></div>
       <div class="kv-list w-aps"></div>
@@ -58,14 +77,15 @@ export class WifiSection extends PolledSection {
       </form>`);
     const q = (s) => d.querySelector(s);
     Object.assign(this, {
-      _status: q('.w-status'), _error: q('.w-error'), _mode: q('#w-mode'), _coex: q('#w-coex'), _aps: q('.w-aps'),
+      _status: q('.w-status'), _error: q('.w-error'), _mode: q('#w-mode'), _coex: q('#w-coex'),
+      _coexBlock: q('.w-coex'), _aps: q('.w-aps'),
       _saved: q('.w-saved'), _note: q('.w-note'), _ssid: q('.w-ssid'), _psk: q('.w-psk'),
       _apSsid: q('.w-ap-ssid'), _apPsk: q('.w-ap-psk'),
     });
     this._mode.addEventListener('change', () => this._call('wifi.mode', { mode: this._mode.value }, `mode ${this._mode.value}`));
     this._coex.addEventListener('change', () => this._call('wifi.mode', { coex: this._coex.value },
       this._coex.value === 'live' ? 'joins keep Bluetooth links up' : 'joins pause Bluetooth links'));
-    q('.w-scan').addEventListener('click', () => this._call('wifi.scan', {}, 'scanning…'));
+    q('.w-scan').addEventListener('click', () => this._scan());
     q('.w-join').addEventListener('submit', (e) => { e.preventDefault(); this._join(this._ssid.value.trim(), this._psk.value); });
     q('.w-ap').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -73,18 +93,36 @@ export class WifiSection extends PolledSection {
     });
   }
 
+  // The coexistence choice is the Pico radio. A board with no bt module
+  // has nothing for it to do.
+  onDevice(info) {
+    const bt = Array.isArray(info?.modules) && info.modules.includes('bt');
+    this._coexBlock.hidden = !bt;
+  }
+
+  async _scan() {
+    try {
+      const r = await this.ws.call('wifi.scan', {});
+      const started = r && (r.started || r.scanning);
+      setNote(this._note, started ? 'scanning…' : 'scan did not start', !started);
+    } catch (e) {
+      setNote(this._note, `wifi.scan: ${e.message}`, true);
+    }
+    this.soon();
+  }
+
   async _call(op, params, note) {
     try {
       await this.ws.call(op, params);
-      this._note.textContent = note;
+      setNote(this._note, note);
     } catch (e) {
-      this._note.textContent = `${op}: ${e.message}`;
+      setNote(this._note, `${op}: ${e.message}`, true);
     }
     this.soon();
   }
 
   _join(ssid, psk) {
-    if (!ssid) { this._note.textContent = 'enter an SSID'; return; }
+    if (!ssid) { setNote(this._note, 'enter an SSID', true); return; }
     // "Joining", not "joined": the device answers before the radio has done
     // anything; the status poll says how it went.
     this._call('wifi.connect', psk ? { ssid, psk } : { ssid }, `asked to join ${ssid}…`);
@@ -96,10 +134,11 @@ export class WifiSection extends PolledSection {
       this.ws.call('wifi.scan_results').catch(() => ({ aps: [] })),
       this.ws.call('wifi.networks').catch(() => ({ networks: [] })),
     ]);
-    const up = st.mode === 'sta' && st.ip && st.ip !== '0.0.0.0';
+    const fact = wifiFacts(st);
     kvRows(this._status, [
-      ['State', up ? `joined ${st.ssid}` : (st.ap ? 'hotspot only' : st.mode || 'idle')],
-      ['Address', up ? st.ip : null],
+      ['State', fact.state],
+      ['Address', fact.address],
+      ['Addressing', fact.addressing],
       ['Mode', `${st.mode}${st.want && st.want !== st.mode ? ` (want ${st.want})` : ''}`],
       ['Radio', st.driver ? 'up' : 'down'],
       ['Hotspot', st.ap ? `up · ${st.ap_ip} · ${st.ap_clients ?? 0} client(s)` : 'down'],

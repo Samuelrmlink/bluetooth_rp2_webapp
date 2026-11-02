@@ -31,9 +31,12 @@
 #include "fs/fs_watch.h"
 #include "config/config.h"
 #include "net/http.h"
+#include "net/peer_fwd.h"
 #include "net/usb_ncm.h"
 #include "tusb.h"
 #include "net/mdns.h"
+#include "net/net_log.h"
+#include "net/ping.h"
 #include "api/ops.h"
 #include "util/crumb.h"
 #include "util/stackmark.h"
@@ -54,6 +57,7 @@
 #endif
 #include "net/wg.h"
 #include "net/uplink.h"
+#include "net/gw_lan.h"
 #include "net/fwd.h"
 #include "net/sntp_time.h"
 #if CONFIG_NET_WIFI
@@ -127,6 +131,12 @@ int main(void) {
         fs_migrate_boot();
         cfg_load();
     }
+#if defined(BTGW_ROLE_CON) && !defined(BTGW_ROLE_NET)
+    /* Simulator image. A station that never associates holds the controller
+     * off for 60 s (wifi_bt_hold). Mode off releases it. The bench image
+     * (BTGW_ROLE_NET) leaves Wi-Fi up so the board stays reachable. */
+    cfg_set_mode("off");
+#endif
 
 #if CONFIG_RADIO_CYW43
     /* Brings up cyw43 + lwIP + BTstack on one async_context_poll. */
@@ -159,6 +169,9 @@ int main(void) {
      * lwIP is up as soon as cyw43_arch_init() has run, which is above. */
     mdns_start();
 #endif
+    /* After the responder is up, before any netif, so the stored name is
+     * what those interfaces register. The serial formula is not written. */
+    gw_lan_init();
 
 #if CONFIG_NET_USB_NCM
     /* Explicit, because pico_stdio_usb is off: nothing else brings TinyUSB up,
@@ -249,6 +262,7 @@ int main(void) {
 #if CONFIG_OTA
             ota_reboot(false);          /* powers the radio down first */
 #else
+            launch_mark_requested();
             watchdog_reboot(0, 0, 100);
             for (;;) { __asm volatile("wfi"); }
 #endif
@@ -329,6 +343,12 @@ int main(void) {
         crumb(CRUMB_LOOP_PEX);
         pex_gw_poll();
 #endif
+#ifdef BTGW_ROLE_CON
+        { void role_con_poll(void); role_con_poll(); }
+#endif
+        /* Before uplink selection, so a peer that just went silent is gone
+         * before the peer route is applied. */
+        gw_lan_poll();
 #if CONFIG_NET_UPLINK
         crumb(CRUMB_LOOP_UPLINK);
         uplink_tick();
@@ -353,10 +373,14 @@ int main(void) {
          * the per-line tcp_output() was removed deliberately. */
         crumb(CRUMB_LOOP_WS);
         http_flush_ws();
+        peer_fwd_poll();
 #endif
 #if CONFIG_NET_MDNS
+        mdns_poll();
         mdns_browse_poll();
 #endif
+        net_log_poll();
+        ping_tick();
         crumb(CRUMB_LOOP_END);
 
         /*

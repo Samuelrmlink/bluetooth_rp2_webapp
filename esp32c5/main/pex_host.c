@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "sdkconfig.h"
 #include "esp_cache.h"
 #include "esp_log.h"
 #include "esp_partition.h"
@@ -11,10 +12,13 @@
 #include "freertos/semphr.h"
 #include "psa/crypto.h"
 
+#include "ble_pex.h"
 #include "fs_lfs.h"
 #include "ota/ota_pubkey.h"
 #include "pex_rt.h"
 #include "wifi_sta.h"
+
+extern const pex_group_t pex_group_bt;
 
 static const char *TAG = "pex";
 /* DRAM, and executable only because CONFIG_ESP_SYSTEM_MEMPROT is off.
@@ -98,11 +102,16 @@ void pex_host_init(void) {
         .pool = pool, .pool_size = sizeof pool,
         .policy = PEX_POLICY_ALLOW_UNSIGNED,
         .verify = pex_verify, .host_name = "esp32c5", .flash = fp,
+        .on_unload = ble_pex_unload,
     };
     if (pex_init(&c) != PEX_OK) {
         ESP_LOGE(TAG, "pex_init failed: %s", pex_errmsg());
         return;
     }
+    if (pex_register_group(&pex_group_bt) != PEX_OK) {
+        ESP_LOGE(TAG, "bt group: %s", pex_errmsg());
+    }
+    ble_pex_start();
     up = true;
 }
 
@@ -173,6 +182,13 @@ static int load_installed_or_file(const char *name);
 
 static void launch_step(void) {
     if (!up) return;
+#if CONFIG_C5_BLE
+    /* The role console is the BLE user on this image. A launched module
+     * would take the same controller. */
+    lskip = "role";
+    ldone = true;
+    return;
+#endif
     if (!lloaded) load_launch();
     if (ldone || lskip) return;
     if (!lnow) {
@@ -199,6 +215,7 @@ void pex_host_poll(void) {
     if (!up) return;
     pex_host_lock();
     pex_poll();
+    ble_pex_poll();
     launch_step();
     pex_host_unlock();
 }
@@ -235,8 +252,8 @@ int launch_set_json(const char *frame, char *dst, size_t cap, const char **err) 
     for (int i = 0; i < nent; i++) {
         char key[48], kind[8], name[24];
         snprintf(key, sizeof key, "params.entries.%d.kind", i);
-        if (!pex_json_str(frame, key, kind, sizeof kind) || (strcmp(kind, "pex") && strcmp(kind, "lua"))) {
-            *err = "kind is \"pex\" or \"lua\"";
+        if (!pex_json_str(frame, key, kind, sizeof kind) || strcmp(kind, "pex")) {
+            *err = "this image starts PEX apps only";
             return -1;
         }
         snprintf(key, sizeof key, "params.entries.%d.name", i);

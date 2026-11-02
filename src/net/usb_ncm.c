@@ -116,6 +116,11 @@ void usb_ncm_poll(void) {
         if (!n) {
             break;
         }
+        if (mdns_should_drop(ncm_rx_data[ncm_rx_r], n)) {
+            ncm_rx_len[ncm_rx_r] = 0;
+            ncm_rx_r = (uint8_t)((ncm_rx_r + 1) % NCM_RX_N);
+            continue;
+        }
         struct pbuf *p = pbuf_alloc(PBUF_RAW, n, PBUF_POOL);
         if (p) {
             pbuf_take(p, ncm_rx_data[ncm_rx_r], n);

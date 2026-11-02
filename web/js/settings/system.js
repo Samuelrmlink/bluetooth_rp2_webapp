@@ -1,16 +1,17 @@
 // Settings -> System: reboot the gateway, restart the Lua VM on its own, and
 // see where the Lua arena's memory is (script.heap) -- with a download of the
 // whole arena for offline analysis (tools/lua_heapdump.py).
-import { makeSection, kvRows, button, PolledSection } from './common.js';
+import { makeSection, kvRows, button, setNote, PolledSection } from './common.js';
+import { luaShown } from './caps.js';
 
 const kb = (n) => (n == null ? '—' : `${(n / 1024).toFixed(1)} KB`);
 
-// Shown before sys.reboot. Scripts and PEX apps come back only on a normal
-// boot, and only when Startup lists them.
+// Shown before sys.reboot. That reboot runs the Startup list. A hang, and a
+// second reset before the first one has settled, still start nothing.
 export const REBOOT_CONFIRM =
   'Reboot the gateway?\n\nEvery connection drops: WiFi, WireGuard, Bluetooth devices and this page. ' +
-  'Scripts and PEX apps start again only when this boot is a normal one and Startup lists them. ' +
-  'A watchdog reboot or a double reset starts nothing.';
+  'Scripts and PEX apps in Startup start again on this reboot. ' +
+  'A watchdog reset that nobody asked for, or a second reset before the first one has settled, starts nothing.';
 
 // The census as rows. Pure; tested.
 export function heapRows(h) {
@@ -52,14 +53,17 @@ export class SystemSection extends PolledSection {
     const d = makeSection(this.id, 'System', `
       <div class="row sys-actions"></div>
       <div class="dim sys-note"></div>
-      <div class="row"><strong>Lua memory</strong></div>
-      <div class="kv-list sys-heap"></div>
-      <div class="row sys-dump"></div>`);
+      <div class="sys-lua" hidden>
+        <div class="row sys-lua-actions"></div>
+        <div class="row"><strong>Lua memory</strong></div>
+        <div class="kv-list sys-heap"></div>
+        <div class="row sys-dump"></div>
+      </div>`);
+    this._lua = d.querySelector('.sys-lua');
     this._heap = d.querySelector('.sys-heap');
     this._note = d.querySelector('.sys-note');
-    const acts = d.querySelector('.sys-actions');
-    acts.append(
-      button('Reboot gateway', () => this.reboot()),
+    d.querySelector('.sys-actions').append(button('Reboot gateway', () => this.reboot()));
+    d.querySelector('.sys-lua-actions').append(
       button('Restart Lua VM', () => this.restartVm()),
       button('Defragment Lua memory', () => this.restartVm(true)),
     );
@@ -67,12 +71,17 @@ export class SystemSection extends PolledSection {
     d.querySelector('.sys-dump').append(this._dumpBtn);
   }
 
+  // Reboot is every image. The Lua rows are only a board that runs scripts.
+  onDevice(info) {
+    this._lua.hidden = !luaShown(info);
+  }
+
   async reboot() {
     if (!window.confirm(REBOOT_CONFIRM)) return;
     try {
       await this.ws.call('sys.reboot');
-      this._note.textContent = 'Rebooting… this page reconnects when it is back.';
-    } catch (e) { this._note.textContent = e.message; }
+      setNote(this._note, 'Rebooting… this page reconnects when it is back.');
+    } catch (e) { setNote(this._note, e.message, true); }
   }
 
   // resume: Defragment -- rebuild the VM and start the running scripts again
@@ -84,8 +93,8 @@ export class SystemSection extends PolledSection {
     if (!window.confirm(q)) return;
     try {
       const r = await this.ws.call('script.vm_restart', { resume });
-      this._note.textContent = restartText(r);
-    } catch (e) { this._note.textContent = e.message; }
+      setNote(this._note, restartText(r));
+    } catch (e) { setNote(this._note, e.message, true); }
     this.soon();
   }
 
@@ -100,9 +109,9 @@ export class SystemSection extends PolledSection {
       a.download = `lua-heap-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-      this._note.textContent = 'Saved. Compare two dumps with tools/lua_heapdump.py --diff.';
+      setNote(this._note, 'Saved. Compare two dumps with tools/lua_heapdump.py --diff.');
     } catch (e) {
-      this._note.textContent = `Heap dump failed: ${e.message}`;
+      setNote(this._note, `Heap dump failed: ${e.message}`, true);
     } finally {
       this._dumpBtn.disabled = false;
       this._dumpBtn.textContent = 'Download heap dump';

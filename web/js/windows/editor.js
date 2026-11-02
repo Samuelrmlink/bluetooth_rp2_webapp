@@ -47,6 +47,7 @@ import { planTransfer, measure, runTransfer, parseLfsFree, sdFreeBytes, lfsFreeC
 import { badPath, encodeTar, appendTar } from '../tar.js';
 import { gestureOf } from '../editor/select.js';
 import { createJobs, byteLine, byteFrac, fileLine, jobError } from '../editor/jobs.js';
+import { readChunks, writeChunks } from '../xfer/wsfile.js';
 import { JobList } from '../editor/joblist.js';
 import { archivePlan, pruneCovered } from '../editor/archive.js';
 
@@ -56,7 +57,10 @@ const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve))
 const NO_SD = 'The compiler lives on the SD card and this firmware has no SD.';
 const LANG_NAMES = { lua: 'Lua', json: 'JSON', text: 'Plain text' };
 
-const TABS_KEY = 'btgw.editor.tabs';
+// A peer editor is this same page in a frame. Same-origin storage would
+// otherwise share one tab list between the local board and every other one.
+const _peerTabs = new URLSearchParams(location.search).get('peer');
+const TABS_KEY = _peerTabs ? `btgw.editor.tabs:${_peerTabs}` : 'btgw.editor.tabs';
 // What a drag carries: a row of the file list, or an editor tab ({ path, gid }).
 const ROW_TYPE = 'application/x-btgw-path';
 const TAB_TYPE = 'application/x-btgw-tab';
@@ -307,7 +311,7 @@ export class EditorWindow {
     this._buildBtn.addEventListener('click', () => this.build());
     this._brunBtn.addEventListener('click', () => this.build({ run: true }));
     q('.ed-b-new').addEventListener('click', () => this.newFile());
-    q('.ed-b-upload').addEventListener('click', () => { this._uploadDir = undefined; this._upload.click(); });
+    q('.ed-b-upload').addEventListener('click', () => { this._uploadVia = ''; this._uploadDir = undefined; this._upload.click(); });
     q('.ed-b-download').addEventListener('click', () => this.download());
     this._upload.addEventListener('change', () => this.upload([...this._upload.files], this._uploadDir));
     this._tarInput.addEventListener('change', () => {
@@ -2925,6 +2929,7 @@ export class EditorWindow {
       case 'commit': return this.scriptOp('script.commit', p, (n) => `Committed ${n} to lua/${n}.lua`);
       case 'revert': return this.scriptOp('script.revert', p, (n) => `Reverted ${n}: the next tier down runs now`);
       case 'download': return this.download(p);
+      case 'download-ws': return this.downloadWs(p);
       case 'copy': return this.copyTo(p);
       case 'rename': return this.renameFile(p);
       case 'select': this.tree.applyPick('toggle', p); this.tree.render(); return undefined;
@@ -2936,7 +2941,8 @@ export class EditorWindow {
       case 'new': return this.newFile(p);
       case 'mkdir': return this.newFolder(p);
       case 'sd-settings': return this.app.settingsModal?.open('sect-sd');
-      case 'upload': this._uploadDir = p; return this._upload.click();
+      case 'upload': this._uploadVia = ''; this._uploadDir = p; return this._upload.click();
+      case 'upload-ws': this._uploadVia = 'WebSocket'; this._uploadDir = p; return this._upload.click();
       case 'refresh': return this.tree.refresh(node).then(() => this.tree.invalidate());
       case 'tar': return this.downloadTar(p);
       case 'untar': this._tarTarget = p; return this._tarInput.click();
@@ -3211,15 +3217,18 @@ export class EditorWindow {
 
   async upload(files, dir = this.tree.currentDir) {
     const list = [...files];
+    const via = this._uploadVia || 'HTTP';
+    this._uploadVia = '';
     this._upload.value = '';
     if (!list.length) return;
+    if (via === 'WebSocket') return this.uploadWs(list, dir);
     const job = this._job('Uploading');
     let wrote = 0;
     for (let i = 0; i < list.length; i++) {
       if (job.signal.aborted) { job.aborted(); break; }
       const f = list[i];
       const dest = dir ? `${dir}/${f.name}` : f.name;
-      job.set(`Uploading ${f.name} · ${i + 1} of ${list.length}`, list.length ? i / list.length : 0);
+      job.set(`Uploading ${f.name} · HTTP · ${i + 1} of ${list.length}`, list.length ? i / list.length : 0);
       const r = await fs.write(dest, f);
       if (job.signal.aborted) { job.aborted(); break; }
       if (!r.ok) {
@@ -3243,7 +3252,7 @@ export class EditorWindow {
     if (b && !b.binary) {
       const job = this._job(`Downloading ${name}`);
       const text = path === this.path ? this.core.value : b.text;
-      job.set(`Downloading ${name}`);
+      job.set(byteLine('Downloading', name, text.length, text.length, 'HTTP'));
       this._saveBlob(new Blob([text], { type: 'text/plain' }), name);
       job.done(`Downloaded ${name}`);
       return;
@@ -3251,12 +3260,58 @@ export class EditorWindow {
     const job = this._job(`Downloading ${name}`);
     const r = await fs.readFileStream(path, {
       signal: job.signal,
-      onProgress: ({ got, total }) => job.set(byteLine('Downloading', name, got, total), byteFrac(got, total)),
+      onProgress: ({ got, total }) => job.set(byteLine('Downloading', name, got, total, 'HTTP'), byteFrac(got, total)),
     });
     if (r.aborted) { job.aborted(); return; }
     if (!r.ok) { job.fail(jobError(r.error)); this._say(`Download failed: ${jobError(r.error)}`, 'err'); return; }
     this._saveBlob(new Blob([r.bytes]), name);
     job.done(`Downloaded ${name}`);
+  }
+
+  // The socket this editor already holds. A page opened on one board does
+  // not put `node` on the frame: that socket is the board. A caller that
+  // shares one socket across boards passes the other board's mDNS name.
+  async downloadWs(path = this.path, node) {
+    if (!path || path === PEX_PART) return;
+    const name = (isGz(path) ? plainName(path) : path).split('/').pop();
+    const job = this._job(`Downloading ${name}`);
+    const r = await readChunks((op, params, n) => this.ws.call(op, params, n), path, {
+      signal: job.signal,
+      node,
+      onProgress: ({ got, total }) => job.set(byteLine('Downloading', name, got, total, 'WebSocket'), byteFrac(got, total)),
+    });
+    if (r.aborted) { job.aborted(); return; }
+    if (!r.ok) { job.fail(jobError(r.error)); this._say(`Download failed: ${jobError(r.error)}`, 'err'); return; }
+    this._saveBlob(new Blob([r.bytes]), name);
+    job.done(`Downloaded ${name}`);
+  }
+
+  async uploadWs(files, dir = this.tree.currentDir, node) {
+    const list = [...files];
+    const job = this._job('Uploading');
+    let wrote = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (job.signal.aborted) { job.aborted(); break; }
+      const f = list[i];
+      const dest = dir ? `${dir}/${f.name}` : f.name;
+      const buf = new Uint8Array(await f.arrayBuffer());
+      const r = await writeChunks((op, params, n) => this.ws.call(op, params, n), dest, buf, {
+        signal: job.signal,
+        node,
+        onProgress: ({ got, total }) => job.set(byteLine('Uploading', f.name, got, total, 'WebSocket'), byteFrac(got, total)),
+      });
+      if (r.aborted) { job.aborted(); break; }
+      if (!r.ok) {
+        job.fail(jobError(r.error));
+        this._say(`Upload of ${f.name} failed: ${jobError(r.error)}`, 'err');
+        wrote = -1;
+        break;
+      }
+      wrote++;
+      this._say(`Uploaded ${dest}`);
+    }
+    if (wrote === list.length) job.done(`Uploaded ${list.length}`);
+    this.tree.refresh();
   }
 
   toggleSidebar() {

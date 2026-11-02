@@ -33,4 +33,8 @@ fs_wr_t *fs_open_write(const char *path);
 int fs_pwrite(fs_wr_t *f, const void *src, uint32_t n);
 int fs_close_write(fs_wr_t *f, bool abort);
 
+/* Write n bytes at off. trunc is only for offset 0 of a new websocket
+ * upload (RDWR|CREAT, TRUNC when trunc). Returns n, or a negative lfs error. */
+int fs_write_at(const char *path, uint32_t off, const void *src, uint32_t n, int trunc, uint32_t *size_out);
+
 #endif

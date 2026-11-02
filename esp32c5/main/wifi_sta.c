@@ -5,11 +5,25 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "cfg_wifi.h"
 
+#include "lwip/autoip.h"
+#include "lwip/dhcp.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/tcpip.h"
+
 static const char *TAG = "wifi";
-static bool sta_up, ap_up, scanning, have_ip;
+static bool sta_up, ap_up, scanning, have_ip, sta_connected;
+static esp_netif_t *sta_netif;
+/* When the station address is missing or 169.254. wifi_dhcp_poll restarts
+ * the client from there. AutoIP on this netif would replace a lease: the
+ * IDF port starts it from the DHCP client and never stops it on bind. */
+static uint32_t dhcp_bad_since, dhcp_kick_at;
+/* Station brought up only so a sweep can run. AP-only mode rejects a scan. */
+static bool scan_borrowed_sta;
 static char cur_ssid[CFG_SSID_MAX + 1];
 static char ip_str[16];
 static char err_str[48];
@@ -63,21 +77,38 @@ static void join_current(void) {
     esp_wifi_connect();
 }
 
+static bool addr_is_ll(uint32_t addr) {
+    return (lwip_ntohl(addr) & 0xffff0000u) == 0xa9fe0000u;
+}
+
 static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         join_current();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        sta_connected = true;
+        dhcp_bad_since = 0;
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        sta_connected = false;
+        dhcp_bad_since = 0;
         have_ip = false;
         ip_str[0] = 0;
-        wifi_event_sta_disconnected_t *ev = data;
-        snprintf(err_str, sizeof err_str, "disconnect %u", ev ? (unsigned)ev->reason : 0);
-        ESP_LOGW(TAG, "%s", err_str);
-        if (want_sta()) esp_wifi_connect();
+        /* The station interface exists only for the sweep. That drop is
+         * not a failed join, and want_sta() is false so we must not reconnect. */
+        if (!(scan_borrowed_sta && !want_sta())) {
+            wifi_event_sta_disconnected_t *ev = data;
+            snprintf(err_str, sizeof err_str, "disconnect %u", ev ? (unsigned)ev->reason : 0);
+            ESP_LOGW(TAG, "%s", err_str);
+            if (want_sta()) esp_wifi_connect();
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_SCAN_DONE) {
+        wifi_event_sta_scan_done_t *ev = data;
         uint16_t n = 16;
         wifi_ap_record_t rec[16];
-        if (esp_wifi_scan_get_ap_records(&n, rec) != ESP_OK) n = 0;
+        if (!ev || ev->status != 0 || esp_wifi_scan_get_ap_records(&n, rec) != ESP_OK) {
+            n = 0;
+            esp_wifi_clear_ap_list();
+        }
         scan_n = n;
         for (int i = 0; i < scan_n; i++) {
             snprintf(scan_aps[i].ssid, sizeof scan_aps[i].ssid, "%s", (char *)rec[i].ssid);
@@ -89,13 +120,17 @@ static void on_wifi(void *arg, esp_event_base_t base, int32_t id, void *data) {
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *ev = data;
         snprintf(ip_str, sizeof ip_str, IPSTR, IP2STR(&ev->ip_info.ip));
-        have_ip = true;
+        /* 169.254 is AutoIP, not a lease. wifi_dhcp_poll clears it. */
+        have_ip = !addr_is_ll(ev->ip_info.ip.addr);
+        if (have_ip) dhcp_bad_since = 0;
         err_str[0] = 0;
-        ESP_LOGI(TAG, "address %s", ip_str);
+        ESP_LOGI(TAG, "address %s%s", ip_str, have_ip ? "" : " (link-local)");
     }
 }
 
 static void apply_radio(void) {
+    /* A config change owns the mode. Don't restore the pre-scan mode over it. */
+    scan_borrowed_sta = false;
     bool st = want_sta(), ap = want_ap();
     wifi_mode_t mode = WIFI_MODE_NULL;
     if (st && ap) mode = WIFI_MODE_APSTA;
@@ -122,7 +157,7 @@ static void apply_radio(void) {
 }
 
 void wifi_start_from_cfg(void) {
-    esp_netif_create_default_wifi_sta();
+    sta_netif = esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&ic));
@@ -139,9 +174,47 @@ void wifi_apply_cfg(void) {
 }
 
 bool wifi_has_addr(void) { return have_ip; }
+
+/* A station with no lease, or only a 169.254 address, does not keep that
+ * address. Restarting the client also drops AutoIP, which this IDF build
+ * would otherwise leave in place over a lease. */
+void wifi_dhcp_poll(void) {
+    if (!sta_connected || scan_borrowed_sta || !sta_netif) return;
+    esp_netif_ip_info_t info;
+    if (esp_netif_get_ip_info(sta_netif, &info) != ESP_OK) return;
+    bool bad = info.ip.addr == 0 || addr_is_ll(info.ip.addr);
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    if (!bad) { dhcp_bad_since = 0; return; }
+    if (!dhcp_bad_since) dhcp_bad_since = now;
+    if ((uint32_t)(now - dhcp_bad_since) < 8000) return;
+    if (dhcp_kick_at && (uint32_t)(now - dhcp_kick_at) < 15000) return;
+    struct netif *nif = esp_netif_get_netif_impl(sta_netif);
+    if (!nif) return;
+    dhcp_kick_at = now;
+    LOCK_TCPIP_CORE();
+    autoip_stop(nif);
+    dhcp_start(nif);
+    UNLOCK_TCPIP_CORE();
+    have_ip = false;
+    if (addr_is_ll(info.ip.addr)) ip_str[0] = 0;
+    ESP_LOGW(TAG, "no DHCP lease, restarting the client");
+}
+
 int wifi_ip(char *dst, size_t cap) { return snprintf(dst, cap, "%s", have_ip ? ip_str : ""); }
 const char *wifi_current_ssid(void) { return cur_ssid; }
 bool wifi_scanning(void) { return scanning; }
+
+/* Back to the configured mode once the sweep's records are copied.
+ * esp_wifi_set_mode from the SCAN_DONE handler deadlocks the Wi-Fi task,
+ * so this runs on the task that reads status or results. */
+static void scan_release_sta(void) {
+    if (!scan_borrowed_sta || scanning) return;
+    scan_borrowed_sta = false;
+    if (sta_up) return;
+    wifi_mode_t mode = ap_up ? WIFI_MODE_AP : WIFI_MODE_NULL;
+    esp_err_t err = esp_wifi_set_mode(mode);
+    if (err != ESP_OK) ESP_LOGW(TAG, "scan restore %s", esp_err_to_name(err));
+}
 
 bool wifi_join(const char *ssid, const char *psk_or_null) {
     if (!ssid || !ssid[0]) return false;
@@ -173,13 +246,34 @@ bool wifi_join(const char *ssid, const char *psk_or_null) {
 
 bool wifi_scan_start(void) {
     if (scanning) return false;
-    wifi_scan_config_t sc = { 0 };
-    if (esp_wifi_scan_start(&sc, false) != ESP_OK) return false;
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) != ESP_OK) return false;
+    /* A scan needs a station interface. Hotspot-only (this board, with no
+     * saved network) is WIFI_MODE_AP, and scan_start is refused there. */
+    if (mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA) {
+        wifi_mode_t next = mode == WIFI_MODE_AP ? WIFI_MODE_APSTA : WIFI_MODE_STA;
+        esp_err_t err = esp_wifi_set_mode(next);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "scan mode %s", esp_err_to_name(err));
+            return false;
+        }
+        scan_borrowed_sta = true;
+    }
+    /* NULL scans every channel. A zeroed wifi_scan_config_t does not: bit 0
+     * of each band bitmap means "scan the whole band", and 0 means "only the
+     * bits that are set", so a cleared struct scans nothing. */
+    esp_err_t err = esp_wifi_scan_start(NULL, false);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "scan start %s", esp_err_to_name(err));
+        scan_release_sta();
+        return false;
+    }
     scanning = true;
     return true;
 }
 
 int wifi_status_json(char *buf, size_t cap) {
+    scan_release_sta();
     return snprintf(buf, cap,
         "{\"ok\":true,\"driver\":true,\"mode\":\"%s\",\"want\":\"%s\","
         "\"ssid\":\"%s\",\"ip\":\"%s\",\"ap\":%s,\"ap_ip\":\"%s\","
@@ -196,6 +290,7 @@ int wifi_status_json(char *buf, size_t cap) {
 }
 
 int wifi_scan_json(char *buf, size_t cap) {
+    scan_release_sta();
     size_t n = (size_t)snprintf(buf, cap, "{\"ok\":true,\"scanning\":%s,\"aps\":[", scanning ? "true" : "false");
     for (int i = 0; i < scan_n && n + 120 < cap; i++) {
         bool known = false;

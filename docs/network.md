@@ -8,7 +8,7 @@ and switched, and the two script-facing features built on top of it.
 | netif | what | built when | addressing |
 |---|---|---|---|
 | `us` | USB-NCM (Ethernet over the USB cable) | `CONFIG_NET_USB_NCM` | 192.168.8.1/24, DHCP server for the host |
-| `w0` | WiFi station | `CONFIG_NET_WIFI` | DHCP |
+| `w0` | WiFi station | `CONFIG_NET_WIFI` | DHCP, then AutoIP after 8 s with no lease |
 | `w1` | WiFi SoftAP | `CONFIG_NET_WIFI` | 192.168.4.1/24, DHCP server |
 | `e0` | W5500 Ethernet on SPI | `CONFIG_NET_ETH_W5500` (default **n**) | DHCP, or manual from `cfg/eth.json` |
 | `wg` | WireGuard tunnel | `CONFIG_NET_WIREGUARD` | `cfg/wireguard.json`; never the default route |
@@ -29,7 +29,26 @@ module on SPI1:
 | RST | GP11 (`CONFIG_ETH_W5500_RST`, -1 = soft reset through MR) |
 | 3V3, GND | 3V3(OUT), GND |
 
-All six pins are SYSTEM-reserved in the pin broker (`pins.map` shows them as
+The ESP32-C5 Wi-Fi image uses the same chip driver and the same `cfg/eth.json`
+modes, on SPI2, with its own pins. These are header pins on
+ESP32-C5-DevKitC-1 that are not USB (GPIO13/14), UART0 (GPIO11/12), the
+strapping pins, or the RGB LED:
+
+| W5500 | ESP32-C5 |
+|---|---|
+| SCK | GPIO8 |
+| MOSI | GPIO23 |
+| MISO | GPIO24 |
+| CS (plain GPIO) | GPIO10 |
+| INT | GPIO4 (`CONFIG_ETH_W5500_INT`, -1 = poll only) |
+| RST | GPIO5 (`CONFIG_ETH_W5500_RST`, -1 = soft reset through MR) |
+
+A missing `cfg/gw.json` keeps link-local on companion netif `el` for the
+life of the link, beside a DHCP lease on `e0`. `{"iface":"none"}` uses the
+Pico rule instead: link-local on `e0` after 8 s, and a lease replaces it.
+The image does not move the default route onto `e0`.
+
+On the Pico, all six pins are SYSTEM-reserved in the pin broker (`pins.map` shows them as
 `reserved` / `w5500`); `gpio.*`, `spi.xfer` and scripts cannot touch them.
 
 The chip runs in MACRAW mode: it moves frames, lwIP does ARP, IP and the
@@ -53,8 +72,10 @@ loop); topic `eth.state`.
   discover backoff grows to one attempt a minute. A lease replaces the
   link-local address; losing it, or a link flap, starts the sequence again.
   This is per-netif, not `LWIP_DHCP_AUTOIP_COOP`: that option is global and
-  would put the WiFi station on 169.254 whenever its DHCP was slow. A
-  link-local-only e0 has no gateway, so it is never an uplink.
+  would start AutoIP on every interface whenever its DHCP was merely slow,
+  including USB-NCM. The station uses the same 8 s rule on its own. A
+  link-local address has no gateway, so it is never an uplink. USB-NCM
+  does not fall back to AutoIP.
 * **manual**: ip/mask, optional gateway (which makes e0 an uplink candidate)
   and DNS.
 * **server**: e0 takes a static address (default 192.168.9.1/24) and serves
@@ -153,6 +174,8 @@ local id = mdns.group{ records = {
 mdns.ungroup(id)
 print(mdns.groups())        -- JSON, like mdns.list()
 ```
+
+`mdns.peers()` returns the `_btgw._tcp` table (name, ip, port, board, assets, age, self). `mdns.hostname('name')` stores that name in `cfg/hostname.json` and drops the previous name from the local peer table. `net.ping('a.b.c.d')` sends one ICMP echo on the interface that has the address on-link, including a 169.254 address with no gateway, and returns at once. `net.ping()` with no address reads the result (`sent`, `reply`, `timeout`). A reply or a timeout is also the event `net.ping`. The websocket op is `net.ping` with `{ "ip": "..." }`.
 
 Announced twice on add, withdrawn with a TTL-0 goodbye. Answers include the
 usual additionals (PTR -> SRV + TXT, SRV -> A), honour the QU bit, and

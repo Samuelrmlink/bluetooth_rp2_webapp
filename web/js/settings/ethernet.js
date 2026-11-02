@@ -11,7 +11,7 @@
 // on the cable keeps its own internet. Apply sends eth.config, which the
 // device validates again and applies from its main loop -- so the status
 // poll, not the reply, says when it took.
-import { makeSection, kvRows, PolledSection } from './common.js';
+import { makeSection, kvRows, setNote, PolledSection } from './common.js';
 
 export function ipv4ok(s) {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(s ?? '').trim());
@@ -110,11 +110,6 @@ export class EthernetSection extends PolledSection {
     this._form.addEventListener('submit', (e) => { e.preventDefault(); this._apply(); });
   }
 
-  onConnect() {
-    const mods = this.app.sysInfo?.modules || [];
-    this._d.hidden = !mods.includes('eth');
-  }
-
   _mode() { return this._d.querySelector('input[name="eth-mode"]:checked')?.value || 'dhcp'; }
 
   _showManual() {
@@ -135,13 +130,13 @@ export class EthernetSection extends PolledSection {
   async _apply() {
     const f = this._formValue();
     const err = ethFormError(f);
-    if (err) { this._note.textContent = err; return; }
+    if (err) { setNote(this._note, err, true); return; }
     try {
       await this.ws.call('eth.config', f);
-      this._note.textContent = f.mode === 'dhcp' ? 'applied: DHCP' : f.mode === 'server' ? `applied: DHCP server on ${f.ip || '192.168.9.1'}` : `applied: ${f.ip}`;
+      setNote(this._note, f.mode === 'dhcp' ? 'applied: DHCP' : f.mode === 'server' ? `applied: DHCP server on ${f.ip || '192.168.9.1'}` : `applied: ${f.ip}`);
       this._dirty = false;
     } catch (e) {
-      this._note.textContent = `eth.config: ${e.message}`;
+      setNote(this._note, `eth.config: ${e.message}`, true);
     }
     this.soon();
   }

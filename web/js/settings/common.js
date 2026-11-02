@@ -25,6 +25,13 @@ export function kvRows(el, rows) {
   el.replaceChildren(frag);
 }
 
+// A status line. `bad` draws it in red; a later ordinary note clears that.
+export function setNote(el, text, bad) {
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('err', !!bad && !!text);
+}
+
 export function button(label, onClick) {
   const b = document.createElement('button');
   b.type = 'button';
@@ -39,12 +46,17 @@ export function button(label, onClick) {
 export class PolledSection {
   constructor(app, settings, id, every) {
     this.app = app;
-    this.ws = app.ws;
     this.settings = settings;
     this.id = id;
     this.every = every;
     this._last = -Infinity;
     this._busy = false;
+  }
+
+  // The board Settings is aimed at. Local uses the page socket. A remote
+  // board uses its own, opened when that board is picked.
+  get ws() {
+    return this.app.settingsSocket();
   }
 
   render(t) {

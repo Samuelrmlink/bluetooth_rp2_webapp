@@ -334,6 +334,19 @@ test('fromJSON keeps a meter-scoped pane id it does not know yet, so an unplugge
   assert.equal(l.isKnown('values@81645'), true);
 });
 
+test('fromJSON reads the old peers pane as the local editor', () => {
+  const panes = ['editor', 'scanner', 'console'];
+  const l = Layout.fromJSON({
+    tree: ['row', 0.6, 'peers', ['col', 0.55, 'scanner', 'console']],
+  }, panes);
+  assert.deepEqual(shape(l), ['row', 0.6, 'editor', ['col', 0.55, 'scanner', 'console']]);
+  const floated = Layout.fromJSON({
+    tree: 'scanner',
+    floating: [{ p: 'peers', x: 0.1, y: 0.1, w: 0.4, h: 0.4 }],
+  }, panes);
+  assert.deepEqual(floated.toJSON().floating.map((f) => f.p), ['editor']);
+});
+
 test('fromJSON still drops an unknown bare id, and a malformed meter id', () => {
   const l = Layout.fromJSON({ tree: ['row', 0.5, 'nope', 'graphs@'] }, PANES);
   assert.deepEqual(shape(l), ['row', 0.5, null, null]);

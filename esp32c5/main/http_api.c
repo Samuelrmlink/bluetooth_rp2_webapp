@@ -1,11 +1,14 @@
 /* Websocket and filesystem HTTP for a board that does not serve web assets.
  * The envelope matches the RP2350 API: {"id","op","params"} answers
  * {"id","ok","result"} or {"id","ok":false,"error":{"code","message"}}.
- * Files go over /api/fs, the same routes the editor already uses. */
+ * Files go over /api/fs, and also over the websocket as fs.read / fs.write
+ * one WS_FILE_RAW chunk at a time. A chunk waits (`busy`) while a telemetry
+ * event is queued, and that event is flushed first. */
 #include "http_api.h"
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_http_server.h"
@@ -18,7 +21,10 @@
 #include "cfg_wifi.h"
 #include "fs_lfs.h"
 #include "mdns_adv.h"
+#include "net/ws_link.h"
+#include "peer_fwd.h"
 #include "pex_host.h"
+#include "role_hw.h"
 #include "wifi_sta.h"
 
 static const char *TAG = "http";
@@ -30,6 +36,7 @@ static char out_buf[8192];
 int pex_json_str(const char *json, const char *path, char *out, size_t cap);
 int pex_json_len(const char *json, const char *path);
 int pex_json_int(const char *json, const char *path, int64_t *out);
+int pex_json_bool(const char *json, const char *path, int *out);
 
 static void cors(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
@@ -337,6 +344,189 @@ static int op_fs_stat(const char *frame, char *dst, size_t cap, const char **err
     return 0;
 }
 
+/* Events the websocket pushes. tel.sample is one a second. A file op
+ * answers busy while any of these are still queued, and the flush below
+ * sends one before that busy reply. 192 bytes fits the poll task. */
+#define TEL_SLOTS 8
+#define TEL_LINE 192
+static char tel_q[TEL_SLOTS][TEL_LINE];
+static int tel_head, tel_n;
+static int flush_posted;
+static int64_t next_tel;
+
+static int ws_file_frame(const char *frame) {
+    char op[48];
+    if (!pex_json_str(frame, "op", op, sizeof op)) return 0;
+    return strcmp(op, "fs.read") == 0 || strcmp(op, "fs.write") == 0;
+}
+
+static void flush_one_locked(void) {
+    int fds[6];
+    size_t nfd = 6;
+    int wsfd[6];
+    int nw = 0;
+    size_t i;
+    httpd_ws_frame_t frame;
+    int sent = 0;
+    if (tel_n <= 0 || !srv) return;
+    if (httpd_get_client_list(srv, &nfd, fds) != ESP_OK) return;
+    for (i = 0; i < nfd && nw < 6; i++) {
+        if (httpd_ws_get_fd_info(srv, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) wsfd[nw++] = fds[i];
+    }
+    if (nw == 0) {
+        tel_head = (tel_head + 1) % TEL_SLOTS;
+        tel_n--;
+        return;
+    }
+    memset(&frame, 0, sizeof frame);
+    frame.type = HTTPD_WS_TYPE_TEXT;
+    frame.payload = (uint8_t *)tel_q[tel_head];
+    frame.len = strnlen(tel_q[tel_head], TEL_LINE - 1);
+    for (i = 0; i < (size_t)nw; i++) {
+        if (httpd_ws_send_frame_async(srv, wsfd[i], &frame) == ESP_OK) sent = 1;
+    }
+    if (sent) {
+        tel_head = (tel_head + 1) % TEL_SLOTS;
+        tel_n--;
+    }
+}
+
+static void tel_work(void *arg) {
+    (void)arg;
+    if (!mu) { flush_posted = 0; return; }
+    xSemaphoreTakeRecursive(mu, portMAX_DELAY);
+    flush_one_locked();
+    flush_posted = 0;
+    xSemaphoreGiveRecursive(mu);
+}
+
+void http_api_emit(const char *topic, const char *json) {
+    char line[TEL_LINE];
+    int n;
+    int slot;
+    if (!topic || !mu) return;
+    n = snprintf(line, sizeof line, "{\"evt\":\"%s\",\"data\":%s}", topic, json ? json : "null");
+    if (n <= 0 || (size_t)n >= sizeof line) return;
+    xSemaphoreTakeRecursive(mu, portMAX_DELAY);
+    if (tel_n == TEL_SLOTS) {
+        tel_head = (tel_head + 1) % TEL_SLOTS;
+        tel_n--;
+    }
+    slot = (tel_head + tel_n) % TEL_SLOTS;
+    memcpy(tel_q[slot], line, (size_t)n + 1);
+    tel_n++;
+    xSemaphoreGiveRecursive(mu);
+}
+
+void http_api_poll(void) {
+    int64_t now = esp_timer_get_time();
+    char data[80];
+    peer_fwd_poll();
+    if (now >= next_tel) {
+        next_tel = now + 1000000;
+        snprintf(data, sizeof data, "{\"heap\":%lu,\"uptime_ms\":%llu}",
+                 (unsigned long)esp_get_free_heap_size(),
+                 (unsigned long long)(now / 1000));
+        http_api_emit("tel.sample", data);
+    }
+    if (!srv || !mu || flush_posted || tel_n <= 0) return;
+    flush_posted = 1;
+    if (httpd_queue_work(srv, tel_work, NULL) != ESP_OK) flush_posted = 0;
+}
+
+static int op_fs_read(const char *frame, char *dst, size_t cap, const char **err, const char **code) {
+    char path[140];
+    int64_t offset = 0, len = WS_FILE_RAW;
+    uint32_t size = 0, off, n;
+    fs_rd_t *f;
+    static uint8_t raw[WS_FILE_RAW];
+    static char b64[((WS_FILE_RAW + 2) / 3) * 4 + 1];
+    int w;
+    unsigned avail = tel_n > 0 ? 0u : WS_LINK_SND_BUF;
+    if (!ws_link_allow_bulk(WS_LINK_SND_BUF, avail, 900u)) {
+        *code = "busy";
+        *err = "telemetry has the link";
+        return -1;
+    }
+    if (!pex_json_str(frame, "params.path", path, sizeof path) || !path[0] || cfg_hidden(path) ||
+        strstr(path, "..") || strchr(path, '"')) {
+        *code = "bad_request";
+        *err = "need \"path\"";
+        return -1;
+    }
+    pex_json_int(frame, "params.offset", &offset);
+    pex_json_int(frame, "params.len", &len);
+    if (offset < 0) { *code = "bad_request"; *err = "bad offset"; return -1; }
+    if (len <= 0 || len > WS_FILE_RAW) len = WS_FILE_RAW;
+    f = fs_open_read(path, &size);
+    if (!f) { *code = "not_found"; *err = "not found"; return -1; }
+    off = (uint32_t)offset;
+    if (off >= size) {
+        fs_close_read(f);
+        snprintf(dst, cap, "{\"path\":\"%s\",\"offset\":%lu,\"size\":%lu,\"n\":0,\"eof\":true,\"data\":\"\"}",
+                 path, (unsigned long)off, (unsigned long)size);
+        return 0;
+    }
+    n = (uint32_t)len;
+    if (off + n > size) n = size - off;
+    if (fs_pread(f, off, raw, n) != (int)n) {
+        fs_close_read(f);
+        *code = "io";
+        *err = "read failed";
+        return -1;
+    }
+    fs_close_read(f);
+    if (!ws_b64_encode(raw, n, b64, sizeof b64)) { *code = "io"; *err = "encode"; return -1; }
+    w = snprintf(dst, cap,
+                 "{\"path\":\"%s\",\"offset\":%lu,\"size\":%lu,\"n\":%lu,\"eof\":%s,\"data\":\"%s\"}",
+                 path, (unsigned long)off, (unsigned long)size, (unsigned long)n, (off + n >= size) ? "true" : "false", b64);
+    if (w < 0 || (size_t)w >= cap) { *code = "too_large"; *err = "read"; return -1; }
+    return 0;
+}
+
+static int op_fs_write(const char *frame, char *dst, size_t cap, const char **err, const char **code) {
+    char path[140];
+    static char data[((WS_FILE_RAW + 2) / 3) * 4 + 1];
+    static uint8_t raw[WS_FILE_RAW];
+    int64_t offset = 0;
+    int trunc_b = 0;
+    int trunc;
+    int n;
+    int wr;
+    uint32_t sz = 0;
+    unsigned avail = tel_n > 0 ? 0u : WS_LINK_SND_BUF;
+    if (!ws_link_allow_bulk(WS_LINK_SND_BUF, avail, 900u)) {
+        *code = "busy";
+        *err = "telemetry has the link";
+        return -1;
+    }
+    if (!pex_json_str(frame, "params.path", path, sizeof path) || !path[0] || cfg_hidden(path) ||
+        strstr(path, "..") || strchr(path, '"')) {
+        *code = "bad_request";
+        *err = "need \"path\"";
+        return -1;
+    }
+    pex_json_int(frame, "params.offset", &offset);
+    if (offset < 0) { *code = "bad_request"; *err = "bad offset"; return -1; }
+    if (pex_json_bool(frame, "params.truncate", &trunc_b)) trunc = trunc_b && offset == 0;
+    else trunc = offset == 0;
+    if (!pex_json_str(frame, "params.data", data, sizeof data)) {
+        if (strstr(frame, "\"data\"")) { *code = "bad_request"; *err = "bad data"; return -1; }
+        data[0] = 0;
+    }
+    n = ws_b64_decode(data, strlen(data), raw, sizeof raw);
+    if (n < 0) { *code = "bad_request"; *err = "bad data"; return -1; }
+    wr = fs_write_at(path, (uint32_t)offset, raw, (uint32_t)n, trunc, &sz);
+    if (wr < 0) {
+        *code = wr == -2 ? "not_found" : "io";
+        *err = wr == -2 ? "not found" : "write failed";
+        return -1;
+    }
+    snprintf(dst, cap, "{\"path\":\"%s\",\"offset\":%lu,\"size\":%lu,\"n\":%u}",
+             path, (unsigned long)offset, (unsigned long)sz, (unsigned)wr);
+    return 0;
+}
+
 static char result_buf[7000];
 
 static int dispatch_op(const char *frame, char *dst, size_t cap) {
@@ -348,6 +538,7 @@ static int dispatch_op(const char *frame, char *dst, size_t cap) {
     }
     char *result = result_buf;
     const char *err = NULL;
+    const char *code = "error";
     int rc;
     if (!strncmp(op, "pex.", 4)) rc = pex_host_op(op, frame, result, sizeof result_buf, &err);
     else if (!strcmp(op, "launch.status")) { launch_status_json(result, sizeof result_buf); rc = 0; }
@@ -360,8 +551,10 @@ static int dispatch_op(const char *frame, char *dst, size_t cap) {
     } else if (!strncmp(op, "sys.", 4)) rc = op_sys(op, frame, result, sizeof result_buf, &err);
     else if (!strncmp(op, "wifi.", 5)) rc = op_wifi(op, frame, result, sizeof result_buf, &err);
     else if (!strcmp(op, "fs.stat")) rc = op_fs_stat(frame, result, sizeof result_buf, &err);
+    else if (!strcmp(op, "fs.read")) rc = op_fs_read(frame, result, sizeof result_buf, &err, &code);
+    else if (!strcmp(op, "fs.write")) rc = op_fs_write(frame, result, sizeof result_buf, &err, &code);
     else { err = "not supported on this image"; rc = -1; }
-    if (rc) reply_err(dst, cap, id, "error", err ? err : "failed");
+    if (rc) reply_err(dst, cap, id, code, err ? err : "failed");
     else reply_ok(dst, cap, id, result);
     return (int)strlen(dst);
 }
@@ -374,7 +567,25 @@ static esp_err_t ws_handler(httpd_req_t *req) {
     frame.payload = (uint8_t *)req_buf;
     if (httpd_ws_recv_frame(req, &frame, frame.len) != ESP_OK) return ESP_FAIL;
     req_buf[frame.len] = 0;
+    if (frame.type == HTTPD_WS_TYPE_TEXT &&
+        peer_fwd_handle(req_buf, httpd_req_to_sockfd(req))) {
+        return ESP_OK;
+    }
     xSemaphoreTakeRecursive(mu, portMAX_DELAY);
+    if (ws_file_frame(req_buf) &&
+        !ws_link_allow_bulk(WS_LINK_SND_BUF, tel_n > 0 ? 0u : WS_LINK_SND_BUF, 900u)) {
+        long id = json_id(req_buf);
+        flush_one_locked();
+        reply_err(out_buf, sizeof out_buf, id, "busy", "telemetry has the link");
+        httpd_ws_frame_t busy = {
+            .type = HTTPD_WS_TYPE_TEXT,
+            .payload = (uint8_t *)out_buf,
+            .len = strlen(out_buf),
+        };
+        esp_err_t be = httpd_ws_send_frame(req, &busy);
+        xSemaphoreGiveRecursive(mu);
+        return be;
+    }
     int n = dispatch_op(req_buf, out_buf, sizeof out_buf);
     httpd_ws_frame_t out = {
         .type = HTTPD_WS_TYPE_TEXT,
@@ -386,6 +597,50 @@ static esp_err_t ws_handler(httpd_req_t *req) {
     return e;
 }
 
+#if CONFIG_C5_BLE
+static uint32_t query_from(const char *uri) {
+    const char *q = uri ? strchr(uri, '?') : NULL;
+    if (!q) return 0;
+    const char *p = strstr(q, "from=");
+    if (!p) return 0;
+    return (uint32_t)strtoul(p + 5, NULL, 10);
+}
+
+static esp_err_t role_console(httpd_req_t *req) {
+    char page[1500];
+    role_hw_console(query_from(req->uri), page, sizeof page);
+    return send_status(req, "200 OK", "text/plain", page);
+}
+
+static esp_err_t role_input(httpd_req_t *req) {
+    char line[96];
+    int n = 0;
+    int left = req->content_len;
+    if (left < 0) left = 0;
+    while (n < left) {
+        int want = left - n;
+        if (n >= (int)sizeof line - 1) want = left - n;
+        char sink[64];
+        char *dst = n < (int)sizeof line - 1 ? line + n : sink;
+        int cap = n < (int)sizeof line - 1 ? (int)sizeof line - 1 - n : (int)sizeof sink;
+        if (want > cap) want = cap;
+        int r = httpd_req_recv(req, dst, want);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (r <= 0) break;
+        if (dst == line + n) n += r;
+    }
+    line[n < (int)sizeof line ? n : (int)sizeof line - 1] = 0;
+    role_hw_submit(line);
+    return send_status(req, "204 No Content", "text/plain", "");
+}
+
+static esp_err_t role_reset(httpd_req_t *req) {
+    (void)req;
+    role_hw_restart();
+    return send_status(req, "204 No Content", "text/plain", "");
+}
+#endif
+
 void http_api_start(void) {
     mu = xSemaphoreCreateRecursiveMutex();
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
@@ -394,11 +649,13 @@ void http_api_start(void) {
     cfg.max_uri_handlers = 16;
     cfg.lru_purge_enable = true;
     cfg.stack_size = 8192;
+    /* Peer dials are raw lwIP pcbs, not httpd client sockets. */
     cfg.max_open_sockets = 6;
     if (httpd_start(&srv, &cfg) != ESP_OK) {
         ESP_LOGE(TAG, "httpd did not start");
         return;
     }
+    peer_fwd_bind(srv);
     const httpd_uri_t routes[] = {
         { .uri = "/ws", .method = HTTP_GET, .handler = ws_handler, .is_websocket = true },
         { .uri = "/", .method = HTTP_GET, .handler = no_assets },
@@ -408,6 +665,11 @@ void http_api_start(void) {
         { .uri = "/api/fs/*", .method = HTTP_PUT, .handler = fs_put },
         { .uri = "/api/fs/*", .method = HTTP_DELETE, .handler = fs_del },
         { .uri = "/api/fs/rename", .method = HTTP_POST, .handler = fs_rename_op },
+#if CONFIG_C5_BLE
+        { .uri = "/console", .method = HTTP_GET, .handler = role_console },
+        { .uri = "/input", .method = HTTP_POST, .handler = role_input },
+        { .uri = "/reset", .method = HTTP_POST, .handler = role_reset },
+#endif
         { .uri = "/*", .method = HTTP_OPTIONS, .handler = opt_any },
     };
     for (size_t i = 0; i < sizeof routes / sizeof routes[0]; i++) {

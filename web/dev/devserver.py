@@ -652,8 +652,13 @@ class MockGateway:
             return uplink_policy(p)
         if op == "uplink.switch":
             return uplink_switch(p.get("iface", ""))
+        if op == "mdns.responder":
+            if "enabled" in p:
+                STATE["mdns_responder"] = bool(p["enabled"])
+            return {"responder": bool(STATE.get("mdns_responder", True))}
         if op == "mdns.status":
             return {"hostname": "bluetooth-rp2-webapp", "fqdn": "bluetooth-rp2-webapp.local", "netifs": 2,
+                    "responder": bool(STATE.get("mdns_responder", True)),
                     "services": [{"instance": "bluetooth-rp2-webapp", "type": "_http", "proto": "tcp",
                                   "port": 80, "owner": -1, "txt": ["path=/"]}]}
         if op == "net.forwards":

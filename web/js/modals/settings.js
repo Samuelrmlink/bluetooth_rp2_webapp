@@ -22,6 +22,7 @@
 // the right geometry rather than keeping whatever the drag left behind.
 
 import { Dialog } from './dialog.js';
+import { sectionShown } from '../settings/caps.js';
 
 // The window/sheet behaviour is js/modals/dialog.js's (shared with the
 // Scanner's dialogs); this adds the sections and the toolbar button.
@@ -33,6 +34,54 @@ export class SettingsModal extends Dialog {
     });
     this.app = app;
     document.getElementById('settings-btn').addEventListener('click', () => this.toggle());
+    this._device = document.getElementById('settings-device');
+    this._pick = document.getElementById('settings-device-pick');
+    this._note = document.createElement('p');
+    this._note.className = 'dim settings-device-note';
+    this._note.hidden = true;
+    document.getElementById('settings-body').prepend(this._note);
+    this._pick.addEventListener('change', () => {
+      this._note.hidden = true;
+      this.app.selectSettingsDevice(this._pick.value);
+    });
+  }
+
+  // Remote boards that have a window. No boards: the control stays hidden
+  // and every title omits [Local].
+  setDevices(names) {
+    const selected = this._pick.value;
+    const keep = names.includes(selected) ? selected : '';
+    this._pick.replaceChildren();
+    const local = document.createElement('option');
+    local.value = '';
+    local.textContent = 'Local';
+    this._pick.appendChild(local);
+    for (const name of names) {
+      const o = document.createElement('option');
+      o.value = name;
+      o.textContent = name;
+      this._pick.appendChild(o);
+    }
+    this._pick.value = keep;
+    this._device.hidden = names.length === 0;
+  }
+
+  setDeviceNote(text, bad) {
+    this._note.textContent = text || '';
+    this._note.hidden = !text;
+    this._note.classList.toggle('err', !!bad && !!text);
+  }
+
+  // Hide sections this board's sys.info does not list.
+  applyCapabilities(info) {
+    for (const s of this.app.sections || []) {
+      const el = document.getElementById(s.id);
+      if (!el) continue;
+      const show = sectionShown(s.id, info);
+      el.hidden = !show;
+      s.onDevice?.(info);
+      if (show) s.soon?.();
+    }
   }
 
   // `sectionId` expands that section on the way in -- how the per-section
@@ -40,6 +89,13 @@ export class SettingsModal extends Dialog {
   open(sectionId) {
     super.open();
     if (sectionId) this.expand(sectionId);
+    // The socket was dropped when this closed, so a remote choice connects again.
+    if (this.app.settingsPeer()) this.app.selectSettingsDevice(this._pick.value);
+  }
+
+  close() {
+    super.close();
+    this.app.dropSettingsPeer();
   }
 
   expand(sectionId) {
@@ -52,6 +108,6 @@ export class SettingsModal extends Dialog {
   sectionVisible(sectionId) {
     if (!this.isOpen) return false;
     const section = document.getElementById(sectionId);
-    return !!section && section.open;
+    return !!section && !section.hidden && section.open;
   }
 }

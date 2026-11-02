@@ -4,7 +4,7 @@
 // cluster choices the board would accept, what the choice comes to, and a
 // confirmation naming the card), and a speed bench. The files themselves are
 // in the editor, under its top-level sd/ folder. docs/sd.md.
-import { makeSection, kvRows, PolledSection } from './common.js';
+import { makeSection, kvRows, setNote, PolledSection } from './common.js';
 import { sdStatus, sdFormat, sdBench } from '../fs.js';
 import { CLUSTERS, defaultFs, defaultCluster, derive, fmtBytes, fmtCluster, fmtDuration } from './sd-format.js';
 
@@ -66,11 +66,6 @@ export class SdCardSection extends PolledSection {
     this._benchGo.addEventListener('click', () => this._runBench());
   }
 
-  onConnect() {
-    const mods = this.app.sysInfo?.modules || [];
-    this._d.hidden = !mods.includes('sd');
-  }
-
   _fillClusters() {
     const fs = this._fs.value;
     const bytes = this.st?.card?.bytes || 0;
@@ -98,26 +93,26 @@ export class SdCardSection extends PolledSection {
 
   async _format() {
     const c = this.st?.card;
-    if (!c) { this._note.textContent = 'no card to format'; return; }
+    if (!c) { setNote(this._note, 'no card to format', true); return; }
     const fs = this._fs.value;
     const cluster = Number(this._cluster.value);
     const name = c.cid ? `${c.cid.oem} "${c.cid.name}" (${fmtBytes(c.bytes)})` : `the ${fmtBytes(c.bytes)} card`;
     if (!confirm(`Format ${name} as ${fs.toUpperCase()} with ${fmtCluster(cluster)} clusters?\n\nEverything on the card is erased.`)) return;
     const r = await sdFormat(fs, cluster);
-    this._note.textContent = r.ok ? 'formatting…' : `format: ${r.error}`;
+    setNote(this._note, r.ok ? 'formatting…' : `format: ${r.error}`, !r.ok);
     this.soon();
   }
 
   async _runBench() {
     const r = await sdBench(10);
-    this._note.textContent = r.ok ? 'bench running…' : `bench: ${r.error}`;
+    setNote(this._note, r.ok ? 'bench running…' : `bench: ${r.error}`, !r.ok);
     this.soon();
   }
 
   async poll() {
     const s = await sdStatus();
     if (!s.ok) {
-      this._note.textContent = s.status === 404 ? 'this firmware has no SD card support' : `status: ${s.error}`;
+      setNote(this._note, s.status === 404 ? 'this firmware has no SD card support' : `status: ${s.error}`, true);
       return;
     }
     this.st = s;
@@ -133,14 +128,14 @@ export class SdCardSection extends PolledSection {
     this._go.disabled = running || !s.card;
     this._bar.hidden = !running && f.state !== 'done';
     if (f.total) this._bar.value = Math.min(100, Math.round((100 * f.done) / f.total));
-    if (running) this._note.textContent = `formatting: ${f.phase}…`;
-    else if (f.state === 'done' && this._note.textContent.startsWith('formatting')) this._note.textContent = `formatted as ${f.fs}`;
-    else if (f.state === 'error') this._note.textContent = `format failed: ${f.error}`;
+    if (running) setNote(this._note, `formatting: ${f.phase}…`);
+    else if (f.state === 'done' && this._note.textContent.startsWith('formatting')) setNote(this._note, `formatted as ${f.fs}`);
+    else if (f.state === 'error') setNote(this._note, `format failed: ${f.error}`, true);
     this.every = running ? 500 : 2000;
     const b = s.bench || {};
     this._benchGo.disabled = b.state === 'running' || s.state !== 'ok';
-    this._bench.textContent = b.state === 'running' ? `running… ${b.done_kb} KB written`
+    setNote(this._bench, b.state === 'running' ? `running… ${b.done_kb} KB written`
       : b.state === 'done' ? `write ${fmtBytes(b.write_kBps * 1000)}/s · read ${fmtBytes(b.read_kBps * 1000)}/s · longest card busy ${(b.card_busy_max_us / 1000).toFixed(0)} ms`
-        : b.state === 'error' ? `bench failed: ${b.error}` : '';
+        : b.state === 'error' ? `bench failed: ${b.error}` : '', b.state === 'error');
   }
 }

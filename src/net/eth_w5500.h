@@ -10,8 +10,12 @@
  *
  * Addressing comes from cfg/eth.json, written by eth.config (see eth_cfg.h):
  *
- *   { "mode": "dhcp" }      the default: DHCP client, link-local (169.254/16)
- *                           beside it when no server answers
+ *   { "mode": "dhcp" }      the default: DHCP client. Link-local (169.254/16)
+ *                           comes up after ETH_LL_AFTER_MS with no lease,
+ *                           and a lease replaces it. When the gateway LAN
+ *                           holds e0, link-local stays on the companion
+ *                           netif "el" for the life of the link and a lease
+ *                           on e0 does not replace it.
  *   { "mode": "manual", "ip": "192.168.50.2", "mask": "255.255.255.0",
  *     "gw": "192.168.50.1", "dns": "1.1.1.1" }            (gw, dns optional)
  *   { "mode": "server", "ip": "192.168.9.1", "mask": "255.255.255.0",
@@ -38,6 +42,9 @@ void eth_poll(void);
 bool eth_present(void);
 /* The netif, or NULL when there is no chip. */
 struct netif *eth_netif(void);
+/* Link-local companion "el", or NULL when the gateway LAN is not holding e0.
+ * Same MAC and the same wire as e0. A lease on e0 does not remove it. */
+struct netif *eth_ll_netif(void);
 /* The netif as an uplink candidate: NULL with no chip, and in DHCP-server
  * mode (e0 then serves a segment; it is nobody's way out). */
 struct netif *eth_uplink_netif(void);
@@ -54,6 +61,7 @@ static inline bool eth_init(void) { return false; }
 static inline void eth_poll(void) {}
 static inline bool eth_present(void) { return false; }
 static inline struct netif *eth_netif(void) { return NULL; }
+static inline struct netif *eth_ll_netif(void) { return NULL; }
 static inline struct netif *eth_uplink_netif(void) { return NULL; }
 static inline size_t eth_status_json(char *d, size_t c) { (void)d; (void)c; return 0; }
 

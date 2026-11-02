@@ -33,6 +33,7 @@
 
 #define LAUNCH_PATH     "cfg/launch.json"
 #define LAUNCH_ARM      0x4C41554Eu   /* 'LAUN' — scratch[2], free of crumb and the SDK */
+#define LAUNCH_ASKED    0x41534B44u   /* 'ASKD' — scratch[3]. scratch[4..7] are the SDK reboot path */
 #define LAUNCH_MAX      16
 #define LAUNCH_GAP_MS   1000u   /* long enough for the entry to issue its first connect */
 #define LAUNCH_SETTLE_MS 2000u  /* idle must hold; Anker's other slot connects inside this */
@@ -281,10 +282,25 @@ bool launch_radio_hold(void) {
 
 bool launch_safe_mode(void) { return s_safe; }
 
+void launch_mark_requested(void) {
+    watchdog_hw->scratch[3] = LAUNCH_ASKED;
+}
+
 void launch_boot(void) {
+#ifdef BTGW_ROLE_NET
+    /* The role console owns the controller. Anker would scan over it. */
+    s_skip = "role";
+    s_phase = PH_SKIP;
+    printf("launch: role console image, starting nothing\n");
+    return;
+#endif
     s_phase = PH_WAIT;
     snprintf(s_when, sizeof s_when, "wifi");
-    if (boot_after_watchdog) {
+    /* A settings reboot and an MCUmgr reset are watchdog resets too. The mark
+     * is how this boot tells those apart from a hang. */
+    bool asked = watchdog_hw->scratch[3] == LAUNCH_ASKED;
+    watchdog_hw->scratch[3] = 0;
+    if (boot_after_watchdog && !asked) {
         watchdog_hw->scratch[2] = 0;
         s_skip = "watchdog";
         s_phase = PH_SKIP;
@@ -299,6 +315,7 @@ void launch_boot(void) {
         printf("launch: safe mode (reset again before the arm cleared), starting nothing\n");
         return;
     }
+    if (asked) printf("launch: requested reboot, starting the list\n");
     watchdog_hw->scratch[2] = LAUNCH_ARM;
     s_armed = true;
 }

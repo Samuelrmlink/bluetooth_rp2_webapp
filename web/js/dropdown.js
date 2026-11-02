@@ -1,15 +1,34 @@
-// A keyboard-driven popup for <select> elements.
+// A popup for <select> elements.
 //
 // The browser's own dropdown is a separate window the page cannot see
 // into: once it is open, no key we bind reaches it, so h/j/k/l cannot walk
 // it. This draws the option list in the page instead — Space or Enter on a
 // focused <select> opens it, j/k or the arrows move the highlight, Enter,
 // Space or l pick, Esc or h cancel, and a click on an option picks it too.
-// The mouse still gets the native dropdown: clicking a <select> is
-// untouched, and this only ever opens from the keyboard.
+//
+// A mouse still gets the native dropdown. A finger does not, inside a
+// dialog: the phone sheet clips with overflow and its header is a drag
+// handle, and Chrome on Android then never opens the system picker. A tap
+// there opens this list instead. A <select> in the toolbar stays native.
 //
 // Picking sets the <select>'s value and fires `input` and `change`, so the
 // code listening to that <select> cannot tell the difference.
+
+const coarse = () => window.matchMedia('(pointer: coarse)').matches;
+
+// The tap may land on the <select> or on the <label> wrapped around it
+// (the settings device row is a label). Anywhere else returns null.
+function selectOf(target) {
+  const el = target instanceof Element ? target : target?.parentElement;
+  if (!el) return null;
+  const direct = el.closest('select');
+  if (direct) return direct.disabled ? null : direct;
+  const label = el.closest('label');
+  if (!label) return null;
+  const via = label.htmlFor ? document.getElementById(label.htmlFor) : null;
+  const sel = via?.tagName === 'SELECT' ? via : label.querySelector('select');
+  return sel && !sel.disabled ? sel : null;
+}
 
 export class Dropdown {
   constructor() {
@@ -24,8 +43,17 @@ export class Dropdown {
     document.body.appendChild(this._el);
 
     // A click anywhere else, a scroll or a resize: the popup no longer
-    // lines up with its <select>, so it goes.
+    // lines up with its <select>, so it goes. A finger on a dialog's
+    // <select> opens this list; see the note at the top.
     document.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const sel = coarse() ? selectOf(e.target) : null;
+      if (sel?.closest('.modal')) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.open(sel);
+        return;
+      }
       if (this.isOpen && !this._el.contains(e.target)) this.close(false);
     }, true);
     window.addEventListener('resize', () => this.close(false));

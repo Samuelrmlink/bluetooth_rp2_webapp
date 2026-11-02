@@ -9,7 +9,7 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include "dhcpserver.h"
+#include "../../include/dhcpserver.h"
 #include "lwip/udp.h"
 #include "lwip/ip.h"
 #include "lwip/ip4_addr.h"

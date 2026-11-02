@@ -294,8 +294,9 @@ export class LayoutManager {
   // were named); pickers and tabs are rebuilt.
   setPaneTitle(id, title) {
     const pane = this._panes.get(id);
-    if (!pane || pane.title === title) return;
+    if (!pane || (pane.title === title && pane.short === title)) return;
     pane.title = title;
+    pane.short = title;
     this._rebuildTabs();
     this._version++;
     this.apply();

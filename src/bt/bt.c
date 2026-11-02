@@ -268,6 +268,9 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
                  * le_on_connected would start a client discovery and, with
                  * no free slot, disconnect the phone. */
                 if (gap_subevent_le_connection_complete_get_role(pkt) != 0) {
+                    le_on_incoming(gap_subevent_le_connection_complete_get_connection_handle(pkt),
+                                   peer,
+                                   gap_subevent_le_connection_complete_get_peer_address_type(pkt));
                     break;
                 }
 #endif

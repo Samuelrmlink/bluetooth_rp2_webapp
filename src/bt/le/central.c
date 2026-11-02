@@ -707,6 +707,26 @@ static void discover_next(le_link_t *l) {
            db->n_svc, db->n_chr, db->n_dsc, db->mtu, db->truncated ? " (TRUNCATED)" : "");
 }
 
+/* ATT insufficient authentication / authorization / encryption / key size.
+ * Emits security.required either way. Policy "never" stops there; every
+ * other policy calls sm_request_pairing. */
+static void security_for_att(le_link_t *l, uint8_t att_status) {
+    if (!bond_att_error_wants_security(att_status)) {
+        return;
+    }
+    char extra[96];
+    snprintf(extra, sizeof extra,
+             "{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"att_error\":%u,\"policy\":\"%s\"}",
+             l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4], l->addr[5],
+             att_status, bond_policy_name(bond_policy()));
+    api_emit("security.required", extra);
+    if (bond_policy() == BOND_POLICY_NEVER) {
+        return;
+    }
+    printf("bt: att 0x%02x wants security; requesting pairing\n", att_status);
+    bond_request(l->con_handle);
+}
+
 static void gatt_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) {
     (void)type; (void)size;
     le_link_t *l = link_by_handle(ch ? ch : 0);
@@ -780,18 +800,13 @@ static void gatt_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size)
             uint8_t att_status = gatt_event_query_complete_get_att_status(pkt);
             l = link_by_handle(h);
             if (!l) { return; }
-            /* The peripheral refusing for want of security is the ONLY thing
-             * that triggers pairing under the default policy -- we do not ask
-             * to bond with everything we connect to. */
+            /* A peripheral that answers a GATT procedure with an ATT error
+             * that wants security is what starts pairing. Discovery lands
+             * here; a later read or write lands in op_complete. Either way
+             * the default policy asks for SMP. Policy "never" only reports
+             * security.required. We do not bond with everything we connect to. */
             if (bond_att_error_wants_security(att_status)) {
-                char extra[48];
-                snprintf(extra, sizeof(extra), "{\"att_error\":%u,\"policy\":\"%s\"}",
-                         att_status, bond_policy_name(bond_policy()));
-                api_emit("security.required", extra);
-                if (bond_policy() != BOND_POLICY_NEVER) {
-                    printf("bt: att 0x%02x wants security; requesting pairing\n", att_status);
-                    bond_request(h);
-                }
+                security_for_att(l, att_status);
                 /* Park the cascade rather than abandon it. The old comment
                  * here said "the caller retries once the link is secured" and
                  * nothing did: the cascade simply stopped. le_on_link_secured
@@ -954,6 +969,16 @@ void le_on_connect_failed(uint8_t status, const uint8_t *addr) {
 }
 
 /* Called from bt.c's HCI handler. */
+void le_on_incoming(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type) {
+    if (!addr) { return; }
+    bt_device_t *d = bt_registry_get(addr, BT_TRANSPORT_LE);
+    if (!d) { return; }
+    d->connected = true;
+    d->con_handle = con_handle;
+    d->addr_type = addr_type;
+    LE_PEX(16, addr, -1, NULL, 0, 0);
+}
+
 void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type) {
     s_connecting = false;
     le_link_t *l = link_alloc();
@@ -1400,6 +1425,10 @@ static void op_complete(struct le_link *l, uint8_t att_status) {
                  l->addr[0], l->addr[1], l->addr[2], l->addr[3], l->addr[4],
                  l->addr[5], op_kind_name(op->kind), op->chr_i, att_status);
         api_emit("gatt.op_failed", ev);
+        /* The same ATT errors discovery already acts on. A locked
+         * characteristic is the usual way a peripheral asks for SMP, and
+         * the read used to stop at gatt.op_failed. */
+        security_for_att(l, att_status);
     }
     write_done(l, op, att_status, LE_WRITE_DONE);
     op_pop(l);

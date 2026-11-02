@@ -6,13 +6,9 @@ import { GattWindow } from './gatt.js';
 import { GattEventsWindow } from './gattevents.js';
 import { HardwareWindow } from './hardware.js';
 import { EditorWindow } from './editor.js';
-import { PeersWindow } from './peers.js';
-
-const embed = new URLSearchParams(location.search).get('embed') === '1';
 
 export const BUILTIN_WINDOWS = [
-  { id: 'editor', title: 'Local', group: 'Tools', create: EditorWindow },
-  ...(embed ? [] : [{ id: 'peers', title: 'Editor', group: 'Tools', create: PeersWindow }]),
+  { id: 'editor', title: 'Editor', group: 'Tools', create: EditorWindow },
   { id: 'scanner', title: 'Scanner', group: 'Tools', create: ScannerWindow },
   { id: 'gatt', title: 'GATT', group: 'Tools', create: GattWindow },
   { id: 'gatt-events', title: 'GATT Events', group: 'Tools', create: GattEventsWindow },

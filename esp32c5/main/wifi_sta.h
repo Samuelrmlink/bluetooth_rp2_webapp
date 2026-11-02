@@ -6,6 +6,9 @@
 
 void wifi_start_from_cfg(void);
 void wifi_apply_cfg(void);
+/* Drop a 169.254 station address and keep the DHCP client running.
+ * Called from the poll task. */
+void wifi_dhcp_poll(void);
 bool wifi_has_addr(void);
 int wifi_ip(char *dst, size_t cap);
 const char *wifi_current_ssid(void);

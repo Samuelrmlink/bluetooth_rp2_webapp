@@ -155,7 +155,9 @@ void fs_on_watch(fs_watch_fn fn);
 #define FS_ERR_BUSY    (-16)
 #define FS_ERR_NOHANDLE (-1000)
 #define FS_ERR_TOOLARGE (-1001)
-enum { FS_O_READ = 0, FS_O_WRITE = 1, FS_O_APPEND = 2 };
+enum { FS_O_READ = 0, FS_O_WRITE = 1, FS_O_APPEND = 2, FS_O_UPDATE = 3 };
+/* FS_O_UPDATE is read/write, create if missing, and does not truncate.
+ * A websocket fs.write uses FS_O_WRITE for offset 0 and FS_O_UPDATE after. */
 /* `mem` is fs_file_mem() bytes the caller owns and keeps until fs_fclose()
  * returns (or until fs_fopen fails): free it then. */
 size_t fs_file_mem(void);

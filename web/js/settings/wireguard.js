@@ -16,7 +16,11 @@ export class WireguardSection extends PolledSection {
     d.querySelector('.wg-actions').append(
       button('Reconnect', async () => { await this.ws.call('wg.up').catch((e) => this.app.log('!', e.message)); this.soon(); }),
       button('Disconnect', async () => { await this.ws.call('wg.down').catch((e) => this.app.log('!', e.message)); this.soon(); }),
-      button('Edit config', () => app.openFile?.('cfg/wireguard.json')),
+      button('Edit config', () => {
+        const peer = app.settingsPeer();
+        if (peer) app.openPeerFile(peer, 'cfg/wireguard.json');
+        else app.openFile?.('cfg/wireguard.json');
+      }),
     );
   }
 

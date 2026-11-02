@@ -698,6 +698,8 @@ int fs_fopen(const char *name, int mode, void *mem) {
         flags = LFS_O_RDWR | LFS_O_CREAT | LFS_O_TRUNC;
     } else if (mode == FS_O_APPEND) {
         flags = LFS_O_RDWR | LFS_O_CREAT | LFS_O_APPEND;
+    } else if (mode == FS_O_UPDATE) {
+        flags = LFS_O_RDWR | LFS_O_CREAT;
     }
     if (wr) {
         ensure_parent_dirs(name);

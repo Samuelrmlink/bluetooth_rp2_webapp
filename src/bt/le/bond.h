@@ -67,5 +67,7 @@ bool bond_remove(const uint8_t *addr, uint8_t addr_type);
 /* Drop every stored LE bond for addr_str, and the Classic link key on a
  * Classic build. addr_str is "AA:BB:CC:DD:EE:FF". */
 bool bond_forget(const char *addr_str);
+/* Drop every stored LE bond, and every Classic link key when Classic is built. */
+void bond_forget_all(void);
 
 #endif

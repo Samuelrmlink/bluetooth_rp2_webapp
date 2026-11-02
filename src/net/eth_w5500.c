@@ -19,6 +19,7 @@
  * needed and nothing here ever runs outside the main loop.
  */
 #include "net/eth_w5500.h"
+#include "net/mdns.h"
 
 #if CONFIG_NET_ETH_W5500
 
@@ -45,6 +46,8 @@
 #include "api/ops.h"
 #include "config/config.h"
 #include "net/eth_cfg.h"
+#include "net/gw_lan.h"
+#include "lwip/prot/ethernet.h"
 
 #define ETH_CFG_PATH "cfg/eth.json"
 #define ETH_TXQ 6
@@ -52,6 +55,11 @@
 static w5500_t chip;
 static struct netif eth_if;
 static bool present, netif_added;
+#if CONFIG_NET_GW_LAN
+static struct netif eth_ll;
+static bool ll_added;
+static bool ll_had_addr;
+#endif
 
 static struct pbuf *txq[ETH_TXQ];
 static uint8_t tx_head, tx_count;
@@ -72,6 +80,54 @@ static dhcp_server_t dsrv;
 static bool srv_on;
 
 static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
+
+#if CONFIG_NET_GW_LAN
+struct netif *eth_ll_netif(void) { return ll_added ? &eth_ll : NULL; }
+
+/* ARP and ethernet multicast (bit 0 of the dest MAC, which covers
+ * 224.0.0.251) go to both netifs. Unicast IPv4 stays on e0: ip4_input
+ * walks the other netifs for an address it owns. */
+static bool rx_share(const struct pbuf *p) {
+    uint8_t hdr[14];
+    if (pbuf_copy_partial(p, hdr, 14, 0) != 14) { return false; }
+    if (hdr[0] & 0x01) { return true; }
+    uint16_t et = (uint16_t)(((uint16_t)hdr[12] << 8) | hdr[13]);
+    return et == ETHTYPE_ARP;
+}
+
+static void ll_note_addr(void) {
+    if (!ll_added) { return; }
+    bool has = !ip4_addr_isany_val(*netif_ip4_addr(&eth_ll)) && netif_is_link_up(&eth_ll);
+    if (has == ll_had_addr) { return; }
+    ll_had_addr = has;
+    if (has) {
+        printf("eth: link-local %s\n", ip4addr_ntoa(netif_ip4_addr(&eth_ll)));
+        mdns_add_netif(&eth_ll);
+    } else {
+        mdns_remove_netif(&eth_ll);
+    }
+}
+
+static void ll_companion_down(void) {
+    if (!ll_added) { return; }
+    autoip_stop(&eth_ll);
+    /* autoip_stop() leaves ACD defending the old 169.254 address. */
+    struct autoip *a = netif_autoip_data(&eth_ll);
+    if (a) { acd_stop(&a->acd); }
+    netif_set_link_down(&eth_ll);
+    ll_note_addr();
+}
+
+static void ll_companion_up(void) {
+    if (!ll_added) { return; }
+    netif_set_link_up(&eth_ll);
+    autoip_start(&eth_ll);
+    ll_starts++;
+    printf("eth: link-local companion up (kept beside any lease)\n");
+}
+#else
+struct netif *eth_ll_netif(void) { return NULL; }
+#endif
 
 static void ll_stop(void) {
     if (!ll_active) { return; }
@@ -101,12 +157,35 @@ static int rx_begin(void *ctx, uint16_t len, w5500_buf_t *b, int max) {
     return n;
 }
 
+static void rx_deliver(struct netif *nif, struct pbuf *p) {
+    if (!nif || nif->input(p, nif) != ERR_OK) { pbuf_free(p); }
+}
+
 static void rx_end(void *ctx, bool ok) {
     (void)ctx;
     struct pbuf *p = rx_p;
     rx_p = NULL;
     if (!p) { return; }
-    if (!ok || eth_if.input(p, &eth_if) != ERR_OK) { pbuf_free(p); }
+    if (!ok) { pbuf_free(p); return; }
+    /* The SPI fill already took one pool buffer. Free it before input when
+     * the responder is off, so the frame is not processed further. */
+    {
+        uint8_t hdr[64];
+        u16_t hn = pbuf_copy_partial(p, hdr, (u16_t)sizeof hdr, 0);
+        if (mdns_should_drop(hdr, hn)) { pbuf_free(p); return; }
+    }
+#if CONFIG_NET_GW_LAN
+    struct netif *ll = eth_ll_netif();
+    if (ll && rx_share(p)) {
+        /* ethernet_input frees the pbuf, so the companion gets a clone.
+         * A failed clone still delivers the original to e0. */
+        struct pbuf *c = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+        rx_deliver(&eth_if, p);
+        if (c) { rx_deliver(ll, c); }
+        return;
+    }
+#endif
+    rx_deliver(&eth_if, p);
 }
 
 static int tx_peek(void *ctx, w5500_buf_t *b, int max) {
@@ -137,8 +216,14 @@ static void on_link(void *ctx, bool up, int speed, bool full) {
     if (up) {
         netif_set_link_up(&eth_if);     /* lwIP restarts DHCP itself */
         ll_since = now_ms();            /* DHCP first, link-local later */
+#if CONFIG_NET_GW_LAN
+        if (gw_lan_hold_ll()) { ll_companion_up(); }
+#endif
     } else {
         ll_stop();
+#if CONFIG_NET_GW_LAN
+        ll_companion_down();
+#endif
         netif_set_link_down(&eth_if);
     }
     emit_state();
@@ -171,6 +256,16 @@ static err_t eth_netif_init(struct netif *netif) {
     memcpy(netif->hwaddr, chip.mac, 6);
     return ERR_OK;
 }
+
+#if CONFIG_NET_GW_LAN
+static err_t eth_ll_netif_init(struct netif *netif) {
+    err_t e = eth_netif_init(netif);
+    if (e != ERR_OK) { return e; }
+    netif->name[0] = 'e';
+    netif->name[1] = 'l';
+    return ERR_OK;
+}
+#endif
 
 /* --- config -------------------------------------------------------------- */
 
@@ -220,7 +315,11 @@ static void apply_cfg(void) {
         netif_set_addr(&eth_if, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4);
         dhcp_start(&eth_if);
         ll_since = now_ms();
-        printf("eth: DHCP client (link-local after %u s without a lease)\n", ETH_LL_AFTER_MS / 1000);
+        if (gw_lan_hold_ll()) {
+            printf("eth: DHCP client (link-local stays on the companion)\n");
+        } else {
+            printf("eth: DHCP client (link-local after %u s without a lease)\n", ETH_LL_AFTER_MS / 1000);
+        }
         break;
     }
 }
@@ -275,6 +374,16 @@ bool eth_init(void) {
     netif_set_hostname(&eth_if, mdns_hostname());
     netif_set_up(&eth_if);
     /* DELIBERATELY NOT netif_set_default(): src/net/uplink.c decides. */
+#if CONFIG_NET_GW_LAN
+    if (gw_lan_hold_ll() &&
+        netif_add(&eth_ll, IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4, NULL,
+                  eth_ll_netif_init, ethernet_input)) {
+        ll_added = true;
+        netif_set_up(&eth_ll);
+    } else if (gw_lan_hold_ll()) {
+        printf("eth: link-local netif_add failed\n");
+    }
+#endif
     apply_cfg();
     return true;
 }
@@ -317,10 +426,14 @@ void eth_poll(void) {
         bool lease = dhcp_supplied_address(&eth_if);
         if (lease != had_lease) {
             had_lease = lease;
-            if (lease) { leases++; ll_stop(); printf("eth: DHCP lease %s\n", ip4addr_ntoa(netif_ip4_addr(&eth_if))); }
-            else { ll_since = now; }
+            if (lease) {
+                leases++;
+                /* The companion keeps its address for the life of the link. */
+                if (!gw_lan_hold_ll()) { ll_stop(); }
+                printf("eth: DHCP lease %s\n", ip4addr_ntoa(netif_ip4_addr(&eth_if)));
+            } else { ll_since = now; }
         }
-        if (eth_ll_due(cfg.mode, chip.link_up, lease, ll_active, ll_since, now)) {
+        if (!gw_lan_hold_ll() && eth_ll_due(cfg.mode, chip.link_up, lease, ll_active, ll_since, now)) {
             ll_active = true;
             ll_starts++;
             printf("eth: no DHCP lease after %u s -- adding link-local (DHCP keeps trying)\n",
@@ -333,6 +446,10 @@ void eth_poll(void) {
             dhcp_start(&eth_if);    /* back to a fast discover; the link-local address stays */
         }
     }
+
+#if CONFIG_NET_GW_LAN
+    ll_note_addr();
+#endif
 
     bool has = !ip4_addr_isany_val(*netif_ip4_addr(&eth_if)) && netif_is_link_up(&eth_if);
     if (has != had_addr) {

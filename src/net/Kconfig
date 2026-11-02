@@ -207,8 +207,8 @@ config NET_GW_LAN
       "none" stays none. Link-local (169.254/16) stays up for the whole
       time the link is up. A DHCP lease is a second address. A DHCP
       router on this LAN is a local uplink only, and it is not advertised.
-      Each board probes that router itself. Specified and not built.
-      Turning this on fails configure.
+      Each board probes that router itself. Default off. A current
+      product defconfig does not turn it on.
 
 config NET_MDNS_GW
     bool "Gateway LAN mDNS (_btgw-gw._udp)"
@@ -222,7 +222,7 @@ config NET_MDNS_GW
       Wi-Fi, USB-NCM, and Bluetooth NAP are separate instances. Sent about
       every 2 seconds. A board that hears nothing new for an instance for
       6 seconds drops that one connection. Other connections from the same
-      board stay. Specified and not built. Turning this on fails configure.
+      board stay. Default off.
 
 config NET_NAT
     bool "NAT from the gateway LAN"
@@ -232,8 +232,7 @@ config NET_NAT
     help
       Masquerade from the gateway LAN out the uplink named by a heard
       _btgw-gw instance. The next hop is the announcer's link-local
-      address. This is not the Lua TCP/UDP proxy (NET_FORWARD). Specified
-      and not built. Turning this on fails configure.
+      address. This is not the Lua TCP/UDP proxy (NET_FORWARD). Default off.
 
 config NET_FORWARD
     bool "Forwarding rules from Lua (TCP proxy + UDP relay)"

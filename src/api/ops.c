@@ -43,12 +43,13 @@ extern const op_module_t op_module_uplink;
 #if CONFIG_NET_MDNS
 extern const op_module_t op_module_mdns;
 #endif
-#if CONFIG_NET_FORWARD
 extern const op_module_t op_module_net;
-#endif
 
 #if CONFIG_PEX
 extern const op_module_t op_module_pex;
+#endif
+#if CONFIG_NET_GW_LAN && CONFIG_NET_HTTP_SERVER
+extern const op_module_t op_module_gw;
 #endif
 
 static const op_module_t *const modules[] = {
@@ -85,11 +86,12 @@ static const op_module_t *const modules[] = {
 #if CONFIG_NET_MDNS
     &op_module_mdns,
 #endif
-#if CONFIG_NET_FORWARD
     &op_module_net,
-#endif
 #if CONFIG_PEX
     &op_module_pex,
+#endif
+#if CONFIG_NET_GW_LAN && CONFIG_NET_HTTP_SERVER
+    &op_module_gw,
 #endif
 };
 #define N_MODULES (sizeof(modules) / sizeof(modules[0]))

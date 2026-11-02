@@ -7,6 +7,7 @@ export class UiSection {
   constructor(app, settings) {
     this.app = app;
     this.settings = settings;
+    this.id = SECTION;
     const d = document.createElement('details');
     d.className = 'sect';
     d.id = SECTION;

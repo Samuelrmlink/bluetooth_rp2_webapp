@@ -38,6 +38,7 @@
 #if CONFIG_SD
 #include "sd/sd_api.h"
 #include "sd/sd_jobs.h"
+#include "sd/sd_store.h"
 #endif
 
 #if CONFIG_PEX_XIP

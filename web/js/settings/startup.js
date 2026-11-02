@@ -1,7 +1,8 @@
 // Settings -> Startup: the one boot list (cfg/launch.json, launch.set).
 // Order is launch order. A row can be off without leaving the list. The
 // running firmware starts the list; this page only edits it.
-import { makeSection, button, PolledSection } from './common.js';
+import { makeSection, button, setNote, PolledSection } from './common.js';
+import { luaShown } from './caps.js';
 
 export const LAUNCH_WHENS = [
   { id: 'wifi', label: 'After Wi-Fi' },
@@ -55,6 +56,23 @@ export function removeEntry(entries, index) {
   return entries.filter((_, i) => i !== index);
 }
 
+// PEX modules from pex.installed, plus Lua scripts only when this board
+// runs them. `files` is that board's lua/ listing. A board without the
+// script module must not be offered another board's scripts.
+export function startupChoices(info, installed, files) {
+  const rows = [];
+  for (const m of installed || []) {
+    if (m?.name && NAME.test(m.name)) rows.push({ kind: 'pex', name: m.name });
+  }
+  if (!luaShown(info)) return rows;
+  for (const f of files || []) {
+    if (f.dir || !/^[^/]+\.lua(\.gz)?$/i.test(f.name || '')) continue;
+    const name = f.name.replace(/\.lua(\.gz)?$/i, '');
+    if (NAME.test(name)) rows.push({ kind: 'lua', name });
+  }
+  return rows;
+}
+
 // A new row, or { error }. The same name once, whatever its kind.
 export function addEntry(entries, kind, name) {
   if (kind !== 'pex' && kind !== 'lua') return { error: 'Pick a PEX app or a Lua script.' };
@@ -79,7 +97,7 @@ export class StartupSection extends PolledSection {
       <div class="row launch-add">
         <select class="launch-pick"></select>
       </div>
-      <div class="dim">Saving writes cfg/launch.json. It takes effect on the next normal boot. The older autostart files stay on disk and are left unused once this file exists.</div>`);
+      <div class="dim">Saving writes cfg/launch.json. It takes effect on the next reboot. The older autostart files stay on disk and are left unused once this file exists.</div>`);
     this._sum = d.querySelector('.launch-sum');
     this._note = d.querySelector('.launch-note');
     this._whenNote = d.querySelector('.launch-when-note');
@@ -89,6 +107,8 @@ export class StartupSection extends PolledSection {
     this._entries = [];
     this._dirty = false;
     this._got = false;
+    this._info = null;
+    this._pickGen = 0;
     const acts = d.querySelector('.launch-actions');
     acts.append(
       button('Launch now', () => this.now()),
@@ -104,6 +124,16 @@ export class StartupSection extends PolledSection {
 
   onConnect() {
     this._got = false;
+    this.soon();
+  }
+
+  // The device changed. Drop the previous board's rows and its Add list.
+  onDevice(info) {
+    this._info = info;
+    this._got = false;
+    this._dirty = false;
+    this._pickGen += 1;
+    this._pick.replaceChildren();
     this.soon();
   }
 
@@ -139,25 +169,28 @@ export class StartupSection extends PolledSection {
   }
 
   async _fillPick() {
+    const gen = this._pickGen;
     const fs = await import('../fs.js');
+    const showLua = luaShown(this._info);
     const [inst, lua] = await Promise.all([
       this.ws.call('pex.installed').catch(() => null),
-      fs.list('lua').catch(() => null),
+      showLua ? fs.list('lua').catch(() => null) : null,
     ]);
+    if (gen !== this._pickGen) return;
     const prev = this._pick.value;
     this._pick.replaceChildren();
-    const add = (kind, name) => {
+    const rows = startupChoices(this._info, inst?.modules, lua?.files);
+    for (const row of rows) {
       const o = document.createElement('option');
-      o.value = `${kind}:${name}`;
-      o.textContent = `${kind === 'lua' ? 'Lua' : 'PEX'} ${name}`;
+      o.value = `${row.kind}:${row.name}`;
+      o.textContent = `${row.kind === 'lua' ? 'Lua' : 'PEX'} ${row.name}`;
       this._pick.append(o);
-    };
-    for (const m of inst?.modules || []) {
-      if (m?.name && NAME.test(m.name)) add('pex', m.name);
     }
-    for (const f of lua?.files || []) {
-      if (f.dir || !/^[^/]+\.lua(\.gz)?$/i.test(f.name)) continue;
-      add('lua', f.name.replace(/\.lua(\.gz)?$/i, ''));
+    if (!rows.length) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = 'Nothing on this board to add';
+      this._pick.append(o);
     }
     if (prev) this._pick.value = prev;
   }
@@ -166,8 +199,8 @@ export class StartupSection extends PolledSection {
     const raw = this._pick.value || '';
     const i = raw.indexOf(':');
     const res = addEntry(this._entries, raw.slice(0, i), raw.slice(i + 1));
-    if (res.error) { this._note.textContent = res.error; return; }
-    this._note.textContent = '';
+    if (res.error) { setNote(this._note, res.error, true); return; }
+    setNote(this._note, '');
     this._edit(res.entries);
   }
 
@@ -175,22 +208,22 @@ export class StartupSection extends PolledSection {
     try {
       await this.ws.call('launch.set', { when: this._when.value, entries: this._entries });
       this._dirty = false;
-      this._note.textContent = 'Saved. The list starts on the next normal boot.';
+      setNote(this._note, 'Saved. The list starts on the next reboot.');
     } catch (e) {
-      this._note.textContent = e.message;
+      setNote(this._note, e.message, true);
     }
   }
 
   async now() {
     try {
       const r = await this.ws.call('launch.now');
-      this._note.textContent = r.started ? 'Starting the list on this boot.'
+      setNote(this._note, r.started ? 'Starting the list on this boot.'
         : r.reason === 'done' ? 'The list has already been started this boot.'
         : r.reason === 'watchdog' ? 'This boot followed a watchdog reset, so the list stays idle.'
         : r.reason === 'safe' ? 'This boot is safe mode, so the list stays idle.'
-        : 'The list stays idle.';
+        : 'The list stays idle.');
     } catch (e) {
-      this._note.textContent = e.message;
+      setNote(this._note, e.message, true);
     }
     this.soon();
   }
@@ -206,7 +239,7 @@ export class StartupSection extends PolledSection {
       this._paint();
       this._got = true;
       if (st.source === 'fallback') {
-        this._note.textContent = 'This boot is using the previous autostart files. Saving writes cfg/launch.json.';
+        setNote(this._note, 'This boot is using the previous autostart files. Saving writes cfg/launch.json.');
       }
     }
     if (!this._pick.options.length) this._fillPick().catch(() => {});

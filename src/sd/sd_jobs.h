@@ -31,6 +31,7 @@
 
 #define SDJ_FILES    4
 #include "sd/sd_api.h"
+#include "sd/sd_store.h"   /* LS_RD / LS_WR / LS_APPEND for SDJ_OPEN */
 /* The data buffer is an idle HTTP transfer ring, borrowed for the job. */
 #define SDJ_BUF      (SD_XFER_BUF < 4096 ? SD_XFER_BUF : 4096)
 #define SDJ_PATH_MAX 128

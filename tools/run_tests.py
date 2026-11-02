@@ -422,6 +422,14 @@ def t_eth_cfg():
     san = "-fsanitize=address,undefined" if rc == 0 else ""
     return _host_c("eth_cfg", ["test/host/eth_cfg_test.c", "src/net/eth_cfg.c"], "btgw_eth_cfg", defs=san)
 
+def t_gw_core():
+    """Gateway LAN decisions with no lwIP: a missing cfg, a stored none,
+    link-local kept only while the feature is on, no advertisement of the
+    DHCP router, one instance dropped after 6 s, NAT not back onto the LAN."""
+    rc, _ = sh("echo 'int main(){}' | gcc -fsanitize=address,undefined -x c - -o /dev/null 2>/dev/null")
+    san = "-fsanitize=address,undefined" if rc == 0 else ""
+    return _host_c("gw_core", ["test/host/gw_core_test.c", "src/net/gw_core.c"], "btgw_gw_core", defs=san)
+
 def t_eth_server_mode_only_explicit():
     """The owner's rule: DHCP-server mode on e0 is NEVER entered on its own.
     The only code that may produce ETH_MODE_SERVER is eth_cfg_parse() (reached
@@ -725,6 +733,20 @@ def t_lua_json_decode():
         first = next((l.strip() for l in out.splitlines() if "FAIL" in l), "")
         return False, first[:100] or f"json_decode_test exited {rc}"
     return True, out.strip().splitlines()[-1]
+
+def t_peer_fwd_msg():
+    """The peer envelope: node routes only when it is the first key, the
+    forwarded frame has no node, and the tag puts that name back."""
+    return _host_c("peer_fwd_msg",
+                   ["test/host/peer_fwd_msg_test.c", "src/net/peer_fwd_msg.c"],
+                   "btgw_peer_fwd_msg", defs="")
+
+def t_ws_link():
+    """Websocket file chunks leave a reserve for telemetry. A 2 MiB transfer
+    with a telemetry frame every turn drops none, and a sender that fills the
+    buffer does."""
+    return _host_c("ws_link", ["test/host/ws_link_test.c", "src/net/ws_link.c"],
+                   "btgw_ws_link", defs="")
 
 def t_fs_batch():
     """Path lists for a chosen tar or a batch delete: JSON paths (escapes,
@@ -1571,6 +1593,8 @@ def main():
     step(0, "the Lua->JSON encoder stays inside its buffer", t_lua_json)
     step(0, "json.decode: types, escapes, depth, malformed, bounds", t_lua_json_decode)
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
+    step(0, "websocket file chunks leave room for telemetry", t_ws_link)
+    step(0, "peer forward envelope is one hop", t_peer_fwd_msg)
     step(0, "batch tar and delete path lists", t_fs_batch)
     step(0, "file module on the SD card: binding -> jobs -> worker -> FatFs", t_lfile_sd)
     step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)
@@ -1590,6 +1614,7 @@ def main():
     step(0, "a script's mDNS declarations go when it stops", t_lua_net_released)
     step(0, "the lwIP timeout pool covers mDNS on every netif", t_sys_timeout_pool_covers_mdns)
     step(0, "Ethernet config: bad -> DHCP client, link-local timing", t_eth_cfg)
+    step(0, "gateway LAN cfg, ads, expiry, and NAT egress", t_gw_core)
     step(0, "Ethernet DHCP-server mode is only ever explicit", t_eth_server_mode_only_explicit)
     step(0, "forwarding: sessions, fail fast, backpressure", t_fwd_core)
     step(0, "a script's forwarding rules go when it stops", t_fwd_released_with_script)

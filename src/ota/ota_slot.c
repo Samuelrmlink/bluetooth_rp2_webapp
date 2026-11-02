@@ -19,6 +19,7 @@
 #include "bt/bt.h"     /* bt_stack_up(): never enter BTstack if it was never built */
 #endif
 #include "pico/platform.h"
+#include "launch.h"
 
 static ota_part_t slot[2];
 
@@ -355,6 +356,9 @@ static void reboot_quiesce(void) {
 
 void ota_reboot(bool flash_update_other) {
     int me = ota_slot_active();
+    /* Before the reset, including the flash-update path. A plain reboot is a
+     * watchdog reset, and the list would otherwise treat it as a hang. */
+    launch_mark_requested();
     reboot_quiesce();
     if (flash_update_other && me >= 0) {
         uint32_t base = XIP_BASE + slot[me ^ 1].start;

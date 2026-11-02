@@ -78,7 +78,7 @@ export class GattEventsView {
       { key: 'note', label: 'Note', width: 160, hidden: true, get: (e) => e.note || '' },
     ];
     this.grid = new Grid(el.querySelector('.ge-table'), {
-      id: 'gatt-events', columns: this.columns, defaultSort: { key: 'time', dir: 'desc' },
+      id: ctx.scope ? `gatt-events${ctx.scope}` : 'gatt-events', columns: this.columns, defaultSort: { key: 'time', dir: 'desc' },
       onChange: () => { this._dirty = true; this.columnsDlg?.sync(); },
     });
     this.columnsDlg = columnsDialog(this.app, this.grid, { id: `gatt-events-columns-${n}` });

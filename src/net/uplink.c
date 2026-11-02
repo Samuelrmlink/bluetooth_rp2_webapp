@@ -18,6 +18,7 @@
 
 #if CONFIG_NET_UPLINK
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@
 #include "lwip/prot/ip4.h"
 #include "lwip/sys.h"
 
+#include "net/mdns.h"
 #include "net/uplink_core.h"
 #include "net/wg.h"
 #include "api/api.h"
@@ -39,6 +41,8 @@
 #include "net/wifi.h"
 #endif
 #include "net/eth_w5500.h"
+#include "net/gw_core.h"
+#include "net/gw_lan.h"
 #if CONFIG_BT_CLASSIC_NAP
 #include "bt/classic/nap.h"
 #endif
@@ -84,6 +88,7 @@ static ip4_addr_t probe_cfg;          /* any = use the WireGuard endpoint */
 static bool cfg_dirty;
 
 static int active = -1;
+static bool peer_routed;
 static uint32_t switches, last_switch_ms, last_suspect_ms;
 static const char *last_reason = "";
 static char last_from[3], last_to[3];
@@ -237,10 +242,57 @@ static void decide(void) {
     if (pick != active) { switch_to(pick, why); }
 }
 
+/* A heard gateway-LAN peer can beat the local candidates. The next hop is
+ * that peer's link-local address, installed as the companion's gateway.
+ * The gateway-LAN DHCP router is not a competitor: every board probes it
+ * itself. An unmeasured local uplink wins until its metric is known. */
+static void apply_peer_route(void) {
+#if CONFIG_NET_GW_LAN
+    struct netif *eln = eth_ll_netif();
+    char name[GW_NAME_LEN], iface[GW_IFACE_LEN], llbuf[GW_LL_LEN];
+    int32_t metric = 0;
+    bool have = gw_best_peer(name, sizeof name, iface, sizeof iface, &metric, llbuf, sizeof llbuf);
+    bool any_local = false, unknown = false;
+    int32_t best_local = INT32_MAX;
+    for (int i = 0; i < N_CANDS; i++) {
+        if (!cands[i].m.has_gw || gw_is_lan_iface(cands[i].name)) { continue; }
+        any_local = true;
+        if (!upl_known(&cands[i].m)) { unknown = true; continue; }
+        int32_t m = upl_metric(&cands[i].m);
+        if (m < best_local) { best_local = m; }
+    }
+    ip4_addr_t via;
+    bool peer_wins = have && eln && !ip4_addr_isany_val(*netif_ip4_addr(eln)) &&
+                     ip4addr_aton(llbuf, &via) &&
+                     (!any_local || (!unknown && metric < best_local));
+    if (peer_wins) {
+        if (netif_default != eln || !ip4_addr_eq(netif_ip4_gw(eln), &via)) {
+            netif_set_addr(eln, netif_ip4_addr(eln), netif_ip4_netmask(eln), &via);
+            netif_set_default(eln);
+            wg_set_uplink(eln);
+            peer_routed = true;
+            printf("uplink: peer %s via %s metric %ld\n", name, llbuf, (long)metric);
+        }
+        return;
+    }
+    if (peer_routed && eln && netif_default == eln) {
+        netif_set_addr(eln, netif_ip4_addr(eln), netif_ip4_netmask(eln), IP4_ADDR_ANY4);
+        peer_routed = false;
+        apply_default();
+        wg_set_uplink(active >= 0 ? cands[active].nif : NULL);
+    } else if (peer_routed) {
+        peer_routed = false;
+    }
+#else
+    (void)0;
+#endif
+}
+
 void uplink_reselect(void) {
     refresh();
     decide();
     apply_default();     /* the cyw43 driver moves it when an interface comes up */
+    apply_peer_route();
 }
 
 /* --- config ---------------------------------------------------------------- */
@@ -346,6 +398,14 @@ bool uplink_any_up(void) {
 
 struct netif *uplink_active(void) { return active >= 0 ? cands[active].nif : NULL; }
 
+int32_t uplink_metric_of(const char *name) {
+    if (!name) { return INT32_MAX - 1; }
+    for (int i = 0; i < N_CANDS; i++) {
+        if (strcmp(cands[i].name, name) == 0) { return upl_metric(&cands[i].m); }
+    }
+    return INT32_MAX - 1;
+}
+
 void uplink_tick(void) {
     uint32_t now = now_ms();
     bool changed = refresh();
@@ -387,6 +447,7 @@ void uplink_tick(void) {
         decide();
         if (changed) { apply_default(); }
     }
+    apply_peer_route();
     if (cfg_dirty) { save_cfg(); }
 }
 
@@ -400,6 +461,15 @@ void uplink_tick(void) {
  * (return NULL), as is everything with no source yet.
  */
 struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr *dest) {
+    /* 224.0.0.251 is not on any interface's subnet, so ip4_route would send
+     * a <name>.local lookup out the default route. That is USB-NCM here.
+     * The responder for that name is on a LAN. */
+    ip4_addr_t mdns_group;
+    IP4_ADDR(&mdns_group, 224, 0, 0, 251);
+    if (dest && ip4_addr_eq(dest, &mdns_group)) {
+        struct netif *n = mdns_dns_netif();
+        if (n) { return n; }
+    }
     if (!src || ip4_addr_isany(src)) { return NULL; }
     struct netif *n, *owner = NULL;
     NETIF_FOREACH(n) {

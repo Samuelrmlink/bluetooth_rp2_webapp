@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createJobs, lineOf, lineParts, ringOf, fileLine, jobError } from '../../js/editor/jobs.js';
+import { createJobs, lineOf, lineParts, ringOf, fileLine, jobError, byteLine } from '../../js/editor/jobs.js';
 import { JobList } from '../../js/editor/joblist.js';
 
 const text = (jobs) => jobs.items.map(lineOf);
@@ -74,6 +74,23 @@ test('a failure names the reason and stays until it is dismissed', () => {
   assert.equal(ringOf(jobs.items).progress, 1);
   jobs.dismiss(id);
   assert.equal(jobs.items.length, 0);
+});
+
+test('HTTP and WebSocket transfers name the transport in the tail', () => {
+  const http = byteLine('Downloading', 'lua/main.lua', 12 * 1024, 1024 * 1024, 'HTTP');
+  const ws = byteLine('Downloading', 'lua/main.lua', 12 * 1024, 1024 * 1024, 'WebSocket');
+  assert.equal(lineParts({ line: http, state: 'run' }).head, 'Downloading lua/main.lua');
+  assert.equal(lineParts({ line: http, state: 'run' }).tail, 'HTTP · 12.0 KB of 1.00 MB');
+  assert.equal(lineParts({ line: ws, state: 'run' }).tail, 'WebSocket · 12.0 KB of 1.00 MB');
+  const jobs = createJobs();
+  let stopped = 0;
+  const id = jobs.start({ title: 'Downloading lua/main.lua', onAbort: () => { stopped++; } });
+  jobs.update(id, { line: ws, progress: 0.01 });
+  jobs.requestAbort(id);
+  assert.equal(stopped, 1);
+  assert.equal(jobs.items[0].state, 'aborting');
+  assert.equal(lineParts(jobs.items[0]).head, 'Downloading lua/main.lua');
+  assert.match(lineParts(jobs.items[0]).tail, /WebSocket/);
 });
 
 test('a long name clips and the progress stays in the tail', () => {

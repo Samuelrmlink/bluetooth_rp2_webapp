@@ -188,6 +188,45 @@ size_t ws_encode_text_frame(const uint8_t *payload, size_t len, uint8_t *out, si
     return hdr_len + len;
 }
 
+/* Client text frame. The peer is a websocket server, so the bytes we send
+ * it are masked. mask is the 4-byte key in host order. */
+size_t ws_encode_client_text(const uint8_t *payload, size_t len, uint8_t *out, size_t out_cap,
+                             uint32_t mask) {
+    size_t hdr_len;
+    size_t i;
+    uint8_t m[4];
+    if (len <= 125) {
+        hdr_len = 6;
+    } else if (len <= 0xFFFF) {
+        hdr_len = 8;
+    } else {
+        return 0;
+    }
+    if (out_cap < hdr_len + len) {
+        return 0;
+    }
+    out[0] = 0x81;
+    if (len <= 125) {
+        out[1] = (uint8_t)(0x80 | len);
+        m[0] = out[2] = (uint8_t)(mask >> 24);
+        m[1] = out[3] = (uint8_t)(mask >> 16);
+        m[2] = out[4] = (uint8_t)(mask >> 8);
+        m[3] = out[5] = (uint8_t)mask;
+    } else {
+        out[1] = (uint8_t)(0x80 | 126);
+        out[2] = (uint8_t)(len >> 8);
+        out[3] = (uint8_t)len;
+        m[0] = out[4] = (uint8_t)(mask >> 24);
+        m[1] = out[5] = (uint8_t)(mask >> 16);
+        m[2] = out[6] = (uint8_t)(mask >> 8);
+        m[3] = out[7] = (uint8_t)mask;
+    }
+    for (i = 0; i < len; i++) {
+        out[hdr_len + i] = payload[i] ^ m[i & 3];
+    }
+    return hdr_len + len;
+}
+
 /* --- frame parse (client -> server, always masked) --------------------- */
 
 void ws_parser_reset(ws_parser_t *p) {

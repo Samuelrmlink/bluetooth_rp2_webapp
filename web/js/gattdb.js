@@ -16,6 +16,7 @@ export class DeviceStore {
   }
 
   subscribe(fn) { this._subs.add(fn); return () => this._subs.delete(fn); }
+  dispose() { this._subs.clear(); }
   _changed() { for (const f of this._subs) { try { f(this); } catch (e) { console.error(e); } } }
 
   get(addr) { return this.devices.get(addr); }

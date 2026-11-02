@@ -688,8 +688,8 @@
       "name": "bt",
       "id": 12,
       "major": 1,
-      "minor": 1,
-      "doc": "Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database when BT_PERIPHERAL is on, and returns PEX_ENOTSUP when it is off",
+      "minor": 3,
+      "doc": "Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database and pex_adv_* the advertising payload when BT_PERIPHERAL is on; both return PEX_ENOTSUP when it is off. Pairing calls use bond.c and return PEX_ENOTSUP when BT_LE is off",
       "types": [
         "typedef struct {",
         "    uint8_t addr[6]; uint8_t addr_type; int8_t rssi;",
@@ -706,6 +706,13 @@
         "#define PEX_BT_LINK_DOWN 17",
         "#define PEX_BT_READY 18     /* GATT discovered: pex_bt_find works */",
         "#define PEX_BT_FAILED 19    /* connect or discovery failed */",
+        "#define PEX_BT_JUST_WORKS 20",
+        "#define PEX_BT_PASSKEY 21       /* stack wants a passkey typed in */",
+        "#define PEX_BT_CONFIRM 22       /* numeric comparison; answer with pex_bt_confirm */",
+        "#define PEX_BT_BONDED 23",
+        "#define PEX_BT_PAIR_FAIL 24",
+        "#define PEX_BT_PASSKEY_DISP 25  /* stack is showing a passkey */",
+        "#define PEX_BT_LOCAL_WRITE 26   /* a peer wrote a local characteristic */",
         "typedef struct {",
         "    uint8_t addr[6]; uint8_t kind; uint8_t pad;",
         "    int16_t chr; int16_t status;",
@@ -823,6 +830,72 @@
           "proto": "int pex_gatt_commit(void)",
           "since": 1,
           "doc": "install the database. Keeps the read and write callbacks"
+        },
+        {
+          "name": "pex_adv_data",
+          "proto": "int pex_adv_data(const uint8_t *adv, uint16_t adv_len, const uint8_t *scan_rsp, uint16_t scan_len)",
+          "since": 2,
+          "doc": "store a 0..31 byte advertising payload and an optional scan response. The next pex_adv_start uses them. Does not stop the central scanner. PEX_ENOTSUP when BT_PERIPHERAL is off"
+        },
+        {
+          "name": "pex_adv_start",
+          "proto": "int pex_adv_start(uint16_t interval_min, uint16_t interval_max)",
+          "since": 2,
+          "doc": "connectable advertising. 0 for either bound is the default 0x00A0..0x00F0 (units of 0.625 ms). Does not stop the central scanner"
+        },
+        {
+          "name": "pex_adv_stop",
+          "proto": "int pex_adv_stop(void)",
+          "since": 2,
+          "doc": "stop advertising. The central scanner keeps running"
+        },
+        {
+          "name": "pex_bt_set_io",
+          "proto": "int pex_bt_set_io(const char *io_capability, int mitm)",
+          "since": 2,
+          "doc": "no_input_no_output, display_only, display_yes_no, keyboard_only, keyboard_display. NULL keeps the capability. mitm < 0 leaves MITM unchanged"
+        },
+        {
+          "name": "pex_bt_set_policy",
+          "proto": "int pex_bt_set_policy(const char *policy)",
+          "since": 2,
+          "doc": "never, on_demand, or always. Same bond.c policy, including declining Just Works when never"
+        },
+        {
+          "name": "pex_bt_passkey",
+          "proto": "int pex_bt_passkey(const uint8_t *addr, uint32_t passkey)",
+          "since": 2,
+          "doc": "answer a passkey request on a connected link. passkey is 0..999999"
+        },
+        {
+          "name": "pex_bt_confirm",
+          "proto": "int pex_bt_confirm(const uint8_t *addr, int accept)",
+          "since": 2,
+          "doc": "answer a numeric comparison. accept non-zero confirms, zero declines"
+        },
+        {
+          "name": "pex_bt_forget",
+          "proto": "int pex_bt_forget(const uint8_t *addr)",
+          "since": 2,
+          "doc": "drop one stored bond. NULL deletes every bond in the existing store"
+        },
+        {
+          "name": "pex_bt_pair",
+          "proto": "int pex_bt_pair(const uint8_t *addr)",
+          "since": 2,
+          "doc": "ask for pairing on a connected link. PEX_ESTATE when the policy is never"
+        },
+        {
+          "name": "pex_bt_set_addr",
+          "proto": "int pex_bt_set_addr(const uint8_t addr[6], int random)",
+          "since": 2,
+          "doc": "1 sets a static random address (BTstack forces the two MSBs) before advertising. 0, the public address, returns PEX_ENOTSUP. PEX_ENOTSUP when BT_LE is off"
+        },
+        {
+          "name": "pex_gatt_set",
+          "proto": "int pex_gatt_set(const uint8_t *data, uint16_t len)",
+          "since": 3,
+          "doc": "bytes for the next pex_gatt_characteristic. Empty (len 0) is allowed. PEX_ENOTSUP when BT_PERIPHERAL is off"
         }
       ]
     },

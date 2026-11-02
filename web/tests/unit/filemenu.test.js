@@ -5,7 +5,7 @@ import { fileMenuItems } from '../../js/editor/filemenu.js';
 const ids = (items) => items.map((i) => i.id);
 
 test('a folder: new file, upload, refresh, rename', () => {
-  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'mkdir', 'upload', 'untar', 'tar', 'size', 'refresh', 'copy', 'rename', 'select', 'delete']);
+  assert.deepEqual(ids(fileMenuItems({ dir: true, path: 'lua' })), ['new', 'mkdir', 'upload', 'upload-ws', 'untar', 'tar', 'size', 'refresh', 'copy', 'rename', 'select', 'delete']);
 });
 
 test('a Pexfile lists its build actions before Open', () => {
@@ -21,19 +21,19 @@ test('a Pexfile lists its build actions before Open', () => {
 
 test('a plain file: open, download, rename, delete (last, marked)', () => {
   const m = fileMenuItems({ dir: false, path: 'cfg/bt.json' });
-  assert.deepEqual(ids(m), ['open', 'download', 'copy', 'rename', 'select', 'delete']);
+  assert.deepEqual(ids(m), ['open', 'download', 'download-ws', 'copy', 'rename', 'select', 'delete']);
   assert.equal(m.at(-1).danger, true);
 });
 
 test('a script gets start / stop / commit / revert; the open file no Open', () => {
   const m = fileMenuItems({ dir: false, path: 'lua/anker.lua' }, { isOpen: true, script: 'anker' });
-  assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'compress', 'copy', 'rename', 'select', 'delete']);
+  assert.deepEqual(ids(m), ['start', 'stop', 'commit', 'revert', 'download', 'download-ws', 'compress', 'copy', 'rename', 'select', 'delete']);
   assert.equal(m[0].label, 'Start anker');
 });
 
 test('a PEX app gets start / stop / install, and uninstall only when it is in the partition', () => {
   const m = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker' });
-  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-mark', 'pex-restore', 'pex-partition', 'download', 'copy', 'rename', 'select', 'delete']);
+  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-mark', 'pex-restore', 'pex-partition', 'download', 'download-ws', 'copy', 'rename', 'select', 'delete']);
   assert.equal(m.find((i) => i.id === 'pex-start').label, 'Start anker');
   assert.equal(m.find((i) => i.id === 'pex-stop').label, 'Stop anker');
   const installed = fileMenuItems({ dir: false, path: 'pex/anker.m33.pex' }, { pex: 'anker', installed: true });

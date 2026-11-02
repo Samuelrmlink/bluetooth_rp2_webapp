@@ -32,7 +32,18 @@ void http_jobs_pump(void);
  * dropped, because a stalled link otherwise looks like missing data. */
 uint32_t http_conn_dropped(void *ctx);
 
+/* True when one bulk frame of `frame_len` bytes may be written to this
+ * websocket without eating the reserve telemetry needs. Arms the one-bulk
+ * per turn flag. A null ctx, or a ctx that is not a live websocket (POST
+ * /api/op), is allowed: that path is not the streaming link. */
+bool http_ws_bulk_ok(void *ctx, uint16_t frame_len);
+
 int http_client_count(void);
+
+/* epoch is 0 when ctx is not a connection slot. live is true only while that
+ * same websocket is still the one peer_fwd stored. */
+uint32_t http_conn_epoch(void *ctx);
+bool http_conn_live(void *ctx, uint32_t epoch);
 
 /* The peer proxy finished with a connection it had taken over. Drops the
  * HTTP slot. The caller closes the pcb. */
@@ -54,7 +65,21 @@ static inline uint32_t http_conn_dropped(void *ctx) {
     (void)ctx;
     return 0;
 }
+static inline bool http_ws_bulk_ok(void *ctx, uint16_t frame_len) {
+    (void)ctx;
+    (void)frame_len;
+    return true;
+}
 static inline int http_client_count(void) { return 0; }
+static inline uint32_t http_conn_epoch(void *ctx) {
+    (void)ctx;
+    return 0;
+}
+static inline bool http_conn_live(void *ctx, uint32_t epoch) {
+    (void)ctx;
+    (void)epoch;
+    return false;
+}
 
 #endif
 

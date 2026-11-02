@@ -5,7 +5,7 @@
 // every interface that has a gateway; an interface with none is shown but
 // not measured. "Use now" switches at once -- make-before-break, the old
 // path keeps receiving -- and the policy carries on from there.
-import { makeSection, kvRows, button, PolledSection } from './common.js';
+import { makeSection, kvRows, button, setNote, PolledSection } from './common.js';
 import { ipv4ok } from './ethernet.js';
 
 const STATE_TEXT = {
@@ -75,22 +75,17 @@ export class UplinksSection extends PolledSection {
     q('.up-probe').addEventListener('submit', (e) => {
       e.preventDefault();
       const ip = this._probe.value.trim();
-      if (ip && !ipv4ok(ip)) { this._note.textContent = 'probe target is not an IPv4 address'; return; }
+      if (ip && !ipv4ok(ip)) { setNote(this._note, 'probe target is not an IPv4 address', true); return; }
       this._set({ probe_ip: ip }, ip ? `probing ${ip}` : 'probing the WireGuard endpoint');
     });
-  }
-
-  onConnect() {
-    const mods = this.app.sysInfo?.modules || [];
-    this._d.hidden = !mods.includes('uplink');
   }
 
   async _set(params, note) {
     try {
       await this.ws.call('uplink.policy', params);
-      this._note.textContent = note;
+      setNote(this._note, note);
     } catch (e) {
-      this._note.textContent = `uplink.policy: ${e.message}`;
+      setNote(this._note, `uplink.policy: ${e.message}`, true);
     }
     this.soon();
   }
@@ -98,9 +93,9 @@ export class UplinksSection extends PolledSection {
   async _use(name) {
     try {
       await this.ws.call('uplink.switch', { iface: name });
-      this._note.textContent = `switched to ${name}`;
+      setNote(this._note, `switched to ${name}`);
     } catch (e) {
-      this._note.textContent = `uplink.switch: ${e.message}`;
+      setNote(this._note, `uplink.switch: ${e.message}`, true);
     }
     this.soon();
   }

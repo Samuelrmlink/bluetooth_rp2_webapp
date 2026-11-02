@@ -16,6 +16,7 @@
 #include "lwip/stats.h"
 #include "fs/fs.h"
 #include "net/ws.h"
+#include "net/ws_link.h"
 #include "api/api.h"
 #include "autoconf.h"
 #if CONFIG_SD
@@ -32,6 +33,7 @@
 
 #include "net/usb_ncm.h"
 #include "net/peer_proxy.h"
+#include "net/peer_fwd.h"
 
 #define HTTP_HDR 1024
 /* A request path. /api/peer/<name>/api/... and percent-encoded SD names
@@ -84,12 +86,17 @@ typedef struct {
     uint8_t retries;
     bool is_ws;
     bool follow;
+    /* One file/bulk frame per connection per main-loop turn. Cleared in
+     * http_flush_ws, which runs once at the end of the drain. */
+    bool bulk_turn;
     ws_parser_t ws;
     /* Live lines this follower did not get because its TCP send buffer was
      * full (tcp_write ERR_MEM). Before this was counted the line went on the
      * floor silently, and a 1.6 s WiFi stall looked like a hole in the
      * meter's data. Reported on STATE as DROPPED= for the asking client. */
     uint32_t dropped;
+    /* Bumped on every reset so a reused slot is not a peer-forward reply target. */
+    uint32_t epoch;
 #if CONFIG_SD
     /* an /api/sd transfer this connection is waiting on (sd_service) */
     bool sd_on;
@@ -225,9 +232,13 @@ static void conn_cleanup(http_conn_t *c) {
 #endif
 }
 
+static uint32_t conn_epoch_next = 1;
+
 static void conn_reset(http_conn_t *c) {
     memset(c, 0, sizeof(*c));
     c->file_h = -1;
+    c->epoch = conn_epoch_next++;
+    if (conn_epoch_next == 0) conn_epoch_next = 1;
 }
 
 static bool conn_held(const http_conn_t *c) {
@@ -878,10 +889,36 @@ static void ws_reply_line(const char *line, void *ctx) {
 /* One tcp_output() per WS follower per drain pass — see ws_reply_line(). */
 void http_flush_ws(void) {
     for (int i = 0; i < HTTP_CONNS; i++) {
+        conns[i].bulk_turn = false;
         if (conns[i].pcb && conns[i].is_ws) {
             tcp_output(conns[i].pcb);
         }
     }
+}
+
+bool http_ws_bulk_ok(void *ctx, uint16_t frame_len) {
+    int i;
+    if (!ctx || frame_len == 0) {
+        return true;
+    }
+    for (i = 0; i < HTTP_CONNS; i++) {
+        http_conn_t *c = &conns[i];
+        if ((void *)c != ctx) {
+            continue;
+        }
+        if (!c->pcb || !c->is_ws) {
+            return true;
+        }
+        if (c->bulk_turn) {
+            return false;
+        }
+        if (!ws_link_allow_bulk(TCP_SND_BUF, tcp_sndbuf(c->pcb), frame_len)) {
+            return false;
+        }
+        c->bulk_turn = true;
+        return true;
+    }
+    return true;
 }
 
 uint32_t http_conn_dropped(void *ctx) {
@@ -905,6 +942,9 @@ static void ws_on_text(const uint8_t *payload, size_t len, void *user) {
     }
     memcpy(line, payload, len);
     line[len] = 0;
+    if (peer_fwd_handle(line, c)) {
+        return;
+    }
     api_handle_text(line, ws_reply_line, c);
 }
 
@@ -941,6 +981,21 @@ int http_client_count(void) {
         }
     }
     return n;
+}
+
+uint32_t http_conn_epoch(void *ctx) {
+    for (int i = 0; i < HTTP_CONNS; i++) {
+        if ((void *)&conns[i] == ctx) return conns[i].epoch;
+    }
+    return 0;
+}
+
+bool http_conn_live(void *ctx, uint32_t epoch) {
+    for (int i = 0; i < HTTP_CONNS; i++) {
+        http_conn_t *c = &conns[i];
+        if ((void *)c == ctx) return c->epoch == epoch && c->pcb && c->is_ws;
+    }
+    return false;
 }
 
 /* Attempts the WS upgrade for a GET /ws request; returns true (and has
@@ -1617,12 +1672,33 @@ static err_t op_bridge(struct tcp_pcb *tpcb, const char *body) {
     return http_reply(tpcb, 200, "application/json", json_buf);
 }
 
+#ifdef BTGW_ROLE_NET
+void role_con_submit(const char *line);
+void role_con_console(uint32_t from, char *dst, size_t cap);
+void role_con_restart(void);
+#endif
+
 static int dispatch(struct tcp_pcb *tpcb, http_conn_t *c, const char *method, const char *path,
                     const char *body, size_t body_len) {
     (void)body_len;
     if (strcmp(method, "OPTIONS") == 0) {
         return http_reply(tpcb, 204, "text/plain", "");
     }
+#ifdef BTGW_ROLE_NET
+    if (path_is(path, "/console") && strcmp(method, "GET") == 0) {
+        static char page[1500];
+        role_con_console(query_u32(path, "from"), page, sizeof page);
+        return http_reply(tpcb, 200, "text/plain", page);
+    }
+    if (path_is(path, "/input") && strcmp(method, "POST") == 0) {
+        role_con_submit(body ? body : "");
+        return http_reply(tpcb, 204, "text/plain", "");
+    }
+    if (path_is(path, "/reset") && strcmp(method, "POST") == 0) {
+        role_con_restart();
+        return http_reply(tpcb, 204, "text/plain", "");
+    }
+#endif
     if (path_is(path, "/api/op")) {
         if (strcmp(method, "POST") != 0) {
             return http_reply(tpcb, 404, "application/json", "{\"ok\":false,\"error\":\"POST\"}");

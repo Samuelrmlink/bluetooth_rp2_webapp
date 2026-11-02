@@ -28,6 +28,8 @@
 #include "bt/registry.h"
 #include "fs/fs.h"
 #include "net/mdns.h"
+#include "net/ping.h"
+#include "net/gw_lan.h"
 #include "net/uplink.h"
 #include "net/fwd.h"
 #include "net/ws.h"
@@ -1298,7 +1300,10 @@ void lbind_pairing_pump(void) {
  * emits the records; these choose what goes in them.
  *
  *   mdns.hostname()            -> "bluetooth-rp2-webapp"
- *   mdns.hostname('lab-gw')    -> true            (A, and every SRV target)
+ *   mdns.hostname('lab-gw')    -> true            (A, and every SRV target;
+ *                                                  stored in cfg/hostname.json)
+ *   mdns.peers()               -> { {name=, ip=, port=, board=, assets=,
+ *                                   age_ms=, self=}, ... }
  *   mdns.service{ type = '_http', port = 80,      (PTR + SRV + TXT)
  *                 txt = { 'path=/', 'role=gw' } }
  *   mdns.remove('_http')
@@ -1315,7 +1320,28 @@ static int l_mdns_hostname(lua_State *L) {
         lua_pushstring(L, "a hostname may contain only letters, digits and hyphens");
         return 2;
     }
+    /* The boot formula does not come through here. A script write does. */
+    gw_hostname_written(mdns_hostname());
+    mdns_hostname_remember();
     lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int l_mdns_peers(lua_State *L) {
+    lua_newtable(L);
+    mdns_peer_view_t v;
+    for (int i = 0; mdns_peer_at(i, &v); i++) {
+        lua_createtable(L, 0, 7);
+        lua_pushstring(L, v.name); lua_setfield(L, -2, "name");
+        lua_pushstring(L, v.ip); lua_setfield(L, -2, "ip");
+        lua_pushinteger(L, v.port); lua_setfield(L, -2, "port");
+        lua_pushstring(L, v.board); lua_setfield(L, -2, "board");
+        if (v.assets < 0) { lua_pushnil(L); } else { lua_pushinteger(L, v.assets); }
+        lua_setfield(L, -2, "assets");
+        lua_pushinteger(L, (lua_Integer)v.age_ms); lua_setfield(L, -2, "age_ms");
+        lua_pushboolean(L, v.self); lua_setfield(L, -2, "self");
+        lua_rawseti(L, -2, i + 1);
+    }
     return 1;
 }
 
@@ -1512,6 +1538,11 @@ static void lbind_release_net(int slot) {
 }
 
 /* --- net -----------------------------------------------------------------
+ *   net.ping('169.254.1.1') -> {state='sent', ip=, iface=, id=}
+ *   net.ping()              -> that result, then state='reply' or 'timeout'
+ * One echo at a time. The reply is also the event net.ping. Link-local
+ * is on-link on the interface that holds it; there is no gateway requirement.
+ *
  *   net.uplinks() -> { {name='w0', kind='wifi', state='ok', active=true,
  *                       ip=..., mask=..., gw=..., rtt_ms=21, jitter_ms=3, loss_pct=0,
  *                       metric=27}, ... }, policy
@@ -1652,6 +1683,28 @@ static int l_json_encode(lua_State *L) {
     return 2;
 }
 
+static int l_net_ping(lua_State *L) {
+    if (lua_isstring(L, 1) || lua_istable(L, 1)) {
+        char ip[20];
+        ip[0] = 0;
+        if (lua_isstring(L, 1)) {
+            snprintf(ip, sizeof ip, "%s", lua_tostring(L, 1));
+        } else {
+            lua_field_str(L, 1, "ip", ip, sizeof ip);
+        }
+        const char *why = "bad request";
+        if (!ping_start(ip, &why)) {
+            lua_pushnil(L);
+            lua_pushstring(L, why);
+            return 2;
+        }
+    }
+    static char js[160];
+    size_t n = ping_status_json(js, sizeof js);
+    lua_pushlstring(L, js, n);
+    return 1;
+}
+
 static void set_table(lua_State *L, const char *name, const luaL_Reg *fns) {
     /* Not luaL_newlib: its size hint is sizeof(l)/sizeof(l[0]), which on a
      * POINTER argument computes 8/32 - 1 = -1 rather than the entry count.
@@ -1667,23 +1720,22 @@ void lbind_open_all(lua_State *L) {
     static const luaL_Reg mdns_fns[] = {
         { "hostname", l_mdns_hostname }, { "service", l_mdns_service },
         { "remove", l_mdns_remove }, { "announce", l_mdns_announce },
-        { "list", l_mdns_list },
+        { "list", l_mdns_list }, { "peers", l_mdns_peers },
         { "group", l_mdns_group }, { "ungroup", l_mdns_ungroup }, { "groups", l_mdns_groups },
         { NULL, NULL } };
     set_table(L, "mdns", mdns_fns);
 
-#if CONFIG_NET_UPLINK || CONFIG_NET_FORWARD
     static const luaL_Reg net_fns[] = {
 #if CONFIG_NET_UPLINK
         { "uplinks", l_net_uplinks },
 #endif
+        { "ping", l_net_ping },
 #if CONFIG_NET_FORWARD
         { "forward", l_net_forward }, { "unforward", l_net_unforward },
         { "forwards", l_net_forwards },
 #endif
         { NULL, NULL } };
     set_table(L, "net", net_fns);
-#endif
 
     static const luaL_Reg json_fns[] = {
         { "decode", l_json_decode }, { "encode", l_json_encode }, { NULL, NULL } };

@@ -28,6 +28,7 @@
  */
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "autoconf.h"
 
 struct netif;
@@ -66,6 +67,10 @@ typedef struct {
 int  uplink_count(void);
 bool uplink_info(int i, uplink_info_t *out);
 const char *uplink_policy_name(void);
+
+/* upl_metric of a named candidate. INT32_MAX-1 when this build has no such
+ * iface (USB-NCM is advertised and is not a candidate). */
+int32_t uplink_metric_of(const char *name);
 
 /* LWIP_HOOK_IP4_ROUTE_SRC (include/lwipopts.h). */
 struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr *dest);

@@ -45,6 +45,10 @@ void ws_accept_key(const char *key, size_t key_len, char *out, size_t out_cap);
  * (not needed for our line-at-a-time protocol). */
 size_t ws_encode_text_frame(const uint8_t *payload, size_t len, uint8_t *out, size_t out_cap);
 
+/* Masked text frame for a websocket client. `mask` is the 4-byte key. */
+size_t ws_encode_client_text(const uint8_t *payload, size_t len, uint8_t *out, size_t out_cap,
+                             uint32_t mask);
+
 /* Incremental client->server frame parser — client frames are always
  * masked (RFC6455 requirement); feed it raw bytes as they arrive and it
  * calls `on_text` once per complete text-frame payload (unmasked

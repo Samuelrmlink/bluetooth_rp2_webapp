@@ -48,6 +48,9 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/dhcp.h"
 #include "lwip/prot/dhcp.h"
+#include "lwip/autoip.h"
+#include "lwip/acd.h"
+#include "net/eth_cfg.h"
 #include "net/mdns.h"
 #include "dhcpserver.h"
 #include "net/wg.h"
@@ -160,6 +163,11 @@ static int      join_links;      /* BLE links open when the current join began *
 static int      last_join_links; /* ...and for the last successful one */
 static uint32_t joins_live_ok, joins_live_fail;  /* live-mode joins under open links */
 static char ip_str[16] = "0.0.0.0";
+/* Link-local on the station only, after ETH_LL_AFTER_MS with no lease.
+ * Not LWIP_DHCP_AUTOIP_COOP: that would also start AutoIP on USB-NCM. */
+static bool sta_ll;
+static uint32_t noip_since, ll_kick;
+static void wifi_ll_stop(void);
 static char last_error[56] = "";
 static char cur_ssid[CFG_SSID_MAX + 1] = "";
 
@@ -609,6 +617,8 @@ static void begin_join(const char *ssid, const char *psk) {
     printf("wifi: joining '%s' (%d BLE link(s) open, coex %s)\n", ssid, join_links,
            coex_live() ? "live" : "window");
     join_start = now_ms();
+    noip_since = 0;
+    wifi_ll_stop();
     state = ST_JOIN;
 }
 
@@ -629,16 +639,31 @@ static void on_up(void) {
     win_close(now_ms(), true);
 #endif
     /* Registered here, not at init: the responder announces the netif's
-     * address and there isn't one until DHCP completes. */
+     * address, and there isn't one until DHCP or AutoIP completes. */
+    noip_since = 0;
     mdns_add_netif(nif);
     fix_default_route();
     printf("wifi: up as '%s', http://%s/ and http://%s.local/\n",
            cur_ssid, ip_str, mdns_hostname());
 }
 
+static void wifi_ll_stop(void) {
+    if (!sta_ll) { return; }
+    sta_ll = false;
+    struct netif *nif = sta_netif();
+    cyw43_arch_lwip_begin();
+    autoip_stop(nif);
+    /* autoip_stop leaves ACD defending the old 169.254 address. */
+    struct autoip *a = netif_autoip_data(nif);
+    if (a) { acd_stop(&a->acd); }
+    cyw43_arch_lwip_end();
+}
+
 static void on_lost(const char *why) {
     snprintf(last_error, sizeof(last_error), "%s", why);
     printf("wifi: %s\n", why);
+    noip_since = 0;
+    wifi_ll_stop();
     if (state == ST_JOIN && join_links > 0) joins_live_fail++;
     mdns_remove_netif(sta_netif());
     strcpy(ip_str, "0.0.0.0");
@@ -717,6 +742,8 @@ static bool adopt_firmware_rejoin(uint32_t now) {
     fw_rejoins++;
     snprintf(last_error, sizeof(last_error), "rejoined by the radio; waiting for DHCP");
     join_start = now;
+    noip_since = 0;
+    wifi_ll_stop();
     state = ST_JOIN;
     return true;
 }
@@ -1169,13 +1196,34 @@ void wifi_poll(void) {
             on_lost("network not found");
         } else if (link == CYW43_LINK_FAIL) {
             on_lost("association failed");
-        } else if (link == CYW43_LINK_JOIN || link == CYW43_LINK_NOIP) {
-            /* BOTH mean the association succeeded and only DHCP is
-             * outstanding — cyw43.h calls LINK_JOIN "Connected to wifi".
-             * Measured: treating JOIN as failure tore down a live association
-             * at 6s and turned a ~9s connect into a reproducible 18.4s one. */
+        } else if (link == CYW43_LINK_JOIN) {
+            /* Associated, but the netif link is not up yet, so AutoIP has
+             * nowhere to run. JOIN can sit here while DHCP is actually in
+             * progress: treating it as failure at WIFI_JOIN_MS tore a live
+             * association down at 6 s. */
+            noip_since = 0;
             if (timed_out(now, join_start, WIFI_JOIN_MS + WIFI_DHCP_MS)) {
                 on_lost("dhcp timeout");
+            }
+        } else if (link == CYW43_LINK_NOIP) {
+            /* Link up, no address. Same rule as e0: link-local after
+             * ETH_LL_AFTER_MS, and a lease replaces it. A missing DHCP
+             * server used to end the association here. */
+            if (!noip_since) { noip_since = now; }
+            struct netif *nif = sta_netif();
+            if (!sta_ll && timed_out(now, noip_since, ETH_LL_AFTER_MS)) {
+                sta_ll = true;
+                ll_kick = now;
+                cyw43_arch_lwip_begin();
+                autoip_start(nif);
+                cyw43_arch_lwip_end();
+                printf("wifi: no DHCP lease after %u s -- adding link-local (DHCP keeps trying)\n",
+                       ETH_LL_AFTER_MS / 1000);
+            } else if (sta_ll && timed_out(now, ll_kick, ETH_DHCP_KICK_MS)) {
+                ll_kick = now;
+                cyw43_arch_lwip_begin();
+                dhcp_start(nif);
+                cyw43_arch_lwip_end();
             }
         } else if (timed_out(now, join_start, WIFI_JOIN_MS)) {
             on_lost("association timeout");
@@ -1187,6 +1235,18 @@ void wifi_poll(void) {
         int link = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
         if (link == CYW43_LINK_UP) {
             down_since = 0;
+            struct netif *nif = sta_netif();
+            if (sta_ll && dhcp_supplied_address(nif)) {
+                wifi_ll_stop();
+                snprintf(ip_str, sizeof ip_str, "%s", ip4addr_ntoa(netif_ip4_addr(nif)));
+                printf("wifi: DHCP lease %s replaced link-local\n", ip_str);
+                mdns_announce_all();
+            } else if (sta_ll && timed_out(now, ll_kick, ETH_DHCP_KICK_MS)) {
+                ll_kick = now;
+                cyw43_arch_lwip_begin();
+                dhcp_start(nif);
+                cyw43_arch_lwip_end();
+            }
         } else if (down_since == 0) {
             /* Require the failure to persist: link status flaps during normal
              * roaming and one bad sample is not a loss. */

@@ -12,8 +12,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef SPIBUS_HOST
+#if defined(SPIBUS_HOST)
 typedef struct { volatile int permits; } spibus_sem_t;
+#elif defined(SPIBUS_C5)
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+typedef StaticSemaphore_t spibus_sem_t;
 #else
 #include "pico/sem.h"
 typedef semaphore_t spibus_sem_t;

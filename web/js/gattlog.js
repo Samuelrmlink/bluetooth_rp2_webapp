@@ -31,6 +31,7 @@ export class GattLog {
   list(addr) { return addr ? this.items.filter((i) => i.addr === addr) : this.items.slice(); }
 
   subscribe(fn) { this._subs.add(fn); return () => this._subs.delete(fn); }
+  dispose() { this._subs.clear(); }
 
   clear() { this.items = []; this._last.clear(); for (const fn of this._subs) fn(null); }
 }

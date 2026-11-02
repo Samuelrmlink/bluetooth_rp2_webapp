@@ -290,6 +290,40 @@ int fs_pwrite(fs_wr_t *f, const void *src, uint32_t n) {
     return r == (lfs_ssize_t)n ? 0 : -1;
 }
 
+int fs_write_at(const char *path, uint32_t off, const void *src, uint32_t n, int trunc, uint32_t *size_out) {
+    char parent[140];
+    lfs_file_t f;
+    int flags;
+    int err;
+    uint32_t sz = 0;
+    if (!mounted || !path_ok(path)) return -1;
+    if (off > 1024u * 1024u || n > 1024u * 1024u || off + n > 1024u * 1024u) return -1;
+    snprintf(parent, sizeof parent, "%s", path);
+    char *slash = strrchr(parent, '/');
+    if (slash && slash != parent) {
+        *slash = 0;
+        if (fs_mkdir_p(parent)) return -1;
+    }
+    flags = LFS_O_RDWR | LFS_O_CREAT;
+    if (trunc) flags |= LFS_O_TRUNC;
+    fs_lock();
+    err = lfs_file_open(&lfs, &f, path, flags);
+    if (!err && off && lfs_file_seek(&lfs, &f, (lfs_soff_t)off, LFS_SEEK_SET) < 0) err = -1;
+    if (!err && n) {
+        lfs_ssize_t w = lfs_file_write(&lfs, &f, src, n);
+        if (w != (lfs_ssize_t)n) err = -1;
+    }
+    if (!err) sz = (uint32_t)lfs_file_size(&lfs, &f);
+    /* -1 is a step that failed after a successful open. Other negatives are
+     * lfs_file_open itself, which must not be closed. */
+    if (err == 0) err = lfs_file_close(&lfs, &f);
+    else if (err == -1) lfs_file_close(&lfs, &f);
+    fs_unlock();
+    if (err) return err < 0 ? err : -1;
+    if (size_out) *size_out = sz;
+    return (int)n;
+}
+
 int fs_close_write(fs_wr_t *f, bool abort_write) {
     if (!f) return -1;
     fs_lock();

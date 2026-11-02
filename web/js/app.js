@@ -34,8 +34,16 @@ import { SETTINGS_SECTIONS } from './settings/index.js';
 import { GattLog } from './gattlog.js';
 import { DeviceStore } from './gattdb.js';
 import { DeviceHost } from './devices/host.js';
+import { PeerHost } from './windows/peers.js';
+import { LOCAL_TOOLS, localToolTitle } from './windows/peercaps.js';
 import { PairingPrompt } from './pairing.js';
 import { list, readText, setSd } from './fs.js';
+
+// A frame opened for one other board. The outer window already has the title
+// and the connection line, so this page is only the editor.
+if (new URLSearchParams(location.search).get('embed') === '1') {
+  document.documentElement.classList.add('is-embed');
+}
 
 const NUDGE_PX = 24;
 const RESIZE_PX = 32;
@@ -47,15 +55,27 @@ function wsUrl() {
   if (q.get('ws')) return q.get('ws');
   const host = q.get('host') || location.hostname;
   const port = q.get('port') || location.port;
-  const peer = q.get('peer');
-  const path = peer ? `/ws/peer/${encodeURIComponent(peer)}` : '/ws';
-  return `ws://${host}${port ? ':' + port : ''}${path}`;
+  return `ws://${host}${port ? ':' + port : ''}/ws`;
+}
+
+// An editor frame for another board. The socket is still /ws; the name is
+// sent as `node` on every call. Empty on the page that served itself.
+function pagePeer() {
+  return new URLSearchParams(location.search).get('peer') || '';
+}
+
+function waitOpen(ws, ms = 8000) {
+  if (ws.connected) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { off(); reject(new Error('timed out')); }, ms);
+    const off = ws.on('_open', () => { clearTimeout(timer); off(); resolve(); });
+  });
 }
 
 class App {
   constructor() {
     this.prefs = readPrefs();
-    this.ws = new WsApi(wsUrl());
+    this.ws = new WsApi(wsUrl(), pagePeer());
     this.bus = new Bus(this.ws);
     // One mirror of the devices the gateway knows, shared by every window
     // that shows them, so the Scanner and GATT can never disagree.
@@ -78,6 +98,7 @@ class App {
     // first and may already have registered theirs.
     this.dialogs = [this.settingsModal, ...(this.dialogs || [])];
     this.sections = SETTINGS_SECTIONS.map((S) => new S(this, this.settingsModal));
+    this.settingsModal.applyCapabilities(null);
     this.helpModal = new HelpModal();
     this.popover = new Popover();
 
@@ -85,7 +106,19 @@ class App {
     this._initKeys();
     // After the layout exists: devices register windows into it as they
     // appear, and a saved arrangement may already have a place for them.
+    this._settingsPeer = '';
+    this._settingsSock = null;
+    this._deviceInfo = null;
+    window.addEventListener('message', (ev) => {
+      if (ev.origin !== location.origin) return;
+      if (ev.data?.type !== 'btgw-open' || typeof ev.data.path !== 'string') return;
+      this.openFile?.(ev.data.path);
+    });
     this.deviceHost = new DeviceHost(this);
+    // Other boards join the window list under their own Tools heading. The
+    // embed frame must not do this, or each board would open another frame of itself.
+    this._settingsHold = '';
+    if (!document.documentElement.classList.contains('is-embed')) this.peerHost = new PeerHost(this);
     // Windows from other projects, uploaded to js/ext/ on the gateway
     // (extensions.js). The same promise for anyone who waits on them.
     this.extensions = loadExtensions(this);
@@ -123,6 +156,107 @@ class App {
     }));
   }
 
+  // The socket Settings talks to. Empty peer means this page's board.
+  settingsSocket() {
+    return this._settingsSock || this.ws;
+  }
+
+  settingsPeer() {
+    return this._settingsPeer || '';
+  }
+
+  // Settings and the tool windows share the page socket. Releasing the hold
+  // does not close it, and does not close the board's view of that socket.
+  dropSettingsPeer() {
+    if (this._settingsHold) {
+      this.peerHost?.sessionFor(this._settingsHold)?.release();
+      this._settingsHold = '';
+    }
+    this._settingsSock = null;
+  }
+
+  // The board's shared socket, held until Settings closes. Null when that
+  // board has no session yet (the caller opens a private one then).
+  _holdSettings(peer) {
+    const session = this.peerHost?.sessionFor(peer);
+    if (!session) return null;
+    session.acquire();
+    this._settingsHold = peer;
+    return session.ws;
+  }
+
+  // Remote boards that currently have a window. Each local tool gains
+  // [Local] only while that list is non-empty, and the Settings device
+  // control appears with the same list.
+  peersChanged(names) {
+    const list = Array.isArray(names) ? names : [];
+    const remote = list.length > 0;
+    for (const [id, role] of LOCAL_TOOLS) {
+      this._layout.setPaneTitle(id, localToolTitle(role, remote));
+    }
+    this.settingsModal.setDevices(list);
+    if (this._settingsPeer && !list.includes(this._settingsPeer)) {
+      this.dropSettingsPeer();
+      this._settingsPeer = '';
+      this._deviceInfo = null;
+      this.settingsModal.setDeviceNote('');
+      this.settingsModal.applyCapabilities(this.sysInfo);
+    }
+  }
+
+  async selectSettingsDevice(name) {
+    const peer = name || '';
+    if (peer === this._settingsPeer && this._settingsSock?.connected) {
+      this.settingsModal.applyCapabilities(this._deviceInfo);
+      return;
+    }
+    if (!peer) {
+      this.dropSettingsPeer();
+      this._settingsPeer = '';
+      this._deviceInfo = null;
+      this.settingsModal.setDeviceNote('');
+      this.settingsModal.applyCapabilities(this.sysInfo);
+      return;
+    }
+    // Drop the previous board first. A window that is still on screen keeps
+    // its own hold. The call goes out on the page socket with `node` set.
+    this.dropSettingsPeer();
+    const sock = this._holdSettings(peer) || this.ws.scope(peer);
+    this.settingsModal.setDeviceNote('Reading capabilities…');
+    try {
+      await waitOpen(sock);
+      const info = await sock.call('sys.info');
+      if (this.settingsModal._pick.value !== peer) return;
+      this._settingsPeer = peer;
+      this._settingsSock = sock;
+      this._deviceInfo = info;
+      this.settingsModal.setDeviceNote('');
+      this.settingsModal.applyCapabilities(info);
+    } catch (e) {
+      if (this.settingsModal._pick.value !== peer) return;
+      // The page socket stays up. The dropdown goes back to the board that
+      // last answered.
+      this.dropSettingsPeer();
+      this.settingsModal._pick.value = this._settingsPeer;
+      this.settingsModal.setDeviceNote(e?.message || 'Could not read that board', true);
+    }
+  }
+
+  // Open a file in the editor window of a remote board.
+  openPeerFile(name, path) {
+    const id = `editor@${name}`;
+    this.show(id);
+    const send = () => {
+      const frame = this.windows.get(id)?.el.querySelector('iframe');
+      if (!frame) return false;
+      const go = () => frame.contentWindow?.postMessage({ type: 'btgw-open', path }, location.origin);
+      if (frame.contentDocument?.readyState === 'complete') requestAnimationFrame(go);
+      else frame.addEventListener('load', () => requestAnimationFrame(go), { once: true });
+      return true;
+    };
+    if (!send()) requestAnimationFrame(() => { if (!send()) requestAnimationFrame(send); });
+  }
+
   // Bring a window into view and focus it -- used by other windows ("open in
   // the editor", "show in GATT") so a request never lands in a parked pane.
   show(paneId) {
@@ -150,6 +284,8 @@ class App {
     const win = create(el);
     this.windows.set(id, { def: { id, ...meta }, el, win });
     this._layout.addPane({ id, title: meta.title, group: meta.group, short: meta.short, el });
+    // Built after the key map exists. A window registered later still gets it.
+    if (this.keys) win?.attachKeys?.(this.keys);
     return win;
   }
 
@@ -158,6 +294,7 @@ class App {
     if (!w) return;
     if (this._visible.has(id)) w.win.onHide?.();
     this._visible.delete(id);
+    w.win.dispose?.();
     this.windows.delete(id);
     this._layout.removePane(id);
     w.el.remove();
@@ -577,20 +714,33 @@ class App {
       } catch {
         info.textContent = '';
       }
-      for (const [, w] of this.windows) w.win.onConnect?.();
+      for (const [, w] of this.windows) {
+        // A remote tool's socket is not this page's. Its own session tells it.
+        if (w.win.ws && w.win.ws !== this.ws) continue;
+        w.win.onConnect?.();
+      }
       for (const s of this.sections) s.onConnect?.();
+      if (!this._settingsPeer) this.settingsModal.applyCapabilities(this.sysInfo);
     });
     this.ws.on('_close', () => {
       status.textContent = 'Disconnected';
       status.className = 'disconnected';
-      for (const [, w] of this.windows) w.win.onDisconnect?.();
+      for (const [, w] of this.windows) {
+        if (w.win.ws && w.win.ws !== this.ws) continue;
+        w.win.onDisconnect?.();
+      }
     });
   }
 
   setPref(key, value) {
     this.prefs[key] = value;
     writePrefs({ [key]: value });
-    for (const [, w] of this.windows) w.win.onPrefs?.(this.prefs);
+    for (const [, w] of this.windows) {
+      // A remote window keeps its own copy. Writing scan filters here must
+      // not repaint that board's scanner with this board's prefs.
+      if (w.win.app && w.win.app !== this) continue;
+      w.win.onPrefs?.(this.prefs);
+    }
   }
 
   // --- the frame -------------------------------------------------------------------

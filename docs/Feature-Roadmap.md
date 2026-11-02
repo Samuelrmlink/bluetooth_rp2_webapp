@@ -22,9 +22,9 @@ These are part of the architecture. They are not tasks.
 
 ## ESP32-C5 and the gateway LAN
 
-Recorded architecture. The C5 port and the gateway LAN behavior are not in a Pico image. These are not Now items, and they have no `R` number. The symbols exist so a later image can turn the pieces on. Pico cmake still builds a Pico board. There is no `configs/esp32c5_defconfig`. Which features each chip runs today is the table in [Capabilities.md](Capabilities.md).
+Recorded architecture. These are not Now items, and they have no `R` number. Pico cmake still builds a Pico board. There is no `configs/esp32c5_defconfig`. Which features each chip runs today is the table in [Capabilities.md](Capabilities.md).
 
-`BOARD_ESP32_C5` defaults off and depends on `BOARD_PICO2_W` being off. Current Pico images keep `CONFIG_NET_HTTP_SERVER` and `CONFIG_RADIO_CYW43` on. `CONFIG_BT_LE` stays on for the Pico, because that option still compiles the Pico BTstack path. A C5 defconfig turns `CONFIG_BT_LE` off until the C5 controller is the code behind it. `CONFIG_OTA` stays the RP2350 boot-ROM path. Configure fails if any of these are on, because the behavior is specified and not built: `NET_GW_LAN`, `NET_MDNS_GW`, `NET_NAT`, `IEEE802154`, `NET_THREAD`, `CAN`, `CAN_TWAI`, `CAN_MCP2515`, `CAN_J1939`.
+`BOARD_ESP32_C5` defaults off and depends on `BOARD_PICO2_W` being off. Current Pico images keep `CONFIG_NET_HTTP_SERVER` and `CONFIG_RADIO_CYW43` on. `CONFIG_BT_LE` stays on for the Pico, because that option still compiles the Pico BTstack path. A C5 defconfig turns `CONFIG_BT_LE` off until the C5 controller is the code behind it. `CONFIG_OTA` stays the RP2350 boot-ROM path. `NET_GW_LAN`, `NET_MDNS_GW`, and `NET_NAT` are implemented in `src/net` and default off. A current product defconfig does not turn them on. Configure fails if any of these are on, because the behavior is specified and not built: `IEEE802154`, `NET_THREAD`, `CAN`, `CAN_TWAI`, `CAN_MCP2515`, `CAN_J1939`.
 
 ### On every C5 build
 
@@ -39,7 +39,7 @@ Lua stays off. `LUA_ENABLE` defaults off, and a C5 image leaves it that way. The
 None of this is in `esp32c5/`.
 
 - Station credential store, band selection, and SoftAP. The linked image uses one SSID from Kconfig.
-- W5500 on SPI, DHCP and link-local on `e0`, the uplink metric, and WireGuard.
+- The uplink metric and WireGuard.
 - Gateway LAN, the per-connection mDNS advertisements, NAT, and `gw.peers`, `gw.hostname`, `gw.forward`.
 - HTTP server and the websocket API. The LittleFS cfg store (`cfg/wifi.json`, `cfg/wireguard.json`, and the later `cfg/gw.json` and `cfg/hostname.json`). The C5 image stores OTA slot hashes in NVS.
 - SD card.
@@ -54,13 +54,19 @@ None of this is in `esp32c5/`.
 - Bluetooth Classic, including RFCOMM and NAP. The C5 controller is LE and 802.15.4.
 - `CAN_MCP2515`. That part is the SPI controller for the RP2350 and RP2040, which have no TWAI peripheral.
 
+### C5 radio
+
+The ESP32-C5 image is Wi-Fi or Thread, chosen in `esp32c5/main/Kconfig.projbuild`. The default is Wi-Fi, and that image's project name is `btgw-esp32c5`. Selecting Thread fails configure: the arm is specified and not built. The name reserved for it is `btgw-esp32c5-thread`, so a Wi-Fi update cannot arm on a Thread board. Software coexistence stays off. A site runs one board of each image and they meet on Ethernet. Home and the car are two deployments of those two images, not extra targets.
+
 ### Gateway LAN
+
+The Pico sources are in `src/net`. Product defconfigs leave `NET_GW_LAN`, `NET_MDNS_GW`, and `NET_NAT` off. The C5 Wi-Fi image keeps link-local on companion netif `el` for the life of the link when `cfg/gw.json` names `e0` (a missing file does, because that image has the W5500). Advertisements, NAT, and the gateway ops are not in that image.
 
 `NET_GW_LAN` depends on `NET_ETH_W5500`. The carrier is the W5500 netif `e0` unless `cfg/gw.json` names another interface or `"none"`. A missing file uses `e0` when the W5500 is in the image, and `none` otherwise. A stored `"none"` stays `none`. Announcements, the peer list, and NAT exist only while the chosen interface is up.
 
-`cfg/hostname.json` stores the mDNS name. A missing file uses `RP2-<serial>` on the RP2350 and RP2040, and `ESP32C5-<serial>` on the C5. The serial is the chip id in hex. A name written by `mdns.hostname` or by `gw.hostname` is stored and stays. Until this feature is in the image, the compile-time hostname remains `bluetooth-rp2-webapp`.
+`cfg/hostname.json` stores the mDNS name. A name written by `mdns.hostname` is stored and kept across reboot whether or not the gateway LAN feature is on. `gw.hostname` writes the same file when that feature is on. A missing file stays the compile-time hostname (`bluetooth-rp2-webapp`) while the feature is off. While it is on, a missing file uses `RP2-<serial>` on the RP2350 and RP2040 and `ESP32C5-<serial>` on the C5. The serial is the chip id in hex, and that formula is not written back.
 
-The gateway LAN holds a link-local address (169.254/16) for the whole time the link is up. A DHCP lease is a second address. Discovery uses the link-local address. lwIP keeps one IPv4 address on a netif, so the implementation adds a second address.
+The gateway LAN holds a link-local address (169.254/16) for the whole time the link is up. A DHCP lease is a second address, on `e0`. The link-local address lives on the companion netif `el`, which shares `e0`'s MAC and wire. Discovery uses the link-local address. lwIP keeps one IPv4 address on a netif, so the implementation adds that companion. When the feature is off, a lease still replaces the link-local address on `e0`.
 
 A DHCP router on that LAN is a local uplink. The board probes it with `upl_metric` and `upl_choose` may select it. It is not advertised. Every board probes that router for itself.
 
@@ -80,9 +86,9 @@ A C5 image with the HTTP server off still advertises and still selects peers for
 
 Shared policy stays in `src/net`. Pico port files are `spibus_pico.c`, `sd_port_pico.c`, `pex_port_pico.c`, and the CYW43439 link. The C5 does not link `CONFIG_RADIO_CYW43`. Each step is gated and stays off on the Pico.
 
-1. Station Wi-Fi on the C5 (2.4 GHz and 5 GHz), the W5500 on SPI, WireGuard, a cfg store, DHCP and link-local on `e0`, and the existing uplink metric. `CONFIG_NET_HTTP_SERVER` off. `CONFIG_BT_LE` off. Lua off. The MCUmgr partition swap from `esp32c5/` stays in this image and in every later one. The bring-up console is USB Serial/JTAG. The Pico cable is CDC-NCM, and the C5 USB port cannot present that gadget.
+1. Station Wi-Fi on the C5 (2.4 GHz and 5 GHz), WireGuard, and the existing uplink metric. The W5500 on SPI2, `cfg/eth.json`, and DHCP plus link-local on `e0` are in the Wi-Fi image. `CONFIG_NET_HTTP_SERVER` off. `CONFIG_BT_LE` off. Lua off. The MCUmgr partition swap from `esp32c5/` stays in this image and in every later one. The bring-up console is USB Serial/JTAG. The Pico cable is CDC-NCM, and the C5 USB port cannot present that gadget.
 2. The PEX target below. Every C5 build loads `c5` modules once this lands. It needs a flash region for installed modules.
-3. Gateway LAN (`NET_GW_LAN`, `NET_MDNS_GW`) and NAT (`NET_NAT`), so a C5 with 5 GHz Wi-Fi can be the uplink for Pico boards on the same switch. The C5 probes a DHCP router on that LAN for itself and does not advertise it.
+3. Gateway LAN (`NET_GW_LAN`, `NET_MDNS_GW`) and NAT (`NET_NAT`), so a C5 with 5 GHz Wi-Fi can be the uplink for Pico boards on the same switch. The C5 probes a DHCP router on that LAN for itself and does not advertise it. The Pico sources are in `src/net` and stay off. The Wi-Fi image already keeps the link-local companion; the advertisements, NAT, and the ops are this step.
 4. `CONFIG_NET_HTTP_SERVER`, including `gw.peers`, `gw.hostname`, and `gw.forward`, when the image has room.
 5. `CONFIG_BT_LE` on the C5 controller.
 6. `IEEE802154`, then `NET_THREAD`.

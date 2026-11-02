@@ -81,6 +81,18 @@ static void on_answer(struct mdns_answer *ans, const char *varpart, int varlen, 
     if (!ans || !varpart || varlen < 0) return;
     char owner[64];
     label0(ans->info.domain.name, ans->info.domain.length, owner, sizeof owner);
+    if (ans->ttl == 0) {
+        /* A goodbye. slot_for would otherwise recreate the name with an
+         * empty address and keep it until DROP_MS. */
+        if (ans->info.type == DNS_RRTYPE_PTR) {
+            char inst[64];
+            label0((const u8_t *)varpart, varlen, inst, sizeof inst);
+            mdns_peers_drop_name(inst);
+        } else {
+            mdns_peers_drop_name(owner);
+        }
+        return;
+    }
     if (ans->info.type == DNS_RRTYPE_PTR) {
         char inst[64];
         label0((const u8_t *)varpart, varlen, inst, sizeof inst);
@@ -149,6 +161,36 @@ bool mdns_peer_endpoint(const char *name, char *ip, size_t ip_cap, uint16_t *por
         if ((uint32_t)(now - s->seen) > DROP_MS) return false;
         snprintf(ip, ip_cap, "%s", s->ip);
         if (port) *port = s->port ? s->port : 80;
+        return true;
+    }
+    return false;
+}
+
+void mdns_peers_drop_name(const char *name) {
+    if (!name || !name[0]) { return; }
+    for (int i = 0; i < PEERS; i++) {
+        if (peers[i].used && strcasecmp(peers[i].name, name) == 0) {
+            peers[i].used = false;
+        }
+    }
+}
+
+bool mdns_peer_at(int index, mdns_peer_view_t *out) {
+    if (!out || index < 0) { return false; }
+    uint32_t now = now_ms();
+    int n = 0;
+    for (int i = 0; i < PEERS; i++) {
+        peer_t *s = &peers[i];
+        if (!s->used) { continue; }
+        if ((uint32_t)(now - s->seen) > DROP_MS) { s->used = false; continue; }
+        if (n++ != index) { continue; }
+        out->name = s->name;
+        out->ip = s->ip;
+        out->port = s->port ? s->port : 80;
+        out->board = s->board;
+        out->assets = s->assets;
+        out->age_ms = now - s->seen;
+        out->self = ours(s->ip);
         return true;
     }
     return false;

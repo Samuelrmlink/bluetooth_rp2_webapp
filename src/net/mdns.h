@@ -47,6 +47,23 @@ void mdns_remove_netif(struct netif *netif);
  * hostname. */
 bool mdns_set_hostname(const char *name);
 const char *mdns_hostname(void);
+/* Stage cfg/hostname.json for the name mdns_set_hostname just applied.
+ * The write runs from mdns_poll, because this is called from an lwIP
+ * callback. The serial formula is not stored: only an explicit write. */
+void mdns_hostname_remember(void);
+void mdns_poll(void);
+/* Default on. The flag drops inbound mDNS before a pool buffer is allocated.
+ * Leaving and rejoining the group happens from mdns_poll, not from the
+ * callback that flipped the flag. Not stored: a reboot comes back answering. */
+void mdns_responder_set(bool on);
+bool mdns_responder_on(void);
+/* True when the responder is off and `frame` is an inbound mDNS datagram.
+ * `len` is the ethernet frame length. Counts drops; does not log. */
+bool mdns_should_drop(const uint8_t *frame, size_t len);
+/* Where a one-shot DNS query for <name>.local should leave. USB-NCM is
+ * skipped: 224.0.0.251 is not on its subnet, and the default route would
+ * send the query there. */
+struct netif *mdns_dns_netif(void);
 
 /*
  * Advertise a service. `instance` NULL or empty means "track the hostname",
@@ -88,6 +105,19 @@ void mdns_browse_kick(void);
 size_t mdns_peers_json(char *dst, size_t cap);
 /* ip is a dotted quad. False when the name is unknown or has gone quiet. */
 bool mdns_peer_endpoint(const char *name, char *ip, size_t ip_cap, uint16_t *port);
+/* Drop one name now. A rename otherwise leaves the old name, with an empty
+ * address, until DROP_MS. Pointers from mdns_peer_at are into this table. */
+void mdns_peers_drop_name(const char *name);
+typedef struct {
+    const char *name;
+    const char *ip;
+    uint16_t port;
+    const char *board;
+    int assets;
+    uint32_t age_ms;
+    bool self;
+} mdns_peer_view_t;
+bool mdns_peer_at(int index, mdns_peer_view_t *out);
 
 #else
 
@@ -96,6 +126,14 @@ static inline void mdns_add_netif(struct netif *n) { (void)n; }
 static inline void mdns_remove_netif(struct netif *n) { (void)n; }
 static inline bool mdns_set_hostname(const char *name) { (void)name; return false; }
 static inline const char *mdns_hostname(void) { return BTGW_MDNS_HOSTNAME; }
+static inline void mdns_hostname_remember(void) {}
+static inline void mdns_poll(void) {}
+static inline void mdns_responder_set(bool on) { (void)on; }
+static inline bool mdns_responder_on(void) { return false; }
+static inline bool mdns_should_drop(const uint8_t *frame, size_t len) {
+    (void)frame; (void)len; return false;
+}
+static inline struct netif *mdns_dns_netif(void) { return NULL; }
 static inline bool mdns_service_add(const char *i, const char *t, bool u, uint16_t p,
                                     const char *const *x, int n) {
     (void)i; (void)t; (void)u; (void)p; (void)x; (void)n; return false;
@@ -124,6 +162,19 @@ static inline size_t mdns_peers_json(char *dst, size_t cap) {
 }
 static inline bool mdns_peer_endpoint(const char *name, char *ip, size_t ip_cap, uint16_t *port) {
     (void)name; (void)ip; (void)ip_cap; (void)port; return false;
+}
+static inline void mdns_peers_drop_name(const char *name) { (void)name; }
+typedef struct {
+    const char *name;
+    const char *ip;
+    uint16_t port;
+    const char *board;
+    int assets;
+    uint32_t age_ms;
+    bool self;
+} mdns_peer_view_t;
+static inline bool mdns_peer_at(int index, mdns_peer_view_t *out) {
+    (void)index; (void)out; return false;
 }
 
 #endif

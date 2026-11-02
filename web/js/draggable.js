@@ -25,7 +25,10 @@ export function makeDraggable(panel, handle, { enabled } = {}) {
   handle.addEventListener('pointerdown', (e) => {
     if (!e.isPrimary || e.button !== 0) return;
     if (enabled && !enabled()) return;
-    if (e.target.closest('.modal-close')) return; // let the close button's own click through
+    // Same as sheet.js: cancelling pointerdown on a <select> keeps the
+    // Android picker from opening. The device list sits in this header.
+    const hit = e.target instanceof Element ? e.target : e.target.parentElement;
+    if (hit?.closest('button, a, input, select, textarea, label')) return;
     const rect = panel.getBoundingClientRect();
     panel.style.position = 'fixed';
     panel.style.left = `${rect.left}px`;
@@ -70,7 +73,6 @@ export function makeDraggable(panel, handle, { enabled } = {}) {
   window.addEventListener('pointercancel', end);
 
   handle.style.cursor = 'move';
-  handle.style.touchAction = 'none';
 }
 
 function clamp(v, lo, hi) {

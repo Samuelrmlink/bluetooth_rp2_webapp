@@ -66,7 +66,10 @@ export function makeSheet(panel, { handles, enabled, onDismiss } = {}) {
     handle.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || e.button !== 0) return;
       if (enabled && !enabled()) return;
-      if (e.target.closest('.modal-close')) return; // the close button's click must survive
+      // preventDefault on pointerdown is what stops Chrome on Android from
+      // opening a <select>. The device picker lives in this header.
+      const hit = e.target instanceof Element ? e.target : e.target.parentElement;
+      if (hit?.closest('button, a, input, select, textarea, label')) return;
 
       height = panel.getBoundingClientRect().height;
       if (height <= 0) return;
@@ -82,7 +85,6 @@ export function makeSheet(panel, { handles, enabled, onDismiss } = {}) {
       } catch { /* see splitter.js: capture is an optimization, not a requirement */ }
       e.preventDefault();
     });
-    handle.style.touchAction = 'none';
   }
 
   window.addEventListener('pointermove', (e) => {

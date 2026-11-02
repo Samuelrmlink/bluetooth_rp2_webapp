@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bootSummary, whenNote, moveEntry, addEntry, removeEntry } from '../../js/settings/startup.js';
+import { bootSummary, whenNote, moveEntry, addEntry, removeEntry, startupChoices } from '../../js/settings/startup.js';
 
 test('boot summary names the skip and the gates', () => {
   assert.match(bootSummary(null), /no startup list/);
@@ -19,6 +19,20 @@ test('meshtastic is stored as a gate that is not met', () => {
   assert.match(whenNote('meshtastic'), /not implemented/);
   assert.match(whenNote('wireguard'), /does not time out/);
   assert.match(whenNote('wifi'), /grace window/);
+});
+
+test('a board without Lua is not offered another board\'s scripts', () => {
+  const files = [{ name: 'pinecil.lua' }, { name: 'note.lua.gz' }, { name: 'skip.txt' }, { dir: true, name: 'profiles' }];
+  const installed = [{ name: 'anker' }];
+  const c5 = { modules: ['fs', 'wifi', 'pex', 'ota', 'launch'] };
+  assert.deepEqual(startupChoices(c5, installed, files), [{ kind: 'pex', name: 'anker' }]);
+  assert.deepEqual(startupChoices(c5, [], files), []);
+  const pico = { modules: ['script', 'pex'] };
+  assert.deepEqual(startupChoices(pico, installed, files), [
+    { kind: 'pex', name: 'anker' },
+    { kind: 'lua', name: 'pinecil' },
+    { kind: 'lua', name: 'note' },
+  ]);
 });
 
 test('the list moves, refuses a second copy of a name, and drops a row', () => {

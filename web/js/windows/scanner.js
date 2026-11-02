@@ -111,6 +111,9 @@ export class ScannerWindow {
   constructor(el, ctx) {
     this.app = ctx.app;
     this.ws = ctx.ws;
+    // Empty on the page's own scanner. A second board's scanner puts its
+    // name here so the two do not share a dialog id or a saved column layout.
+    this._dom = ctx.scope || '';
     this.store = ctx.app.devices;
     this.scanning = false;
     this.sel = null;              // the cursor's device -- survives re-sorting
@@ -145,7 +148,7 @@ export class ScannerWindow {
     const p = (d) => this._parse(d);
     this.columns = scannerColumns(p, () => Date.now(), (d) => this._driverText(d));
     this.grid = new Grid(el.querySelector('.s-table'), {
-      id: 'scanner', columns: this.columns, defaultSort: { key: 'rssi', dir: 'desc' },
+      id: this._dom ? `scanner${this._dom}` : 'scanner', columns: this.columns, defaultSort: { key: 'rssi', dir: 'desc' },
       onChange: () => { this._dirty = true; this._columnsDlg?.sync(); },
     });
 
@@ -253,7 +256,10 @@ export class ScannerWindow {
     const q = (s) => body.querySelector(s);
     this._f = { name: q('.sf-name'), mfg: q('.sf-mfg'), service: q('.sf-svc'), rssi: q('.sf-rssi'), expire: q('.sf-exp'), active: q('.sf-active') };
     this._filters = [this._f.name, this._f.mfg, this._f.service];
-    const dlg = new Dialog({ id: 'scanner-filter-dlg', title: 'Filter', body });
+    const dlg = new Dialog({
+      id: this._dom ? `scanner-filter${this._dom}` : 'scanner-filter-dlg',
+      title: 'Filter', body,
+    });
     // Alt+N / Alt+Shift+N step between the text boxes while one has focus.
     dlg.context = () => (this._filters.includes(document.activeElement) ? 'scanner-filter' : 'settings');
     dlg.onOpen = () => this._paintFilterDialog();
@@ -298,7 +304,9 @@ export class ScannerWindow {
   // --- the Columns dialog -----------------------------------------------------------------
 
   _buildColumnsDialog() {
-    this.columnsDlg = columnsDialog(this.app, this.grid, { id: 'scanner-columns-dlg' });
+    this.columnsDlg = columnsDialog(this.app, this.grid, {
+      id: this._dom ? `scanner-columns${this._dom}` : 'scanner-columns-dlg',
+    });
     this._columnsDlg = this.columnsDlg;
   }
 
@@ -530,6 +538,11 @@ export class ScannerWindow {
   }
 
   onShow() { this._dirty = true; }
+
+  dispose() {
+    clearInterval(this._expiryTimer);
+    this._expiryTimer = 0;
+  }
 
   render() {
     if (!this._dirty && !this._ticking) return;

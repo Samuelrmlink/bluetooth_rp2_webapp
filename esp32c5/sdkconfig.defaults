@@ -6,6 +6,9 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # reboot without that call boots the previous slot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_C5_RADIO_WIFI=y
+# The chip default turns 802.15.4 on. This image is Wi-Fi only.
+CONFIG_IEEE802154_ENABLED=n
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
 CONFIG_HTTPD_MAX_URI_LEN=512
@@ -14,3 +17,19 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # marks DRAM non-executable, so a module in the DRAM pool faults on the
 # first instruction. Leave the split off on this image.
 CONFIG_ESP_SYSTEM_MEMPROT=n
+# Link-local on e0/el uses AutoIP. The ARP-check stub refuses that on a
+# netif which is not the DHCP client, so this image uses the real ACD.
+# Wi-Fi DHCP on this image uses that check too. ESP-IDF turns DHCP/AutoIP
+# cooperation on for every netif whenever AUTOIP is compiled in; there is
+# no Kconfig to turn that off. The try count is the only delay, and a
+# station that reaches it has its lease replaced by 169.254. Keep the
+# count at the top of the range so a join finishes (or wifi_dhcp_poll
+# restarts the client) before AutoIP starts. e0/el still call autoip_start
+# themselves.
+CONFIG_LWIP_AUTOIP=y
+CONFIG_LWIP_AUTOIP_TRIES=100
+CONFIG_LWIP_DHCP_DOES_ACD_CHECK=y
+# CONFIG_LWIP_DHCP_DOES_ARP_CHECK is not set
+# The ethernet task calls netif, DHCP, AutoIP, and ethernet_input directly.
+# Without this, LOCK_TCPIP_CORE() is empty and those calls race the tcpip thread.
+CONFIG_LWIP_TCPIP_CORE_LOCKING=y

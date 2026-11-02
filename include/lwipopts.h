@@ -68,6 +68,10 @@
 #define DNS_TABLE_SIZE              4
 #define DNS_MAX_NAME_LENGTH         96   /* firebasestorage.googleapis.com is 30 */
 #define DNS_MAX_SERVERS             2
+/* <name>.local is a one-shot query to 224.0.0.251. The source port is not
+ * 5353, so the responder answers it as a legacy unicast query. The two do
+ * not share a PCB. */
+#define LWIP_DNS_SUPPORT_MDNS_QUERIES 1
 #else
 #define LWIP_DNS                    0
 #endif
@@ -84,13 +88,13 @@ void sntp_time_set_us(uint32_t sec, uint32_t us);
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define DHCP_DOES_ARP_CHECK         0
 #define LWIP_DHCP_DOES_ACD_CHECK    0
-/* Link-local (AutoIP, RFC 3927) for the Ethernet port when no DHCP server
-   answers. It pulls in ACD (address conflict detection, which AutoIP needs);
-   the DHCP client's own ACD check above stays off, so WiFi and USB-NCM DHCP
-   behave exactly as before. LWIP_DHCP_AUTOIP_COOP is deliberately NOT used:
-   it is global, and would start AutoIP on the WiFi station too whenever its
-   DHCP was slow. src/net/eth_w5500.c cooperates for e0 alone instead. */
-#if CONFIG_NET_ETH_W5500
+/* Link-local (AutoIP, RFC 3927) when no DHCP server answers. e0 and the
+   Wi-Fi station each start it after ETH_LL_AFTER_MS, and a lease replaces
+   it. USB-NCM does not. AutoIP pulls in ACD. The DHCP client's own ACD
+   check above stays off. LWIP_DHCP_AUTOIP_COOP is deliberately NOT used:
+   it is global, and would start AutoIP on every netif whenever its DHCP
+   was merely slow, including USB-NCM. */
+#if CONFIG_NET_ETH_W5500 || CONFIG_NET_WIFI
 #define LWIP_AUTOIP                 1
 #endif
 
@@ -99,7 +103,13 @@ void sntp_time_set_us(uint32_t sec, uint32_t us);
 #define LWIP_IGMP                   1
 #define LWIP_MDNS_RESPONDER         1
 #define LWIP_MDNS_SEARCH            1
+/* Gateway ads are extra services on the link-local netif (Wi-Fi, NCM, NAP)
+ * beside _http and _btgw. The Lua table in mdns.h stays at 4. */
+#if CONFIG_NET_MDNS_GW
+#define MDNS_MAX_SERVICES           6
+#else
 #define MDNS_MAX_SERVICES           4
+#endif
 /* mDNS claims one slot per consumer; with WiFi on, the cyw43 STA and AP
    netifs want their own. Set here rather than as a -D, because every value
    in this file is an unconditional #define and would silently win over a
@@ -184,9 +194,26 @@ struct netif *uplink_route_src(const struct ip4_addr *src, const struct ip4_addr
 #define LWIP_HOOK_IP4_ROUTE_SRC(src, dest) uplink_route_src((src), (dest))
 #endif
 
-/* Phone-network masquerade. The hook returns immediately while Share
- * internet is off. The product image does not set CONFIG_BT_CLASSIC_NAP. */
-#if CONFIG_BT_CLASSIC_NAP
+/* Phone-network masquerade and gateway-LAN NAT. A non-zero return eats the
+ * packet. When both are on, NAT runs first and returns 0 for anything it
+ * does not take, so the phone path still sees it. The product image sets
+ * neither symbol. */
+#if CONFIG_NET_NAT && CONFIG_BT_CLASSIC_NAP
+struct pbuf;
+struct netif;
+int gw_nat_ip4_input(struct pbuf *p, struct netif *inp);
+int nap_fwd_ip4_input(struct pbuf *p, struct netif *inp);
+static inline int gw_or_nap_ip4_input(struct pbuf *p, struct netif *inp) {
+    if (gw_nat_ip4_input(p, inp)) { return 1; }
+    return nap_fwd_ip4_input(p, inp);
+}
+#define LWIP_HOOK_IP4_INPUT(pbuf, inp) gw_or_nap_ip4_input((pbuf), (inp))
+#elif CONFIG_NET_NAT
+struct pbuf;
+struct netif;
+int gw_nat_ip4_input(struct pbuf *p, struct netif *inp);
+#define LWIP_HOOK_IP4_INPUT(pbuf, inp) gw_nat_ip4_input((pbuf), (inp))
+#elif CONFIG_BT_CLASSIC_NAP
 struct pbuf;
 struct netif;
 int nap_fwd_ip4_input(struct pbuf *p, struct netif *inp);
@@ -204,7 +231,14 @@ int nap_fwd_ip4_input(struct pbuf *p, struct netif *inp);
    sys_timeout() panics on an empty pool -- a HardFault + watchdog reboot on
    a board without a debugger. It reproduced on fw 1.97. ~16 B each. */
 #define MDNS_TIMEOUTS_PER_NETIF     7
+/* The gateway LAN adds the link-local companion beside e0. The larger
+ * number is first so the pool check, which reads the first define, still
+ * covers mdns.c. A build that leaves the symbol off keeps 4. */
+#if CONFIG_NET_GW_LAN
+#define MDNS_TIMEOUT_NETIFS         5
+#else
 #define MDNS_TIMEOUT_NETIFS         4
+#endif
 /* +2: SNTP's poll/retry timer and DNS's (DNS is in the internal count, the
    SNTP app is not). */
 #define MEMP_NUM_SYS_TIMEOUT        (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8 + 2 + \

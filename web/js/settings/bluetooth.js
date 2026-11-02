@@ -66,10 +66,8 @@ export class BluetoothSection extends PolledSection {
     });
   }
 
-  onConnect() { this._syncClassic(); }
-
-  _syncClassic() {
-    const t = this.app.sysInfo?.transports || [];
+  onDevice(info) {
+    const t = info?.transports || [];
     this._classic = t.includes('classic') || t.includes('bnep');
     this._listenRow.hidden = !this._classic;
     this._listenNote.hidden = !this._classic;

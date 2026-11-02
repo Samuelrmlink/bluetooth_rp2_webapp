@@ -4,9 +4,10 @@
 // {ok, ...} answers, so the editor, the tree, search and upload work on
 // either without knowing which.
 //
-// HTTP rather than the WebSocket because files are the one thing too big for
-// it: a WS frame caps at 4 KB and an op reply at less, while a file may be
-// 1 MiB. The editor, the sidebar and upload/download all go through here.
+// HTTP stays for every backend (LittleFS, the SD card, curl, the dev
+// server). A websocket fs.read / fs.write moves the same bytes one small
+// chunk at a time and is slower; the editor lists that path separately.
+// The editor, the sidebar and upload/download all go through here for HTTP.
 //
 // Two rules carried over from the km003c app's api.js:
 //
@@ -30,8 +31,29 @@ const SAME_ORIGIN =
  * page's /api/peer/<name>/ proxy. Static paths (an extension script) stay
  * on the page that is hosting the UI. */
 function withPeer(path) {
-  if (!PEER || !String(path).startsWith('/api/')) return path;
-  return `/api/peer/${encodeURIComponent(PEER)}${path}`;
+  const p = String(path);
+  // fetchBody runs apiUrl again on a URL tarUrl and removePostUrl already
+  // prefixed, so a second pass must leave /api/peer/ alone.
+  if (!PEER || !p.startsWith('/api/') || p.startsWith('/api/peer/')) return path;
+  return `/api/peer/${encodeURIComponent(PEER)}${p}`;
+}
+
+// The board proxies one websocket and one HTTP request at a time. The editor
+// asks for the file tree and for js/ext together, so peer calls take turns
+// and a "proxy busy" is tried once more.
+let peerTail = Promise.resolve();
+function throughPeer(run) {
+  if (!PEER) return run();
+  const job = peerTail.then(async () => {
+    const out = await run();
+    if (out && out.error === 'proxy busy') {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return run();
+    }
+    return out;
+  });
+  peerTail = job.then(() => {}, () => {});
+  return job;
 }
 
 export function apiUrl(path) {
@@ -73,6 +95,10 @@ function fsPath(path) {
 }
 
 async function send(method, url, body, as) {
+  return throughPeer(() => sendNow(method, url, body, as));
+}
+
+async function sendNow(method, url, body, as) {
   let res;
   try {
     res = await fetch(apiUrl(url), { method, cache: 'no-store', body });
@@ -127,7 +153,11 @@ const READ_YIELD_MS = 32;
 const yieldToInput = () => new Promise((resolve) => setTimeout(resolve, 0));
 const abortedBody = () => ({ ok: false, aborted: true, error: 'aborted' });
 
-export async function fetchBody(url, { method = 'GET', body = undefined, signal, onProgress } = {}) {
+export async function fetchBody(url, opts) {
+  return throughPeer(() => fetchBodyNow(url, opts));
+}
+
+async function fetchBodyNow(url, { method = 'GET', body = undefined, signal, onProgress } = {}) {
   let res;
   const target = /^https?:\/\//i.test(url) ? url : apiUrl(url);
   try {

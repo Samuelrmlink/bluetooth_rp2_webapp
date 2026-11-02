@@ -209,12 +209,13 @@ export function byteFrac(got, total) {
   return got / total;
 }
 
-export function byteLine(verb, name, got, total) {
+export function byteLine(verb, name, got, total, via) {
   const left = `${verb} ${name}`;
-  if (total > 0 && got > total) return `${left} · ${bytes(got)}`;
-  if (total > 0) return `${left} · ${bytes(got)} of ${bytes(total)}`;
-  if (got > 0) return `${left} · ${bytes(got)}`;
-  return left;
+  const how = via ? `${via} · ` : '';
+  if (total > 0 && got > total) return `${left} · ${how}${bytes(got)}`;
+  if (total > 0) return `${left} · ${how}${bytes(got)} of ${bytes(total)}`;
+  if (got > 0) return `${left} · ${how}${bytes(got)}`;
+  return via ? `${left} · ${via}` : left;
 }
 
 // One archive file. A large file also says how far into it the stream is.

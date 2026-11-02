@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pico/time.h"
+
 #include "lwip/apps/mdns.h"
 #include "lwip/apps/mdns_priv.h"   /* get_mdns_pcb() */
 #include "lwip/netif.h"
@@ -20,14 +22,33 @@
 #include "lwip/timeouts.h"
 
 #include "net/mdns_records.h"
+#include "net/net_log.h"
 #include "api/ops.h"
 #include "util/crumb.h"
 #include "api/api.h"
+#include "config/config.h"
 
+#define MDNS_NAME_PATH "cfg/hostname.json"
+
+static bool host_dirty;
+static char host_pending[64];
+static void send_hostname_goodbye(const char *old);
+
+/* Larger first: tools/run_tests.py reads the first numeric define. The
+ * companion netif is the fifth binding, and only while the gateway LAN
+ * is in the image. */
+#if CONFIG_NET_GW_LAN
+#define MDNS_NETIFS 5
+#else
 #define MDNS_NETIFS 4
+#endif
 
 static char hostname[64] = BTGW_MDNS_HOSTNAME;
 static struct netif *bound[MDNS_NETIFS];
+/* Netifs held while the responder is off, so turning it back on rejoins. */
+static struct netif *parked[MDNS_NETIFS];
+static bool responder_on = true;
+static uint32_t mdns_drops, mdns_drops_logged, mdns_drop_log_ms;
 
 typedef struct {
     bool     used;
@@ -107,7 +128,13 @@ bool mdns_set_hostname(const char *name) {
     }
     tmp[n] = 0;
     if (!tmp[0] || tmp[0] == '-') { return false; }
+    if (strcmp(hostname, tmp) == 0) { return true; }
 
+    /* lwIP's rename restarts probing and does not send a goodbye, so peers
+     * would keep the old name until its TTL. Drop our own row now: a PTR
+     * creates it with an empty address and DROP_MS would keep it 15 s. */
+    mdns_peers_drop_name(hostname);
+    send_hostname_goodbye(hostname);
     snprintf(hostname, sizeof(hostname), "%s", tmp);
     for (int i = 0; i < MDNS_NETIFS; i++) {
         if (!bound[i]) { continue; }
@@ -124,6 +151,114 @@ bool mdns_set_hostname(const char *name) {
 }
 
 const char *mdns_hostname(void) { return hostname; }
+
+void mdns_hostname_remember(void) {
+    snprintf(host_pending, sizeof host_pending, "%s", hostname);
+    host_dirty = true;
+}
+
+static bool json_name(const char *json, char *out, size_t cap) {
+    const char *p = strstr(json, "\"name\"");
+    if (!p) { return false; }
+    p += 6;
+    while (*p && *p != ':') { p++; }
+    if (*p != ':') { return false; }
+    p++;
+    while (*p == ' ' || *p == '\t') { p++; }
+    if (*p != '"') { return false; }
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n + 1 < cap) {
+        if (*p == '\\') { return false; }
+        out[n++] = *p++;
+    }
+    if (*p != '"') { return false; }
+    out[n] = 0;
+    return n > 0;
+}
+
+static void load_hostname(void) {
+    char buf[128], name[64];
+    if (!cfg_file_read(MDNS_NAME_PATH, buf, sizeof buf)) { return; }
+    if (!json_name(buf, name, sizeof name)) { return; }
+    if (mdns_set_hostname(name)) {
+        printf("mdns: hostname %s from %s\n", hostname, MDNS_NAME_PATH);
+    }
+}
+
+static int find_parked(struct netif *netif) {
+    for (int i = 0; i < MDNS_NETIFS; i++) {
+        if (parked[i] == netif) { return i; }
+    }
+    return -1;
+}
+
+static void park_put(struct netif *netif) {
+    if (!netif || find_parked(netif) >= 0) { return; }
+    for (int i = 0; i < MDNS_NETIFS; i++) {
+        if (!parked[i]) { parked[i] = netif; return; }
+    }
+}
+
+/* Ethernet (one 802.1Q tag allowed), IPv4, UDP 5353 or 224.0.0.251. */
+static bool frame_is_mdns(const uint8_t *f, size_t len) {
+    if (!f || len < 14) { return false; }
+    size_t off = 12;
+    uint16_t et = (uint16_t)((f[off] << 8) | f[off + 1]);
+    if (et == 0x8100) {
+        if (len < 18) { return false; }
+        off = 16;
+        et = (uint16_t)((f[off] << 8) | f[off + 1]);
+    }
+    if (et != 0x0800) { return false; }
+    off += 2;
+    if (len < off + 20) { return false; }
+    uint8_t vihl = f[off];
+    if ((vihl >> 4) != 4) { return false; }
+    unsigned ihl = (unsigned)(vihl & 0x0f) * 4u;
+    if (ihl < 20 || len < off + ihl + 8) { return false; }
+    if (f[off + 9] != 17) { return false; }
+    bool mcast = f[off + 16] == 224 && f[off + 17] == 0 && f[off + 18] == 0 && f[off + 19] == 251;
+    size_t udp = off + ihl;
+    uint16_t dport = (uint16_t)((f[udp + 2] << 8) | f[udp + 3]);
+    return mcast || dport == 5353;
+}
+
+bool mdns_should_drop(const uint8_t *frame, size_t len) {
+    if (responder_on || !frame_is_mdns(frame, len)) { return false; }
+    mdns_drops++;
+    return true;
+}
+
+bool mdns_responder_on(void) { return responder_on; }
+
+void mdns_responder_set(bool on) {
+    if (responder_on == on) { return; }
+    responder_on = on;
+    net_log("mdns responder %s", on ? "on" : "off");
+}
+
+static void mdns_drop_log(void) {
+    if (mdns_drops == mdns_drops_logged) { return; }
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (mdns_drop_log_ms && (uint32_t)(now - mdns_drop_log_ms) < 1000) { return; }
+    net_log("mdns drop %lu", (unsigned long)mdns_drops);
+    mdns_drops_logged = mdns_drops;
+    mdns_drop_log_ms = now;
+}
+
+static void responder_apply(void);
+
+void mdns_poll(void) {
+    responder_apply();
+    mdns_drop_log();
+    if (!host_dirty) { return; }
+    char body[96];
+    snprintf(body, sizeof body, "{\"name\":\"%s\"}", host_pending);
+    if (!cfg_file_write(MDNS_NAME_PATH, body)) { return; }
+    host_dirty = false;
+    printf("mdns: hostname %s stored\n", host_pending);
+}
 
 bool mdns_service_add(const char *instance, const char *type, bool udp,
                       uint16_t port, const char *const *txt, int n_txt) {
@@ -208,8 +343,24 @@ void mdns_announce_all(void) {
     }
 }
 
+struct netif *mdns_dns_netif(void) {
+    struct netif *any = NULL;
+    for (int i = 0; i < MDNS_NETIFS; i++) {
+        struct netif *n = bound[i];
+        if (!n || !netif_is_up(n) || !netif_is_link_up(n)) { continue; }
+        if (ip4_addr_isany_val(*netif_ip4_addr(n))) { continue; }
+        if (!any) { any = n; }
+        /* 'us' is USB-NCM, the management link. A .local name is on a LAN. */
+        if (!(n->name[0] == 'u' && n->name[1] == 's')) { return n; }
+    }
+    return any;
+}
+
 void mdns_add_netif(struct netif *netif) {
     if (!netif || find_netif(netif) >= 0) { return; }
+    if (!responder_on) { park_put(netif); return; }
+    int p = find_parked(netif);
+    if (p >= 0) { parked[p] = NULL; }
     int ni = -1;
     for (int i = 0; i < MDNS_NETIFS; i++) {
         if (!bound[i]) { ni = i; break; }
@@ -227,11 +378,32 @@ void mdns_add_netif(struct netif *netif) {
 }
 
 void mdns_remove_netif(struct netif *netif) {
+    for (int i = 0; i < MDNS_NETIFS; i++) {
+        if (parked[i] == netif) { parked[i] = NULL; }
+    }
     int i = find_netif(netif);
     if (i < 0) { return; }
     for (int s = 0; s < MDNS_SERVICES_MAX; s++) { svc[s].slot[i] = -1; }
     mdns_resp_remove_netif(netif);
     bound[i] = NULL;
+}
+
+static void responder_apply(void) {
+    if (!responder_on) {
+        for (int i = 0; i < MDNS_NETIFS; i++) {
+            struct netif *n = bound[i];
+            if (!n) { continue; }
+            mdns_remove_netif(n);
+            park_put(n);
+        }
+        return;
+    }
+    for (int i = 0; i < MDNS_NETIFS; i++) {
+        struct netif *n = parked[i];
+        if (!n) { continue; }
+        parked[i] = NULL;
+        mdns_add_netif(n);
+    }
 }
 
 static int bound_count(void) {
@@ -245,8 +417,8 @@ static int bound_count(void) {
 size_t mdns_status_json(char *dst, size_t cap) {
     size_t n = (size_t)snprintf(dst, cap,
                                 "{\"hostname\":\"%s\",\"fqdn\":\"%s.local\","
-                                "\"netifs\":%d,\"services\":[",
-                                hostname, hostname, bound_count());
+                                "\"responder\":%s,\"netifs\":%d,\"services\":[",
+                                hostname, hostname, responder_on ? "true" : "false", bound_count());
     bool first = true;
     for (int i = 0; i < MDNS_SERVICES_MAX && n + 96 < cap; i++) {
         if (!svc[i].used) { continue; }
@@ -303,6 +475,89 @@ static void send_all(const uint8_t *data, size_t len) {
         if (bound[i] && !ip4_addr_isany_val(*netif_ip4_addr(bound[i]))) {
             send_pkt(bound[i], data, len, &mdns_v4group, 5353);
         }
+    }
+}
+
+static int put_u16(uint8_t *b, int cap, int o, unsigned v) {
+    if (o < 0 || o + 2 > cap) { return -1; }
+    b[o] = (uint8_t)(v >> 8);
+    b[o + 1] = (uint8_t)v;
+    return o + 2;
+}
+
+static int put_u32(uint8_t *b, int cap, int o, uint32_t v) {
+    o = put_u16(b, cap, o, (unsigned)(v >> 16));
+    return put_u16(b, cap, o, (unsigned)v);
+}
+
+static int put_name(uint8_t *b, int cap, int o, const char *name) {
+    if (o < 0 || !name || !name[0]) { return -1; }
+    const char *s = name;
+    while (*s) {
+        const char *dot = strchr(s, '.');
+        int n = dot ? (int)(dot - s) : (int)strlen(s);
+        if (n <= 0 || n > 63 || o + 1 + n >= cap) { return -1; }
+        b[o++] = (uint8_t)n;
+        memcpy(b + o, s, (size_t)n);
+        o += n;
+        if (!dot || !dot[1]) { break; }
+        s = dot + 1;
+    }
+    if (o >= cap) { return -1; }
+    b[o++] = 0;
+    return o;
+}
+
+/* TTL 0 for the old hostname's A and for each service instance that was
+ * following it. lwIP's mdns_resp_rename_netif does not send this. */
+static void send_hostname_goodbye(const char *old) {
+    if (!old || !old[0]) { return; }
+    char host[80], inst[96], svcname[48];
+    snprintf(host, sizeof host, "%s.local", old);
+    for (int i = 0; i < MDNS_NETIFS; i++) {
+        struct netif *nif = bound[i];
+        if (!nif || ip4_addr_isany_val(*netif_ip4_addr(nif))) { continue; }
+        uint8_t pkt[384];
+        memset(pkt, 0, 12);
+        pkt[2] = 0x84;
+        int answers = 0;
+        int o = 12;
+        for (int s = 0; s < MDNS_SERVICES_MAX; s++) {
+            if (!svc[s].used || !svc[s].track_hostname) { continue; }
+            /* type is already "_btgw" / "_http". */
+            snprintf(svcname, sizeof svcname, "%s._%s.local", svc[s].type,
+                     svc[s].udp ? "udp" : "tcp");
+            snprintf(inst, sizeof inst, "%s.%s", old, svcname);
+            int at = o;
+            o = put_name(pkt, (int)sizeof pkt, o, svcname);
+            o = put_u16(pkt, (int)sizeof pkt, o, 12);
+            o = put_u16(pkt, (int)sizeof pkt, o, 1);
+            o = put_u32(pkt, (int)sizeof pkt, o, 0);
+            int rd = o;
+            o = put_u16(pkt, (int)sizeof pkt, o, 0);
+            int rs = o;
+            o = put_name(pkt, (int)sizeof pkt, o, inst);
+            if (o < 0) { o = at; continue; }
+            put_u16(pkt, (int)sizeof pkt, rd, (unsigned)(o - rs));
+            answers++;
+        }
+        int at = o;
+        o = put_name(pkt, (int)sizeof pkt, o, host);
+        o = put_u16(pkt, (int)sizeof pkt, o, 1);
+        o = put_u16(pkt, (int)sizeof pkt, o, 1);
+        o = put_u32(pkt, (int)sizeof pkt, o, 0);
+        o = put_u16(pkt, (int)sizeof pkt, o, 4);
+        if (o < 0 || o + 4 > (int)sizeof pkt) { o = at; }
+        else {
+            const ip4_addr_t *ip = netif_ip4_addr(nif);
+            memcpy(pkt + o, &ip->addr, 4);
+            o += 4;
+            answers++;
+        }
+        if (answers <= 0 || o < 12) { continue; }
+        pkt[6] = (uint8_t)(answers >> 8);
+        pkt[7] = (uint8_t)answers;
+        send_pkt(nif, pkt, (size_t)o, &mdns_v4group, 5353);
     }
 }
 
@@ -411,11 +666,20 @@ static void op_mdns_browse(const char *params, api_reply_fn reply, void *ctx, lo
     api_reply_ok(reply, ctx, id, mops_buf);
 }
 
+static void op_mdns_responder(const char *params, api_reply_fn reply, void *ctx, long id) {
+    bool en = mdns_responder_on();
+    if (api_json_bool(params, "enabled", &en)) { mdns_responder_set(en); }
+    char buf[40];
+    snprintf(buf, sizeof buf, "{\"responder\":%s}", mdns_responder_on() ? "true" : "false");
+    api_reply_ok(reply, ctx, id, buf);
+}
+
 static const op_def_t mdns_ops[] = {
     { "mdns.status", op_mdns_status },
     { "mdns.groups", op_mdns_groups },
     { "mdns.peers", op_mdns_peers },
     { "mdns.browse", op_mdns_browse },
+    { "mdns.responder", op_mdns_responder },
     { NULL, NULL }
 };
 
@@ -431,6 +695,7 @@ void mdns_start(void) {
     }
     mdns_resp_init();
     mrec_reset();
+    load_hostname();
     add_default_http();
 }
 

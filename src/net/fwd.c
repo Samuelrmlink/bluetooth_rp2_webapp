@@ -18,6 +18,7 @@
  * nothing blocks.
  */
 #include "net/fwd.h"
+#include "net/ping.h"
 
 #if CONFIG_NET_FORWARD
 
@@ -629,11 +630,14 @@ static void op_forwards(const char *params, api_reply_fn reply, void *ctx, long 
 
 static const op_def_t net_ops[] = {
     { "net.forwards", op_forwards },
+    { "net.ping", ping_op },
     { NULL, NULL }
 };
 
+static const char *const net_topics[] = { "net.ping", NULL };
+
 const op_module_t op_module_net = {
-    .ns = "net", .ops = net_ops, .topics = NULL, .init = NULL
+    .ns = "net", .ops = net_ops, .topics = net_topics, .init = NULL
 };
 
 #endif /* CONFIG_NET_FORWARD */
