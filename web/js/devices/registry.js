@@ -37,6 +37,12 @@ export const PLUGINS = [
     name: () => 'Pinecil',
     module: './pinecil/plugin.js',
   },
+  {
+    id: 'ws2812',
+    match: (topic) => topic === 'profile.ws2812.telemetry',
+    name: () => 'WS2812',
+    module: './ws2812/plugin.js',
+  },
 ];
 
 export const GENERIC = {

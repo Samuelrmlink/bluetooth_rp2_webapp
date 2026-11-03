@@ -32,6 +32,8 @@
 #include "sd/sd_card.h"
 #include "sd/sd_port.h"
 #include "sdio.pio.h"
+#include "io/pio_port.h"
+#include "io/pio_res.h"
 #if CONFIG_IO_PINS
 #include "io/pins.h"
 #endif
@@ -162,17 +164,42 @@ bool sdio_hw_init(const sdio_pins_t *pins) {
     data_prog = sdio_data_program;
     data_prog.instructions = data_instr;
 
-    uint lo = (uint)(P.clk < P.cmd ? P.clk : P.cmd), hi = (uint)(P.clk < P.cmd ? P.cmd : P.clk);
-    if (!pio_claim_free_sm_and_add_program_for_gpio_range(&sdio_cmd_program, &pc, &smc, &offc,
-                                                           lo, hi - lo + 1, true)) { return false; }
-    if (!pio_claim_free_sm_and_add_program_for_gpio_range(&data_prog, &pd, &smd, &offd,
-                                                           (uint)P.d0, 4, true)) { return false; }
+    /* The ledger keeps the words. INSTR_MEM is write-only, so the SDK claim
+     * cannot be asked later what was loaded or where one program ended.
+     * Both copies are the firmware card driver, so they are protected: a
+     * module cannot release, rewrite, reconfigure, or stop them. A disjoint
+     * gap on the same block stays available. pio_res_release cannot drop a
+     * protected machine, so a failed init uses the hardware release. */
+    uint8_t cmd_pins[2] = { (uint8_t)P.clk, (uint8_t)P.cmd };
+    int hc = pio_res_load("sd", cmd_pins, 2, sdio_cmd_program.instructions,
+                          sdio_cmd_program.length, PIO_LOAD_PROTECT);
+    if (hc < 0) { return false; }
+    pc = (PIO)pio_port_instance(pio_res_block(hc));
+    smc = (uint)pio_res_sm(hc);
+    offc = (uint)pio_res_offset(hc);
+
+    uint8_t data_pins[4] = {
+        (uint8_t)P.d0, (uint8_t)(P.d0 + 1), (uint8_t)(P.d0 + 2), (uint8_t)(P.d0 + 3),
+    };
+    int hd = pio_res_load("sd", data_pins, 4, data_prog.instructions,
+                          data_prog.length, PIO_LOAD_PROTECT);
+    if (hd < 0) {
+        pio_res_release_hw(pio_res_block(hc), pio_res_sm(hc));
+        return false;
+    }
+    pd = (PIO)pio_port_instance(pio_res_block(hd));
+    smd = (uint)pio_res_sm(hd);
+    offd = (uint)pio_res_offset(hd);
 
     dma_rx = dma_claim_unused_channel(false);
     dma_ctl = dma_claim_unused_channel(false);
     dma_tx = dma_claim_unused_channel(false);
     dma_txcrc = dma_claim_unused_channel(false);
-    if (dma_rx < 0 || dma_ctl < 0 || dma_tx < 0 || dma_txcrc < 0) { return false; }
+    if (dma_rx < 0 || dma_ctl < 0 || dma_tx < 0 || dma_txcrc < 0) {
+        pio_res_release_hw(pio_res_block(hc), pio_res_sm(hc));
+        pio_res_release_hw(pio_res_block(hd), pio_res_sm(hd));
+        return false;
+    }
 
     pio_gpio_init(pc, (uint)P.clk);
     pio_gpio_init(pc, (uint)P.cmd);

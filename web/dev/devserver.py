@@ -676,6 +676,20 @@ class MockGateway:
             return STATE["eth"]
         if op == "test.answers":
             return {"answers": STATE.get("answers", [])}
+        if op == "pio.status":
+            return {"blocks": [
+                {"pio": 0, "gpio_base": 0, "instr_used": 28, "instr_free": 4,
+                 "instr_map": (1 << 28) - 1, "sm_free": 0b1110, "irq_used": 0, "irq_lines": 0,
+                 "programs": [{"owner": "sd", "offset": 0, "length": 28, "origin": -1, "sm": 1, "irq": 0, "prot": 1}]},
+                {"pio": 1, "gpio_base": -1, "instr_used": 0, "instr_free": 32,
+                 "instr_map": 0, "sm_free": 0b1111, "irq_used": 0, "irq_lines": 0, "programs": []},
+                {"pio": 2, "gpio_base": 0, "instr_used": 17, "instr_free": 15,
+                 "instr_map": (1 << 17) - 1, "sm_free": 0b1010, "irq_used": 0, "irq_lines": 0,
+                 "programs": [
+                     {"owner": "cyw43", "offset": 0, "length": 6, "origin": -1, "sm": 1, "irq": 0, "prot": 1},
+                     {"owner": "sd", "offset": 6, "length": 11, "origin": -1, "sm": 4, "irq": 0, "prot": 1},
+                 ]},
+            ]}
         if op.startswith("pex."):
             return self._pex_op(op, p)
         if (op.startswith("script.") and op not in ("script.heap", "script.arena", "script.vm_restart")) \

@@ -28,3 +28,12 @@ pex_add_module(pinecil
     VERSION 1.0.0
     DESCRIPTION "Pinecil V2 driver"
     OUTPUT_DIR ${PEX_DRIVER_OUT})
+
+pex_add_module(ws2812
+    SOURCES ${_d}/ws2812_app.c
+    TARGETS m33
+    MODEL reloc
+    KIND app
+    VERSION 1.0.0
+    DESCRIPTION "WS2812B strip"
+    OUTPUT_DIR ${PEX_DRIVER_OUT})

@@ -63,6 +63,12 @@ const char *pins_reserved_by(uint8_t pin) {
     return (pin < PIN_COUNT && slots[pin].kind == PIN_OWNER_SYSTEM) ? slots[pin].owner : NULL;
 }
 
+const char *pins_owner(uint8_t pin) {
+    pins_init();
+    if (pin >= PIN_COUNT || slots[pin].kind == PIN_OWNER_NONE) { return NULL; }
+    return slots[pin].owner;
+}
+
 bool pins_is_reserved(uint8_t pin) {
     return pin < PIN_COUNT && slots[pin].kind == PIN_OWNER_SYSTEM;
 }

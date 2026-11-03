@@ -741,6 +741,23 @@ def t_peer_fwd_msg():
                    ["test/host/peer_fwd_msg_test.c", "src/net/peer_fwd_msg.c"],
                    "btgw_peer_fwd_msg", defs="")
 
+def t_pio_res():
+    """The PIO claim ledger: shadowed instruction words, a shared copy counted
+    once, the GPIO window, one handler per CPU IRQ line, reserved pins, and
+    one console line per refusal. The wrapper does not print a second line."""
+    import json
+    api = json.load(open(os.path.join(ROOT, "pex/host_api.json")))
+    groups = [g for g in api["groups"] if g.get("name") == "pio"]
+    if len(groups) != 1 or groups[0].get("id") != 15:
+        return False, "pex/host_api.json needs one pio group, id 15"
+    text = open(os.path.join(ROOT, "src/pex/pex_gw_pio.c")).read()
+    if "printf(" in text:
+        return False, "pex_gw_pio.c prints; the ledger already logs the one line"
+    return _host_c("pio_res",
+                   ["test/host/pio_res_test.c", "test/host/pio_port_fake.c",
+                    "src/io/pio_res.c"],
+                   "btgw_pio_res", defs="")
+
 def t_ws_link():
     """Websocket file chunks leave a reserve for telemetry. A 2 MiB transfer
     with a telemetry frame every turn drops none, and a sender that fills the
@@ -1595,6 +1612,7 @@ def main():
     step(0, "file module paths: volumes, charsets, limits", t_lfile_path)
     step(0, "websocket file chunks leave room for telemetry", t_ws_link)
     step(0, "peer forward envelope is one hop", t_peer_fwd_msg)
+    step(0, "PIO claim ledger shadows instruction words", t_pio_res)
     step(0, "batch tar and delete path lists", t_fs_batch)
     step(0, "file module on the SD card: binding -> jobs -> worker -> FatFs", t_lfile_sd)
     step(0, "HTTP client: response parser, URLs, redirects", t_httpc_parse)

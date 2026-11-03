@@ -40,6 +40,21 @@ test('profile.anker.gone removes that device even while a window is open', () =>
   ]);
 });
 
+test('profile.ws2812.gone removes the strip and leaves an addressed device', () => {
+  const app = fakeApp();
+  const host = new DeviceHost(app);
+  host._onEvent('profile.anker.telemetry', { addr: '7C:E9:13:60:1F:D8', product_code: 'A2687' });
+  host._onEvent('profile.ws2812.telemetry', { on: 0, pin: 0, mode: 'solid' });
+  assert.equal(host.devices.size, 2);
+  host._onEvent('profile.ws2812.gone', {});
+  assert.equal(host.devices.size, 1);
+  assert.ok(host.devices.has('7CE913601FD8'));
+  assert.deepEqual(app.removed, [
+    'ws2812.controls@ws2812-telemetry',
+    'ws2812.unclassified@ws2812-telemetry',
+  ]);
+});
+
 test('profile.anker.gone with no address or an unknown device leaves the rest', () => {
   const app = fakeApp();
   const host = new DeviceHost(app);

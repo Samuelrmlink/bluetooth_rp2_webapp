@@ -51,6 +51,8 @@ bool pins_is_reserved(uint8_t pin);
 bool pins_reserve(uint8_t pin, pin_function_t fn, const char *owner);
 /* Who reserved it ("cyw43", "w5500", ...), or NULL. */
 const char *pins_reserved_by(uint8_t pin);
+/* Owner of a reserved or claimed pin, or NULL when it is free. */
+const char *pins_owner(uint8_t pin);
 /* Give back a pins_reserve() made by `owner` (a driver whose chip was not
  * there). Pins reserved by anyone else -- the radio -- are left alone. */
 void pins_unreserve(uint8_t pin, const char *owner);

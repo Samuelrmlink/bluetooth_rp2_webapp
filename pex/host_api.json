@@ -1174,6 +1174,125 @@
       ]
     },
     {
+      "name": "pio",
+      "id": 15,
+      "major": 1,
+      "minor": 1,
+      "doc": "RP2040/RP2350 PIO claim ledger. Instruction words are shadowed here because INSTR_MEM is write-only. A Pico build registers it; other chips do not, so import it weak and check pex_has. A refusal returns a negative PEX_E* and the ledger prints one console line. This wrapper does not print another. pex_pio_load places a program in a free gap and will not rewrite a program that is already loaded. A protected program (the CYW43439 bus) cannot be released or reconfigured, and its block keeps its GPIO base. A module cannot mark its own program protected.",
+      "types": [
+        "typedef struct {",
+        "    int32_t gpio_base;       /* -1 until a machine sets it, else 0 or 16 */",
+        "    uint32_t instr_used;",
+        "    uint32_t instr_free;",
+        "    uint32_t instr_map;      /* bit i set when instruction word i is taken */",
+        "    uint32_t sm_free;        /* bit i set when state machine i is free */",
+        "    uint32_t irq_used;       /* instruction flags 0-3 a loaded word references */",
+        "    uint32_t irq_line_used;  /* bit i set when CPU IRQ line i has a handler */",
+        "} pex_pio_block_t;",
+        "typedef struct {",
+        "    uint32_t offset;",
+        "    uint32_t length;",
+        "    int32_t origin;          /* -1 when the loader picked the offset */",
+        "    uint32_t sm_mask;        /* machines on this block executing the copy */",
+        "    uint32_t irq_flags;      /* bits 0-3 this block, bits 4-7 the next block's 0-3 */",
+        "    char owner[24];",
+        "    uint32_t prot;           /* 1 when this copy must keep running */",
+        "} pex_pio_prog_t;",
+        "typedef struct {",
+        "    uint8_t out_base, out_count;",
+        "    uint8_t set_base, set_count;",
+        "    uint8_t sideset_base, sideset_count, sideset_opt;",
+        "    uint8_t shift_right;     /* 1: shift both directions right */",
+        "    uint8_t autopush, autopull;",
+        "    uint8_t push_thresh, pull_thresh; /* 0 means 32 */",
+        "    uint8_t fifo_join;       /* 0 none, 1 TX (8 deep, no RX), 2 RX */",
+        "    int16_t in_base;         /* -1: do not set the input base */",
+        "    int16_t jmp_pin;         /* -1: do not set the jump pin */",
+        "    uint32_t clkdiv;         /* 16.8 fixed point. 0 and 0x100 both mean 1.0 */",
+        "} pex_pio_cfg_t;",
+        "typedef void (*pex_pio_irq_fn)(void *arg);",
+        "#define PEX_PIO_IRQ_RX   1u  /* this machine's RX FIFO is not empty */",
+        "#define PEX_PIO_IRQ_TX   2u  /* this machine's TX FIFO is not full */",
+        "#define PEX_PIO_IRQ_FLAG 4u  /* instruction flags this program references */",
+        "#define PEX_PIO_JOIN_NONE 0u",
+        "#define PEX_PIO_JOIN_TX   1u",
+        "#define PEX_PIO_JOIN_RX   2u"
+      ],
+      "functions": [
+        {
+          "name": "pex_pio_stat",
+          "proto": "int pex_pio_stat(pex_pio_block_t *out, size_t cap, size_t *n)",
+          "doc": "*n is how many blocks this chip has. out receives min(cap, *n). gpio_base is -1 until a claim sets it"
+        },
+        {
+          "name": "pex_pio_programs",
+          "proto": "int pex_pio_programs(int block, pex_pio_prog_t *out, size_t cap, size_t *n)",
+          "doc": "loaded ranges on one block. *n is the count; out receives min(cap, *n). A shared copy is one row"
+        },
+        {
+          "name": "pex_pio_instr",
+          "proto": "int pex_pio_instr(int block, uint32_t offset, uint16_t *words, size_t cap)",
+          "doc": "copies the shadowed instruction words at offset. cap 0 returns the length. PEX_ENOENT when nothing is loaded there"
+        },
+        {
+          "name": "pex_pio_fit",
+          "proto": "int pex_pio_fit(const uint8_t *pins, size_t npins, uint32_t nwords, int origin)",
+          "doc": "the block a claim would pick, or the PEX_E* it would return. origin -1 is any free run. Does not claim"
+        },
+        {
+          "name": "pex_pio_claim",
+          "proto": "int pex_pio_claim(const uint8_t *pins, size_t npins, uint32_t nwords, int origin)",
+          "doc": "a handle (>= 1) or a negative PEX_E*. The machine, its FIFOs, and the instruction gap are reserved. An origin that names an existing range of the same length shares that copy. An origin on a protected copy is refused"
+        },
+        {
+          "name": "pex_pio_load",
+          "proto": "int pex_pio_load(const uint8_t *pins, size_t npins, const uint16_t *words, size_t nwords)",
+          "since": 1,
+          "doc": "allocates a state machine, places words in a free gap, and returns a handle. Does not attach to a program that is already loaded. A protected range, or a gap that would overlap one, is PEX_EBUSY and the loaded words stay. The module cannot set the protect flag"
+        },
+        {
+          "name": "pex_pio_program",
+          "proto": "int pex_pio_program(int handle, const uint16_t *words, size_t nwords)",
+          "doc": "loads words into the reserved gap and scans IRQ opcodes. A shared copy must match the words already loaded. nwords must equal the claim"
+        },
+        {
+          "name": "pex_pio_init",
+          "proto": "int pex_pio_init(int handle, const pex_pio_cfg_t *cfg)",
+          "doc": "out/set/sideset bases and counts, shift, autopush/autopull, FIFO join, and the 16.8 clock divider. Pin bases must be in the claim and inside the block window. WAIT GPIO operands are not checked"
+        },
+        {
+          "name": "pex_pio_enable",
+          "proto": "int pex_pio_enable(int handle, int on)",
+          "doc": "on nonzero starts the machine"
+        },
+        {
+          "name": "pex_pio_put",
+          "proto": "int pex_pio_put(int handle, uint32_t word)",
+          "doc": "one word into this machine's TX FIFO. PEX_EAGAIN when it is full. Does not spin"
+        },
+        {
+          "name": "pex_pio_get",
+          "proto": "int pex_pio_get(int handle, uint32_t *word)",
+          "doc": "one word from this machine's RX FIFO. PEX_EAGAIN when it is empty"
+        },
+        {
+          "name": "pex_pio_levels",
+          "proto": "int pex_pio_levels(int handle, uint32_t *tx_level, uint32_t *rx_level)",
+          "doc": "how many words are in this machine's FIFOs. A joined FIFO is 8 in that direction and 0 in the other"
+        },
+        {
+          "name": "pex_pio_irq",
+          "proto": "int pex_pio_irq(int handle, int line, uint32_t sources, pex_pio_irq_fn fn, void *arg)",
+          "doc": "one handler for CPU IRQ line 0 or 1 of this machine's block. sources is PEX_PIO_IRQ_RX, TX, FLAG. A second handler on that line is PEX_EBUSY. The callback runs on the main loop, never from the interrupt"
+        },
+        {
+          "name": "pex_pio_release",
+          "proto": "int pex_pio_release(int handle)",
+          "doc": "gives this handle back. The instruction shadow is cleared when the last machine on that range is gone"
+        }
+      ]
+    },
+    {
       "name": "lua",
       "id": 16,
       "major": 1,

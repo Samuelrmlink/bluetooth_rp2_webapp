@@ -587,7 +587,10 @@ without stranding modules.
 | 10 | `fs` | gateway | `lfs:/` and `sd:/` files: open/read/write/seek/size/close/stat/list/mkdir/remove/rename/media |
 | 11 | `net` | gateway | the HTTP(S) client: start (into a buffer or a `lfs:/` file), status, cancel, completion callback |
 | 12 | `bt` | gateway | LE central: scan table (filter by name prefix / 128-bit UUID), connect, GATT lookup by service + characteristic UUID + instance, read, write with/without response with completion, notify/indicate, MTU; events through a listener |
+| 15 | `pio` | gateway, Pico only | claim or load a state machine, FIFOs, one handler per CPU IRQ line. A protected machine cannot be rewritten |
 | 16 | `lua` | Lua layer, optional | `pexlua` (§7.3, §9) |
+
+Group 15 is the claim ledger: a query reads the recorded instruction words, offset, and owner, because `INSTR_MEM` is write-only, and the C5 image does not register the group, so `pex_has(15)` is 0. `pex_pio_load` (group 1.1) allocates a machine and writes a program into a free gap. It does not rewrite a program that is already there. The CYW43439 bus is protected, so a load that would change its instructions, its machine, or its block's GPIO base is refused. A module program such as WS2812 is not protected, and its owner can release it. A module cannot mark its own program protected.
 
 Exact signatures: **appendix A** (generated from `host_api.json`).
 Asynchronous results (the card, HTTP, BLE) arrive as **callbacks from the
@@ -1439,7 +1442,7 @@ typedef struct {
 
 ### A.4 `sched` -- group 4, v1.0
 
-cooperative tasks on the host's main loop: no RTOS; callbacks must return quickly. A callback that runs longer than the host's slice (`pex_config_t.slice_ms`) is faulted and the loop continues; see §8
+cooperative tasks on the host's main loop: no RTOS; callbacks must return quickly
 
 ```c
 /* Return PEX_TASK_AGAIN to stay scheduled, PEX_TASK_DONE to end the task. */
@@ -1612,9 +1615,9 @@ typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);
 | `int pex_http_status(int id, pex_http_res_t *out)` | `48b3c23a` | 1.0 |  |
 | `int pex_http_cancel(int id)` | `49e97eb2` | 1.0 |  |
 
-### A.12 `bt` -- group 12, v1.1
+### A.12 `bt` -- group 12, v1.3
 
-Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database when BT_PERIPHERAL is on, and returns PEX_ENOTSUP when it is off
+Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database and pex_adv_* the advertising payload when BT_PERIPHERAL is on; both return PEX_ENOTSUP when it is off. Pairing calls use bond.c and return PEX_ENOTSUP when BT_LE is off
 
 ```c
 typedef struct {
@@ -1632,6 +1635,13 @@ typedef struct {
 #define PEX_BT_LINK_DOWN 17
 #define PEX_BT_READY 18     /* GATT discovered: pex_bt_find works */
 #define PEX_BT_FAILED 19    /* connect or discovery failed */
+#define PEX_BT_JUST_WORKS 20
+#define PEX_BT_PASSKEY 21       /* stack wants a passkey typed in */
+#define PEX_BT_CONFIRM 22       /* numeric comparison; answer with pex_bt_confirm */
+#define PEX_BT_BONDED 23
+#define PEX_BT_PAIR_FAIL 24
+#define PEX_BT_PASSKEY_DISP 25  /* stack is showing a passkey */
+#define PEX_BT_LOCAL_WRITE 26   /* a peer wrote a local characteristic */
 typedef struct {
     uint8_t addr[6]; uint8_t kind; uint8_t pad;
     int16_t chr; int16_t status;
@@ -1667,6 +1677,17 @@ typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
 | `int pex_gatt_service(const char *uuid)` | `a99251f7` | 1.1 | 4 hex chars or a dashed 128-bit UUID |
 | `int pex_gatt_characteristic(const char *uuid, int properties)` | `fcc1c221` | 1.1 | ATT property bits. The MCUmgr SMP UUID is recorded and marked dynamic |
 | `int pex_gatt_commit(void)` | `cc8d34b1` | 1.1 | install the database. Keeps the read and write callbacks |
+| `int pex_adv_data(const uint8_t *adv, uint16_t adv_len, const uint8_t *scan_rsp, uint16_t scan_len)` | `862ef4d9` | 1.2 | store a 0..31 byte advertising payload and an optional scan response. The next pex_adv_start uses them. Does not stop the central scanner. PEX_ENOTSUP when BT_PERIPHERAL is off |
+| `int pex_adv_start(uint16_t interval_min, uint16_t interval_max)` | `971f890b` | 1.2 | connectable advertising. 0 for either bound is the default 0x00A0..0x00F0 (units of 0.625 ms). Does not stop the central scanner |
+| `int pex_adv_stop(void)` | `941030f9` | 1.2 | stop advertising. The central scanner keeps running |
+| `int pex_bt_set_io(const char *io_capability, int mitm)` | `9147d017` | 1.2 | no_input_no_output, display_only, display_yes_no, keyboard_only, keyboard_display. NULL keeps the capability. mitm < 0 leaves MITM unchanged |
+| `int pex_bt_set_policy(const char *policy)` | `73d67051` | 1.2 | never, on_demand, or always. Same bond.c policy, including declining Just Works when never |
+| `int pex_bt_passkey(const uint8_t *addr, uint32_t passkey)` | `1ebc41d2` | 1.2 | answer a passkey request on a connected link. passkey is 0..999999 |
+| `int pex_bt_confirm(const uint8_t *addr, int accept)` | `8d936bd2` | 1.2 | answer a numeric comparison. accept non-zero confirms, zero declines |
+| `int pex_bt_forget(const uint8_t *addr)` | `8b87996b` | 1.2 | drop one stored bond. NULL deletes every bond in the existing store |
+| `int pex_bt_pair(const uint8_t *addr)` | `8f2f947a` | 1.2 | ask for pairing on a connected link. PEX_ESTATE when the policy is never |
+| `int pex_bt_set_addr(const uint8_t addr[6], int random)` | `c89b7838` | 1.2 | 1 sets a static random address (BTstack forces the two MSBs) before advertising. 0, the public address, returns PEX_ENOTSUP. PEX_ENOTSUP when BT_LE is off |
+| `int pex_gatt_set(const uint8_t *data, uint16_t len)` | `eaabb48c` | 1.3 | bytes for the next pex_gatt_characteristic. Empty (len 0) is allowed. PEX_ENOTSUP when BT_PERIPHERAL is off |
 
 ### A.13 `codec` -- group 13, v1.1
 
@@ -1729,6 +1750,156 @@ typedef struct {
 | `int pex_codec_kdf(const uint8_t *Z, uint8_t *out, size_t outlen)` | `acd2235b` | 1.0 | Anker ECIES KDF. outlen bytes, or a negative PEX_E* |
 | `int pex_codec_account_key(const char *id, uint8_t *key, uint8_t *iv)` | `be91f92f` | 1.0 | AesConferV1: key is the id padded to 32, iv is 16 zero bytes. 32 or a negative PEX_E* |
 | `void pex_codec_ghash(const uint8_t *H, const uint8_t *aad, size_t aad_len, const uint8_t *ct, size_t ct_len, uint8_t *out)` | `c62e1321` | 1.0 | GHASH(H, aad, ct) -> 16 bytes. The negotiation tag is this XOR a recovered E(J0); the constants stay in the module |
+
+### A.14 `classic` -- group 14, v1.0
+
+Bluetooth Classic RFCOMM sessions. Present only when the firmware is built with BT_CLASSIC. One module may hold several sessions, and another module may hold others at the same time. The caller supplies the 16-bit UUID, the channel, and the security policy. The host has no PIN and no service of its own. A fixed PIN list answers a legacy PIN in order; when that list runs out, or the controller asks for a passkey or a numeric comparison, the session emits PEX_CL_PIN, PEX_CL_PASSKEY, or PEX_CL_CONFIRM and waits. The module answers at once with a fixed code, or later after a person types, through the same submit calls. A weak import of this group still loads on an image without Classic, and pex_avail() is false there.
+
+```c
+#define PEX_CL_PIN 1
+#define PEX_CL_PASSKEY 2
+#define PEX_CL_CONFIRM 3
+#define PEX_CL_OPEN 4
+#define PEX_CL_CLOSED 5
+#define PEX_CL_FAILED 6
+#define PEX_CL_RX 7
+#define PEX_CL_TX_ROOM 8
+#define PEX_CL_SDP 9
+#define PEX_CL_IO_NONE 0
+#define PEX_CL_IO_DISPLAY 1
+#define PEX_CL_IO_YESNO 2
+#define PEX_CL_IO_KEYBOARD 3
+#define PEX_CL_BOND_NONE 0
+#define PEX_CL_BOND_GENERAL 1
+#define PEX_CL_BOND_DEDICATED 2
+#define PEX_CL_BOND_OMIT 0xFF
+#define PEX_CL_LEVEL_OMIT 0xFF
+#define PEX_CL_PIN_MAX 4
+#define PEX_CL_PIN_LEN 16
+typedef struct {
+    int handle;
+    int kind;               /* PEX_CL_* */
+    int why;
+    int status;             /* SDP: 0 found a channel */
+    uint32_t number;        /* numeric comparison, or the passkey value */
+    uint16_t len;
+    const uint8_t *data;    /* RX peek only; valid during the callback; listen consumes */
+    uint8_t addr[6];
+    uint8_t channel;
+    uint16_t uuid;
+} pex_cl_event_t;
+typedef void (*pex_cl_fn)(void *arg, const pex_cl_event_t *ev);
+typedef struct {
+    uint8_t addr[6];
+    uint16_t uuid;          /* channel 0 looks this up; the host does not assume one */
+    uint8_t channel;        /* 0: SDP */
+    uint8_t fallback;       /* 0: no fallback channel */
+    uint8_t level;          /* 0..4, or PEX_CL_LEVEL_OMIT (level 2) */
+    uint8_t io;             /* PEX_CL_IO_* */
+    uint8_t bond;           /* PEX_CL_BOND_*, or PEX_CL_BOND_OMIT (general) */
+    uint8_t drop_key;       /* on auth failure, drop the link key and try once more */
+    uint32_t deadline_ms;   /* 0: no connect deadline. Short for a fixed PIN, longer for a person */
+    uint8_t npin;
+    char pin[PEX_CL_PIN_MAX][PEX_CL_PIN_LEN];
+    pex_cl_fn fn;
+    void *arg;
+} pex_cl_open_t;
+typedef struct {
+    uint8_t addr[6];
+    char name[32];
+    int8_t rssi;
+    uint32_t cod;
+} pex_cl_dev_t;
+typedef struct {
+    int handle;
+    uint8_t addr[6];
+    uint16_t uuid;
+    uint8_t channel, state, ask, level, secure;
+    int why;
+    uint16_t mtu;
+    uint32_t cod, rx_drop, confirm_num;
+    char error[48];
+} pex_cl_info_t;
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_bt_classic_scan(uint32_t duration_ms)` | `ed3915e2` | 1.0 | 0 until stop. PEX_EBUSY if an inquiry is already running. An open session does not block it |
+| `void pex_bt_classic_scan_stop(void)` | `5d6e30df` | 1.0 |  |
+| `int pex_bt_classic_scanning(void)` | `ccd7d074` | 1.0 |  |
+| `int pex_bt_classic_devices(pex_cl_dev_t *out, uint32_t max, uint32_t cod_mask, uint32_t cod_value, const char *name_prefix)` | `f06b1a8e` | 1.0 | this caller's view. cod_mask 0 and a NULL prefix are the whole shared table. count |
+| `int pex_bt_classic_sdp(const uint8_t *addr, uint16_t uuid, pex_cl_fn fn, void *arg)` | `021aaa84` | 1.0 | one lookup of a 16-bit UUID. 0 accepted; the channel arrives as PEX_CL_SDP. PEX_EBUSY if a query is already running |
+| `int pex_bt_classic_open(const pex_cl_open_t *opt)` | `19a35f4f` | 1.0 | a session handle, or PEX_ENOMEM when the table is full, or PEX_EBUSY when the radio or the IO capability exchange cannot start another. Level 3 or 4 with no input and no output is PEX_EINVAL. Up to four PIN strings are tried in order and do not wait; the next request after that is PEX_CL_PIN |
+| `int pex_bt_classic_pin(int handle, const char *pin)` | `2d70598a` | 1.0 | answer PEX_CL_PIN. A fixed code or whatever a person typed. Empty or NULL cancels that session |
+| `int pex_bt_classic_passkey(int handle, int negative, uint32_t passkey)` | `4fd5869d` | 1.0 | answer PEX_CL_PASSKEY. negative non-zero cancels. passkey is 0..999999 |
+| `int pex_bt_classic_confirm(int handle, int accept)` | `5dc0fb65` | 1.0 | answer PEX_CL_CONFIRM. accept 0 declines. The six-digit number was in the event |
+| `int pex_bt_classic_send(int handle, const void *data, size_t len)` | `c2474f95` | 1.0 | bytes queued, or PEX_EBUSY while the link is short of the requested level or the TX buffer is full |
+| `int pex_bt_classic_tx_room(int handle)` | `0578acab` | 1.0 | bytes free in this session's TX buffer |
+| `int pex_bt_classic_listen(int handle, void *buf, size_t cap)` | `a4e1fdcc` | 1.0 | consumes up to 252 bytes from this session's RX ring, only after the level is met. The RX event is a peek and does not consume |
+| `int pex_bt_classic_close(int handle)` | `5138c459` | 1.0 |  |
+| `int pex_bt_classic_state(int handle, pex_cl_info_t *out)` | `66a31654` | 1.0 |  |
+| `int pex_bt_classic_forget(const uint8_t *addr)` | `f4eb47c2` | 1.0 | drop that address's link key. Does not close a session |
+
+### A.15 `pio` -- group 15, v1.1
+
+RP2040/RP2350 PIO claim ledger. Instruction words are shadowed here because INSTR_MEM is write-only. A Pico build registers it; other chips do not, so import it weak and check pex_has. A refusal returns a negative PEX_E* and the ledger prints one console line. This wrapper does not print another. pex_pio_load places a program in a free gap and will not rewrite a program that is already loaded. A protected program (the CYW43439 bus) cannot be released or reconfigured, and its block keeps its GPIO base. A module cannot mark its own program protected.
+
+```c
+typedef struct {
+    int32_t gpio_base;       /* -1 until a machine sets it, else 0 or 16 */
+    uint32_t instr_used;
+    uint32_t instr_free;
+    uint32_t instr_map;      /* bit i set when instruction word i is taken */
+    uint32_t sm_free;        /* bit i set when state machine i is free */
+    uint32_t irq_used;       /* instruction flags 0-3 a loaded word references */
+    uint32_t irq_line_used;  /* bit i set when CPU IRQ line i has a handler */
+} pex_pio_block_t;
+typedef struct {
+    uint32_t offset;
+    uint32_t length;
+    int32_t origin;          /* -1 when the loader picked the offset */
+    uint32_t sm_mask;        /* machines on this block executing the copy */
+    uint32_t irq_flags;      /* bits 0-3 this block, bits 4-7 the next block's 0-3 */
+    char owner[24];
+    uint32_t prot;           /* 1 when this copy must keep running */
+} pex_pio_prog_t;
+typedef struct {
+    uint8_t out_base, out_count;
+    uint8_t set_base, set_count;
+    uint8_t sideset_base, sideset_count, sideset_opt;
+    uint8_t shift_right;     /* 1: shift both directions right */
+    uint8_t autopush, autopull;
+    uint8_t push_thresh, pull_thresh; /* 0 means 32 */
+    uint8_t fifo_join;       /* 0 none, 1 TX (8 deep, no RX), 2 RX */
+    int16_t in_base;         /* -1: do not set the input base */
+    int16_t jmp_pin;         /* -1: do not set the jump pin */
+    uint32_t clkdiv;         /* 16.8 fixed point. 0 and 0x100 both mean 1.0 */
+} pex_pio_cfg_t;
+typedef void (*pex_pio_irq_fn)(void *arg);
+#define PEX_PIO_IRQ_RX   1u  /* this machine's RX FIFO is not empty */
+#define PEX_PIO_IRQ_TX   2u  /* this machine's TX FIFO is not full */
+#define PEX_PIO_IRQ_FLAG 4u  /* instruction flags this program references */
+#define PEX_PIO_JOIN_NONE 0u
+#define PEX_PIO_JOIN_TX   1u
+#define PEX_PIO_JOIN_RX   2u
+```
+
+| symbol | FNV-1a | since | |
+|---|---|---|---|
+| `int pex_pio_stat(pex_pio_block_t *out, size_t cap, size_t *n)` | `c0cf8c00` | 1.0 | *n is how many blocks this chip has. out receives min(cap, *n). gpio_base is -1 until a claim sets it |
+| `int pex_pio_programs(int block, pex_pio_prog_t *out, size_t cap, size_t *n)` | `f4f4394b` | 1.0 | loaded ranges on one block. *n is the count; out receives min(cap, *n). A shared copy is one row |
+| `int pex_pio_instr(int block, uint32_t offset, uint16_t *words, size_t cap)` | `af37c4e0` | 1.0 | copies the shadowed instruction words at offset. cap 0 returns the length. PEX_ENOENT when nothing is loaded there |
+| `int pex_pio_fit(const uint8_t *pins, size_t npins, uint32_t nwords, int origin)` | `87b7fc19` | 1.0 | the block a claim would pick, or the PEX_E* it would return. origin -1 is any free run. Does not claim |
+| `int pex_pio_claim(const uint8_t *pins, size_t npins, uint32_t nwords, int origin)` | `655ed1d6` | 1.0 | a handle (>= 1) or a negative PEX_E*. The machine, its FIFOs, and the instruction gap are reserved. An origin that names an existing range of the same length shares that copy. An origin on a protected copy is refused |
+| `int pex_pio_load(const uint8_t *pins, size_t npins, const uint16_t *words, size_t nwords)` | `93d2af42` | 1.1 | allocates a state machine, places words in a free gap, and returns a handle. Does not attach to a program that is already loaded. A protected range, or a gap that would overlap one, is PEX_EBUSY and the loaded words stay. The module cannot set the protect flag |
+| `int pex_pio_program(int handle, const uint16_t *words, size_t nwords)` | `9fca9c1a` | 1.0 | loads words into the reserved gap and scans IRQ opcodes. A shared copy must match the words already loaded. nwords must equal the claim |
+| `int pex_pio_init(int handle, const pex_pio_cfg_t *cfg)` | `3bc5c780` | 1.0 | out/set/sideset bases and counts, shift, autopush/autopull, FIFO join, and the 16.8 clock divider. Pin bases must be in the claim and inside the block window. WAIT GPIO operands are not checked |
+| `int pex_pio_enable(int handle, int on)` | `53c17a19` | 1.0 | on nonzero starts the machine |
+| `int pex_pio_put(int handle, uint32_t word)` | `785f8e0f` | 1.0 | one word into this machine's TX FIFO. PEX_EAGAIN when it is full. Does not spin |
+| `int pex_pio_get(int handle, uint32_t *word)` | `f27c6266` | 1.0 | one word from this machine's RX FIFO. PEX_EAGAIN when it is empty |
+| `int pex_pio_levels(int handle, uint32_t *tx_level, uint32_t *rx_level)` | `d0730c61` | 1.0 | how many words are in this machine's FIFOs. A joined FIFO is 8 in that direction and 0 in the other |
+| `int pex_pio_irq(int handle, int line, uint32_t sources, pex_pio_irq_fn fn, void *arg)` | `ab9f8380` | 1.0 | one handler for CPU IRQ line 0 or 1 of this machine's block. sources is PEX_PIO_IRQ_RX, TX, FLAG. A second handler on that line is PEX_EBUSY. The callback runs on the main loop, never from the interrupt |
+| `int pex_pio_release(int handle)` | `a20fcb4b` | 1.0 | gives this handle back. The instruction shadow is cleared when the last machine on that range is gone |
 
 ### A.16 `lua` -- group 16, v1.0
 

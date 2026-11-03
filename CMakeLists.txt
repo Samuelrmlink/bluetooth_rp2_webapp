@@ -113,11 +113,16 @@ target_link_libraries(btgw
 # and records how long the driver waited. See that file for why tud_task() is
 # safe to call there and usb_ncm_poll() is not.
 if(CONFIG_RADIO_CYW43)
-    target_sources(btgw PRIVATE src/net/cyw43_wait.c)
+    target_sources(btgw PRIVATE src/net/cyw43_wait.c src/io/cyw43_bus_pio_spi.c)
     target_link_libraries(btgw pico_cyw43_arch_lwip_poll)
     target_link_options(btgw PRIVATE
         -Wl,--wrap=cyw43_await_background_or_timeout_us
         -Wl,--wrap=cyw43_cb_process_ethernet)
+    # Our bus defines cyw43_spi_*. The SDK copy would define them again.
+    # The .pio header is still generated for cyw43_driver_picow.
+    set_source_files_properties(
+        ${PICO_SDK_PATH}/src/rp2_common/pico_cyw43_driver/cyw43_bus_pio_spi.c
+        PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 if(CONFIG_NET_HTTP_SERVER)
     target_sources(btgw PRIVATE src/net/http.c src/net/ws.c src/net/peer_proxy.c
@@ -188,6 +193,11 @@ endif()
 if(CONFIG_BT_PERIPHERAL)
     target_sources(btgw PRIVATE src/bt/le/peripheral.c)
 endif()
+
+# PIO claim ledger. The SDIO driver and the PEX pio group both use it, so it
+# is part of every image. The port is the only file that includes the SDK.
+target_sources(btgw PRIVATE src/io/pio_res.c src/io/pio_port_pico.c)
+target_link_libraries(btgw hardware_pio hardware_gpio hardware_irq)
 
 if(CONFIG_IO_PINS)
     target_sources(btgw PRIVATE src/io/pins.c src/io/io_ops.c)
@@ -409,7 +419,7 @@ endif()
 # the gateway's groups and ops in src/pex/, pexlua when there is Lua.
 if(CONFIG_PEX)
     include(${CMAKE_CURRENT_LIST_DIR}/pex/runtime/pex_runtime.cmake)
-    set(_pex_groups sys board bus fs net bt)
+    set(_pex_groups sys board bus fs net bt pio)
     if(CONFIG_PROTO_ANKER_CRYPTO)
         list(APPEND _pex_groups codec)
     endif()
@@ -419,7 +429,7 @@ if(CONFIG_PEX)
     pex_runtime_add(btgw GROUPS ${_pex_groups} NO_PICO_PORT SIG_UECC)
     target_sources(btgw PRIVATE ${CMAKE_CURRENT_LIST_DIR}/pex/runtime/port/pico/pex_port_pico.c
         src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c
-        src/pex/pex_sd_read.c)
+        src/pex/pex_gw_pio.c src/pex/pex_sd_read.c)
     if(CONFIG_PROTO_ANKER_CRYPTO)
         target_sources(btgw PRIVATE src/pex/pex_gw_codec.c)
     endif()
@@ -444,7 +454,7 @@ if(CONFIG_PEX)
     # micro-ecc: the OTA key checks module signatures (spec 10).
     target_include_directories(btgw PRIVATE ${PICO_SDK_PATH}/lib/btstack/3rd-party/micro-ecc)
     set_property(SOURCE src/pex/pex_gw.c src/pex/pex_gw_sys.c src/pex/pex_gw_bus.c src/pex/pex_gw_fs.c src/pex/pex_gw_xip.c
-        src/pex/pex_sd_read.c
+        src/pex/pex_gw_pio.c src/pex/pex_sd_read.c
         src/pex/pex_gw_net.c src/pex/pex_gw_bt.c src/pex/pex_gw_classic.c src/pex/pex_gw_lua.c APPEND PROPERTY COMPILE_OPTIONS -Os)
     # Paying for PEX (~38 KB) in the 864 KiB slot, measured on the SD build
     # (2026-10-21; it had ~8 KB left): code that is not on a hot path goes

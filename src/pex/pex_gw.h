@@ -63,7 +63,7 @@ const char *pex_gw_arch(void);
 
 /* groups (pex_gw_*.c) */
 extern const pex_group_t pex_group_sys, pex_group_board, pex_group_bus, pex_group_fs, pex_group_net,
-    pex_group_bt, pex_group_codec, pex_group_classic;
+    pex_group_bt, pex_group_codec, pex_group_classic, pex_group_pio;
 void pex_gw_bus_unload(pex_mod_t *m);
 size_t pex_gw_bus_ops_json(char *dst, size_t cap);
 void pex_gw_fs_unload(pex_mod_t *m);
@@ -74,5 +74,7 @@ void pex_gw_bt_unload(pex_mod_t *m);
 void pex_gw_bt_poll(void);
 void pex_gw_classic_unload(pex_mod_t *m);
 void pex_gw_classic_poll(void);
+void pex_gw_pio_unload(pex_mod_t *m);
+void pex_gw_pio_poll(void);
 
 #endif

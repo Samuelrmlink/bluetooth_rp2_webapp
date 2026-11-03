@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinClass, pinTitle, summarise, fmtI2cResults, fmtVolts, fmtCelsius, ADC_CHANNELS }
+import { pinClass, pinTitle, summarise, fmtI2cResults, fmtVolts, fmtCelsius, ADC_CHANNELS, pioView, pioProgLine }
   from '../../js/hw.js';
 
 /* The real map off the board: 30 pins, four reserved by the radio. */
@@ -62,6 +62,57 @@ test('adc channels name the contended one', () => {
   assert.match(ch3.note, /radio/);
   const temp = ADC_CHANNELS.find((c) => c.ch === 4);
   assert.equal(temp.pin, null);
+});
+
+test('pio status names the owner of each taken instruction word', () => {
+  const v = pioView({
+    blocks: [{
+      pio: 2,
+      gpio_base: 0,
+      instr_used: 17,
+      instr_free: 15,
+      instr_map: (1 << 17) - 1,
+      sm_free: 0b1010,
+      irq_used: 0,
+      irq_lines: 1,
+      programs: [
+        { owner: 'cyw43', offset: 0, length: 6, origin: -1, sm: 1, irq: 0, prot: 1 },
+        { owner: 'sd', offset: 6, length: 11, origin: -1, sm: 4, irq: 0, prot: 1 },
+      ],
+    }],
+  });
+  assert.equal(v.blocks.length, 1);
+  assert.equal(v.blocks[0].cells[0].owner, 'cyw43');
+  assert.equal(v.blocks[0].cells[5].owner, 'cyw43');
+  assert.equal(v.blocks[0].cells[5].prot, true);
+  assert.equal(v.blocks[0].cells[6].owner, 'sd');
+  assert.equal(v.blocks[0].cells[6].prot, true);
+  assert.equal(v.blocks[0].cells[16].owner, 'sd');
+  assert.equal(v.blocks[0].cells[17].taken, false);
+  assert.deepEqual(v.blocks[0].sms.filter((s) => s.free).map((s) => s.sm), [1, 3]);
+  assert.deepEqual(v.blocks[0].sms[0].owners, ['cyw43']);
+  assert.deepEqual(v.blocks[0].irq_lines, [0]);
+  assert.match(v.summary, /17 of 32 words/);
+  assert.match(v.summary, /2 machines/);
+  assert.match(pioProgLine(v.blocks[0].programs[0]), /cyw43/);
+  assert.match(pioProgLine(v.blocks[0].programs[0]), /protected/);
+  assert.match(pioProgLine(v.blocks[0].programs[1]), /words 6–16/);
+  assert.match(pioProgLine(v.blocks[0].programs[1]), /protected/);
+  assert.match(pioProgLine(v.blocks[0].programs[1]), /origin auto/);
+});
+
+test('a taken word with no program is unknown, and bit 31 still counts', () => {
+  const v = pioView({ blocks: [{ instr_map: 2147483648, programs: [], sm_free: 0 }] });
+  assert.equal(v.blocks[0].cells[31].taken, true);
+  assert.equal(v.blocks[0].cells[31].owner, '?');
+  assert.equal(v.blocks[0].cells[30].taken, false);
+  assert.equal(v.blocks[0].sms.filter((s) => s.free).length, 0);
+});
+
+test('a missing pio reply is an empty status, not a throw', () => {
+  const v = pioView(undefined);
+  assert.deepEqual(v.blocks, []);
+  assert.equal(v.summary, 'no PIO status');
 });
 
 test('missing readings render as absent, not zero', () => {

@@ -116,6 +116,7 @@ static void on_unload(pex_mod_t *m) {
 #if CONFIG_BT_CLASSIC
     pex_gw_classic_unload(m);
 #endif
+    pex_gw_pio_unload(m);
 }
 
 /* Append one record to var/pex_faults.json. Autostart skips that build.
@@ -240,6 +241,7 @@ bool pex_gw_ensure(void) {
 #endif
     pex_register_group(&pex_group_sys);
     pex_register_group(&pex_group_board);
+    pex_register_group(&pex_group_pio);
     pex_register_group(&pex_group_bus);
     pex_register_group(&pex_group_fs);
 #if CONFIG_NET_HTTP_CLIENT
@@ -474,6 +476,7 @@ void pex_gw_poll(void) {
         return;
     }
     pex_poll();
+    pex_gw_pio_poll();
     pex_gw_fs_poll();
     pex_gw_sd_poll();
 #if CONFIG_NET_HTTP_CLIENT

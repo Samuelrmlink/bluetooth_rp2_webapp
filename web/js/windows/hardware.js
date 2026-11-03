@@ -7,9 +7,10 @@
 // whether or not anyone was looking, which is twelve pointless round trips
 // a minute over a link that may be a Starlink tunnel.
 
-import { ADC_CHANNELS, pinClass, pinTitle, summarise, fmtVolts, fmtCelsius, fmtI2cResults } from '../hw.js';
+import { ADC_CHANNELS, pinClass, pinTitle, summarise, fmtVolts, fmtCelsius, fmtI2cResults, pioView, pioProgLine } from '../hw.js';
 
 const POLL_MS = 5000;
+const PIO_COLORS = ['#4fd07f', '#7eb6ff', '#e0b45c', '#d07adf', '#5ec8c8', '#e07a62'];
 
 export class HardwareWindow {
   constructor(el, ctx) {
@@ -27,6 +28,7 @@ export class HardwareWindow {
       </div>
       <div class="hw-body">
         <section><h4>Pins</h4><div class="hw-pins"></div><div class="hw-detail dim">Select a pin.</div></section>
+        <section><h4>PIO</h4><div class="hw-pio dim">…</div></section>
         <section><h4>ADC</h4><div class="hw-adc kv-list"></div></section>
         <section><h4>I2C scan</h4>
           <form class="hw-i2c-form">
@@ -41,6 +43,7 @@ export class HardwareWindow {
     this._sum = el.querySelector('.h-sum');
     this._grid = el.querySelector('.hw-pins');
     this._detail = el.querySelector('.hw-detail');
+    this._pio = el.querySelector('.hw-pio');
     this._adc = el.querySelector('.hw-adc');
     this._i2c = el.querySelector('.hw-i2c');
     this._i2cNote = el.querySelector('.hw-i2c-note');
@@ -66,6 +69,7 @@ export class HardwareWindow {
     if (!this.ws.connected) return;
     this.refreshPins();
     this.refreshAdc();
+    this.refreshPio();
   }
 
   async refreshPins() {
@@ -114,6 +118,74 @@ export class HardwareWindow {
       b.addEventListener('click', () => Promise.resolve(fn()).catch((e) => { line.textContent = `GPIO ${p.pin}: ${e.message}  `; }));
       return b;
     }));
+  }
+
+  async refreshPio() {
+    let view;
+    try {
+      view = pioView(await this.ws.call('pio.status'));
+    } catch (e) {
+      this._pio.textContent = `pio.status: ${e.message}`;
+      return;
+    }
+    const owners = [];
+    for (const b of view.blocks) {
+      for (const p of b.programs) if (!owners.includes(p.owner)) owners.push(p.owner);
+    }
+    const head = document.createElement('div');
+    head.textContent = view.summary;
+    const kids = [head];
+    for (const b of view.blocks) kids.push(this._pioBlock(b, owners));
+    this._pio.replaceChildren(...kids);
+  }
+
+  _pioBlock(b, owners) {
+    const box = document.createElement('div');
+    box.className = 'hw-pio-block';
+    const title = document.createElement('div');
+    const base = b.gpio_base < 0 ? 'base unset' : `base ${b.gpio_base}`;
+    title.textContent = `PIO ${b.pio} · ${base} · ${b.instr_used} used · ${b.instr_free} free · map 0x${b.instr_map.toString(16).padStart(8, '0')}`;
+    const map = document.createElement('div');
+    map.className = 'hw-pio-map';
+    b.cells.forEach((c, i) => {
+      if (i && i % 8 === 0) {
+        const gap = document.createElement('span');
+        gap.className = 'hw-pio-gap';
+        map.appendChild(gap);
+      }
+      const cell = document.createElement('span');
+      cell.className = 'hw-pio-cell' + (c.prot ? ' prot' : '');
+      cell.title = c.taken ? `word ${c.word} · ${c.owner}${c.prot ? ' · protected' : ''}` : `word ${c.word} free`;
+      if (c.taken) {
+        const slot = owners.indexOf(c.owner);
+        cell.style.background = PIO_COLORS[(slot < 0 ? 0 : slot) % PIO_COLORS.length];
+      }
+      map.appendChild(cell);
+    });
+    const sms = document.createElement('div');
+    sms.textContent = b.sms.map((s) => (s.free ? `SM ${s.sm} free` : `SM ${s.sm} ${s.owners.join('+') || 'taken'}`)).join(' · ');
+    const irq = document.createElement('div');
+    const flags = b.irq.length
+      ? b.irq.map((f) => (f.owners.length ? `IRQ ${f.flag} ${f.owners.join('+')}` : `IRQ ${f.flag}`)).join(', ')
+      : 'IRQ flags free';
+    const cpu = b.irq_lines.length ? b.irq_lines.map((l) => `CPU IRQ ${l}`).join(', ') : 'CPU IRQ lines free';
+    irq.textContent = `${flags} · ${cpu}`;
+    const progs = document.createElement('div');
+    progs.className = 'hw-pio-progs';
+    if (!b.programs.length) {
+      const empty = document.createElement('div');
+      empty.textContent = 'no program loaded';
+      progs.appendChild(empty);
+    } else {
+      for (const p of b.programs) {
+        const line = document.createElement('div');
+        line.className = 'hw-pio-prog';
+        line.textContent = pioProgLine(p);
+        progs.appendChild(line);
+      }
+    }
+    box.append(title, map, sms, irq, progs);
+    return box;
   }
 
   async refreshAdc() {

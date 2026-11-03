@@ -6,11 +6,13 @@
  * I2C and SPI exist mostly for driver bring-up -- i2c.scan is the reason --
  * so a deployed build that does not need them can drop them and reclaim flash.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "api/ops.h"
 #include "io/pins.h"
+#include "io/pio_res.h"
 #include "autoconf.h"
 
 #include "hardware/gpio.h"
@@ -218,10 +220,79 @@ static void op_spi_buses(const char *params, api_reply_fn reply, void *ctx, long
 }
 #endif
 
+/* Read-only ledger. Claim, load, and FIFO writes stay on the PEX pio
+ * group; this is only so the Hardware window can show what is taken. */
+static int io_add(size_t *n, const char *fmt, ...) {
+    if (*n >= sizeof io_buf) { return -1; }
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(io_buf + *n, sizeof io_buf - *n, fmt, ap);
+    va_end(ap);
+    if (w < 0 || (size_t)w >= sizeof io_buf - *n) { return -1; }
+    *n += (size_t)w;
+    return 0;
+}
+
+static void op_pio_status(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    pio_res_block_t blocks[3];
+    size_t nb = 0;
+    if (pio_res_stat(blocks, 3, &nb) != PIO_OK) {
+        api_reply_err(reply, ctx, id, "pio", "pio stat failed");
+        return;
+    }
+    /* One block at a time. Six programs is every machine this image runs
+     * plus a strip; more than that replies with an error instead of a
+     * truncated object. */
+    static pio_res_prog_t rows[6];
+    size_t n = 0;
+    if (io_add(&n, "{\"blocks\":[") < 0) { goto nospace; }
+    for (size_t i = 0; i < nb; i++) {
+        size_t np = 0;
+        if (pio_res_programs((int)i, rows, 6, &np) != PIO_OK) {
+            api_reply_err(reply, ctx, id, "pio", "pio programs failed");
+            return;
+        }
+        size_t show = np < 6 ? np : 6;
+        const pio_res_block_t *b = &blocks[i];
+        if (io_add(&n, "%s{\"pio\":%u,\"gpio_base\":%d,\"instr_used\":%u,\"instr_free\":%u,"
+                    "\"instr_map\":%u,\"sm_free\":%u,\"irq_used\":%u,\"irq_lines\":%u,\"programs\":[",
+                    i ? "," : "", (unsigned)i, (int)b->gpio_base, (unsigned)b->instr_used,
+                    (unsigned)b->instr_free, (unsigned)b->instr_map, (unsigned)b->sm_free,
+                    (unsigned)b->irq_used, (unsigned)b->irq_line_used) < 0) {
+            goto nospace;
+        }
+        for (size_t p = 0; p < show; p++) {
+            char own[24], esc[48];
+            memcpy(own, rows[p].owner, sizeof own);
+            own[sizeof own - 1] = 0;
+            api_json_escape(esc, sizeof esc, own);
+            if (io_add(&n, "%s{\"owner\":\"%s\",\"offset\":%u,\"length\":%u,\"origin\":%d,"
+                        "\"sm\":%u,\"irq\":%u,\"prot\":%u}",
+                        p ? "," : "", esc, (unsigned)rows[p].offset, (unsigned)rows[p].length,
+                        (int)rows[p].origin, (unsigned)rows[p].sm_mask, (unsigned)rows[p].irq_flags,
+                        (unsigned)rows[p].prot) < 0) {
+                goto nospace;
+            }
+        }
+        if (np > show) {
+            if (io_add(&n, "],\"more\":%u}", (unsigned)(np - show)) < 0) { goto nospace; }
+        } else if (io_add(&n, "]}") < 0) {
+            goto nospace;
+        }
+    }
+    if (io_add(&n, "]}") < 0) { goto nospace; }
+    api_reply_ok(reply, ctx, id, io_buf);
+    return;
+nospace:
+    api_reply_err(reply, ctx, id, "pio", "pio status did not fit");
+}
+
 static const op_def_t io_ops_tbl[] = {
     { "pins.map",     op_pins_map },
     { "pins.claim",   op_pins_claim },
     { "pins.release", op_pins_release },
+    { "pio.status",   op_pio_status },
 #if CONFIG_IO_GPIO
     { "gpio.set",     op_gpio_set },
     { "gpio.get",     op_gpio_get },

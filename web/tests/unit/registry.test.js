@@ -6,6 +6,8 @@ test('the C1000 is a PPS, the A2687 a charger, the Pinecil itself', () => {
   assert.equal(pluginFor('profile.anker.telemetry', { product_code: 'A1761' }).id, 'anker-pps');
   assert.equal(pluginFor('profile.anker.telemetry', { product_code: 'A2687' }).id, 'anker-scp');
   assert.equal(pluginFor('profile.pinecil.telemetry', {}).id, 'pinecil');
+  assert.equal(pluginFor('profile.ws2812.telemetry', {}).id, 'ws2812');
+  assert.equal(pluginFor('profile.ws2812.telemetry', {}).name(), 'WS2812');
 });
 
 test('an unknown device or profile still gets the generic telemetry window', () => {

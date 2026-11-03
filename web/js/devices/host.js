@@ -11,9 +11,11 @@
 //   unmounted    the window is parked or closed: its DOM is emptied, every
 //                subscription it made is dropped through its bus scope, and
 //                the stylesheet goes with the type's last mounted window.
-//   gone         profile.anker.gone removes that device's windows at once,
-//                including one that is on screen. Silence still does the
-//                same after GONE_MS, but only once none of them are open.
+//   gone         profile.<name>.gone removes that device's windows at once,
+//                including one that is on screen. An address picks one
+//                device (Anker). Without one, the device is the one keyed
+//                by profile.<name>.telemetry. Silence still does the same
+//                after GONE_MS, but only once none of them are open.
 //
 // "Unloading" cannot mean evicting the module -- no browser does that -- so
 // it means nothing of the plugin remains wired to the page: no DOM, no
@@ -126,8 +128,9 @@ export class DeviceHost {
   }
 
   _onEvent(topic, d) {
-    if (topic === 'profile.anker.gone') {
-      this._retire(d?.addr);
+    const gone = /^profile\.(.+)\.gone$/.exec(topic);
+    if (gone) {
+      this._retire(gone[1], d);
       return;
     }
     if (!topic.endsWith('.telemetry') || !d || typeof d !== 'object') return;
@@ -169,12 +172,15 @@ export class DeviceHost {
     this.app.log('device', `${dev.name} discovered — open it from any window's picker`);
   }
 
-  // Anker stop publishes profile.anker.gone. Drop the windows now, even if
-  // one is open. The tile keeps the pane id, so the next session lands there.
-  _retire(addr) {
-    if (typeof addr !== 'string' || !addr) return;
-    const dev = this.devices.get(deviceKey('profile.anker.gone', { addr }));
-    if (!dev) return;
+  // profile.<name>.gone drops the windows now, even if one is open.
+  // The tile keeps the pane id, so the next session lands there.
+  // A bare gone does not match a device that has an address: that key is
+  // the topic, and the device's key is the address.
+  _retire(name, d) {
+    const topic = `profile.${name}.telemetry`;
+    const addr = d && typeof d.addr === 'string' ? d.addr : '';
+    const dev = this.devices.get(deviceKey(topic, addr ? { addr } : {}));
+    if (!dev || (!addr && dev.addr)) return;
     for (const id of dev.windows.keys()) this.app.removeWindow(id);
     this.devices.delete(dev.key);
     this.app.log('device', `${dev.name} stopped — its windows were removed`);

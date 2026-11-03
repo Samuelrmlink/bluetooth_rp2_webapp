@@ -102,7 +102,22 @@ export function buildControl(c, onWrite) {
       unit.textContent = c.unit || '';
       if (c.kind === 'slider') unit.className = 'ctl-unit';
       // Commit on change (Enter, blur, slider release), never per keystroke.
-      input.addEventListener('change', () => onWrite(Number(input.value)));
+      // `live` also commits a number while it is edited, so a count follows
+      // the spinner. Out-of-range drafts are not sent.
+      let liveTimer = 0;
+      const commit = () => onWrite(Number(input.value));
+      input.addEventListener('change', () => {
+        if (liveTimer) { clearTimeout(liveTimer); liveTimer = 0; }
+        commit();
+      });
+      if (c.live && c.kind === 'number') {
+        input.addEventListener('input', () => {
+          const n = Number(input.value);
+          if (!Number.isFinite(n) || (c.min != null && n < c.min) || (c.max != null && n > c.max)) return;
+          clearTimeout(liveTimer);
+          liveTimer = setTimeout(() => { liveTimer = 0; commit(); }, 50);
+        });
+      }
       set = (v) => {
         if (v == null || document.activeElement === input) return;
         input.value = String(v);
