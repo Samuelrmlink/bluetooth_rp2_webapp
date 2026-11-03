@@ -587,10 +587,10 @@ without stranding modules.
 | 10 | `fs` | gateway | `lfs:/` and `sd:/` files: open/read/write/seek/size/close/stat/list/mkdir/remove/rename/media |
 | 11 | `net` | gateway | the HTTP(S) client: start (into a buffer or a `lfs:/` file), status, cancel, completion callback |
 | 12 | `bt` | gateway | LE central: scan table (filter by name prefix / 128-bit UUID), connect, GATT lookup by service + characteristic UUID + instance, read, write with/without response with completion, notify/indicate, MTU; events through a listener |
-| 15 | `pio` | gateway, Pico only | claim or load a state machine, FIFOs, one handler per CPU IRQ line. A protected machine cannot be rewritten |
+| 15 | `pio` | gateway, Pico only | claim or load a state machine, FIFOs, one handler per CPU IRQ line, a paced DMA feed into a machine the module owns. A protected machine cannot be rewritten or fed |
 | 16 | `lua` | Lua layer, optional | `pexlua` (§7.3, §9) |
 
-Group 15 is the claim ledger: a query reads the recorded instruction words, offset, and owner, because `INSTR_MEM` is write-only, and the C5 image does not register the group, so `pex_has(15)` is 0. `pex_pio_load` (group 1.1) allocates a machine and writes a program into a free gap. It does not rewrite a program that is already there. The CYW43439 bus is protected, so a load that would change its instructions, its machine, or its block's GPIO base is refused. A module program such as WS2812 is not protected, and its owner can release it. A module cannot mark its own program protected.
+Group 15 is the claim ledger: a query reads the recorded instruction words, offset, and owner, because `INSTR_MEM` is write-only, and the C5 image does not register the group, so `pex_has(15)` is 0. `pex_pio_load` (group 1.1) allocates a machine and writes a program into a free gap. It does not rewrite a program that is already there. The CYW43439 bus is protected, so a load that would change its instructions, its machine, or its block's GPIO base is refused. A module program such as WS2812 is not protected, and its owner can release it. A module cannot mark its own program protected. Group 1.2 feeds that machine from the module's own RAM. The firmware owns the DMA channel (at most four module channels), refuses a protected machine, and delivers each completion on the main loop. The interrupt only starts the one armed section.
 
 Exact signatures: **appendix A** (generated from `host_api.json`).
 Asynchronous results (the card, HTTP, BLE) arrive as **callbacks from the
@@ -1840,9 +1840,9 @@ typedef struct {
 | `int pex_bt_classic_state(int handle, pex_cl_info_t *out)` | `66a31654` | 1.0 |  |
 | `int pex_bt_classic_forget(const uint8_t *addr)` | `f4eb47c2` | 1.0 | drop that address's link key. Does not close a session |
 
-### A.15 `pio` -- group 15, v1.1
+### A.15 `pio` -- group 15, v1.2
 
-RP2040/RP2350 PIO claim ledger. Instruction words are shadowed here because INSTR_MEM is write-only. A Pico build registers it; other chips do not, so import it weak and check pex_has. A refusal returns a negative PEX_E* and the ledger prints one console line. This wrapper does not print another. pex_pio_load places a program in a free gap and will not rewrite a program that is already loaded. A protected program (the CYW43439 bus) cannot be released or reconfigured, and its block keeps its GPIO base. A module cannot mark its own program protected.
+RP2040/RP2350 PIO claim ledger. Instruction words are shadowed here because INSTR_MEM is write-only. A Pico build registers it; other chips do not, so import it weak and check pex_has. A refusal returns a negative PEX_E* and the ledger prints one console line. This wrapper does not print another. pex_pio_load places a program in a free gap and will not rewrite a program that is already loaded. A protected program (the CYW43439 bus) cannot be released or reconfigured, and its block keeps its GPIO base. A module cannot mark its own program protected. Group 1.2 feeds a machine the caller owns from a buffer in that module's RAM. The module does not name a DMA channel. A protected machine is refused. At most four module channels. The completion callback runs on the main loop.
 
 ```c
 typedef struct {
@@ -1882,6 +1882,7 @@ typedef void (*pex_pio_irq_fn)(void *arg);
 #define PEX_PIO_JOIN_NONE 0u
 #define PEX_PIO_JOIN_TX   1u
 #define PEX_PIO_JOIN_RX   2u
+typedef void (*pex_pio_dma_fn)(void *arg);
 ```
 
 | symbol | FNV-1a | since | |
@@ -1899,7 +1900,12 @@ typedef void (*pex_pio_irq_fn)(void *arg);
 | `int pex_pio_get(int handle, uint32_t *word)` | `f27c6266` | 1.0 | one word from this machine's RX FIFO. PEX_EAGAIN when it is empty |
 | `int pex_pio_levels(int handle, uint32_t *tx_level, uint32_t *rx_level)` | `d0730c61` | 1.0 | how many words are in this machine's FIFOs. A joined FIFO is 8 in that direction and 0 in the other |
 | `int pex_pio_irq(int handle, int line, uint32_t sources, pex_pio_irq_fn fn, void *arg)` | `ab9f8380` | 1.0 | one handler for CPU IRQ line 0 or 1 of this machine's block. sources is PEX_PIO_IRQ_RX, TX, FLAG. A second handler on that line is PEX_EBUSY. The callback runs on the main loop, never from the interrupt |
-| `int pex_pio_release(int handle)` | `a20fcb4b` | 1.0 | gives this handle back. The instruction shadow is cleared when the last machine on that range is gone |
+| `int pex_pio_release(int handle)` | `a20fcb4b` | 1.0 | gives this handle back. The instruction shadow is cleared when the last machine on that range is gone. A DMA feed on this handle is aborted first |
+| `int pex_pio_dma_tx(int handle, const uint32_t *src, uint32_t nwords)` | `ab92436d` | 1.2 | start a paced copy of nwords (1..65535) into this machine's TX FIFO. src is 32-bit words in this module's RAM. PEX_EBUSY when a transfer is already running (arm the next section). PEX_ENOMEM when four module channels are already taken or the chip has none free. A protected machine is refused |
+| `int pex_pio_dma_arm(int handle, const uint32_t *src, uint32_t nwords)` | `4a199629` | 1.2 | store one next section. If a transfer is running, the DMA interrupt starts it when the current one finishes. If nothing is running, it starts now. A second arm while one is stored is PEX_EAGAIN |
+| `int pex_pio_dma_idle(int handle)` | `b87c615f` | 1.2 | 1 when nothing is running and nothing is armed on this handle |
+| `int pex_pio_dma_zero(int handle, uint32_t nwords)` | `60d6bf17` | 1.2 | abort the current color transfer, clear the TX FIFO, and shift nwords zeros from one firmware word. The read address does not advance. Used to blank a strip without a buffer the size of the string |
+| `int pex_pio_dma_listen(int handle, pex_pio_dma_fn fn, void *arg)` | `bca9e81a` | 1.2 | one completion callback for this handle. The DMA interrupt does not enter the module. The callback runs on the main loop, once per finished section, including a section that started an armed buffer. fn NULL clears it |
 
 ### A.16 `lua` -- group 16, v1.0
 

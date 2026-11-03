@@ -951,6 +951,12 @@ int pio_res_check(int handle, const char *owner) {
     return PIO_OK;
 }
 
+int pio_res_protected(int handle) {
+    slot_t *s = slot_of(handle);
+    if (!s) { return -1; }
+    return slot_prot(s) ? 1 : 0;
+}
+
 int pio_res_block(int handle) {
     slot_t *s = slot_of(handle);
     return s ? s->block : -1;

@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "autoconf.h"
+#include "io/pio_dma.h"
 #include "io/pio_res.h"
 
 _Static_assert(PIO_EINVAL == PEX_EINVAL, "pio EINVAL");
@@ -33,12 +34,33 @@ static void deliver(void *mod, pio_res_irq_fn fn, void *arg) {
     pex_call((pex_mod_t *)mod, (uint32_t)(uintptr_t)fn, (uint32_t)(uintptr_t)arg, 0, 0, 0);
 }
 
-void pex_gw_pio_poll(void) { pio_res_poll(deliver); }
+static void deliver_dma(void *mod, pio_dma_fn fn, void *arg) {
+    deliver(mod, fn, arg);
+}
+
+void pex_gw_pio_poll(void) {
+    pio_res_poll(deliver);
+    pio_dma_poll(deliver_dma);
+}
 
 void pex_gw_pio_unload(pex_mod_t *m) {
     pex_info_t in;
     if (!m || pex_info(m, &in) != PEX_OK || !in.name) { return; }
+    /* DMA first. A completion must not touch a FIFO or a buffer this unload
+     * is about to free. */
+    pio_dma_abort_owner(in.name);
     pio_res_release_owner(in.name);
+}
+
+/* The caller's RW. An empty range makes the source check refuse. */
+static void rw_span(uintptr_t *lo, uintptr_t *hi) {
+    *lo = 0;
+    *hi = 0;
+    pex_mod_t *m = pex_self();
+    pex_info_t in;
+    if (!m || pex_info(m, &in) != PEX_OK || !in.rw || !in.rw_size) { return; }
+    *lo = in.rw;
+    *hi = in.rw + in.rw_size;
 }
 
 int pex_pio_stat(pex_pio_block_t *out, size_t cap, size_t *n) {
@@ -167,5 +189,32 @@ int pex_pio_irq(int handle, int line, uint32_t sources, pex_pio_irq_fn fn, void 
 int pex_pio_release(int handle) {
     int rc = gate(handle);
     if (rc < 0) { return rc; }
+    pio_dma_abort(handle);
     return pio_res_release(handle);
+}
+
+int pex_pio_dma_tx(int handle, const uint32_t *src, uint32_t nwords) {
+    uintptr_t lo, hi;
+    rw_span(&lo, &hi);
+    return pio_dma_tx(handle, mod_name(), src, nwords, lo, hi);
+}
+
+int pex_pio_dma_arm(int handle, const uint32_t *src, uint32_t nwords) {
+    uintptr_t lo, hi;
+    rw_span(&lo, &hi);
+    return pio_dma_arm(handle, mod_name(), src, nwords, lo, hi);
+}
+
+int pex_pio_dma_idle(int handle) {
+    return pio_dma_idle(handle, mod_name());
+}
+
+int pex_pio_dma_zero(int handle, uint32_t nwords) {
+    return pio_dma_zero(handle, mod_name(), nwords);
+}
+
+int pex_pio_dma_listen(int handle, pex_pio_dma_fn fn, void *arg) {
+    int rc = gate(handle);
+    if (rc < 0) { return rc; }
+    return pio_dma_listen(handle, mod_name(), fn, arg, pex_self());
 }

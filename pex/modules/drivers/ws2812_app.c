@@ -4,15 +4,20 @@
  *
  * The four instruction words are pioasm of ws2812.pio (origin 0).
  * The ledger adds the load offset to each JMP. Pixels are GRB in the
- * top 24 bits: the machine shifts left and autopulls at 24. A joined
- * TX FIFO holds 8 pixels. The line sits low when that FIFO runs dry,
- * and a low of more than about 50 us latches the strip, so the rest
- * of a frame is written here before that gap. Off clocks a frame of
- * zeros and waits for that latch before the pin is released. */
+ * top 24 bits. Two section buffers of 256 pixels are enough for any
+ * length: DMA shifts the current section into the TX FIFO while the
+ * main loop renders the next one. The joined FIFO holds eight pixels
+ * after a section ends, which is the time the interrupt has to start
+ * the armed section. The last section is not followed by another, so
+ * the line stays low and the strip latches. Off asks the firmware to
+ * clock zeros, and the pin stays a PIO output until that transfer is
+ * idle and the latch time has passed. */
 #include "pex.h"
 
-#define WS_MAX 64
-#define WS_FRAME_MS 20
+#define WS_SECTION 256
+#define WS_MAX 65535
+#define WS_FRAME_US 20000u
+#define WS_LATCH_US 300u
 
 /* pioasm 2.3.0, .side_set 1, T1=3 T2=3 T3=4:
  *   0: out x, 1 side 0 [3]
@@ -30,11 +35,21 @@ static int s_count;
 static int s_mode;                 /* 0 solid, 1 rainbow, 2 breathe, 3 chase */
 static int s_hue, s_sat, s_val, s_speed;
 static uint32_t s_phase;
-static int s_lit;                 /* pixels the last frame addressed */
+static int s_lit;                  /* pixels the last finished frame addressed */
 static int s_pub;
-static uint32_t s_pix[WS_MAX];
+static int s_blank;
+static int s_reclaim;
+static int s_frame;
+static int s_span;                 /* pixels this frame will clock, tail included */
+static int s_sent;                 /* pixels already given to DMA this frame */
+static int s_free;                 /* section half DMA is not reading */
+static int s_color;                /* LED count captured when the frame started */
+static int s_fmode, s_fhue, s_fsat, s_fval;
+static uint32_t s_fphase;
+static uint64_t s_pass_us;
 static char s_emit[480];
 static char s_status[96];
+static uint32_t s_sec[2][WS_SECTION];
 
 static int streq(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
@@ -80,6 +95,7 @@ static const char *pio_why(int rc) {
     if (rc == PEX_ENOMEM) { return "PIO has no free state machine"; }
     if (rc == PEX_EINVAL) { return "PIO refused the pin or the program (see the console)"; }
     if (rc == PEX_ENOTSUP) { return "this board has no PIO ledger"; }
+    if (rc == PEX_EAGAIN) { return "DMA already has a section waiting"; }
     return "PIO claim failed (see the console)";
 }
 
@@ -103,6 +119,7 @@ static void describe(const char *err) {
     char *p = s_status;
     char *end = s_status + sizeof s_status;
     if (err && err[0]) { put_str(p, end, err); return; }
+    if (s_blank) { put_str(p, end, "blanking"); return; }
     if (s_on && s_handle >= 0) {
         p = put_str(p, end, "driving GP");
         p = put_u(p, end, (unsigned)s_pin);
@@ -179,133 +196,168 @@ static void hsv_rgb(int h, int s, int v, uint8_t *r, uint8_t *g, uint8_t *b) {
     *b = (uint8_t)bb;
 }
 
-static void render(void) {
-    int n = s_count;
-    if (n < 1) { n = 1; }
-    if (n > WS_MAX) { n = WS_MAX; }
-    int shift = (int)(s_phase % 360u);
-    int head = n ? (int)((s_phase / 24u) % (uint32_t)n) : 0;
-    int breathe = (int)((s_phase / 8u) % 256u);
+/* LEDs at and after s_color are the tail a shorter count still has to darken. */
+static void render_range(uint32_t *dst, int start, int n) {
+    int color_n = s_color;
+    if (color_n < 1) { color_n = 1; }
+    int shift = (int)(s_fphase % 360u);
+    int head = (int)((s_fphase / 24u) % (uint32_t)color_n);
+    int breathe = (int)((s_fphase / 8u) % 256u);
     if (breathe > 127) { breathe = 255 - breathe; }
     for (int i = 0; i < n; i++) {
-        int h = s_hue;
-        int v = s_val;
-        if (s_mode == 1) {
-            h = s_hue + (i * 360) / n + shift;
-        } else if (s_mode == 2) {
-            v = s_val * breathe / 127;
-        } else if (s_mode == 3) {
-            int d = i - head;
+        int led = start + i;
+        if (led >= color_n) { dst[i] = 0; continue; }
+        int h = s_fhue;
+        int v = s_fval;
+        if (s_fmode == 1) {
+            h = s_fhue + (led * 360) / color_n + shift;
+        } else if (s_fmode == 2) {
+            v = s_fval * breathe / 127;
+        } else if (s_fmode == 3) {
+            int d = led - head;
             if (d < 0) { d = -d; }
-            int wrap = n - d;
+            int wrap = color_n - d;
             if (wrap < d) { d = wrap; }
-            if (d == 0) { v = s_val; }
-            else if (d == 1) { v = s_val / 6; }
+            if (d == 0) { v = s_fval; }
+            else if (d == 1) { v = s_fval / 6; }
             else { v = 0; }
-            h = s_hue + shift;
+            h = s_fhue + shift;
         }
         uint8_t r, g, b;
-        hsv_rgb(h, s_sat, v, &r, &g, &b);
-        s_pix[i] = ((uint32_t)g << 24) | ((uint32_t)r << 16) | ((uint32_t)b << 8);
+        hsv_rgb(h, s_fsat, v, &r, &g, &b);
+        dst[i] = ((uint32_t)g << 24) | ((uint32_t)r << 16) | ((uint32_t)b << 8);
     }
 }
 
-/* One pixel is 24 bits at 800 kHz, 30 us. The joined FIFO is 8 deep. */
-#define WS_FIFO 8
-#define WS_LATCH_US 300u
-#define WS_DRAIN_US 5000u
+static int section_n(int sent, int span) {
+    int left = span - sent;
+    if (left > WS_SECTION) { left = WS_SECTION; }
+    if (left < 0) { left = 0; }
+    return left;
+}
 
 static void wait_us(uint32_t us) {
     uint64_t t0 = pex_us();
     while ((uint32_t)(pex_us() - t0) < us) { }
 }
 
-static int fifo_room(void) {
-    uint32_t tx = 0;
-    if (s_handle < 0) { return -1; }
-    if (pex_pio_levels(s_handle, &tx, 0) < 0) { return -1; }
-    if (tx >= (uint32_t)WS_FIFO) { return 0; }
-    return (int)(WS_FIFO - tx);
-}
-
-/* Block until every queued word has been pulled, or the machine is stuck. */
-static int wait_empty(void) {
-    uint64_t t0 = pex_us();
-    for (;;) {
-        int room = fifo_room();
-        if (room < 0) { return -1; }
-        if (room >= WS_FIFO) { return 0; }
-        if ((uint32_t)(pex_us() - t0) > WS_DRAIN_US) { return -1; }
-    }
-}
-
-/* Shift s_pix[0..n) out as one frame. A low gap in the middle would
- * latch early, so a full FIFO is waited out here, for one pixel time. */
-static int send_frame(int n) {
-    int i = 0;
-    int stalls = 0;
-    if (n < 1 || n > WS_MAX) { return -1; }
-    if (wait_empty() < 0) { return -1; }
-    wait_us(WS_LATCH_US);
-    while (i < n) {
-        int room = fifo_room();
-        int wrote = 0;
-        if (room < 0) { return -1; }
-        while (i < n && room > 0) {
-            int rc = pex_pio_put(s_handle, s_pix[i]);
-            if (rc == PEX_EAGAIN) { break; }
-            if (rc < 0) { return -1; }
-            i++;
-            room--;
-            wrote = 1;
-        }
-        if (wrote) { stalls = 0; continue; }
-        wait_us(20);
-        if (++stalls > 16) { return -1; }
-    }
-    return 0;
-}
-
-/* Zeros for every LED this claim has addressed, then hold the line low
- * until the strip latches. Releasing the pin before that leaves the
- * last colors lit. */
-static void blank_strip(void) {
-    int n = s_count;
-    if (s_lit > n) { n = s_lit; }
-    if (n < 1) { n = 1; }
-    if (n > WS_MAX) { n = WS_MAX; }
-    for (int i = 0; i < n; i++) { s_pix[i] = 0; }
-    if (send_frame(n) == 0 && wait_empty() == 0) { wait_us(WS_LATCH_US); }
-    s_lit = 0;
-}
-
-static void release_strip(void) {
+static void drop_handle(void) {
     if (s_handle < 0) { return; }
-    blank_strip();
     pex_pio_enable(s_handle, 0);
     pex_pio_release(s_handle);
     s_handle = -1;
-    s_lit = 0;
 }
 
-static void start_frame(void) {
-    int n, span;
-    if (!s_on || s_handle < 0) { return; }
+static int claim_strip(void);
+static void finish_blank(void);
+
+static int start_pass(void) {
+    int n, n2, rc;
+    if (s_handle < 0 || !s_on || s_blank || s_frame) { return PEX_OK; }
     if (s_speed > 0) { s_phase += (uint32_t)s_speed; }
-    n = s_count;
+    s_color = s_count;
+    if (s_color < 1) { s_color = 1; }
+    s_span = s_lit > s_color ? s_lit : s_color;
+    s_sent = 0;
+    s_free = 0;
+    s_fmode = s_mode;
+    s_fhue = s_hue;
+    s_fsat = s_sat;
+    s_fval = s_val;
+    s_fphase = s_phase;
+    s_pass_us = pex_us();
+    n = section_n(0, s_span);
+    render_range(s_sec[0], 0, n);
+    rc = pex_pio_dma_tx(s_handle, s_sec[0], (uint32_t)n);
+    if (rc < 0) {
+        describe("dma failed");
+        s_on = 0;
+        s_frame = 0;
+        drop_handle();
+        return rc;
+    }
+    s_sent = n;
+    s_frame = 1;
+    if (s_sent >= s_span) { return PEX_OK; }
+    n2 = section_n(s_sent, s_span);
+    render_range(s_sec[1], s_sent, n2);
+    if (pex_pio_dma_arm(s_handle, s_sec[1], (uint32_t)n2) == 0) { s_sent += n2; }
+    return PEX_OK;
+}
+
+static void feed_more(void) {
+    int n;
+    if (s_handle < 0 || !s_frame) { return; }
+    if (s_sent < s_span) {
+        n = section_n(s_sent, s_span);
+        render_range(s_sec[s_free], s_sent, n);
+        if (pex_pio_dma_arm(s_handle, s_sec[s_free], (uint32_t)n) == 0) {
+            s_sent += n;
+            s_free ^= 1;
+        } else if (pex_pio_dma_idle(s_handle) == 1) {
+            s_frame = 0;
+            describe("dma failed");
+        }
+        return;
+    }
+    if (pex_pio_dma_idle(s_handle) == 1) {
+        s_frame = 0;
+        s_lit = s_color;
+    }
+}
+
+static void begin_blank(void) {
+    int n = s_count;
+    if (s_lit > n) { n = s_lit; }
+    if (s_span > n) { n = s_span; }
     if (n < 1) { n = 1; }
     if (n > WS_MAX) { n = WS_MAX; }
-    span = s_lit > n ? s_lit : n;
-    render();
-    for (int i = n; i < span; i++) { s_pix[i] = 0; }
-    if (send_frame(span) == 0) { s_lit = n; }
+    s_frame = 0;
+    s_blank = 1;
+    describe(0);
+    if (s_handle < 0) { s_blank = 0; return; }
+    if (pex_pio_dma_zero(s_handle, (uint32_t)n) < 0) {
+        drop_handle();
+        s_blank = 0;
+        s_lit = 0;
+        s_span = 0;
+        describe("blank failed");
+    }
 }
 
-static int tick(void *arg) {
+static void finish_blank(void) {
+    int reclaim;
+    if (!s_blank || s_handle < 0) { return; }
+    if (pex_pio_dma_idle(s_handle) != 1) { return; }
+    wait_us(WS_LATCH_US);
+    reclaim = s_reclaim && s_on && s_running;
+    drop_handle();
+    s_blank = 0;
+    s_lit = 0;
+    s_span = 0;
+    s_frame = 0;
+    s_reclaim = 0;
+    if (reclaim) {
+        int rc = claim_strip();
+        if (rc < 0) {
+            s_on = 0;
+            describe((rc == PEX_EINVAL && ws_div() == 0) ? "clock is unknown" : pio_why(rc));
+        } else {
+            describe(0);
+            start_pass();
+        }
+    } else {
+        s_on = 0;
+        describe(0);
+    }
+    if (s_running) { publish(); }
+}
+
+static void on_dma(void *arg) {
     (void)arg;
-    if (s_on) { start_frame(); }
-    if (++s_pub >= 25) { s_pub = 0; publish(); }
-    return PEX_TASK_AGAIN;
+    if (s_handle < 0) { return; }
+    if (s_blank) { finish_blank(); return; }
+    if (s_frame) { feed_more(); }
 }
 
 static int claim_strip(void) {
@@ -334,12 +386,14 @@ static int claim_strip(void) {
     c.clkdiv = div;
     int rc = pex_pio_init(h, &c);
     if (rc >= 0) { rc = pex_pio_enable(h, 1); }
+    if (rc >= 0) { rc = pex_pio_dma_listen(h, on_dma, 0); }
     if (rc < 0) {
         pex_pio_release(h);
         return rc;
     }
     s_handle = h;
-    s_lit = 0;
+    s_frame = 0;
+    s_sent = 0;
     return PEX_OK;
 }
 
@@ -355,7 +409,26 @@ static void defaults(void) {
     s_phase = 0;
     s_handle = -1;
     s_lit = 0;
+    s_blank = 0;
+    s_reclaim = 0;
+    s_frame = 0;
+    s_span = 0;
+    s_sent = 0;
+    s_free = 0;
+    s_pass_us = 0;
     describe(0);
+}
+
+static int tick(void *arg) {
+    (void)arg;
+    if (s_blank) {
+        finish_blank();
+    } else if (s_on && s_handle >= 0 && !s_frame && pex_pio_dma_idle(s_handle) == 1 &&
+               pex_us() - s_pass_us >= WS_FRAME_US) {
+        start_pass();
+    }
+    if (++s_pub >= 25) { s_pub = 0; publish(); }
+    return PEX_TASK_AGAIN;
 }
 
 static int op_set(void *arg, const char *params, char *reply, size_t cap) {
@@ -382,7 +455,7 @@ static int op_set(void *arg, const char *params, char *reply, size_t cap) {
     if (pin < 0 || pin > 29) { return reply_msg(reply, cap, "pin is 0-29 on this board", PEX_EINVAL); }
     const char *blocked = pin_reason(pin);
     if (blocked) { return reply_msg(reply, cap, blocked, PEX_EINVAL); }
-    if (count < 1 || count > WS_MAX) { return reply_msg(reply, cap, "count is 1-64", PEX_EINVAL); }
+    if (count < 1 || count > WS_MAX) { return reply_msg(reply, cap, "count is 1-65535", PEX_EINVAL); }
     if (hue < 0 || hue > 359) { return reply_msg(reply, cap, "hue is 0-359", PEX_EINVAL); }
     if (sat < 0 || sat > 255 || val < 0 || val > 255) {
         return reply_msg(reply, cap, "saturation and brightness are 0-255", PEX_EINVAL);
@@ -399,30 +472,40 @@ static int op_set(void *arg, const char *params, char *reply, size_t cap) {
     s_mode = mode;
 
     if (!on) {
-        release_strip();
         s_on = 0;
-        describe(0);
+        s_reclaim = 0;
+        if (s_handle >= 0 && !s_blank) { begin_blank(); }
+        else if (!s_blank) { describe(0); }
+        publish();
+    } else if (s_blank) {
+        s_on = 1;
+        s_reclaim = 1;
         publish();
     } else if (s_handle < 0 || pin_changed) {
-        release_strip();
-        int rc = claim_strip();
-        if (rc < 0) {
-            s_on = 0;
-            const char *why = (rc == PEX_EINVAL && ws_div() == 0) ? "clock is unknown" : pio_why(rc);
-            describe(why);
+        if (s_handle >= 0) {
+            s_on = 1;
+            s_reclaim = 1;
+            begin_blank();
             publish();
-            return reply_msg(reply, cap, why, rc);
+        } else {
+            int rc = claim_strip();
+            if (rc < 0) {
+                s_on = 0;
+                const char *why = (rc == PEX_EINVAL && ws_div() == 0) ? "clock is unknown" : pio_why(rc);
+                describe(why);
+                publish();
+                return reply_msg(reply, cap, why, rc);
+            }
+            s_on = 1;
+            describe(0);
+            pex_log(PEX_LOG_INFO, "ws2812: driving GP%d, %d LEDs", s_pin, s_count);
+            publish();
+            start_pass();
         }
-        s_on = 1;
-        describe(0);
-        pex_log(PEX_LOG_INFO, "ws2812: driving GP%d, %d LEDs", s_pin, s_count);
-        publish();
-        start_frame();
     } else {
         s_on = 1;
         describe(0);
         publish();
-        start_frame();
     }
 
     pex_jw_t w;
@@ -444,11 +527,11 @@ int pex_main(const pex_host_t *host, uint32_t reason, void *arg) {
     case PEX_INIT:
         return pex_bus_op("ws2812.set", op_set, 0);
     case PEX_APP_RUN:
-        release_strip();
+        if (s_handle >= 0) { drop_handle(); }
         defaults();
         s_running = 1;
         s_pub = 0;
-        s_task = pex_sched_every(WS_FRAME_MS, tick, 0);
+        s_task = pex_sched_every(20, tick, 0);
         if (s_task <= 0) { s_running = 0; return s_task < 0 ? s_task : PEX_ENOMEM; }
         publish();
         pex_log(PEX_LOG_INFO, "ws2812: idle, data pin GP%d, strip off until the window turns it on", s_pin);
@@ -456,14 +539,17 @@ int pex_main(const pex_host_t *host, uint32_t reason, void *arg) {
     case PEX_APP_STOP:
         s_running = 0;
         s_on = 0;
-        release_strip();
+        s_reclaim = 0;
+        if (s_handle >= 0 && !s_blank) { begin_blank(); }
         if (s_task > 0) { pex_sched_cancel(s_task); s_task = 0; }
         pex_bus_emit("profile.ws2812.gone", "{}");
         return PEX_OK;
     case PEX_DEINIT:
         s_running = 0;
         s_on = 0;
-        release_strip();
+        s_blank = 0;
+        s_reclaim = 0;
+        drop_handle();
         if (s_task > 0) { pex_sched_cancel(s_task); s_task = 0; }
         return PEX_OK;
     default:

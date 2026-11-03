@@ -196,8 +196,8 @@ endif()
 
 # PIO claim ledger. The SDIO driver and the PEX pio group both use it, so it
 # is part of every image. The port is the only file that includes the SDK.
-target_sources(btgw PRIVATE src/io/pio_res.c src/io/pio_port_pico.c)
-target_link_libraries(btgw hardware_pio hardware_gpio hardware_irq)
+target_sources(btgw PRIVATE src/io/pio_res.c src/io/pio_dma.c src/io/pio_port_pico.c)
+target_link_libraries(btgw hardware_pio hardware_gpio hardware_irq hardware_dma)
 
 if(CONFIG_IO_PINS)
     target_sources(btgw PRIVATE src/io/pins.c src/io/io_ops.c)

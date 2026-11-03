@@ -6,7 +6,7 @@
 export const controls = [
   { kind: 'switch', field: 'on', label: 'On' },
   { kind: 'number', field: 'pin', label: 'Data pin', min: 0, max: 29, step: 1 },
-  { kind: 'number', field: 'count', label: 'LEDs', min: 1, max: 64, step: 1, live: true },
+  { kind: 'number', field: 'count', label: 'LEDs', min: 1, max: 65535, step: 1, live: true },
   { kind: 'select', field: 'mode', label: 'Mode', options: [
     ['solid', 'Solid'],
     ['rainbow', 'Rainbow'],

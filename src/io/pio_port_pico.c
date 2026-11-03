@@ -9,9 +9,12 @@
 #include <string.h>
 
 #include "autoconf.h"
+#include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/sync.h"
+#include "io/pio_dma.h"
 #include "io/pio_res.h"
 #if CONFIG_IO_PINS
 #include "io/pins.h"
@@ -286,4 +289,75 @@ void pio_port_gpio_release(int pin) {
     gpio_set_function((uint)pin, GPIO_FUNC_SIO);
     gpio_set_dir((uint)pin, GPIO_IN);
     gpio_disable_pulls((uint)pin);
+}
+
+/* DMA_IRQ_0, shared. DMA_IRQ_1 belongs to the SPI bus. */
+static uint32_t s_dma_ours;
+static uint8_t s_dma_irq;
+
+static void dma_irq(void) {
+    for (int ch = 0; ch < 16; ch++) {
+        if ((s_dma_ours & (1u << ch)) == 0) { continue; }
+        if (!dma_irqn_get_channel_status(0, (uint)ch)) { continue; }
+        dma_irqn_acknowledge_channel(0, (uint)ch);
+        pio_dma_hw_done(ch);
+    }
+}
+
+uint32_t pio_port_lock(void) { return save_and_disable_interrupts(); }
+void pio_port_unlock(uint32_t key) { restore_interrupts(key); }
+
+int pio_port_dma_claim(void) {
+    int ch = dma_claim_unused_channel(false);
+    if (ch < 0 || ch >= 16) { return -1; }
+    s_dma_ours |= 1u << ch;
+    dma_irqn_set_channel_enabled(0, (uint)ch, true);
+    if (!s_dma_irq) {
+        irq_add_shared_handler(DMA_IRQ_0, dma_irq, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
+        irq_set_enabled(DMA_IRQ_0, true);
+        s_dma_irq = 1;
+    }
+    return ch;
+}
+
+void pio_port_dma_unclaim(int ch) {
+    if (ch < 0 || ch >= 16) { return; }
+    dma_irqn_set_channel_enabled(0, (uint)ch, false);
+    dma_channel_unclaim((uint)ch);
+    s_dma_ours &= ~(1u << ch);
+}
+
+int pio_port_dma_start(int ch, int block, int sm, const uint32_t *src, uint32_t nwords, int inc) {
+    PIO pio = pio_of(block);
+    if (ch < 0 || ch >= 16 || !pio || sm < 0 || sm >= 4 || !src || nwords < 1 || nwords > 65535u) {
+        return -1;
+    }
+    dma_channel_config c = dma_channel_get_default_config((uint)ch);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    channel_config_set_read_increment(&c, inc ? true : false);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_dreq(&c, pio_get_dreq(pio, (uint)sm, true));
+    dma_channel_configure((uint)ch, &c, &pio->txf[sm], src, nwords, true);
+    return 0;
+}
+
+void pio_port_dma_abort(int ch) {
+    if (ch < 0 || ch >= 16) { return; }
+    dma_channel_abort((uint)ch);
+}
+
+void pio_port_dma_ack(int ch) {
+    if (ch < 0 || ch >= 16) { return; }
+    dma_irqn_acknowledge_channel(0, (uint)ch);
+}
+
+void pio_port_tx_resync(int block, int sm, int pc) {
+    PIO pio = pio_of(block);
+    if (!pio || sm < 0 || sm >= 4) { return; }
+    pio_sm_set_enabled(pio, (uint)sm, false);
+    pio_sm_clear_fifos(pio, (uint)sm);
+    pio_sm_restart(pio, (uint)sm);
+    pio_sm_clkdiv_restart(pio, (uint)sm);
+    if (pc >= 0 && pc < 32) { pio_sm_exec(pio, (uint)sm, pio_encode_jmp((uint)pc)); }
+    pio_sm_set_enabled(pio, (uint)sm, true);
 }

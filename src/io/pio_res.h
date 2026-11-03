@@ -113,6 +113,9 @@ void pio_res_release_owner(const char *owner);
 
 /* PIO_OK when handle belongs to owner. One error line otherwise. */
 int pio_res_check(int handle, const char *owner);
+/* 1 when this machine's program is protected, 0 when it is not, -1 when
+ * the handle is not live. Does not print. */
+int pio_res_protected(int handle);
 
 int pio_res_block(int handle);     /* -1 when the handle is not live */
 int pio_res_sm(int handle);

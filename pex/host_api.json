@@ -1177,8 +1177,8 @@
       "name": "pio",
       "id": 15,
       "major": 1,
-      "minor": 1,
-      "doc": "RP2040/RP2350 PIO claim ledger. Instruction words are shadowed here because INSTR_MEM is write-only. A Pico build registers it; other chips do not, so import it weak and check pex_has. A refusal returns a negative PEX_E* and the ledger prints one console line. This wrapper does not print another. pex_pio_load places a program in a free gap and will not rewrite a program that is already loaded. A protected program (the CYW43439 bus) cannot be released or reconfigured, and its block keeps its GPIO base. A module cannot mark its own program protected.",
+      "minor": 2,
+      "doc": "RP2040/RP2350 PIO claim ledger. Instruction words are shadowed here because INSTR_MEM is write-only. A Pico build registers it; other chips do not, so import it weak and check pex_has. A refusal returns a negative PEX_E* and the ledger prints one console line. This wrapper does not print another. pex_pio_load places a program in a free gap and will not rewrite a program that is already loaded. A protected program (the CYW43439 bus) cannot be released or reconfigured, and its block keeps its GPIO base. A module cannot mark its own program protected. Group 1.2 feeds a machine the caller owns from a buffer in that module's RAM. The module does not name a DMA channel. A protected machine is refused. At most four module channels. The completion callback runs on the main loop.",
       "types": [
         "typedef struct {",
         "    int32_t gpio_base;       /* -1 until a machine sets it, else 0 or 16 */",
@@ -1216,7 +1216,8 @@
         "#define PEX_PIO_IRQ_FLAG 4u  /* instruction flags this program references */",
         "#define PEX_PIO_JOIN_NONE 0u",
         "#define PEX_PIO_JOIN_TX   1u",
-        "#define PEX_PIO_JOIN_RX   2u"
+        "#define PEX_PIO_JOIN_RX   2u",
+        "typedef void (*pex_pio_dma_fn)(void *arg);"
       ],
       "functions": [
         {
@@ -1288,7 +1289,37 @@
         {
           "name": "pex_pio_release",
           "proto": "int pex_pio_release(int handle)",
-          "doc": "gives this handle back. The instruction shadow is cleared when the last machine on that range is gone"
+          "doc": "gives this handle back. The instruction shadow is cleared when the last machine on that range is gone. A DMA feed on this handle is aborted first"
+        },
+        {
+          "name": "pex_pio_dma_tx",
+          "proto": "int pex_pio_dma_tx(int handle, const uint32_t *src, uint32_t nwords)",
+          "since": 2,
+          "doc": "start a paced copy of nwords (1..65535) into this machine's TX FIFO. src is 32-bit words in this module's RAM. PEX_EBUSY when a transfer is already running (arm the next section). PEX_ENOMEM when four module channels are already taken or the chip has none free. A protected machine is refused"
+        },
+        {
+          "name": "pex_pio_dma_arm",
+          "proto": "int pex_pio_dma_arm(int handle, const uint32_t *src, uint32_t nwords)",
+          "since": 2,
+          "doc": "store one next section. If a transfer is running, the DMA interrupt starts it when the current one finishes. If nothing is running, it starts now. A second arm while one is stored is PEX_EAGAIN"
+        },
+        {
+          "name": "pex_pio_dma_idle",
+          "proto": "int pex_pio_dma_idle(int handle)",
+          "since": 2,
+          "doc": "1 when nothing is running and nothing is armed on this handle"
+        },
+        {
+          "name": "pex_pio_dma_zero",
+          "proto": "int pex_pio_dma_zero(int handle, uint32_t nwords)",
+          "since": 2,
+          "doc": "abort the current color transfer, clear the TX FIFO, and shift nwords zeros from one firmware word. The read address does not advance. Used to blank a strip without a buffer the size of the string"
+        },
+        {
+          "name": "pex_pio_dma_listen",
+          "proto": "int pex_pio_dma_listen(int handle, pex_pio_dma_fn fn, void *arg)",
+          "since": 2,
+          "doc": "one completion callback for this handle. The DMA interrupt does not enter the module. The callback runs on the main loop, once per finished section, including a section that started an armed buffer. fn NULL clears it"
         }
       ]
     },

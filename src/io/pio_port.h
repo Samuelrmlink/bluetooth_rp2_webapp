@@ -55,4 +55,18 @@ void pio_port_irq_unmask(int block, int line);
 void pio_port_gpio_init(int block, int pin);
 void pio_port_gpio_release(int pin);
 
+/* Module DMA. The ledger caps how many of these exist. The port only
+ * claims an unused channel and paces it off the state machine's TX DREQ.
+ * inc 0 holds the read address (a single zero word). */
+uint32_t pio_port_lock(void);
+void pio_port_unlock(uint32_t key);
+int pio_port_dma_claim(void);             /* channel, or -1 */
+void pio_port_dma_unclaim(int ch);
+int pio_port_dma_start(int ch, int block, int sm, const uint32_t *src,
+                       uint32_t nwords, int inc);
+void pio_port_dma_abort(int ch);
+void pio_port_dma_ack(int ch);
+/* Halt, drop the FIFO, and jump to pc so the next word is bit-aligned. */
+void pio_port_tx_resync(int block, int sm, int pc);
+
 #endif

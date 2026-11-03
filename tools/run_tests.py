@@ -750,12 +750,19 @@ def t_pio_res():
     groups = [g for g in api["groups"] if g.get("name") == "pio"]
     if len(groups) != 1 or groups[0].get("id") != 15:
         return False, "pex/host_api.json needs one pio group, id 15"
+    if groups[0].get("minor") != 2:
+        return False, "pio group minor is 2"
+    names = {f["name"] for f in groups[0].get("functions", [])}
+    for need in ("pex_pio_dma_tx", "pex_pio_dma_arm", "pex_pio_dma_idle",
+                 "pex_pio_dma_zero", "pex_pio_dma_listen"):
+        if need not in names:
+            return False, "pio group is missing " + need
     text = open(os.path.join(ROOT, "src/pex/pex_gw_pio.c")).read()
     if "printf(" in text:
         return False, "pex_gw_pio.c prints; the ledger already logs the one line"
     return _host_c("pio_res",
                    ["test/host/pio_res_test.c", "test/host/pio_port_fake.c",
-                    "src/io/pio_res.c"],
+                    "src/io/pio_res.c", "src/io/pio_dma.c"],
                    "btgw_pio_res", defs="")
 
 def t_ws_link():

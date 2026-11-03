@@ -2,9 +2,17 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "io/pio_dma.h"
 #include "io/pio_res.h"
 
 void pio_port_fake_reserve(int pin, const char *owner);
+int pio_port_fake_dma_starts(void);
+int pio_port_fake_dma_aborts(void);
+int pio_port_fake_dma_drains(void);
+int pio_port_fake_dma_last(void);
+const uint32_t *pio_port_fake_dma_src(int ch);
+int pio_port_fake_dma_inc(int ch);
+int pio_port_fake_dma_active(int ch);
 void pio_port_fake_drop_instr(void);
 int pio_port_fake_dropped(void);
 uint16_t pio_port_fake_mem(int block, int offset);
@@ -405,6 +413,145 @@ static void test_sd_protect(void) {
            "hardware release drops the card");
 }
 
+static int dma_tx(int handle, const char *owner, uint32_t *src, uint32_t n) {
+    return pio_dma_tx(handle, owner, src, n, (uintptr_t)src, (uintptr_t)(src + n));
+}
+
+static int dma_arm(int handle, const char *owner, uint32_t *src, uint32_t n) {
+    return pio_dma_arm(handle, owner, src, n, (uintptr_t)src, (uintptr_t)(src + n));
+}
+
+static int s_dma_hits;
+
+static void on_dma(void *arg) {
+    (void)arg;
+    s_dma_hits++;
+}
+
+static void deliver_dma(void *mod, pio_dma_fn fn, void *arg) {
+    (void)mod;
+    if (fn) { fn(arg); }
+}
+
+static void test_dma(void) {
+    drop_hw();
+    release_all();
+    for (int h = 1; h <= 12; h++) { pio_dma_abort(h); }
+    int starts = pio_port_fake_dma_starts();
+    uint16_t prog[4] = { 0x6321, 0x1223, 0x1200, 0xa242 };
+    uint8_t pin = 22;
+    int other = pio_res_load("other", &pin, 1, prog, 4, 0);
+    uint32_t word = 0x11;
+    expect(other > 0, "other machine loads");
+    expect(dma_tx(other, "ws", &word, 1) == PIO_EINVAL &&
+           strstr(pio_res_last_error(), "owned by other") != NULL,
+           "a transfer on someone else's machine is refused");
+    expect(pio_port_fake_dma_starts() == starts, "a refused transfer does not start");
+    pio_res_release(other);
+
+    pin = 21;
+    int h = pio_res_load("ws", &pin, 1, prog, 4, 0);
+    expect(h > 0, "ws machine loads");
+    expect(dma_tx(h, "ws", &word, 0) == PIO_EINVAL &&
+           strstr(pio_dma_last_error(), "not 1-65535") != NULL,
+           "zero words are refused");
+    uint32_t outside = 7;
+    expect(pio_dma_tx(h, "ws", &outside, 1, (uintptr_t)&outside + 16,
+                      (uintptr_t)&outside + 32) == PIO_EINVAL &&
+           strstr(pio_dma_last_error(), "outside module memory") != NULL,
+           "a source outside the module is refused");
+    expect(pio_port_fake_dma_starts() == starts, "refused sources do not start");
+
+    expect(pio_dma_listen(h, "ws", on_dma, 0, 0) == PIO_OK, "listen records a callback");
+    s_dma_hits = 0;
+    uint32_t sec_a[2] = { 1, 2 };
+    uint32_t sec_b[2] = { 3, 4 };
+    expect(dma_tx(h, "ws", sec_a, 2) == PIO_OK, "tx while idle starts");
+    expect(pio_dma_idle(h, "ws") == 0, "a running transfer is not idle");
+    expect(pio_port_fake_dma_starts() == starts + 1, "tx starts one transfer");
+    int ch = pio_port_fake_dma_last();
+    expect(ch >= 0 && pio_port_fake_dma_src(ch) == sec_a && pio_port_fake_dma_inc(ch) == 1,
+           "the first section is the one that started");
+    expect(dma_tx(h, "ws", sec_b, 2) == PIO_EBUSY, "tx while busy is refused");
+    expect(dma_arm(h, "ws", sec_b, 2) == PIO_OK, "arm while busy stores one section");
+    expect(pio_port_fake_dma_src(ch) == sec_a, "arm does not replace the running section");
+    expect(dma_arm(h, "ws", sec_a, 2) == PIO_EAGAIN &&
+           strstr(pio_dma_last_error(), "already armed") != NULL,
+           "a second arm is refused");
+    pio_dma_hw_done(ch);
+    expect(pio_port_fake_dma_starts() == starts + 2 && pio_port_fake_dma_src(ch) == sec_b,
+           "completion starts the armed section");
+    expect(pio_dma_idle(h, "ws") == 0, "the armed section is now running");
+    pio_dma_poll(deliver_dma);
+    expect(s_dma_hits == 1, "poll delivers the completion on the main loop");
+    pio_dma_hw_done(ch);
+    expect(pio_dma_idle(h, "ws") == 1, "completion with nothing armed goes idle");
+    pio_dma_poll(deliver_dma);
+    expect(s_dma_hits == 2, "the last section is delivered too");
+
+    expect(dma_tx(h, "ws", sec_a, 2) == PIO_OK, "tx after idle starts again");
+    expect(dma_arm(h, "ws", sec_b, 2) == PIO_OK, "arm stores the section abort will drop");
+    int aborts = pio_port_fake_dma_aborts();
+    int running_starts = pio_port_fake_dma_starts();
+    pio_dma_abort(h);
+    pio_dma_abort(h);
+    expect(pio_port_fake_dma_aborts() == aborts + 1, "abort stops the channel once");
+    expect(pio_port_fake_dma_starts() == running_starts, "abort does not start the armed section");
+    expect(pio_dma_idle(h, "ws") == 1, "abort leaves the handle idle");
+    pio_dma_hw_done(ch);
+    expect(pio_port_fake_dma_starts() == running_starts, "a stale completion does not start");
+
+    expect(dma_tx(h, "ws", sec_a, 2) == PIO_OK, "color transfer before a blank");
+    int drains = pio_port_fake_dma_drains();
+    expect(pio_dma_zero(h, "ws", 20) == PIO_OK, "zero aborts color and starts");
+    ch = pio_port_fake_dma_last();
+    expect(pio_port_fake_dma_inc(ch) == 0 && pio_port_fake_dma_drains() == drains + 1,
+           "zeros hold the read address and resync the machine");
+    expect(pio_dma_idle(h, "ws") == 0, "the zero transfer is running");
+    pio_dma_hw_done(ch);
+    expect(pio_dma_idle(h, "ws") == 1, "the zero transfer can finish");
+    pio_dma_abort(h);
+    pio_res_release(h);
+
+    pin = 20;
+    int prot = pio_res_load("sd", &pin, 1, prog, 4, PIO_LOAD_PROTECT);
+    expect(prot > 0, "protected machine loads");
+    starts = pio_port_fake_dma_starts();
+    expect(dma_tx(prot, "sd", &word, 1) == PIO_EBUSY &&
+           strstr(pio_dma_last_error(), "protected") != NULL,
+           "a protected machine is refused");
+    expect(pio_port_fake_dma_starts() == starts, "a protected machine does not start dma");
+    pio_res_release_hw(pio_res_block(prot), pio_res_sm(prot));
+
+    int handles[4];
+    uint8_t pins[4] = { 16, 17, 18, 19 };
+    uint32_t secs[4] = { 1, 2, 3, 4 };
+    int got = 0;
+    for (int i = 0; i < 4; i++) {
+        handles[i] = pio_res_load("many", &pins[i], 1, prog, 4, 0);
+        if (handles[i] > 0 && dma_tx(handles[i], "many", &secs[i], 1) == PIO_OK) { got++; }
+    }
+    expect(got == 4, "four module channels start");
+    pin = 15;
+    int fifth = pio_res_load("many", &pin, 1, prog, 4, 0);
+    uint32_t extra = 9;
+    expect(fifth > 0 && dma_tx(fifth, "many", &extra, 1) == PIO_ENOMEM &&
+           strstr(pio_dma_last_error(), "limited to 4") != NULL,
+           "a fifth channel is refused");
+    for (int i = 0; i < 4; i++) {
+        if (handles[i] > 0) { pio_dma_abort(handles[i]); pio_res_release(handles[i]); }
+    }
+    if (fifth > 0) { pio_dma_abort(fifth); pio_res_release(fifth); }
+
+    pin = 14;
+    int idle_h = pio_res_load("ws", &pin, 1, prog, 4, 0);
+    expect(idle_h > 0 && pio_dma_idle(idle_h, "ws") == 1, "a machine with no dma is idle");
+    expect(dma_arm(idle_h, "ws", sec_a, 2) == PIO_OK && pio_dma_idle(idle_h, "ws") == 0,
+           "arm while idle starts immediately");
+    pio_dma_abort(idle_h);
+    pio_res_release(idle_h);
+}
+
 int main(void) {
     test_empty_and_fit();
     test_load_and_shadow();
@@ -414,6 +561,7 @@ int main(void) {
     test_fifo_and_irq();
     test_protect();
     test_sd_protect();
+    test_dma();
     printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

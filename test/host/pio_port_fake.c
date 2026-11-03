@@ -168,3 +168,80 @@ void pio_port_irq_disarm(int block, int line) { (void)block; (void)line; }
 void pio_port_irq_unmask(int block, int line) { (void)block; (void)line; }
 void pio_port_gpio_init(int block, int pin) { (void)block; (void)pin; }
 void pio_port_gpio_release(int pin) { (void)pin; }
+
+#define DMA_N 8
+
+static int s_dma_used[DMA_N];
+static int s_dma_block[DMA_N];
+static int s_dma_sm[DMA_N];
+static const uint32_t *s_dma_src[DMA_N];
+static uint32_t s_dma_n[DMA_N];
+static int s_dma_inc[DMA_N];
+static int s_dma_active[DMA_N];
+static int s_dma_starts;
+static int s_dma_aborts;
+static int s_dma_drains;
+static int s_dma_last = -1;
+
+uint32_t pio_port_lock(void) { return 0; }
+void pio_port_unlock(uint32_t key) { (void)key; }
+
+int pio_port_dma_claim(void) {
+    for (int i = 0; i < DMA_N; i++) {
+        if (!s_dma_used[i]) {
+            s_dma_used[i] = 1;
+            s_dma_active[i] = 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+void pio_port_dma_unclaim(int ch) {
+    if (ch < 0 || ch >= DMA_N) { return; }
+    s_dma_used[ch] = 0;
+    s_dma_active[ch] = 0;
+}
+
+int pio_port_dma_start(int ch, int block, int sm, const uint32_t *src, uint32_t nwords, int inc) {
+    if (ch < 0 || ch >= DMA_N || !s_dma_used[ch] || !src || nwords < 1) { return -1; }
+    s_dma_block[ch] = block;
+    s_dma_sm[ch] = sm;
+    s_dma_src[ch] = src;
+    s_dma_n[ch] = nwords;
+    s_dma_inc[ch] = inc ? 1 : 0;
+    s_dma_active[ch] = 1;
+    s_dma_starts++;
+    s_dma_last = ch;
+    return 0;
+}
+
+void pio_port_dma_abort(int ch) {
+    if (ch < 0 || ch >= DMA_N || !s_dma_used[ch]) { return; }
+    s_dma_active[ch] = 0;
+    s_dma_aborts++;
+}
+
+void pio_port_dma_ack(int ch) { (void)ch; }
+
+void pio_port_tx_resync(int block, int sm, int pc) {
+    (void)block; (void)sm; (void)pc;
+    s_dma_drains++;
+}
+
+int pio_port_fake_dma_starts(void) { return s_dma_starts; }
+int pio_port_fake_dma_aborts(void) { return s_dma_aborts; }
+int pio_port_fake_dma_drains(void) { return s_dma_drains; }
+int pio_port_fake_dma_last(void) { return s_dma_last; }
+const uint32_t *pio_port_fake_dma_src(int ch) {
+    if (ch < 0 || ch >= DMA_N) { return NULL; }
+    return s_dma_src[ch];
+}
+int pio_port_fake_dma_inc(int ch) {
+    if (ch < 0 || ch >= DMA_N) { return -1; }
+    return s_dma_inc[ch];
+}
+int pio_port_fake_dma_active(int ch) {
+    if (ch < 0 || ch >= DMA_N) { return 0; }
+    return s_dma_active[ch];
+}
