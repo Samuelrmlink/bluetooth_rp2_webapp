@@ -31,7 +31,7 @@ import { openCellMenu } from '../controls/cellmenu.js';
 import { fileMenuItems, fileInfo, dirInfo, folderSize, sizeInfo } from '../editor/filemenu.js';
 import { pexNameOf, pexFileName, pexRunningPaths, isPexFile, startPex, stopPex } from '../editor/pexrun.js';
 import { buildIdOf } from '../editor/pexmap.js';
-import { PexPartition, PEX_PART } from '../editor/pexpart.js';
+import { PexPartition, PEX_PART, mergePartition } from '../editor/pexpart.js';
 import { buildButtonState, projectBuildItems } from '../editor/pexfile.js';
 import { LongPress } from '../editor/longpress.js';
 import { RestoreDialog } from '../editor/restore.js';
@@ -1484,28 +1484,46 @@ export class EditorWindow {
 
   async _poll() {
     if (!this.ws.connected) return;
+    // The timer and the partition tab both call this. A slow reply must not
+    // land after a newer one and replace the picture with a failure.
+    if (this._pollBusy) { this._pollAgain = true; return; }
+    this._pollBusy = true;
     try {
-      // pex.list is absent on firmware built before PEX. A failure leaves the
-      // Lua marks updating exactly as they did.
-      const [loaded, list, pex, inst] = await Promise.all([
-        this.ws.call('script.loaded'),
-        this.ws.call('script.list'),
-        this.ws.call('pex.list').catch(() => null),
-        this.ws.call('pex.installed').catch(() => null),
-      ]);
-      this.marks = arenaMarks(loaded.units);
-      this.list = list;
-      this.runtime = list.runtime || null;
-      this.pexStates = pexRunningPaths(pex);
-      this.pexArch = pex?.arch || this.pexArch;
-      this.pexPool = pex?.pool || this.pexPool;
-      this.pexPolicy = pex?.policy || this.pexPolicy;
-      this.pexInstalled = new Set((inst?.modules || []).map((m) => m.name));
-      this.pexPart = inst;
-      this.tree.invalidate();
-      this._renderTitle();
-      this._paintPartition();
+      while (this.ws.connected) {
+        this._pollAgain = false;
+        // pex.list is absent on firmware built before PEX. A failure leaves the
+        // Lua marks updating exactly as they did.
+        const [loaded, list, pex, inst] = await Promise.all([
+          this.ws.call('script.loaded'),
+          this.ws.call('script.list'),
+          this.ws.call('pex.list').catch(() => null),
+          this.ws.call('pex.installed').catch(() => null),
+        ]);
+        this.marks = arenaMarks(loaded.units);
+        this.list = list;
+        this.runtime = list.runtime || null;
+        this.pexStates = pexRunningPaths(pex);
+        this.pexArch = pex?.arch || this.pexArch;
+        this.pexPool = pex?.pool || this.pexPool;
+        this.pexPolicy = pex?.policy || this.pexPolicy;
+        const part = mergePartition(this.pexPart, inst);
+        if (part && Array.isArray(part.modules)) {
+          this.pexInstalled = new Set(part.modules.map((m) => m.name));
+        }
+        this.pexPart = part;
+        this.tree.invalidate();
+        this._renderTitle();
+        this._paintPartition();
+        if (!this._pollAgain) break;
+      }
     } catch { /* offline or an older firmware: markers simply stay as they were */ }
+    finally {
+      this._pollBusy = false;
+      if (this._pollAgain) {
+        this._pollAgain = false;
+        this._poll();
+      }
+    }
   }
 
   // --- buffers ---------------------------------------------------------------

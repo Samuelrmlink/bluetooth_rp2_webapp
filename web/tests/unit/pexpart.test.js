@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PEX_PART, SECTOR, PexPartition, partitionModel, partitionActions } from '../../js/editor/pexpart.js';
+import { PEX_PART, SECTOR, PexPartition, partitionModel, partitionActions, mergePartition } from '../../js/editor/pexpart.js';
 
 const live = {
   mounted: true, size: 262144, free: 0, largest: 0, seq: 42, moves: 0, rw_area: 23488,
@@ -61,6 +61,14 @@ function domStub() {
     createTextNode(text) { return { text }; },
   };
 }
+
+test('a failed refresh keeps the partition already on screen', () => {
+  assert.equal(mergePartition(null, null), null);
+  assert.equal(mergePartition(null, {}), null);
+  assert.equal(mergePartition(live, null), live);
+  assert.equal(mergePartition(live, { modules: [] }).modules.length, 0);
+  assert.equal(mergePartition(null, live), live);
+});
 
 test('Start, Stop, and Uninstall follow the selected installed module', () => {
   assert.deepEqual(partitionActions(null, 'running'), { start: false, stop: false, remove: false, state: '' });

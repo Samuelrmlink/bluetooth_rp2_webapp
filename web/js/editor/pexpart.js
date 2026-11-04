@@ -46,6 +46,14 @@ export function partitionModel(info) {
   };
 }
 
+/** A failed refresh must not wipe a partition the tab is already showing.
+ *  `pex.installed` is allowed to fail (older firmware, a timed-out call) and
+ *  that used to replace the picture with "Asking the device…". */
+export function mergePartition(prev, inst) {
+  if (inst && Array.isArray(inst.modules)) return inst;
+  return prev ?? null;
+}
+
 /** Which header buttons apply to the selected installed module. `state` is
  *  the live pex.list state. Start is refused only while it is running.
  *  Stop stays available for anything still resident, including a stopped copy. */
