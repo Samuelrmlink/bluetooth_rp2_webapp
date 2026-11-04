@@ -207,15 +207,18 @@ void api_handle_text(const char *text, api_reply_fn reply, void *ctx) {
         def->fn(params_of(text), reply, ctx, id);
         return;
     }
+#if CONFIG_PEX
+    /* Native modules register ops on the bus. This stays outside the Lua
+     * block: a no-Lua image still runs printer_hub and the other PEX apps,
+     * and their ops have to answer. */
+    if (pex_gw_dispatch(op, params_of(text), reply, ctx, id)) {
+        return;
+    }
+#endif
 #if CONFIG_LUA_ENABLE
     /* A script may have registered this name. Built-ins are checked first, and
      * ops.register refuses to shadow one, so a client can trust that sys.info
      * always means what the firmware says it means. */
-#if CONFIG_PEX
-    if (pex_gw_dispatch(op, params_of(text), reply, ctx, id)) {     /* ops of native modules */
-        return;
-    }
-#endif
     if (lbind_dispatch(op, params_of(text), reply, ctx, id)) {
         return;
     }
