@@ -50,6 +50,7 @@ Shipped defconfigs:
 | `pico2w_sdspi_defconfig` | The same card on SPI |
 | `pico2w_classic_defconfig` | Wi-Fi, WireGuard, and Classic. No SD card and no NAP |
 | `pico2w_sd_classic_defconfig` | The SD image plus Classic. HTTPS and NAP stay off |
+| `pico2w_sd_classic_spp_defconfig` | The SD image plus Classic SPP, NAP, peripheral advertising, and HTTPS. Lua is off |
 | `pico2w_pexcc_defconfig` | The SD image, same unsigned-module default, used with the browser compiler |
 | `pico2w_minimal_defconfig` | BLE over USB-NCM. No Wi-Fi, no Lua, no OTA |
 | `pico2w_noanker_defconfig` | Wi-Fi and Lua, with the Anker codec left out. OTA is off, so unsigned PEX modules load |

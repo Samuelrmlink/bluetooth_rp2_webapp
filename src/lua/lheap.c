@@ -4,6 +4,12 @@
 #include "lua/lheap.h"
 
 #define ARENA_BYTES ((size_t)LHEAP_KB * 1024u)
+#if LHEAP_KB == 0
+/* Lua is off. The TLS pool further down is the region this file owns.
+ * Eight bytes keeps the arena symbol real; nothing calls lheap_init. */
+#undef ARENA_BYTES
+#define ARENA_BYTES 8
+#endif
 
 /*
  * Address-ordered first fit with boundary tags.

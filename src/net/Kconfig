@@ -61,15 +61,15 @@ config NET_HTTP_SERVER
       A later target can leave it off.
 
 config NET_HTTP_CLIENT
-    bool "HTTP client for Lua scripts (http.start)"
-    depends on LUA_ENABLE
-    default y
+    bool "HTTP client (Lua http.start and PEX net.http)"
+    default y if LUA_ENABLE
     help
-      An HTTP/1.1 client on raw lwIP TCP (src/net/httpc.c) for the Lua
-      `http` module: DNS, Content-Length and chunked bodies, redirects,
-      streaming into a LittleFS or SD file, timeouts, several requests at
-      once. Turns lwIP's DNS client on. Requests and their buffers live in
-      the Lua arena, not in static RAM.
+      An HTTP/1.1 client on raw lwIP TCP (src/net/httpc.c). Lua gets it as
+      the `http` module. A PEX module gets it as the net group. DNS,
+      Content-Length and chunked bodies, redirects, streaming into a
+      LittleFS or SD file, timeouts, several requests at once. Turns lwIP's
+      DNS client on. On when Lua is on. A defconfig without Lua can still
+      set it; https:// then uses the TLS pool below.
 
 config NET_HTTP_TLS
     bool "HTTPS (mbedTLS, TLS 1.2 client)"

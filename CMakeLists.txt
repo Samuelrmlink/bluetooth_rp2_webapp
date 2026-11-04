@@ -286,6 +286,10 @@ if(CONFIG_LUA_ENABLE)
         target_sources(btgw PRIVATE src/lua/lbind_proto.c)
     endif()
     target_link_libraries(btgw lua)
+elseif(CONFIG_NET_HTTP_CLIENT)
+    # The TLS pool lives in lheap.c. A no-Lua image that still fetches
+    # https:// links that file and leaves the arena at eight bytes.
+    target_sources(btgw PRIVATE src/lua/lheap.c)
 endif()
 
 if(CONFIG_NET_WIFI)

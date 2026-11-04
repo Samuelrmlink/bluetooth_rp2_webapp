@@ -1235,6 +1235,8 @@ void le_notify_flush(const char *addr_filter) {
         s_inbox[i].used = false;
     }
 }
+#else
+uint32_t le_notify_dropped(void) { return 0; }
 #endif /* CONFIG_LUA_ENABLE */
 
 static void emit_char_value(le_link_t *l, uint16_t value_handle,

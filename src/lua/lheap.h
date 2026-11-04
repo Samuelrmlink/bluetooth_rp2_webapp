@@ -26,7 +26,13 @@
 
 #ifndef LHEAP_KB
 #include "autoconf.h"
+/* The arena exists only while the Lua runtime does. A Classic image can
+ * keep the TLS pool with Lua gated off; that build has no CONFIG_LUA_HEAP_KB. */
+#if defined(CONFIG_LUA_ENABLE) && CONFIG_LUA_ENABLE
 #define LHEAP_KB CONFIG_LUA_HEAP_KB
+#else
+#define LHEAP_KB 0
+#endif
 #if defined(CONFIG_NET_HTTP_TLS) && CONFIG_NET_HTTP_TLS && defined(CONFIG_NET_TLS_POOL_KB)
 #define LHEAP_POOL_KB CONFIG_NET_TLS_POOL_KB
 #endif

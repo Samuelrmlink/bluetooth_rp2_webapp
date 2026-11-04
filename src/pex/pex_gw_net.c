@@ -6,9 +6,9 @@
  * Memory: httpc has ONE allocator for everyone. In a Lua build it is the Lua
  * arena's top (what lhttp sets, copied below so a native request does not
  * fall back to the C heap, which a TLS session -- ~35 KB -- would exhaust and
- * pico_malloc would panic on). Merge note: when feature/lua-net-fs's
- * dedicated TLS pool lands, point this at that allocator instead. Without
- * Lua, https:// is refused for the same reason.
+ * pico_malloc would panic on). The session itself is the TLS pool. A build
+ * with that pool and no Lua uses the pool for the request too. Without the
+ * pool, https:// is refused.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +19,10 @@
 #include "fs/fs.h"
 #include "lua/lfile_path.h"
 #include "net/httpc.h"
-#if CONFIG_LUA_ENABLE
+#if CONFIG_LUA_ENABLE || CONFIG_NET_HTTP_TLS
 #include "lua/lheap.h"
+#endif
+#if CONFIG_LUA_ENABLE
 #include "lua/lrt.h"
 #endif
 
@@ -63,6 +65,22 @@ static void *scope_use(void *scope) { return lheap_scratch_use(scope); }
 static void arena_stat(size_t *used, size_t *largest) {
     *used = lheap_used();
     *largest = lheap_largest_free();
+}
+#elif CONFIG_NET_HTTP_TLS
+static void *pool_alloc(size_t n) {
+    void *p = lheap_pool_alloc(n ? n : 1);
+    if (p && n) { memset(p, 0, n); }
+    return p;
+}
+static void pool_free(void *p) {
+    if (p && lheap_pool_owns(p)) { lheap_pool_free(p); }
+}
+static void *pool_use(void *scope) { (void)scope; return NULL; }
+static void pool_stat(size_t *used, size_t *largest) {
+    lheap_pool_stats_t ps;
+    lheap_pool_stats(&ps);
+    *used = ps.used;
+    *largest = ps.largest_free;
 }
 #endif
 
@@ -111,9 +129,9 @@ static void release(hslot_t *h) {
 int pex_http_start(const pex_http_req_t *q, pex_http_cb done, void *arg) {
     if (!q || !q->url) { return PEX_EINVAL; }
     if (!q->to_file && (!q->buf || !q->buf_cap)) { return PEX_EINVAL; }
-#if !CONFIG_LUA_ENABLE
+#if !CONFIG_LUA_ENABLE && !CONFIG_NET_HTTP_TLS
     if (strncmp(q->url, "https:", 6) == 0) {
-        pex_seterr(PEX_ENOTSUP, "https needs the TLS memory pool (Lua builds, for now)");
+        pex_seterr(PEX_ENOTSUP, "https needs the TLS memory pool");
         return PEX_ENOTSUP;
     }
 #endif
@@ -146,6 +164,9 @@ int pex_http_start(const pex_http_req_t *q, pex_http_cb done, void *arg) {
     h->res.total = -1;
 #if CONFIG_LUA_ENABLE
     static const httpc_alloc_fns fns = { arena_alloc, lheap_free_any, arena_stat, scope_use };
+    httpc_set_alloc(&fns);
+#elif CONFIG_NET_HTTP_TLS
+    static const httpc_alloc_fns fns = { pool_alloc, pool_free, pool_stat, pool_use };
     httpc_set_alloc(&fns);
 #endif
     httpc_opts_t o = { .method = q->method ? q->method : "GET", .url = q->url, .headers = q->headers,
