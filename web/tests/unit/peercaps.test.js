@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  bleSupported, hardwareSupported, localToolTitle, peerRoles, roleTitle, scopeOf, toolGroup,
+  bleSupported, hardwareSupported, localToolTitle, peerRoles, peerVisible, roleTitle, scopeOf, toolGroup,
 } from '../../js/windows/peercaps.js';
 
 const pico = {
@@ -9,6 +9,13 @@ const pico = {
   transports: ['le', 'classic'],
 };
 const c5 = { modules: ['fs', 'wifi', 'pex', 'ota', 'launch'], transports: ['wifi'] };
+
+test('this board is not listed as another board', () => {
+  assert.equal(peerVisible({ name: 'bluetooth-rp2-webapp', ip: '', self: false }), false);
+  assert.equal(peerVisible({ name: 'bluetooth-rp2-webapp', ip: '192.168.1.68', self: true }), false);
+  assert.equal(peerVisible({ name: 'ESP32C5-3844be0a31f0', ip: '192.168.1.219', self: false }), true);
+  assert.equal(peerVisible(null), false);
+});
 
 test('a board with no info yet gets the editor and a console', () => {
   assert.deepEqual(peerRoles(null).map((r) => r.id), ['editor', 'console']);

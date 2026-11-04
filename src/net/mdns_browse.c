@@ -39,9 +39,28 @@ static uint32_t now_ms(void) { return to_ms_since_boot(get_absolute_time()); }
 
 static bool ours(const char *ip) {
     struct netif *nif;
+    if (!ip || !ip[0]) return false;
     NETIF_FOREACH(nif) {
         if (!ip4_addr_isany(netif_ip4_addr(nif)) && strcmp(ip, ip4addr_ntoa(netif_ip4_addr(nif))) == 0)
             return true;
+    }
+    return false;
+}
+
+/* Wi-Fi and Ethernet sit on one LAN and both answer _btgw._tcp. The answer
+ * to that browse is a PTR with no address. Our hostname and no address, or
+ * any address this device holds, is us. Another machine that has taken the
+ * hostname keeps a foreign address and stays in the table. */
+static bool our_name(const char *name) {
+    const char *h = mdns_hostname();
+    return name && name[0] && h && h[0] && strcasecmp(name, h) == 0;
+}
+
+static bool skip_us(peer_t *s) {
+    if (!s) return true;
+    if ((s->ip[0] && ours(s->ip)) || (!s->ip[0] && our_name(s->name))) {
+        s->used = false;
+        return true;
     }
     return false;
 }
@@ -96,7 +115,9 @@ static void on_answer(struct mdns_answer *ans, const char *varpart, int varlen, 
     if (ans->info.type == DNS_RRTYPE_PTR) {
         char inst[64];
         label0((const u8_t *)varpart, varlen, inst, sizeof inst);
-        touch(slot_for(inst));
+        peer_t *p = slot_for(inst);
+        touch(p);
+        skip_us(p);
         return;
     }
     peer_t *s = slot_for(owner);
@@ -124,6 +145,7 @@ static void on_answer(struct mdns_answer *ans, const char *varpart, int varlen, 
             i += n;
         }
     }
+    skip_us(s);
 }
 
 static void search_next(void) {
@@ -158,6 +180,7 @@ bool mdns_peer_endpoint(const char *name, char *ip, size_t ip_cap, uint16_t *por
     for (int i = 0; i < PEERS; i++) {
         peer_t *s = &peers[i];
         if (!s->used || !s->ip[0] || strcasecmp(s->name, name) != 0) continue;
+        if (skip_us(s)) return false;
         if ((uint32_t)(now - s->seen) > DROP_MS) return false;
         snprintf(ip, ip_cap, "%s", s->ip);
         if (port) *port = s->port ? s->port : 80;
@@ -183,6 +206,7 @@ bool mdns_peer_at(int index, mdns_peer_view_t *out) {
         peer_t *s = &peers[i];
         if (!s->used) { continue; }
         if ((uint32_t)(now - s->seen) > DROP_MS) { s->used = false; continue; }
+        if (skip_us(s)) { continue; }
         if (n++ != index) { continue; }
         out->name = s->name;
         out->ip = s->ip;
@@ -205,6 +229,7 @@ size_t mdns_peers_json(char *dst, size_t cap) {
         if (!s->used) continue;
         uint32_t age = now - s->seen;
         if (age > DROP_MS) { s->used = false; continue; }
+        if (skip_us(s)) continue;
         n += (size_t)snprintf(dst + n, cap - n,
                               "%s{\"name\":\"%s\",\"ip\":\"%s\",\"port\":%u,\"board\":\"%s\","
                               "\"assets\":%d,\"age_ms\":%lu,\"self\":%s}",

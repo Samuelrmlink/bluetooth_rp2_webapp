@@ -1981,10 +1981,21 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
         /* Evaluate rdata -> to see if it's a copy of our own data */
         if (ans.info.type == DNS_RRTYPE_A) {
 #if LWIP_IPV4
-          if (ans.rd_length == sizeof(ip4_addr_t) &&
-              pbuf_memcmp(pkt->pbuf, ans.rd_offset, netif_ip4_addr(netif), ans.rd_length) == 0) {
-            LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: response equals our own IPv4 address record -> no conflict\n"));
-            conflict = 0;
+          /* LOCAL CHANGE (btgw): the same hostname is announced from every
+           * interface. Wi-Fi and Ethernet share a LAN, so this netif receives
+           * the other interface's A record. That address is still ours. */
+          if (ans.rd_length == sizeof(ip4_addr_t)) {
+            struct netif *scan;
+            NETIF_FOREACH(scan) {
+              if (ip4_addr_isany(netif_ip4_addr(scan))) {
+                continue;
+              }
+              if (pbuf_memcmp(pkt->pbuf, ans.rd_offset, netif_ip4_addr(scan), ans.rd_length) == 0) {
+                LWIP_DEBUGF(MDNS_DEBUG, ("mDNS: response equals our own IPv4 address record -> no conflict\n"));
+                conflict = 0;
+                break;
+              }
+            }
           }
 #endif
         }
@@ -2079,6 +2090,27 @@ mdns_handle_response(struct mdns_packet *pkt, struct netif *netif)
 void btgw_mdns_query_hook(struct netif *netif, struct pbuf *p, const ip_addr_t *addr,
                           u16_t port, int recv_unicast);
 
+/* LOCAL CHANGE (btgw): true when addr is an IPv4 address on any netif. */
+static int
+mdns_ipv4_from_us(const ip_addr_t *addr)
+{
+#if LWIP_IPV4
+  struct netif *scan;
+  if (addr == NULL || !IP_IS_V4(addr) || ip4_addr_isany(ip_2_ip4(addr))) {
+    return 0;
+  }
+  NETIF_FOREACH(scan) {
+    if (!ip4_addr_isany(netif_ip4_addr(scan)) &&
+        ip4_addr_cmp(ip_2_ip4(addr), netif_ip4_addr(scan))) {
+      return 1;
+    }
+  }
+#else
+  LWIP_UNUSED_ARG(addr);
+#endif
+  return 0;
+}
+
 static void
 mdns_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
@@ -2091,6 +2123,12 @@ mdns_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr,
   LWIP_UNUSED_ARG(pcb);
 
   LWIP_DEBUGF(MDNS_DEBUG, ("MDNS: Received IPv%d MDNS packet, len %d\n", IP_IS_V6(addr) ? 6 : 4, p->tot_len));
+
+  /* LOCAL CHANGE (btgw): a packet we sent on another interface arrives here
+   * when both are on the same network. It is not a second host. */
+  if (mdns_ipv4_from_us(addr)) {
+    goto dealloc;
+  }
 
   if (NETIF_TO_HOST(recv_netif) == NULL) {
     /* From netif not configured for MDNS */

@@ -15,6 +15,13 @@ export function toolGroup(name) {
   return `Tools [${name}]`;
 }
 
+// A row with no address cannot be opened. `self` is this board, including
+// the other interface on the same network, which arrives as a name and an
+// empty address.
+export function peerVisible(p) {
+  return !!(p && p.name && p.ip && !p.self);
+}
+
 export function roleTitle(role, name) {
   return `${role} [${name}]`;
 }

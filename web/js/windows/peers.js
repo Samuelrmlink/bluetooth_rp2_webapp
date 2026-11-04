@@ -19,7 +19,7 @@ import { ScannerWindow } from './scanner.js';
 import { GattWindow } from './gatt.js';
 import { GattEventsWindow } from './gattevents.js';
 import { HardwareWindow } from './hardware.js';
-import { peerRoles, roleTitle, scopeOf, toolGroup } from './peercaps.js';
+import { peerRoles, peerVisible, roleTitle, scopeOf, toolGroup } from './peercaps.js';
 
 const GONE_MS = 30000;
 const POLL_MS = 2000;
@@ -203,7 +203,7 @@ export class PeerHost {
       const now = Date.now();
       const live = new Set();
       for (const p of peers) {
-        if (!p?.name || p.self) continue;
+        if (!peerVisible(p)) continue;
         live.add(p.name);
         let row = this.peers.get(p.name);
         if (!row) {

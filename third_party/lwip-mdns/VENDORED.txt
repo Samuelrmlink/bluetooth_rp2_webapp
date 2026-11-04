@@ -12,7 +12,14 @@ responder has no API for that. Those records must be answered from source
 port 5353, and only one pcb can own the port, so the queries have to be seen
 from inside lwIP's receive path.
 
-Local changes: ONE, in mdns.c (search for "LOCAL CHANGE"):
+Local changes, in mdns.c (search for "LOCAL CHANGE"):
+
+  mdns_recv() drops a packet whose IPv4 source is an address on any local
+  netif. Wi-Fi and Ethernet on one LAN otherwise deliver each other's
+  announcements, and lwIP treats the other address as a hostname conflict.
+
+  The conflict check for an A record accepts that address on any netif, not
+  only the netif that received the packet.
 
   mdns_recv() calls btgw_mdns_query_hook(netif, p, addr, port, recv_unicast)
   for every query that has passed lwIP's own source checks, before lwIP
