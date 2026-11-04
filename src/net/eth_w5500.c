@@ -7,12 +7,12 @@
  *       length; it gets a PBUF_POOL pbuf (one 1516-byte pool buffer holds any
  *       frame) and the DMA writes straight into it. Out of pool -> the frame
  *       is skipped in the ring and counted.
- *   TX  linkoutput cannot wait for the bus, so it CLONES the frame into one
- *       contiguous PBUF_RAM pbuf from lwIP's heap and queues the pointer; the
- *       state machine writes it out and frees it. A clone, not pbuf_ref():
- *       lwIP hands drivers PBUF_REF/ROM chains whose memory belongs to the
- *       caller, and a queued reference to those would be read after it had
- *       been reused. Bounded at ETH_TXQ frames, so at most ~9 KB of heap.
+ *   TX  linkoutput cannot wait for the bus, so it queues one contiguous
+ *       buffer and the state machine writes it out. A PBUF_RAM or PBUF_POOL
+ *       frame that is already one buffer is referenced, not copied: the TCP
+ *       send buffer is already that heap allocation. A chain, or a
+ *       PBUF_REF/ROM payload the caller may reuse, is cloned into one
+ *       PBUF_RAM buffer. Bounded at ETH_TXQ frames.
  *
  * Interrupts: the INT pin is sampled by the state machine as a level (a
  * frame waiting holds it low until Sn_IR is cleared), so no GPIO IRQ is
@@ -234,11 +234,23 @@ static const w5500_ops_t chip_ops = { rx_begin, rx_end, tx_peek, tx_done, on_lin
 
 /* --- netif --------------------------------------------------------------- */
 
+/* One buffer whose payload lives in the heap or the pool stays valid for as
+ * long as a reference is held. Anything else is copied, because the SPI
+ * transfer keeps a raw pointer until the frame has left the chip. */
+static struct pbuf *tx_hold(struct pbuf *p) {
+    if (p->next == NULL && p->len == p->tot_len &&
+        (pbuf_match_allocsrc(p, PBUF_RAM) || pbuf_match_allocsrc(p, PBUF_POOL))) {
+        pbuf_ref(p);
+        return p;
+    }
+    return pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+}
+
 static err_t eth_linkoutput(struct netif *netif, struct pbuf *p) {
     (void)netif;
     if (!present || !chip.link_up) { tx_dropped++; return ERR_IF; }
     if (tx_count >= ETH_TXQ) { txq_full++; return ERR_MEM; }
-    struct pbuf *c = pbuf_clone(PBUF_RAW, PBUF_RAM, p);
+    struct pbuf *c = tx_hold(p);
     if (!c) { txq_full++; return ERR_MEM; }
     txq[(tx_head + tx_count) % ETH_TXQ] = c;
     tx_count++;

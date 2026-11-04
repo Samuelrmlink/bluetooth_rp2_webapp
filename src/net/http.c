@@ -13,6 +13,8 @@
 #include <string.h>
 #include <strings.h>
 #include "lwip/tcp.h"
+#include "lwip/ip.h"
+#include "lwip/netif.h"
 #include "lwip/stats.h"
 #include "fs/fs.h"
 #include "net/ws.h"
@@ -2264,6 +2266,13 @@ static void http_err(void *arg, err_t err) {
 static err_t http_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     (void)arg;
     (void)err;
+    /* The listen socket is every interface. Pin this connection to the one
+     * that received the SYN, or a same-subnet reply follows ip4_route and
+     * can leave through the other uplink. */
+    struct netif *in = ip_data.current_input_netif;
+    if (in) {
+        newpcb->netif_idx = netif_get_index(in);
+    }
     tcp_arg(newpcb, newpcb);
     tcp_nagle_disable(newpcb);
     tcp_recv(newpcb, http_recv);
