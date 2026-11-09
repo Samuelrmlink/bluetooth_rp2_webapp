@@ -1453,6 +1453,27 @@ def t_pex_lua_unload():
     return True, (last[-1] if last else "ok")[:90]
 
 
+def t_scan_sched():
+    """The PEX scan scheduler (src/pex/pex_scan_sched.c) against a fake radio
+    and clock: high and low priority, one request per module, requests that
+    outlive a scan session, and the quiet slot's policy (one holder, the
+    10-minute cap, the 25 s guard, revoke, unload)."""
+    d = f"{BUILD_PREFIX}scansched"
+    os.makedirs(d, exist_ok=True)
+    gatt = "-DCONFIG_GATT_MAX_SVCS=8 -DCONFIG_GATT_MAX_CHRS=8 -DCONFIG_GATT_MAX_DSCS=8 -DCONFIG_GATT_MAX_UUID128=8"
+    rc, out = sh(f"python3 pex/tools/gen_host_api.py header pex/host_api.json {d}/pex_api.h && "
+                 f"gcc -O1 -Wall -Wextra -Werror {gatt} -Itest/host -Itest/host/stub -Isrc -Ipex/runtime "
+                 f"-Ipex/sdk/include -I{d} test/host/scan_sched_test.c src/pex/pex_scan_sched.c -o {d}/scan_sched")
+    if rc:
+        errs = [l for l in out.splitlines() if "error" in l]
+        return False, (errs[0] if errs else out.strip()[-90:])[:100]
+    rc, out = sh(f"{d}/scan_sched")
+    last = out.strip().splitlines()[-1] if out.strip() else ""
+    if rc:
+        first = next((l.strip() for l in out.splitlines() if l.startswith("FAIL")), last)
+        return False, first[:100]
+    return True, last.replace("scan_sched: ", "")
+
 def t_pex_host():
     """pex/: the host API source is consistent and the portable runtime parts
     (json group, CRC-32, SHA-256) pass on the build host."""
@@ -1661,6 +1682,7 @@ def main():
     step(0, "the cyw43 wait hook stays USB-only", t_cyw43_wait_stays_usb_only)
     step(0, "W5500 pins are reserved", t_w5500_pins_reserved)
     step(0, "PEX: host API source + portable runtime parts (json, CRC, SHA-256)", t_pex_host)
+    step(0, "PEX scan scheduler: priorities, quiet slots, guard", t_scan_sched)
     step(0, "PEX: Lua unload notifies, detaches, and errors on use after", t_pex_lua_unload)
 
     if a.tier >= 1:
