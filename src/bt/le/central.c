@@ -52,6 +52,7 @@ void le_on_disconnected(uint16_t con_handle, uint8_t reason);
 static btstack_packet_callback_registration_t adv_cb;
 static le_scan_filter_t s_filter;
 static bool s_scanning;
+static uint8_t s_connect_addr[BT_ADDR_LEN];   /* the connect in flight, for its timeout */
 static uint32_t s_scan_until_ms;
 static bool s_connecting;
 static uint32_t s_connect_deadline_ms;
@@ -305,8 +306,11 @@ void le_central_tick(void) {
          * every later connect is refused. */
         gap_connect_cancel();
         s_connecting = false;
-        api_emit("dev.connect_failed", "{\"reason\":\"timeout\"}");
-        LE_PEX(19, NULL, -1, NULL, 0, -1);
+        char ev[72];
+        snprintf(ev, sizeof ev, "{\"addr\":\"%s\",\"reason\":\"timeout\"}", bd_addr_to_str(s_connect_addr));
+        printf("bt: connect to %s timed out (15 s, no answer)\n", bd_addr_to_str(s_connect_addr));
+        api_emit("dev.connect_failed", ev);
+        LE_PEX(19, s_connect_addr, -1, NULL, 0, -1);
     }
     if (s_scanning && s_scan_until_ms && (int32_t)(now_ms() - s_scan_until_ms) >= 0) {
         scan_radio_off();
@@ -1144,6 +1148,7 @@ bool le_connect(const uint8_t *addr, uint8_t addr_type) {
      * lower duty, as a link is then up) once bring-up is over. */
     scan_radio_off();
     s_connecting = true;
+    memcpy(s_connect_addr, addr, BT_ADDR_LEN);
     s_connect_deadline_ms = now_ms() + 15000;
     /* Android's link defaults, which is what the phone apps flash iTi units
      * with: interval 30-50 ms, latency 0, supervision timeout 5 s. BTstack's
