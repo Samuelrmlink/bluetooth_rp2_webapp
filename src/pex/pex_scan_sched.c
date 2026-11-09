@@ -88,10 +88,25 @@ static sreq_t *req_new(pex_mod_t *m) {
     return NULL;
 }
 
+/* Does a module other than m still want a scan? The guard after a slot is
+ * owed to those modules only: with none waiting, a new slot is granted at
+ * once, so back-to-back jobs of one module are not each delayed 25 s. */
+static bool others_want(const pex_mod_t *m) {
+    for (int i = 0; i < SREQS; i++) {
+        if (s_req[i].used && s_req[i].mod != m) { return true; }
+    }
+    return false;
+}
+
+static bool guarding(uint32_t now, const pex_mod_t *m) {
+    if (!s_guard_until_ms || after_or_at(now, s_guard_until_ms)) { return false; }
+    return others_want(m);
+}
+
 static void quiet_end(uint32_t now) {
     if (!s_quiet.on) { return; }
     s_quiet.on = false;
-    s_guard_until_ms = now + QUIET_GUARD_MS;
+    s_guard_until_ms = others_want(s_quiet.mod) ? now + QUIET_GUARD_MS : 0;
     /* Low-priority requests waited out the slot: each gets a burst of at
      * least the guard length now, before another slot can be granted. */
     for (int i = 0; i < SREQS; i++) {
@@ -102,7 +117,7 @@ static void quiet_end(uint32_t now) {
         r->next_ms = now + (r->period_ms > len ? r->period_ms : len);
     }
     printf("pex: quiet slot %d ended; scans resume (no new slot for %u s)\n",
-           s_quiet.id, (unsigned)(QUIET_GUARD_MS / 1000u));
+           s_quiet.id, s_guard_until_ms ? (unsigned)(QUIET_GUARD_MS / 1000u) : 0u);
 }
 
 /* Is r held off by another module's quiet slot? */
@@ -223,7 +238,7 @@ int pex_bt_quiet(uint32_t ms) {
         s_quiet.end_ms = after_or_at(end, cap) ? cap : end;
         return s_quiet.id;
     }
-    if (s_guard_until_ms && !after_or_at(now, s_guard_until_ms)) { return PEX_EAGAIN; }
+    if (guarding(now, m)) { return PEX_EAGAIN; }
     if (++s_quiet_seq <= 0) { s_quiet_seq = 1; }
     s_quiet.on = true;
     s_quiet.mod = m;
@@ -281,7 +296,7 @@ int pex_gw_bt_sched_json(char *buf, size_t cap) {
     }
     if (w < 0 || (size_t)w >= cap - n) { return -1; }
     n += (size_t)w;
-    uint32_t guard = (s_guard_until_ms && !after_or_at(now, s_guard_until_ms)) ? s_guard_until_ms - now : 0;
+    uint32_t guard = guarding(now, NULL) ? s_guard_until_ms - now : 0;
     w = snprintf(buf + n, cap - n, ",\"guard_ms\":%lu,\"requests\":[", (unsigned long)guard);
     if (w < 0 || (size_t)w >= cap - n) { return -1; }
     n += (size_t)w;

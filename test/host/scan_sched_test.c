@@ -225,7 +225,39 @@ static void test_quiet(void) {
     pex_bt_scan_stop();
 }
 
+/* The guard is owed to other modules' scans: with nobody else waiting, the
+ * same module's next job gets a slot at once. */
+static void test_guard_owed(void) {
+    reset_all();
+    at_ms(7000000);
+    as(&m_iti);
+    int id = pex_bt_quiet(60000);
+    CHECK(id > 0, "slot granted with nobody else scanning");
+    CHECK(pex_bt_quiet_release(id) == PEX_OK, "released");
+    int id2 = pex_bt_quiet(60000);
+    CHECK(id2 > 0, "no guard when no other module wants a scan");
+    /* the holder's own scan request does not create a guard either */
+    pex_bt_scan(0, 1);
+    pex_bt_quiet_release(id2);
+    CHECK(pex_bt_quiet(60000) > 0, "the holder's own request is not owed a guard");
+    pex_bt_scan_stop();
+    pex_scan_sched_unload((pex_mod_t *)&m_iti);
+    /* anker waiting: guard holds; anker giving up its request ends it early */
+    at_ms(7100000); tick();
+    as(&m_anker);
+    pex_bt_scan_periodic(25000, 60000, 1);
+    as(&m_iti);
+    id = pex_bt_quiet(60000);
+    pex_bt_quiet_release(id);
+    CHECK(pex_bt_quiet(60000) == PEX_EAGAIN, "guard while anker is owed its burst");
+    as(&m_anker);
+    pex_bt_scan_stop();
+    as(&m_iti);
+    CHECK(pex_bt_quiet(60000) > 0, "guard ends once anker no longer wants a scan");
+}
+
 int main(void) {
+    test_guard_owed();
     test_high();
     test_low();
     test_quiet();
