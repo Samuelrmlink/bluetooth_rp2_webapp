@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pexNameOf, pexFileName, isPexFile, pexRunningPaths, startPex, stopPex } from '../../js/editor/pexrun.js';
+import { pexNameOf, pexHomeOnSd, pexHomePaths, pexFileName, isPexFile, pexRunningPaths, startPex, stopPex } from '../../js/editor/pexrun.js';
 
 const fail = (code, message) => Object.assign(new Error(message || code), { code });
 
@@ -41,7 +41,21 @@ test('pexFileName reads a module name from any directory', () => {
   assert.equal(pexNameOf('sd/projects/anker/build/pico2_w/anker.m33.pex'), null);
 });
 
-test('pexRunningPaths maps every state, and skips a second instance', () => {
+test('pexNameOf takes the sd/pex/ home too, but not sd/pex/good/ or a build directory', () => {
+  assert.equal(pexNameOf('sd/pex/anker.m33.pex'), 'anker');
+  assert.equal(pexNameOf('sd/pex/good/anker.m33.pex'), null);
+  assert.equal(pexNameOf('sd/pex/anker.m33.pex.gz'), null);
+  assert.equal(pexNameOf('sd/x/pex/anker.m33.pex'), null);
+  assert.equal(pexNameOf('pex/good/anker.m33.pex'), null);
+  assert.equal(pexHomeOnSd('sd/pex/anker.m33.pex'), true);
+  assert.equal(pexHomeOnSd('pex/anker.m33.pex'), false);
+  assert.equal(pexHomeOnSd('sd/pex/good/anker.m33.pex'), false);
+  assert.equal(pexHomeOnSd(null), false);
+  assert.deepEqual(pexHomePaths('anker', 'm33'), ['pex/anker.m33.pex', 'sd/pex/anker.m33.pex']);
+  assert.deepEqual(pexHomePaths(null), []);
+});
+
+test('pexRunningPaths maps every state under both homes, and skips a second instance', () => {
   assert.deepEqual(pexRunningPaths(null), {});
   assert.deepEqual(pexRunningPaths({
     arch: 'm33',
@@ -55,10 +69,15 @@ test('pexRunningPaths maps every state, and skips a second instance', () => {
     ],
   }), {
     'pex/anker.m33.pex': 'running',
+    'sd/pex/anker.m33.pex': 'running',
     'pex/pinecil.m33.pex': 'stopped',
+    'sd/pex/pinecil.m33.pex': 'stopped',
     'pex/sample.m33.pex': 'loaded',
+    'sd/pex/sample.m33.pex': 'loaded',
     'pex/old.m33.pex': 'exited',
+    'sd/pex/old.m33.pex': 'exited',
     'pex/bad.m33.pex': 'faulted',
+    'sd/pex/bad.m33.pex': 'faulted',
   });
 });
 
@@ -130,4 +149,49 @@ test('stopPex reports a module that stopped but stayed loaded', async () => {
     error: 'hello has 1 live reference',
   });
   assert.deepEqual(api.calls.map((c) => c[0]), ['pex.stop', 'pex.unload']);
+});
+
+test('startPex loads from the card when the name is neither installed nor on LittleFS', async () => {
+  const api = fake({
+    'pex.info': () => { throw fail('not_loaded'); },
+    'pex.load': () => { throw fail('not_found', 'not installed, and no lfs:/pex/<name>.<arch>.pex'); },
+    'pex.start': () => ({ started: true }),
+  });
+  let fromCard = 0;
+  const r = await startPex(api, 'anker', { loadSd: async () => { fromCard++; } });
+  assert.deepEqual(r, { started: true });
+  assert.equal(fromCard, 1);
+  assert.deepEqual(api.calls.map((c) => c[0]), ['pex.info', 'pex.load', 'pex.start']);
+});
+
+test('startPex loads an installed module by name and does not touch the card', async () => {
+  const api = fake({
+    'pex.info': () => { throw fail('not_loaded'); },
+    'pex.load': () => ({ name: 'anker', state: 'loaded' }),
+    'pex.start': () => ({ started: true }),
+  });
+  let fromCard = 0;
+  await startPex(api, 'anker', { loadSd: async () => { fromCard++; } });
+  assert.equal(fromCard, 0);
+  assert.deepEqual(api.calls[1], ['pex.load', { name: 'anker' }]);
+});
+
+test('startPex does not fall back to the card on an error other than not_found', async () => {
+  const api = fake({
+    'pex.info': () => { throw fail('not_loaded'); },
+    'pex.load': () => { throw fail('no_memory'); },
+  });
+  let fromCard = 0;
+  await assert.rejects(startPex(api, 'anker', { loadSd: async () => { fromCard++; } }), { code: 'no_memory' });
+  assert.equal(fromCard, 0);
+});
+
+test('startPex does not start when the card load fails', async () => {
+  const api = fake({
+    'pex.info': () => { throw fail('not_loaded'); },
+    'pex.load': () => { throw fail('not_found'); },
+    'pex.start': () => ({ started: true }),
+  });
+  await assert.rejects(startPex(api, 'anker', { loadSd: async () => { throw new Error('no such file'); } }), /no such file/);
+  assert.equal(api.calls.some((c) => c[0] === 'pex.start'), false);
 });

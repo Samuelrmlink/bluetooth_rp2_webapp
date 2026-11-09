@@ -29,7 +29,7 @@ import { initialState, handle as vimHandle, modeLabel, clampNormal, searchMatche
 import { copyText } from '../clipboard.js';
 import { openCellMenu } from '../controls/cellmenu.js';
 import { fileMenuItems, fileInfo, dirInfo, folderSize, sizeInfo } from '../editor/filemenu.js';
-import { pexNameOf, pexFileName, pexRunningPaths, isPexFile, startPex, stopPex } from '../editor/pexrun.js';
+import { pexNameOf, pexFileName, pexHomeOnSd, pexHomePaths, pexRunningPaths, isPexFile, startPex, stopPex } from '../editor/pexrun.js';
 import { buildIdOf } from '../editor/pexmap.js';
 import { PexPartition, PEX_PART, mergePartition } from '../editor/pexpart.js';
 import { buildButtonState, projectBuildItems } from '../editor/pexfile.js';
@@ -80,7 +80,7 @@ export class EditorWindow {
     this.tabs = new TabState();
     this.views = new Map();         // group id -> view
     this.marks = new Map();         // path -> { state, tier, hash } (editor/status.js)
-    this.pexStates = {};            // pex/<name>.<arch>.pex -> pex.list state
+    this.pexStates = {};            // pex/ and sd/pex/<name>.<arch>.pex -> pex.list state (both keys, so a pex/ key looks up either)
     this.pexInstalled = new Set();  // names pex.installed reports
     this.pexPart = null;            // last pex.installed reply, for the partition tab
     this.pexArch = 'm33';
@@ -113,6 +113,7 @@ export class EditorWindow {
       <div class="ed-titlebar">
         <button type="button" class="tool-btn ed-b-sidebar" title="Files (Alt+B)" aria-label="Toggle file sidebar">${icon('sidebar')}</button>
         <button type="button" class="tool-btn ed-b-keys" aria-pressed="false" title="Vim keys on/off — off, the text behaves like any text box (also Settings → UI)">VIM</button>
+        <button type="button" class="tool-btn ed-b-pex" title="PEX partition" aria-label="PEX partition">PEX</button>
         <span class="ed-title"><span class="ed-name">No file open</span><span class="ed-state"></span></span>
         <span class="ed-notice"></span>
         <span class="spacer"></span>
@@ -127,7 +128,6 @@ export class EditorWindow {
         <button type="button" class="tool-btn ed-b-svg" title="Show the SVG as a picture or as text" hidden>Text</button>
         <button type="button" class="tool-btn ed-b-split" title="Split the editor: the file in a second half, side by side (Alt+\\) — again to unsplit" aria-label="Split editor" aria-pressed="false">${icon('split')}</button>
         <button type="button" class="tool-btn ed-b-help" title="The editor's keys (Alt+/)" aria-label="Editor keys">?</button>
-        <button type="button" class="tool-btn ed-b-pex" title="PEX partition" aria-label="PEX partition">PEX</button>
         <button type="button" class="tool-btn ed-b-more" title="More" aria-label="More actions">${icon('more')}</button>
         <input type="file" class="ed-upload-input" multiple hidden>
         <input type="file" class="ed-tar-input" accept=".tar,application/x-tar" hidden>
@@ -1491,17 +1491,20 @@ export class EditorWindow {
     try {
       while (this.ws.connected) {
         this._pollAgain = false;
-        // pex.list is absent on firmware built before PEX. A failure leaves the
-        // Lua marks updating exactly as they did.
+        // pex.list is absent on firmware built before PEX, and script.* is
+        // absent on a no-Lua build. Either failing leaves the other side's
+        // state updating: the PEX partition must not wait on Lua.
         const [loaded, list, pex, inst] = await Promise.all([
-          this.ws.call('script.loaded'),
-          this.ws.call('script.list'),
+          this.ws.call('script.loaded').catch(() => null),
+          this.ws.call('script.list').catch(() => null),
           this.ws.call('pex.list').catch(() => null),
           this.ws.call('pex.installed').catch(() => null),
         ]);
-        this.marks = arenaMarks(loaded.units);
-        this.list = list;
-        this.runtime = list.runtime || null;
+        if (loaded) this.marks = arenaMarks(loaded.units);
+        if (list) {
+          this.list = list;
+          this.runtime = list.runtime || null;
+        }
         this.pexStates = pexRunningPaths(pex);
         this.pexArch = pex?.arch || this.pexArch;
         this.pexPool = pex?.pool || this.pexPool;
@@ -1804,12 +1807,23 @@ export class EditorWindow {
   }
 
   // The toolbar Run / Stop buttons, and the file menu's Start / Stop on a
-  // .pex file. Lua scripts never come through here.
-  async _pexStart(name) {
+  // .pex file. Lua scripts never come through here. `path` is the row the
+  // start came from, when there is one. pex.load {name} finds an installed
+  // copy or the LittleFS file. A module whose only file is sd/pex/ is then
+  // not_found, and loads from its sd: path instead.
+  async _pexStart(name, path = null) {
     if (!name) return;
+    const home = [path, this.tree?.sel, this.path].find((p) => p && pexNameOf(p) === name)
+      || this._pexHome(name);
+    const sdPath = pexHomeOnSd(home) ? `sd:/${home.slice(3)}` : null;
     return this._pexRun(`Starting ${name}`, async (job) => {
       job.set(`Starting ${name}`, 0.45);
-      const r = await startPex(this.ws, name);
+      const loadSd = sdPath ? async () => {
+        job.set(`Loading ${name} from the card`, 0.6);
+        const { loadFromCard } = await import('../editor/pexproj.js');
+        await loadFromCard({ ws: this.ws, sdPath, name });
+      } : null;
+      const r = await startPex(this.ws, name, { loadSd });
       return r.started ? `Started ${name}` : `${name} is already running`;
     });
   }
@@ -1941,6 +1955,8 @@ export class EditorWindow {
     });
   }
 
+  // pex/<name>.<arch>.pex on LittleFS: the firmware installs it by name.
+  // sd/pex/<name>.<arch>.pex goes through _pexInstallFrom (see _fileAct).
   async _pexInstall(name) {
     if (!name) return;
     return this._pexRun(`Installing ${name}`, async (job) => {
@@ -1952,8 +1968,8 @@ export class EditorWindow {
     });
   }
 
-  // A .pex that is not pex/<name>.<arch>.pex, including one in a build
-  // directory on the card. Firmware streams an sd: install through a 4 KB
+  // A .pex on the card: its home sd/pex/<name>.<arch>.pex, or one in a
+  // build directory. Firmware streams an sd: install through a 4 KB
   // window. It is not copied to LittleFS. A RAM load is the path that
   // still needs the whole file in the pool.
   async _pexInstallFrom(path) {
@@ -1987,7 +2003,7 @@ export class EditorWindow {
 
   async _pexUninstall(name) {
     if (!name) return;
-    if (!confirm(`Uninstall ${name} from the PEX partition? The file in pex/ stays. A running copy has to be stopped and unloaded first.`)) return;
+    if (!confirm(`Uninstall ${name} from the PEX partition? The .pex file stays. A running copy has to be stopped and unloaded first.`)) return;
     return this._pexRun(`Uninstalling ${name}`, async (job) => {
       job.set(`Uninstalling ${name}`, 0.45);
       await this.ws.call('pex.uninstall', { name });
@@ -2014,6 +2030,13 @@ export class EditorWindow {
   // The row the user pointed at wins, so Run / Stop follow a .pex file even
   // while a script stays open. The open buffer is the fallback. The partition
   // view keeps the block it last described when the tree is on something else.
+  // The home file (pex/ or sd/pex/) the tree has for this module, LittleFS
+  // first, or null when neither folder lists it.
+  _pexHome(name) {
+    if (!name || !this.tree) return null;
+    return pexHomePaths(name, this.pexArch).find((p) => this.tree.find(p)) || null;
+  }
+
   _activePex() {
     const selected = pexNameOf(this.tree?.sel);
     if (selected) return selected;
@@ -2029,8 +2052,8 @@ export class EditorWindow {
   _selectPex(name) {
     if (!name) return false;
     this._pexFocus = name;
-    const path = `pex/${name}.${this.pexArch}.pex`;
-    if (this.tree.find(path)) {
+    const path = this._pexHome(name);
+    if (path) {
       this.tree.sel = path;
       this.tree.reveal(path);
     }
@@ -2935,9 +2958,12 @@ export class EditorWindow {
       case 'open': return this.open(p);
       case 'start': return this.scriptOp('script.start', p, (n) => `Started ${n}`);
       case 'stop': return this.scriptOp('script.stop', p, (n) => `Stopped ${n}`);
-      case 'pex-start': return this._pexStart(pexNameOf(p));
+      case 'pex-start': return this._pexStart(pexNameOf(p), p);
       case 'pex-stop': return this._pexStop(pexNameOf(p));
-      case 'pex-install': return pexNameOf(p) ? this._pexInstall(pexNameOf(p)) : this._pexInstallFrom(p);
+      // A home file on LittleFS installs by name. Anything on the card,
+      // sd/pex/ included, installs from its sd: path: by name the firmware
+      // would look on LittleFS.
+      case 'pex-install': return pexNameOf(p) && !pexHomeOnSd(p) ? this._pexInstall(pexNameOf(p)) : this._pexInstallFrom(p);
       case 'pex-uninstall': return this._pexUninstall(pexNameOf(p));
       case 'pex-mark': return this._pexMark(p);
       case 'pex-restore': return this._pexRestore(p);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadProject, executeTarget, markVerified, restoreVerified, installFromCard, installCandidate } from '../../js/editor/pexproj.js';
+import { loadProject, executeTarget, markVerified, restoreVerified, installFromCard, installCandidate, loadFromCard, pexIdentity } from '../../js/editor/pexproj.js';
 
 const PEX = `name blink
 version 0.1.0
@@ -408,4 +408,41 @@ test('mark verified keeps the previous file until the new copy is on the card', 
   assert.equal(streamed.ok, true, streamed.error);
   assert.equal(confirmed, true);
   assert.equal(unloaded, true);
+});
+
+test('loadFromCard loads an sd/pex module by its sd: path and waits for pex.sd_done', async () => {
+  const calls = [];
+  const ws = {
+    call: async (op, params) => { calls.push({ op, params }); return { pending: true }; },
+    on: (topic, fn) => {
+      if (topic === 'pex.sd_done') queueMicrotask(() => fn({ op: 'load', ok: true, name: 'anker' }));
+      return () => {};
+    },
+  };
+  const ev = await loadFromCard({ ws, sdPath: 'sd:/pex/anker.m33.pex', name: 'anker' });
+  assert.equal(ev.ok, true);
+  assert.deepEqual(calls, [{ op: 'pex.load', params: { path: 'sd:/pex/anker.m33.pex', name: 'anker' } }]);
+
+  const bad = {
+    call: async () => ({ pending: true }),
+    on: (topic, fn) => { queueMicrotask(() => fn({ ok: false, error: 'not_found', msg: 'no such file' })); return () => {}; },
+  };
+  await assert.rejects(loadFromCard({ ws: bad, sdPath: 'sd:/pex/gone.m33.pex', name: 'gone' }), /no such file/);
+});
+
+test('an sd/pex home file has the same identity, and restore installs from sd/pex/good/', async () => {
+  assert.deepEqual(pexIdentity('sd/pex/anker.m33.pex'), { name: 'anker', arch: 'm33' });
+  assert.deepEqual(pexIdentity('pex/anker.m33.pex'), { name: 'anker', arch: 'm33' });
+  const { ws, calls } = callsOf();
+  let readFrom = '';
+  const res = await restoreVerified({
+    name: 'anker', arch: 'm33',
+    confirm: () => true,
+    read: async (p) => { readFrom = p; return { ok: true, bytes: new Uint8Array(8) }; },
+    write: async () => ({ ok: true }),
+    ws,
+  });
+  assert.equal(res.ok, true, res.error);
+  assert.equal(readFrom, 'sd/pex/good/anker.m33.pex');
+  assert.deepEqual(calls[0], { op: 'pex.install', params: { path: 'sd:/pex/good/anker.m33.pex', name: 'anker' } });
 });

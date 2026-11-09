@@ -5,12 +5,17 @@
 //            uncompressed, Restore .bak (when there is one), Copy to…,
 //            Rename / move…, Delete…; a script (lua/x.lua or staged/x.lua)
 //            also Start, Stop, Commit to lua/, Revert to the next tier; a
-//            PEX app (pex/<name>.<arch>.pex) also Start, Stop, Install,
-//            Uninstall (only when that name is in the PEX partition), and
-//            PEX partition…. A .pex elsewhere, including a build directory
-//            on the SD card, offers Install (the card path calls pex.install
-//            on that sd: path) and PEX partition…. Start calls pex.start.
-//            Stop calls pex.stop and then pex.unload, not Lua.
+//            PEX app's own file (pex/<name>.<arch>.pex on LittleFS, or
+//            sd/pex/<name>.<arch>.pex on the card) also Start, Stop,
+//            Install, Uninstall (only when that name is in the PEX
+//            partition), Mark verified, Restore verified, and PEX
+//            partition…. Install of the sd/pex/ file calls pex.install on
+//            its sd: path; Start falls back to pex.load of that sd: path
+//            when the name is neither installed nor on LittleFS. A .pex
+//            elsewhere, including sd/pex/good/ and a build directory on the
+//            SD card, offers Install (only on the card, from that sd: path),
+//            Mark verified, Restore verified, and PEX partition…. Start
+//            calls pex.start. Stop calls pex.stop and then pex.unload, not Lua.
 //   folder   New file here…, Upload here…, Upload archive here…, Download
 //            as .tar, Calculate size, Refresh, Copy to…, Rename / move…,
 //            and Delete… once it is known to be empty. The card's own
@@ -80,7 +85,7 @@ export function fileMenuItems(node, { isOpen = false, script = null, pex = null,
     out.push({ id: 'pex-partition', label: 'PEX partition…' });
   } else if (/\.pex$/i.test(node.path || node.name || '') && !isGz(node.path || '')) {
     const base = (node.name || node.path || '').split('/').pop().replace(/\.pex$/i, '');
-    // pex/<name>.<arch>.pex is the branch above. A module in an SD build
+    // pex/ and sd/pex/<name>.<arch>.pex are the branch above. A module in an SD build
     // directory is installed from that path; firmware reads it into the pool.
     if (onSd(node.path)) out.push({ id: 'pex-install', label: `Install ${base}` });
     out.push({ id: 'pex-mark', label: `Mark ${base} verified` });

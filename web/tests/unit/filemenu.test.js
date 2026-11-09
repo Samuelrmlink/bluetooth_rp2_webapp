@@ -135,3 +135,15 @@ test('the SD card: its own folder has no rename/delete and links to its settings
   assert.ok(!ids(fileMenuItems({ dir: false, path: 'sd/notes.txt' })).includes('compress'));
   assert.match(sizeInfo({ files: 2, dirs: 1, bytes: 2048, alloc: 0, block: 0 }, 'sd/logs'), /on the SD card$/);
 });
+
+test('an sd/pex/ home file gets the full PEX app menu, like pex/', () => {
+  const m = fileMenuItems({ dir: false, path: 'sd/pex/anker.m33.pex', name: 'anker.m33.pex' }, { pex: 'anker' });
+  assert.deepEqual(ids(m), ['open', 'pex-start', 'pex-stop', 'pex-install', 'pex-mark', 'pex-restore', 'pex-partition', 'download', 'download-ws', 'copy', 'rename', 'select', 'delete']);
+  assert.equal(m.find((i) => i.id === 'pex-install').label, 'Install anker');
+  const installed = fileMenuItems({ dir: false, path: 'sd/pex/anker.m33.pex', name: 'anker.m33.pex' }, { pex: 'anker', installed: true });
+  assert.ok(ids(installed).includes('pex-uninstall'));
+  // a verified copy is not a home file: no Start, Stop, or Uninstall
+  const good = ids(fileMenuItems({ dir: false, path: 'sd/pex/good/anker.m33.pex', name: 'anker.m33.pex' }, { pex: null, installed: true }));
+  assert.ok(!good.includes('pex-start') && !good.includes('pex-uninstall'));
+  assert.ok(good.includes('pex-install') && good.includes('pex-restore'));
+});

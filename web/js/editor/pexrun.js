@@ -3,10 +3,28 @@
 // .pex file uses these instead, so the Lua sources on the device are never
 // the launcher and are never written.
 
-/** "pex/anker.m33.pex" -> "anker". Anything else is not the installed app file. */
+// A module's own file sits in one of two homes: pex/<name>.<arch>.pex on
+// LittleFS (older images), or sd/pex/<name>.<arch>.pex on the card. Only
+// the top of each folder counts: sd/pex/good/ holds verified copies, and a
+// build directory holds build outputs.
+const HOME = /^(sd\/)?pex\/([A-Za-z0-9_-]+)\.[A-Za-z0-9]+\.pex$/;
+
+/** "pex/anker.m33.pex" or "sd/pex/anker.m33.pex" -> "anker". Anything else is not an app's own file. */
 export function pexNameOf(path) {
-  const m = /^pex\/([A-Za-z0-9_-]+)\.[A-Za-z0-9]+\.pex$/.exec(path || '');
-  return m ? m[1] : null;
+  const m = HOME.exec(path || '');
+  return m ? m[2] : null;
+}
+
+/** True for sd/pex/<name>.<arch>.pex: the home file is on the card. */
+export function pexHomeOnSd(path) {
+  const m = HOME.exec(path || '');
+  return !!(m && m[1]);
+}
+
+/** Both homes a module's file can have, LittleFS first. */
+export function pexHomePaths(name, arch = 'm33') {
+  if (!name) return [];
+  return [`pex/${name}.${arch}.pex`, `sd/pex/${name}.${arch}.pex`];
 }
 
 /** Basename of name.arch.pex, including a copy under sd/. A .gz name is not one. */
@@ -24,8 +42,9 @@ export function isPexFile(path) {
 const PEX_STATES = new Set(['loaded', 'running', 'stopped', 'exited', 'faulted']);
 
 /**
- * path -> state for every app pex.list reports. A second instance is renamed
- * name#2 and has no file of its own, so it is left unmarked.
+ * path -> state for every app pex.list reports, under both homes (pex/ and
+ * sd/pex/) so whichever file the tree shows is marked. A second instance is
+ * renamed name#2 and has no file of its own, so it is left unmarked.
  */
 export function pexRunningPaths(list) {
   if (!list) return {};
@@ -33,7 +52,7 @@ export function pexRunningPaths(list) {
   const out = {};
   for (const m of list.modules || []) {
     if (!m?.name || !PEX_STATES.has(m.state) || String(m.name).includes('#')) continue;
-    out[`pex/${m.name}.${arch}.pex`] = m.state;
+    for (const p of pexHomePaths(m.name, arch)) out[p] = m.state;
   }
   return out;
 }
@@ -41,9 +60,12 @@ export function pexRunningPaths(list) {
 /**
  * Load the app if it is not loaded, then start it. An app that is already
  * running is left alone: a second pex.start is an error.
+ * pex.load {name} uses the installed partition copy, then the LittleFS file.
+ * When neither exists it answers not_found; `loadSd` (when given) then loads
+ * the module from its file on the card, and the start follows.
  * Returns { started: true } or { started: false, state: 'running' }.
  */
-export async function startPex(api, name) {
+export async function startPex(api, name, { loadSd = null } = {}) {
   let info = null;
   try {
     info = await api.call('pex.info', { name });
@@ -51,7 +73,14 @@ export async function startPex(api, name) {
     if (e.code !== 'not_loaded') throw e;
   }
   if (info?.state === 'running') return { started: false, state: 'running' };
-  if (!info) await api.call('pex.load', { name });
+  if (!info) {
+    try {
+      await api.call('pex.load', { name });
+    } catch (e) {
+      if (e?.code !== 'not_found' || !loadSd) throw e;
+      await loadSd();
+    }
+  }
   await api.call('pex.start', { name });
   return { started: true };
 }

@@ -149,14 +149,23 @@ export async function installFromCard({ ws, sdPath, name }) {
   return waitSd(ws, () => ws.call('pex.install', { path: sdPath, name }));
 }
 
-async function waitSd(ws, call) {
+/**
+ * Load a module into RAM from its file on the card (pex.load of an sd:
+ * path), waiting for pex.sd_done. `name` keeps the loaded module's name.
+ * It does not start the module.
+ */
+export async function loadFromCard({ ws, sdPath, name }) {
+  return waitSd(ws, () => ws.call('pex.load', name ? { path: sdPath, name } : { path: sdPath }), 'load failed');
+}
+
+async function waitSd(ws, call, failed = 'install failed') {
   const done = watchEvent(ws, 'pex.sd_done', 60000);
   let reply;
   try { reply = await call(); }
   catch (e) { done.cancel(); throw e; }
   if (reply?.pending) {
     const ev = await done.promise;
-    if (!ev?.ok) throw new Error(ev?.msg || ev?.error || 'install failed');
+    if (!ev?.ok) throw new Error(ev?.msg || ev?.error || failed);
     return ev;
   }
   done.cancel();
