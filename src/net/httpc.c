@@ -403,7 +403,12 @@ static void finish(req_t *r, httpc_err_t err, const char *msg) {
     r->err = err;
     r->errmsg = msg;
     r->state = err == HTTPC_OK ? HTTPC_DONE : HTTPC_ERROR;
-    if (err != HTTPC_OK) { s_stats.failures++; }
+    if (err != HTTPC_OK) {
+        s_stats.failures++;
+        /* One line per failure: without Lua there is no other place to see why. */
+        printf("httpc: %s %s failed: %s (%s)\n", r->method ? r->method : "?", r->url ? r->url : "?",
+               httpc_err_name(err), msg ? msg : "");
+    }
     if (!r->done_called && r->sink.on_done) {
         r->done_called = true;
         r->sink.on_done(r->user, err, msg);

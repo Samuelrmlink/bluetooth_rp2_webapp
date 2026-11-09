@@ -32,6 +32,7 @@
 #include "net/cyw43_wait.h"
 #include "pico/time.h"
 #include "autoconf.h"
+#include "net/sntp_time.h"
 #if CONFIG_NET_HTTP_CLIENT
 #include "net/httpc.h"
 #endif
@@ -294,6 +295,10 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
                  (unsigned long)hs.tls_waits, (unsigned long)hs.tls_alloc_fails);
     }
 #endif
+    /* The wall clock (SNTP): TLS checks certificate dates only once it is set. */
+    char timej[128];
+    snprintf(timej, sizeof timej, "{\"valid\":%s,\"unix\":%lld,\"server\":\"%s\"}",
+             sntp_time_valid() ? "true" : "false", (long long)sntp_time_unix(), sntp_time_server());
     static char result[2048];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"board\":\"%s\",\"uptime_ms\":%lu,"
@@ -301,7 +306,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
-             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s,\"lua_mem\":%s,\"httpc\":%s}",
+             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s,\"lua_mem\":%s,\"httpc\":%s,\"time\":%s}",
              PICO_BOARD,
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
@@ -332,7 +337,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              (unsigned long)stackmark_max_used(),
              /* The mounted LittleFS, its migration (fs_migrate.h) and the
               * PEX partition it makes room for. */
-             fsj, memj, httpcj);
+             fsj, memj, httpcj, timej);
     api_reply_ok(reply, ctx, id, result);
 }
 
