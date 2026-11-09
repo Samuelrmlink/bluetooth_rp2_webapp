@@ -32,6 +32,9 @@
 #include "net/cyw43_wait.h"
 #include "pico/time.h"
 #include "autoconf.h"
+#if CONFIG_NET_HTTP_CLIENT
+#include "net/httpc.h"
+#endif
 #if CONFIG_PEX
 #include "pex/pex_gw.h"
 #endif
@@ -274,6 +277,23 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
 #if CONFIG_LUA_ENABLE
     lrt_mem_json(memj, sizeof memj);
 #endif
+    /* The HTTP client and the pool its requests and TLS live in. Without Lua
+     * this is the only place it is visible (lhttp's stats need a script). */
+    char httpcj[240] = "null";
+#if CONFIG_NET_HTTP_CLIENT
+    {
+        httpc_stats_t hs;
+        httpc_stats(&hs);
+        snprintf(httpcj, sizeof httpcj,
+                 "{\"requests\":%lu,\"failures\":%lu,\"tls_now\":%lu,\"pool_size\":%lu,"
+                 "\"pool_used\":%lu,\"pool_peak\":%lu,\"pool_largest_free\":%lu,"
+                 "\"pool_fails\":%lu,\"tls_waits\":%lu,\"tls_alloc_fails\":%lu}",
+                 (unsigned long)hs.requests, (unsigned long)hs.failures, (unsigned long)hs.tls_now,
+                 (unsigned long)hs.pool_size, (unsigned long)hs.pool_used, (unsigned long)hs.pool_peak,
+                 (unsigned long)hs.pool_largest_free, (unsigned long)hs.pool_fails,
+                 (unsigned long)hs.tls_waits, (unsigned long)hs.tls_alloc_fails);
+    }
+#endif
     static char result[2048];
     snprintf(result, sizeof(result),
              "{\"firmware\":\"bluetooth_rp2_webapp\",\"board\":\"%s\",\"uptime_ms\":%lu,"
@@ -281,7 +301,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              "\"radio_wait_max_at_ms\":%lu,\"radio_wait_max_asked_us\":%lu,"
              "\"radio_wait_usb_max_us\":%lu,\"radio_wait_total_ms\":%lu,"
              "\"transports\":[\"le\"%s],\"clients\":%d,\"modules\":%s,"
-             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s,\"lua_mem\":%s}",
+             "\"last_crumb\":%lu,\"last_fault_pc\":%lu,\"stack_max\":%lu,\"fs\":%s,\"lua_mem\":%s,\"httpc\":%s}",
              PICO_BOARD,
              (unsigned long)to_ms_since_boot(get_absolute_time()),
              /* The previous boot's loop stopped running. Reported here
@@ -312,7 +332,7 @@ static void op_sys_info(const char *params, api_reply_fn reply, void *ctx, long 
              (unsigned long)stackmark_max_used(),
              /* The mounted LittleFS, its migration (fs_migrate.h) and the
               * PEX partition it makes room for. */
-             fsj, memj);
+             fsj, memj, httpcj);
     api_reply_ok(reply, ctx, id, result);
 }
 

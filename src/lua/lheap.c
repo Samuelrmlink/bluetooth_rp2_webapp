@@ -170,7 +170,10 @@ void lheap_init(void) {
 
 /* The whole block a request of `want` payload bytes needs; 0 if impossible. */
 static size_t need_of(size_t want) {
-    if (want > ARENA_BYTES) { return 0; }
+    /* The region being allocated from, not the arena: the TLS pool is its
+     * own region, and on a no-Lua image the arena is 8 bytes, which refused
+     * every pool allocation larger than that. */
+    if (want > (size_t)(G->end - G->base)) { return 0; }
     size_t n = RUP(want + HDR);
     return n < MINBLK ? MINBLK : n;
 }
@@ -624,9 +627,10 @@ void *lheap_scratch_alloc(lheap_scratch_t *s, size_t n) {
             return p;
         }
     }
-    /* A new page: the default size, or what this one allocation needs. */
-    size_t need = need_of(n);
+    /* A new page: the default size, or what this one allocation needs. The
+     * page comes from the arena, so the arena is what bounds the request. */
     G = &g_main;
+    size_t need = need_of(n);
     if (!need) { return fail(n); }
     size_t want = SPAGE_HDR + need + MINBLK;
     if (want < s->page) { want = s->page; }

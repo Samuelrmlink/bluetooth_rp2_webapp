@@ -148,6 +148,8 @@ int pex_http_start(const pex_http_req_t *q, pex_http_cb done, void *arg) {
         h->ring = pex_alloc_long(RING);
         h->fmem = pex_alloc_long(fs_file_mem());
         if (!h->ring || !h->fmem) {
+            printf("pex: http to_file %s: no PEX pool memory for its %u B ring and %u B file buffer\n",
+                   h->fpath, (unsigned)RING, (unsigned)fs_file_mem());
             if (h->ring) { pex_free(h->ring); }
             if (h->fmem) { pex_free(h->fmem); }
             return PEX_ENOMEM;

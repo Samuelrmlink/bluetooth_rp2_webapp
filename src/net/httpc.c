@@ -856,9 +856,26 @@ int httpc_start(const httpc_opts_t *o, const httpc_sink_t *sink, void *user, htt
     *err = HTTPC_OK;
     int slot = -1;
     for (int i = 0; i < HTTPC_MAX; i++) { if (!s_req[i]) { slot = i; break; } }
-    if (slot < 0) { *err = HTTPC_ENOMEM; return -1; }
+    if (slot < 0) {
+        /* Say who holds them: a request that never finishes keeps its slot. */
+        printf("httpc: no free request slot for %s (all %d in use)\n", o->url ? o->url : "?", HTTPC_MAX);
+        for (int i = 0; i < HTTPC_MAX; i++) {
+            if (s_req[i]) {
+                printf("httpc:  slot %d id %ld: %s\n", i, (long)s_req[i]->id, s_req[i]->url ? s_req[i]->url : "?");
+            }
+        }
+        *err = HTTPC_ENOMEM;
+        return -1;
+    }
     req_t *r = palloc(sizeof *r);
-    if (!r) { *err = HTTPC_ENOMEM; return -1; }
+    if (!r) {
+        lheap_pool_stats_t ps;
+        lheap_pool_stats(&ps);
+        printf("httpc: no memory for a request (%u B): pool %u of %u B used, largest free %u B\n",
+               (unsigned)sizeof *r, (unsigned)ps.used, (unsigned)ps.capacity, (unsigned)ps.largest_free);
+        *err = HTTPC_ENOMEM;
+        return -1;
+    }
     r->scope = o->scope;
     if (++s_gen > 0x7FFFFF) { s_gen = 1; }
     r->id = (s_gen << 4) | slot;
@@ -876,6 +893,10 @@ int httpc_start(const httpc_opts_t *o, const httpc_sink_t *sink, void *user, htt
     r->follow_left = o->follow;
     r->deadline_ms = now_ms() + (o->timeout_ms ? o->timeout_ms : 30000);
     if (!r->url || !r->method || (o->headers && !r->headers) || (o->body_len && !r->body)) {
+        lheap_pool_stats_t ps;
+        lheap_pool_stats(&ps);
+        printf("httpc: no memory to copy the request for %s: pool %u of %u B used, largest free %u B\n",
+               o->url ? o->url : "?", (unsigned)ps.used, (unsigned)ps.capacity, (unsigned)ps.largest_free);
         s_req[slot] = r;
         r->done_called = true;
         req_free(r);
@@ -898,7 +919,13 @@ int httpc_start(const httpc_opts_t *o, const httpc_sink_t *sink, void *user, htt
 #endif
     s_req[slot] = r;
     s_stats.requests++;
-    if (!build_request(r, true)) { r->done_called = true; req_free(r); *err = HTTPC_ENOMEM; return -1; }
+    if (!build_request(r, true)) {
+        lheap_pool_stats_t ps;
+        lheap_pool_stats(&ps);
+        printf("httpc: no memory to build the request for %s: pool %u of %u B used, largest free %u B\n",
+               r->url, (unsigned)ps.used, (unsigned)ps.capacity, (unsigned)ps.largest_free);
+        r->done_called = true; req_free(r); *err = HTTPC_ENOMEM; return -1;
+    }
     r->state = HTTPC_DNS;      /* the connection starts on the next tick */
     return r->id;
 }
