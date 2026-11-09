@@ -5,7 +5,7 @@
 static char body[256];
 static char res1[96] = "pending", res2[96] = "pending";
 static char file[64];
-static char url2[128];
+static char url2[256];
 
 static void done2(void *arg, const pex_http_res_t *r) {
     pex_fs_entry_t st;
@@ -44,7 +44,7 @@ static int keepalive(void *arg) { return PEX_TASK_AGAIN; }
 int pex_main(const pex_host_t *host, uint32_t reason, void *arg) {
     if (reason == PEX_INIT) { return pex_bus_op("pextest.net", op_net, 0); }
     if (reason == PEX_APP_RUN) {
-        static char url[128];
+        static char url[256];
         if (!pex_json_str(arg, "url", url, sizeof url)) { return PEX_EINVAL; }
         pex_json_str(arg, "file_url", url2, sizeof url2);
         if (!pex_json_str(arg, "file", file, sizeof file)) { pex_snprintf(file, sizeof file, "lfs:/pextest_dl.bin"); }

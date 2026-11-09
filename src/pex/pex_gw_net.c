@@ -1,7 +1,16 @@
 /*
  * The net group: the firmware's HTTP(S) client (src/net/httpc.h) for native
- * modules -- start, status, cancel; the body into a module buffer or into a
- * LittleFS file; the completion callback from the main loop.
+ * modules -- start, status, cancel; the body into a module buffer, a
+ * LittleFS file (lfs:/), or a file on the SD card (sd:/); the completion
+ * callback from the main loop.
+ *
+ * A to_file body lands in a 2 KiB ring from the module's pool first; room()
+ * holds TCP back while it is full. The poll drains it: into the LittleFS file
+ * directly, or, for the card, into the SD worker's 4 KiB transfer buffer,
+ * which goes to the card as one write job when full, idle, or at the end.
+ * A card download is written to "<path>.part" and renamed over the path only
+ * once the whole body is on the card, so a failed or cancelled one never
+ * leaves a short file under the real name.
  *
  * Memory: httpc has ONE allocator for everyone. In a Lua build it is the Lua
  * arena's top (what lhttp sets, copied below so a native request does not
@@ -16,7 +25,12 @@
 #include <strings.h>
 #include "autoconf.h"
 #include "pex/pex_gw.h"
+#include "pico/time.h"
 #include "fs/fs.h"
+#if CONFIG_SD
+#include "sd/sd_jobs.h"
+#include "sd/sd_store.h"
+#endif
 #include "lua/lfile_path.h"
 #include "net/httpc.h"
 #if CONFIG_LUA_ENABLE || CONFIG_NET_HTTP_TLS
@@ -27,6 +41,12 @@
 #endif
 
 #define RING 2048u
+#define SD_FILL_IDLE_MS 200u     /* a part-filled card buffer is written after this */
+
+enum { V_NONE = 0, V_LFS, V_SD };
+/* The card side: open the .part file, write each filled buffer, close, then
+ * replace the real name with it (remove + rename), or remove it on failure. */
+enum { SD_OPEN = 1, SD_OPENING, SD_READY, SD_WRITING, SD_CLOSING, SD_UNLINK, SD_RENAMING, SD_REMOVING, SD_DONE };
 
 typedef struct {
     bool used;
@@ -44,6 +64,15 @@ typedef struct {
     uint8_t *ring;
     uint32_t rhead, rtail;          /* free-running */
     bool file_err;
+    uint8_t vol;                    /* V_NONE, V_LFS, V_SD */
+    char ferr[48];                  /* why the file failed, for res.msg */
+#if CONFIG_SD
+    uint8_t sd;                     /* SD_* */
+    int sd_file;                    /* open card file, or -1 */
+    uint32_t sd_token, fill_token;  /* the job in flight; the buffer being filled */
+    uint32_t fill_len, fill_ms, written;
+    bool sd_ok;                     /* the body is complete and should replace the path */
+#endif
 } hslot_t;
 static hslot_t s_h[HTTPC_MAX];
 
@@ -116,8 +145,23 @@ static void on_done(void *u, httpc_err_t err, const char *msg) {
 }
 static const httpc_sink_t SINK = { on_status, on_header, room, on_body, on_done };
 
+/* The card side's jobs and file, dropped without waiting (cancel, unload,
+ * and the end of a finished one, where they are already idle). A cancelled
+ * download leaves at most its "<path>.part" behind. */
+static void sd_drop(hslot_t *h) {
+#if CONFIG_SD
+    if (h->vol != V_SD) { return; }
+    if (h->fill_token) { sdj_abandon(h->fill_token); h->fill_token = 0; }
+    if (h->sd_token) { sdj_abandon(h->sd_token); h->sd_token = 0; }
+    if (h->sd_file >= 0) { sdj_close_async(h->sd_file); h->sd_file = -1; }
+#else
+    (void)h;
+#endif
+}
+
 static void release(hslot_t *h) {
     if (h->id > 0) { httpc_cancel(h->id); }
+    sd_drop(h);
     if (h->fmem) {
         if (h->fh >= 0) { fs_fclose(h->fh); }
         pex_free(h->fmem);
@@ -141,10 +185,35 @@ int pex_http_start(const pex_http_req_t *q, pex_http_cb done, void *arg) {
     memset(h, 0, sizeof *h);
     h->fh = -1;
     if (q->to_file) {
-        if (lfile_parse_path(q->to_file, strlen(q->to_file), h->fpath, sizeof h->fpath) != LFILE_LFS || !h->fpath[0]) {
-            pex_seterr(PEX_EINVAL, "to_file must be lfs:/... in this version");
+        int v = lfile_parse_path(q->to_file, strlen(q->to_file), h->fpath, sizeof h->fpath);
+#if CONFIG_SD
+        if (v == LFILE_SD && h->fpath[0]) {
+            /* Refused now, not after the download: the path must leave room for ".part". */
+            if (strlen(h->fpath) + 5 > SDJ_PATH_MAX) {
+                pex_seterr(PEX_EINVAL, "to_file: sd:/ path too long");
+                memset(h, 0, sizeof *h);
+                return PEX_EINVAL;
+            }
+            h->ring = pex_alloc_long(RING);
+            if (!h->ring) {
+                printf("pex: http to_file sd:/%s: no PEX pool memory for its %u B ring\n", h->fpath, (unsigned)RING);
+                memset(h, 0, sizeof *h);
+                return PEX_ENOMEM;
+            }
+            h->vol = V_SD;
+            h->sd = SD_OPEN;
+            h->sd_file = -1;
+            v = 0;                       /* handled */
+        } else
+#endif
+        if (v != LFILE_LFS || !h->fpath[0]) {
+            pex_seterr(PEX_EINVAL, CONFIG_SD ? "to_file must be lfs:/... or sd:/..." : "to_file must be lfs:/... (no SD card in this build)");
+            memset(h, 0, sizeof *h);
             return PEX_EINVAL;
         }
+    }
+    if (q->to_file && h->vol != V_SD) {
+        h->vol = V_LFS;
         h->ring = pex_alloc_long(RING);
         h->fmem = pex_alloc_long(fs_file_mem());
         if (!h->ring || !h->fmem) {
@@ -211,6 +280,7 @@ void pex_gw_net_unload(pex_mod_t *m) {
     for (int i = 0; i < HTTPC_MAX; i++) {
         if (s_h[i].used && s_h[i].mod == m) {
             if (s_h[i].fmem && s_h[i].fh >= 0) { fs_fclose(s_h[i].fh); s_h[i].fh = -1; fs_delete(s_h[i].fpath); }
+            sd_drop(&s_h[i]);
             s_h[i].fmem = NULL;          /* the module's blocks go with it */
             s_h[i].ring = NULL;
             if (s_h[i].id > 0) { httpc_cancel(s_h[i].id); }
@@ -218,6 +288,142 @@ void pex_gw_net_unload(pex_mod_t *m) {
         }
     }
 }
+
+#if CONFIG_SD
+static void sd_fail(hslot_t *h, const char *why, int rc) {
+    if (!h->file_err) {
+        h->file_err = true;
+        snprintf(h->ferr, sizeof h->ferr, "%s (%d)", why, rc);
+        printf("pex: http to_file sd:/%s: %s (%d)\n", h->fpath, why, rc);
+    }
+}
+
+/* One pass of the card side. True once it has nothing left to do, so the
+ * request may complete; false while a job is in flight or still to post.
+ * Every job goes through the one SD worker slot: a refused post is tried
+ * again on a later pass. */
+static bool sd_step(hslot_t *h) {
+    sdj_t q;
+    if (h->sd_token) {
+        sdj_t r;
+        enum sdj_state st = sdj_poll(h->sd_token, &r);
+        if (st == SDJ_POSTED || st == SDJ_FILLING) { return false; }
+        if (st == SDJ_DONE) { sdj_finish(h->sd_token); }
+        h->sd_token = 0;
+        int rc = st == SDJ_DONE ? r.rc : LS_EIO;
+        switch (h->sd) {
+            case SD_OPENING:
+                if (rc < 0) { sd_fail(h, "cannot open the file on the card", rc); h->sd = SD_DONE; }
+                else { h->sd_file = rc; h->sd = SD_READY; }
+                break;
+            case SD_WRITING:
+                if (rc < 0 || (uint32_t)rc != h->written) {
+                    sd_fail(h, rc == LS_ENOSPC ? "the card is full" : "card write failed", rc);
+                    h->sd = SD_CLOSING;      /* close, then remove the .part */
+                    break;
+                }
+                h->sd = SD_READY;
+                break;
+            case SD_CLOSING:
+                h->sd_file = -1;
+                if (rc < 0) { sd_fail(h, "close failed", rc); }
+                h->sd = h->sd_ok && !h->file_err ? SD_UNLINK : SD_REMOVING;
+                break;
+            case SD_UNLINK:                  /* the old file, if any: not there is fine */
+                h->sd = SD_RENAMING;
+                break;
+            case SD_RENAMING:
+                if (rc < 0) { sd_fail(h, "rename onto the path failed", rc); h->sd = SD_REMOVING; }
+                else { h->sd = SD_DONE; }
+                break;
+            case SD_REMOVING:
+                h->sd = SD_DONE;
+                break;
+        }
+    }
+    if (h->file_err) {
+        /* The card failed: the rest of the body has nowhere to go. Stop the
+         * download and drop what is buffered; close and remove follow. */
+        h->rtail = h->rhead;
+        if (h->fill_token) { sdj_abandon(h->fill_token); h->fill_token = 0; }
+        if (!h->res.done) {
+            if (h->id > 0) { httpc_cancel(h->id); h->id = 0; }
+            h->res.done = 1;
+        }
+        if (h->sd == SD_READY) { h->sd = SD_CLOSING; }
+    }
+    if (h->sd == SD_DONE) { return true; }
+    bool ok_status = h->res.status >= 200 && h->res.status <= 299;
+    bool end = h->res.done && h->rhead == h->rtail;
+    memset(&q, 0, sizeof q);
+    if (h->sd == SD_OPEN) {
+        /* Not before a 2xx: an error page never touches the card. */
+        if (h->res.done && !ok_status) { h->rtail = h->rhead; h->sd = SD_DONE; return true; }
+        if (!h->res.status) { return h->res.done; }
+        if (!ok_status) { h->rtail = h->rhead; return h->res.done; }
+        q.op = SDJ_OPEN;
+        q.mode = LS_WR;
+        snprintf(q.path, sizeof q.path, "%s.part", h->fpath);
+        if (sdj_post(&q, &h->sd_token)) { h->sd = SD_OPENING; }
+        return false;
+    }
+    if (h->sd == SD_READY && !h->file_err) {
+        /* Ring -> the worker's transfer buffer, then one write job per 4 KiB. */
+        if (h->rhead != h->rtail && !h->fill_token) {
+            if (sdj_begin_write(h->sd_file, &h->fill_token)) { h->fill_len = 0; }
+        }
+        if (h->fill_token) {
+            uint8_t *dst = sdj_buf();
+            if (h->fill_len == 0 && h->rhead != h->rtail) { h->fill_ms = to_ms_since_boot(get_absolute_time()); }
+            while (h->rhead != h->rtail && h->fill_len < SDJ_BUF) { dst[h->fill_len++] = h->ring[h->rtail++ % RING]; }
+            bool full = h->fill_len >= SDJ_BUF;
+            bool idle = h->fill_len && to_ms_since_boot(get_absolute_time()) - h->fill_ms >= SD_FILL_IDLE_MS;
+            bool last = h->res.done && h->rhead == h->rtail;
+            if (h->fill_len && (full || idle || last)) {
+                h->written = h->fill_len;
+                sdj_commit(h->fill_token, h->fill_len);
+                h->sd_token = h->fill_token;
+                h->fill_token = 0;
+                h->fill_len = 0;
+                h->sd = SD_WRITING;
+                return false;
+            }
+            if (!h->fill_len && last) { sdj_abandon(h->fill_token); h->fill_token = 0; }
+            else if (!last) { return false; }
+        }
+        if (!end) { return false; }
+        h->sd_ok = !h->res.err && ok_status;
+        h->sd = SD_CLOSING;
+    }
+    if (h->sd == SD_CLOSING) {
+        if (h->sd_file < 0) { h->sd = h->sd_ok && !h->file_err ? SD_UNLINK : SD_REMOVING; return false; }
+        q.op = SDJ_CLOSE;
+        q.file = h->sd_file;
+        sdj_post(&q, &h->sd_token);
+        return false;
+    }
+    if (h->sd == SD_UNLINK) {
+        q.op = SDJ_REMOVE;
+        snprintf(q.path, sizeof q.path, "%s", h->fpath);
+        sdj_post(&q, &h->sd_token);
+        return false;
+    }
+    if (h->sd == SD_RENAMING) {
+        q.op = SDJ_RENAME;
+        snprintf(q.path, sizeof q.path, "%s.part", h->fpath);
+        snprintf(q.path2, sizeof q.path2, "%s", h->fpath);
+        sdj_post(&q, &h->sd_token);
+        return false;
+    }
+    if (h->sd == SD_REMOVING) {
+        q.op = SDJ_REMOVE;
+        snprintf(q.path, sizeof q.path, "%s.part", h->fpath);
+        sdj_post(&q, &h->sd_token);
+        return false;
+    }
+    return false;
+}
+#endif
 
 void pex_gw_net_poll(void) {
     bool any = false;
@@ -235,7 +441,7 @@ void pex_gw_net_poll(void) {
             h->res.err = HTTPC_ECANCELLED;
             snprintf(h->res.msg, sizeof h->res.msg, "request dropped (client reset)");
         }
-        if (h->ring && h->rhead != h->rtail) {
+        if (h->vol == V_LFS && h->rhead != h->rtail) {
             uint8_t tmp[256];
             uint32_t budget = 4096;
             while (h->rhead != h->rtail && budget) {
@@ -247,6 +453,9 @@ void pex_gw_net_poll(void) {
                 budget = budget > k ? budget - k : 0;
             }
         }
+#if CONFIG_SD
+        if (h->vol == V_SD && !sd_step(h)) { continue; }   /* the card still has work */
+#endif
         if (h->res.done && (!h->ring || h->rhead == h->rtail)) {
             if (h->fmem) {
                 fs_fclose(h->fh);
@@ -254,6 +463,10 @@ void pex_gw_net_poll(void) {
                 bool ok = !h->res.err && !h->file_err && h->res.status >= 200 && h->res.status <= 299;
                 if (!ok) { fs_delete(h->fpath); }
                 if (h->file_err) { h->res.err = HTTPC_EIO; snprintf(h->res.msg, sizeof h->res.msg, "file write failed"); }
+            }
+            if (h->vol == V_SD && h->file_err && !h->res.err) {
+                h->res.err = HTTPC_EIO;
+                snprintf(h->res.msg, sizeof h->res.msg, "%s", h->ferr[0] ? h->ferr : "card write failed");
             }
             pex_http_res_t res = h->res;
             pex_mod_t *m = h->mod;

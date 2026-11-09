@@ -663,7 +663,7 @@
         "    uint8_t follow;          /* redirects to follow */",
         "    uint8_t insecure;        /* skip certificate checks */",
         "    void *buf; size_t buf_cap; /* the body goes here (truncated past cap) ... */",
-        "    const char *to_file;     /* ... or into this file (lfs:/...) */",
+        "    const char *to_file;     /* ... or into this file: lfs:/... or (fw 1.317+) sd:/... */",
         "} pex_http_req_t;",
         "typedef struct { int status; int err; uint32_t bytes; int64_t total; uint8_t done, truncated; char msg[48]; } pex_http_res_t;",
         "typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);"
@@ -672,7 +672,7 @@
         {
           "name": "pex_http_start",
           "proto": "int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)",
-          "doc": "request id (> 0); done runs once from the main loop. A User-Agent line in headers replaces the firmware's own (fw 1.231+)"
+          "doc": "request id (> 0); done runs once from the main loop. A User-Agent line in headers replaces the firmware's own (fw 1.231+). to_file sd:/path (fw 1.317+) streams to the card as path.part, renamed over path only when the whole 2xx body is written; an older firmware refuses it at once with PEX_EINVAL"
         },
         {
           "name": "pex_http_status",

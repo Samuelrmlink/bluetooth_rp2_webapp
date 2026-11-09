@@ -1611,7 +1611,7 @@ typedef void (*pex_http_cb)(void *arg, const pex_http_res_t *res);
 
 | symbol | FNV-1a | since | |
 |---|---|---|---|
-| `int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)` | `1cb6ef04` | 1.0 | request id (> 0); done runs once from the main loop. A User-Agent line in headers replaces the firmware's own (fw 1.231+) |
+| `int pex_http_start(const pex_http_req_t *req, pex_http_cb done, void *arg)` | `1cb6ef04` | 1.0 | request id (> 0); done runs once from the main loop. A User-Agent line in headers replaces the firmware's own (fw 1.231+). to_file may be sd:/... (fw 1.317+): written as path.part and renamed over path once the whole 2xx body is on the card |
 | `int pex_http_status(int id, pex_http_res_t *out)` | `48b3c23a` | 1.0 |  |
 | `int pex_http_cancel(int id)` | `49e97eb2` | 1.0 |  |
 
