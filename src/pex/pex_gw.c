@@ -672,6 +672,24 @@ static void op_uninstall(const char *params, api_reply_fn reply, void *ctx, long
     api_reply_ok(reply, ctx, id, "{\"uninstalled\":true}");
 }
 
+#if CONFIG_BT_LE
+/* The shared scan's schedule: who wants it at which priority, and the quiet
+ * slot, if one is held. */
+static void op_radio(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    char b[900];
+    if (pex_gw_bt_sched_json(b, sizeof b) < 0) { api_reply_err(reply, ctx, id, "too_large", "radio"); return; }
+    api_reply_ok(reply, ctx, id, b);
+}
+
+/* End the quiet slot now: the holder's pex_bt_quiet_left answers PEX_ENOENT. */
+static void op_radio_revoke(const char *params, api_reply_fn reply, void *ctx, long id) {
+    (void)params;
+    if (pex_gw_bt_quiet_revoke() < 0) { api_reply_err(reply, ctx, id, "not_found", "no quiet slot"); return; }
+    api_reply_ok(reply, ctx, id, "{\"revoked\":true}");
+}
+#endif
+
 static void op_compact(const char *params, api_reply_fn reply, void *ctx, long id) {
     (void)params;
     if (!xip_up(reply, ctx, id)) { return; }
@@ -832,6 +850,9 @@ static const op_def_t pex_ops_tbl[] = {
     { "pex.autostart", op_autostart }, { "pex.faults", op_faults }, { "pex.faults_clear", op_faults_clear },
     { "pex.ops", op_ops },       { "pex.install", op_install }, { "pex.installed", op_installed },
     { "pex.uninstall", op_uninstall }, { "pex.compact", op_compact }, { "pex.verify", op_verify },
+#if CONFIG_BT_LE
+    { "pex.radio", op_radio },   { "pex.radio_revoke", op_radio_revoke },
+#endif
     { NULL, NULL }
 };
 static const char *const pex_topics[] = { "pex.*", NULL };

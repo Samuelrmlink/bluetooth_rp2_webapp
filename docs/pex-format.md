@@ -1655,9 +1655,15 @@ typedef void (*pex_bt_fn)(void *arg, const pex_bt_event_t *ev);
 
 | symbol | FNV-1a | since | |
 |---|---|---|---|
-| `int pex_bt_scan(uint32_t duration_ms, int active)` | `28bd958f` | 1.0 | 0 = until pex_bt_scan_stop |
-| `void pex_bt_scan_stop(void)` | `55276ce8` | 1.0 |  |
+| `int pex_bt_scan(uint32_t duration_ms, int active)` | `28bd958f` | 1.0 | high priority. 0 = until pex_bt_scan_stop. One request per module; fw 1.314+ keeps it across scan sessions and pauses it during another module's quiet slot |
+| `void pex_bt_scan_stop(void)` | `55276ce8` | 1.0 | drops this module's request only (fw 1.311+); the scan ends when no request wants it. A scan the web page or Lua started is not stopped |
 | `int pex_bt_scanning(void)` | `97771765` | 1.0 |  |
+| `int pex_bt_scan_periodic(uint32_t burst_ms, uint32_t period_ms, int active)` | `750f9771` | 1.4 | low priority: a burst of 1..30 s every period (>= 10 s). One request per module, replacing its last; the same call again keeps the schedule |
+| `int pex_bt_scan_state(void)` | `b2715fc5` | 1.4 | PEX_BT_SCAN_NONE / _ON / _WAITING / _QUIET / _BLOCKED for this module's request |
+| `int pex_bt_quiet(uint32_t ms)` | `ac9ab84e` | 1.4 | hold other modules' scans off for up to 10 min: slot id, PEX_EBUSY (another holder) or PEX_EAGAIN (within 25 s of the last slot ending) |
+| `int pex_bt_quiet_extend(int id, uint32_t ms)` | `2a6ad7fb` | 1.4 | ends ms from now, capped at 10 min from the grant: ms left or PEX_ENOENT |
+| `int pex_bt_quiet_release(int id)` | `5d9a8c50` | 1.4 | end the slot when its work is done |
+| `int pex_bt_quiet_left(int id)` | `df435bba` | 1.4 | ms left, or PEX_ENOENT once expired or revoked (pex.radio_revoke) |
 | `int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128)` | `faf0eced` | 1.0 | the scan table from the front, in registry order, not by RSSI. Either filter matches; NULLs mean every LE device. Stops at max, so an unfiltered caller that passes less than the registry size never sees the rest |
 | `int pex_bt_uuids128(const uint8_t *addr, char (*out)[37], int max)` | `587ac1fb` | 1.0 |  |
 | `int pex_bt_addr(const char *str, uint8_t *addr)` | `572b4ac9` | 1.0 | parse "AA:BB:.." |

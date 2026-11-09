@@ -22,7 +22,12 @@ void le_central_init(void);
 
 bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms);
 void le_scan_stop(void);
+/* True while a scan is wanted, including while a connect or GATT discovery
+ * holds it paused (the radio then is not scanning; the tick resumes it). */
 bool le_scanning(void);
+/* Changes on every le_scan_start, so a holder can tell whether the scan
+ * running now is the one it started. */
+uint32_t le_scan_gen(void);
 
 /*
  * Is the BLE side using the radio right now -- scanning, or holding a link?

@@ -199,6 +199,57 @@ void le_central_init(void) {
     hci_add_event_handler(&adv_cb);
 }
 
+/* What the radio is doing, as opposed to s_scanning (what was asked for).
+ * The two differ while a connect or discovery holds the scan paused. */
+static bool s_scan_live;
+static uint32_t s_scan_gen;      /* counts scan sessions: one per le_scan_start */
+uint32_t le_scan_gen(void) { return s_scan_gen; }
+static uint8_t s_scan_duty;      /* SCAN_DUTY_* last given to the controller */
+static bool s_scan_active_set;   /* active flag last given to the controller */
+
+enum { SCAN_DUTY_FULL = 1, SCAN_DUTY_LOW = 2 };
+
+/* Scan timing in 0.625 ms units. With no link up the scan has the radio:
+ * window = interval. With a link up, a 30 ms window every 150 ms (20%)
+ * leaves the connection events, and WiFi, their airtime. */
+#define SCAN_FULL_INTERVAL 0x0030
+#define SCAN_FULL_WINDOW   0x0030
+#define SCAN_LOW_INTERVAL  0x00F0
+#define SCAN_LOW_WINDOW    0x0030
+
+static void scan_radio_off(void) {
+    if (s_scan_live) {
+        gap_stop_scan();
+        s_scan_live = false;
+    }
+}
+
+/* Bring the radio in line with s_scanning: paused while a link is coming
+ * up (or WiFi holds the radio), and at the duty the link count calls for.
+ * A change of duty or of the active flag restarts the scan. */
+static void scan_apply(void) {
+    bool want = s_scanning && !le_bringup_busy();
+#if CONFIG_NET_WIFI
+    if (want && (wifi_bt_hold() || wifi_scanning())) { want = false; }
+#endif
+    if (!want) { scan_radio_off(); return; }
+    uint8_t duty = le_link_count() > 0 ? SCAN_DUTY_LOW : SCAN_DUTY_FULL;
+    bool active = s_filter.active;
+    if (s_scan_live && duty == s_scan_duty && active == s_scan_active_set) { return; }
+    scan_radio_off();
+    /* Active scanning solicits SCAN_RSP, which is where most peripherals put
+     * the complete local name. A passive scan often sees no names at all. */
+    if (duty == SCAN_DUTY_LOW) {
+        gap_set_scan_parameters(active ? 1 : 0, SCAN_LOW_INTERVAL, SCAN_LOW_WINDOW);
+    } else {
+        gap_set_scan_parameters(active ? 1 : 0, SCAN_FULL_INTERVAL, SCAN_FULL_WINDOW);
+    }
+    gap_start_scan();
+    s_scan_live = true;
+    s_scan_duty = duty;
+    s_scan_active_set = active;
+}
+
 bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms) {
 #if CONFIG_NET_WIFI
     /* Give WiFi the shared radio first (wifi_bt_hold), and never run a BLE
@@ -209,12 +260,16 @@ bool le_scan_start(const le_scan_filter_t *f, uint32_t duration_ms) {
     /* Reachable straight from a script (bt.scan) on a boot with no BTstack. */
     if (!bt_stack_up()) { return false; }
     s_filter = *f;
-    /* Active scanning solicits SCAN_RSP, which is where most peripherals put
-     * the complete local name. A passive scan often sees no names at all. */
-    gap_set_scan_parameters(f->active ? 1 : 0, 0x0030, 0x0030);
-    gap_start_scan();
+    /* Every start is a new session, also one that joins a running scan (the
+     * web Scanner or Lua while a module scans). A PEX module's claim is on
+     * the session it started, so it never ends a scan someone else asked for. */
+    s_scan_gen++;
     s_scanning = true;
     s_scan_until_ms = duration_ms ? now_ms() + duration_ms : 0;
+    /* During a connect or GATT discovery the scan is held paused: it is
+     * wanted (le_scanning() is true) but the radio is not scanning. The
+     * tick starts it once bring-up is over. */
+    scan_apply();
     return true;
 }
 
@@ -222,7 +277,7 @@ void le_scan_stop(void) {
     if (!s_scanning || !bt_stack_up()) {
         return;
     }
-    gap_stop_scan();
+    scan_radio_off();
     s_scanning = false;
     s_scan_until_ms = 0;
     api_emit("scan.done", "{\"reason\":\"stopped\"}");
@@ -253,11 +308,13 @@ void le_central_tick(void) {
         LE_PEX(19, NULL, -1, NULL, 0, -1);
     }
     if (s_scanning && s_scan_until_ms && (int32_t)(now_ms() - s_scan_until_ms) >= 0) {
-        gap_stop_scan();
+        scan_radio_off();
         s_scanning = false;
         s_scan_until_ms = 0;
         api_emit("scan.done", "{\"reason\":\"timeout\"}");
     }
+    /* Resume a paused scan once bring-up is over, and follow the link count. */
+    scan_apply();
 
     discovery_tick();
     op_tick();
@@ -423,7 +480,7 @@ int le_link_count(void) {
 int le_release_radio(const char *why) {
     if (!bt_stack_up()) { return 0; }
     if (s_scanning) {
-        gap_stop_scan();
+        scan_radio_off();
         s_scanning = false;
         s_scan_until_ms = 0;
         api_emit("scan.done", "{\"reason\":\"wifi\"}");
@@ -1067,11 +1124,10 @@ bool le_connect(const uint8_t *addr, uint8_t addr_type) {
     if (wifi_bt_hold()) { return false; }
 #endif
     /* Scanning and connecting at once is asking the controller to do two
-     * things with one radio; stop first. */
-    if (s_scanning) {
-        gap_stop_scan();
-        s_scanning = false;
-    }
+     * things with one radio. Pause the scan: it stays wanted, so a module
+     * does not start it again mid-discovery, and the tick resumes it (at the
+     * lower duty, as a link is then up) once bring-up is over. */
+    scan_radio_off();
     s_connecting = true;
     s_connect_deadline_ms = now_ms() + 15000;
     gap_connect((uint8_t *)addr, (bd_addr_type_t)addr_type);

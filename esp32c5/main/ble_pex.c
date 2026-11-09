@@ -51,6 +51,14 @@ static int off(void) { return PEX_ENOTSUP; }
 int pex_bt_scan(uint32_t duration_ms, int active) { (void)duration_ms; (void)active; return off(); }
 void pex_bt_scan_stop(void) {}
 int pex_bt_scanning(void) { return off(); }
+int pex_bt_scan_periodic(uint32_t burst_ms, uint32_t period_ms, int active) {
+    (void)burst_ms; (void)period_ms; (void)active; return off();
+}
+int pex_bt_scan_state(void) { return PEX_BT_SCAN_NONE; }
+int pex_bt_quiet(uint32_t ms) { (void)ms; return off(); }
+int pex_bt_quiet_extend(int id, uint32_t ms) { (void)id; (void)ms; return PEX_ENOENT; }
+int pex_bt_quiet_release(int id) { (void)id; return PEX_ENOENT; }
+int pex_bt_quiet_left(int id) { (void)id; return PEX_ENOENT; }
 int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128) {
     (void)out; (void)max; (void)name_prefix; (void)uuid128; return off();
 }
@@ -1231,6 +1239,18 @@ void pex_bt_scan_stop(void) {
     if (s_synced && ble_gap_disc_active()) ble_gap_disc_cancel();
 }
 int pex_bt_scanning(void) { return s_synced && ble_gap_disc_active() ? 1 : 0; }
+
+/* This port has no scan scheduler yet. A low-priority request scans the way
+ * pex_bt_scan(0) does, and quiet slots are not offered. */
+int pex_bt_scan_periodic(uint32_t burst_ms, uint32_t period_ms, int active) {
+    (void)burst_ms; (void)period_ms;
+    return pex_bt_scan(0, active);
+}
+int pex_bt_scan_state(void) { return pex_bt_scanning() ? PEX_BT_SCAN_ON : PEX_BT_SCAN_NONE; }
+int pex_bt_quiet(uint32_t ms) { (void)ms; return PEX_ENOTSUP; }
+int pex_bt_quiet_extend(int id, uint32_t ms) { (void)id; (void)ms; return PEX_ENOENT; }
+int pex_bt_quiet_release(int id) { (void)id; return PEX_ENOENT; }
+int pex_bt_quiet_left(int id) { (void)id; return PEX_ENOENT; }
 
 int pex_bt_devices(pex_bt_dev_t *out, uint32_t max, const char *name_prefix, const char *uuid128) {
     if (max && !out) return PEX_EINVAL;

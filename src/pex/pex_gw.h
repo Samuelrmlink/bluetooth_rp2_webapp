@@ -72,6 +72,8 @@ void pex_gw_net_unload(pex_mod_t *m);
 void pex_gw_net_poll(void);
 void pex_gw_bt_unload(pex_mod_t *m);
 void pex_gw_bt_poll(void);
+int pex_gw_bt_sched_json(char *buf, size_t cap);   /* the scan schedule (pex.radio) */
+int pex_gw_bt_quiet_revoke(void);                    /* end the quiet slot (pex.radio_revoke) */
 void pex_gw_classic_unload(pex_mod_t *m);
 void pex_gw_classic_poll(void);
 void pex_gw_pio_unload(pex_mod_t *m);

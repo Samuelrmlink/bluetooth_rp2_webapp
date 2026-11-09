@@ -688,7 +688,7 @@
       "name": "bt",
       "id": 12,
       "major": 1,
-      "minor": 3,
+      "minor": 4,
       "doc": "Bluetooth LE central, the operations of Lua's bt.*: the scan table, connect, discovered GATT, read/write/subscribe; values, write completions and link changes arrive as events through a listener (from the main loop). pex_gatt_* replaces the local ATT database and pex_adv_* the advertising payload when BT_PERIPHERAL is on; both return PEX_ENOTSUP when it is off. Pairing calls use bond.c and return PEX_ENOTSUP when BT_LE is off",
       "types": [
         "typedef struct {",
@@ -698,6 +698,11 @@
         "    uint8_t mfg_len; uint8_t mfg[31];",
         "    uint32_t age_ms;",
         "} pex_bt_dev_t;",
+        "#define PEX_BT_SCAN_NONE    0   /* pex_bt_scan_state: no request */",
+        "#define PEX_BT_SCAN_ON      1   /* scanning now */",
+        "#define PEX_BT_SCAN_WAITING 2   /* low priority, between bursts */",
+        "#define PEX_BT_SCAN_QUIET   3   /* held off by another module's quiet slot */",
+        "#define PEX_BT_SCAN_BLOCKED 4   /* wanted; a connect, discovery, or WiFi holds the radio */",
         "#define PEX_BT_NOTIFY 1",
         "#define PEX_BT_INDICATE 2",
         "#define PEX_BT_READ 3",
@@ -736,6 +741,42 @@
         {
           "name": "pex_bt_scanning",
           "proto": "int pex_bt_scanning(void)"
+        },
+        {
+          "name": "pex_bt_scan_periodic",
+          "proto": "int pex_bt_scan_periodic(uint32_t burst_ms, uint32_t period_ms, int active)",
+          "since": 4,
+          "doc": "low-priority scan: one burst of burst_ms (1..30 s) every period_ms (at least 10 s and burst + 5 s). Replaces this module's scan request (one per module); the same call again keeps its schedule. Held off during another module's quiet slot, and given at least 25 s of scanning when the slot ends. pex_bt_scan_stop drops it"
+        },
+        {
+          "name": "pex_bt_scan_state",
+          "proto": "int pex_bt_scan_state(void)",
+          "since": 4,
+          "doc": "this module's scan request: PEX_BT_SCAN_NONE, _ON (scanning now), _WAITING (low priority, between bursts), _QUIET (held off by another module's quiet slot) or _BLOCKED (wanted; a connect, GATT discovery, or WiFi holds the radio)"
+        },
+        {
+          "name": "pex_bt_quiet",
+          "proto": "int pex_bt_quiet(uint32_t ms)",
+          "since": 4,
+          "doc": "ask for a quiet slot: every other module's scans are held off for ms (at most 10 minutes from the grant). Returns the slot id (> 0), PEX_EBUSY while another module holds one, or PEX_EAGAIN in the 25 s after a slot ends. The holder asking again extends its slot. The holder's own scans still run"
+        },
+        {
+          "name": "pex_bt_quiet_extend",
+          "proto": "int pex_bt_quiet_extend(int id, uint32_t ms)",
+          "since": 4,
+          "doc": "the slot now ends ms from now, never past 10 minutes from its grant. Returns the ms left, or PEX_ENOENT when the slot has ended or was revoked"
+        },
+        {
+          "name": "pex_bt_quiet_release",
+          "proto": "int pex_bt_quiet_release(int id)",
+          "since": 4,
+          "doc": "end the slot early, when the work it was for is done. PEX_ENOENT when it already ended"
+        },
+        {
+          "name": "pex_bt_quiet_left",
+          "proto": "int pex_bt_quiet_left(int id)",
+          "since": 4,
+          "doc": "ms left in the slot, or PEX_ENOENT once it has expired or been revoked (pex.radio_revoke, or the module unloading). Poll it during the work the slot is for"
         },
         {
           "name": "pex_bt_devices",
