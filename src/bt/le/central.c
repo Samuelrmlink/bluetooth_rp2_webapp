@@ -1145,11 +1145,12 @@ bool le_connect(const uint8_t *addr, uint8_t addr_type) {
     scan_radio_off();
     s_connecting = true;
     s_connect_deadline_ms = now_ms() + 15000;
-    /* BTstack's defaults, except the supervision timeout: 5 s (as Android)
-     * instead of 720 ms. A peer that erases flash when it accepts an OTA
-     * image (NXP OTAP) goes quiet for longer than 720 ms, and the link was
-     * dropped under it. 5 s > (1 + latency 4) x 30 ms x 2. */
-    gap_set_connection_parameters(0x0060, 0x0030, 0x0008, 0x0018, 4,
+    /* Android's link defaults, which is what the phone apps flash iTi units
+     * with: interval 30-50 ms, latency 0, supervision timeout 5 s. BTstack's
+     * own (10-30 ms, latency 4, 720 ms) dropped an NXP OTAP peer while it
+     * erased flash for an offered image. A peer may still ask for other
+     * values; BTstack accepts any in its default range. */
+    gap_set_connection_parameters(0x0060, 0x0030, 24, 40, 0,
                                   LE_SUPERVISION_TIMEOUT_10MS, 0, 0);
     gap_connect((uint8_t *)addr, (bd_addr_type_t)addr_type);
     return true;

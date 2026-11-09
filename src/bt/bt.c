@@ -14,6 +14,7 @@
 
 #include "bt/bt.h"
 #include "api/ops.h"
+#include "api/api.h"
 #include "bt/registry.h"
 #include "bt/le/central.h"
 #include "bt/le/gattdb.h"
@@ -262,6 +263,10 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
                     le_on_connect_failed(st, peer);
                     break;
                 }
+                printf("bt: %s link: interval %u x 1.25 ms, latency %u, timeout %u0 ms\n", bd_addr_to_str(peer),
+                       gap_subevent_le_connection_complete_get_conn_interval(pkt),
+                       gap_subevent_le_connection_complete_get_conn_latency(pkt),
+                       gap_subevent_le_connection_complete_get_supervision_timeout(pkt));
 #if CONFIG_BT_PERIPHERAL
                 /* Role 0 is central. A phone that connected to our advert
                  * is not one of the central's outgoing links; handing it to
@@ -277,6 +282,24 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
                 le_on_connected(gap_subevent_le_connection_complete_get_connection_handle(pkt),
                                 peer,
                                 gap_subevent_le_connection_complete_get_peer_address_type(pkt));
+            }
+            break;
+        case HCI_EVENT_LE_META:
+            /* A peer (or this side) changed the link's parameters: log what
+             * the link now runs at, so a drop can be read against them. */
+            if (hci_event_le_meta_get_subevent_code(pkt) == HCI_SUBEVENT_LE_CONNECTION_UPDATE_COMPLETE) {
+                hci_con_handle_t h = hci_subevent_le_connection_update_complete_get_connection_handle(pkt);
+                bt_device_t *d = bt_registry_by_handle(h);
+                char json[160];
+                snprintf(json, sizeof json,
+                         "{\"addr\":\"%s\",\"status\":%u,\"interval_x1250us\":%u,\"latency\":%u,\"timeout_ms\":%u}",
+                         d ? bd_addr_to_str(d->addr) : "?",
+                         hci_subevent_le_connection_update_complete_get_status(pkt),
+                         hci_subevent_le_connection_update_complete_get_conn_interval(pkt),
+                         hci_subevent_le_connection_update_complete_get_conn_latency(pkt),
+                         10u * hci_subevent_le_connection_update_complete_get_supervision_timeout(pkt));
+                printf("bt: link update %s\n", json);
+                api_emit("dev.link_params", json);
             }
             break;
         case HCI_EVENT_DISCONNECTION_COMPLETE:
