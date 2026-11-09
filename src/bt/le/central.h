@@ -88,7 +88,7 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
 /* A peer connected to us. Record it so pairing confirm, passkey, and forget
  * can name the link. Does not start GATT client discovery. */
 void le_on_incoming(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type);
-void le_on_disconnected(uint16_t con_handle);
+void le_on_disconnected(uint16_t con_handle, uint8_t reason);
 
 /* Called from bond.c when pairing on a link finishes (ok = success). A
  * cascade parked by an ATT security refusal resumes here; nothing else did,

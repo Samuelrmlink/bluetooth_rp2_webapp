@@ -45,8 +45,9 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
  * chr is the absolute index into the link's gattdb (-1 for link events). */
 void le_pex_event(int kind, const uint8_t *addr, int chr, const uint8_t *data, uint16_t len, int status)
     __attribute__((weak));
+#define LE_SUPERVISION_TIMEOUT_10MS 500u     /* 5 s */
 #define LE_PEX(...) do { if (le_pex_event) { le_pex_event(__VA_ARGS__); } } while (0)
-void le_on_disconnected(uint16_t con_handle);
+void le_on_disconnected(uint16_t con_handle, uint8_t reason);
 
 static btstack_packet_callback_registration_t adv_cb;
 static le_scan_filter_t s_filter;
@@ -1069,7 +1070,7 @@ void le_on_connected(uint16_t con_handle, const uint8_t *addr, uint8_t addr_type
     start_discovery(l);
 }
 
-void le_on_disconnected(uint16_t con_handle) {
+void le_on_disconnected(uint16_t con_handle, uint8_t reason) {
     le_link_t *l = link_by_handle(con_handle);
     bt_device_t *d = bt_registry_by_handle(con_handle);
     /* A Classic ACL drop, or a phone that connected to the peripheral, uses
@@ -1106,7 +1107,21 @@ void le_on_disconnected(uint16_t con_handle) {
         le_notify_flush(a);
     }
 #endif
-    emit_device_event("dev.disconnected", addr);
+    /* The HCI reason says who ended it: 0x08 the supervision timeout (the
+     * peer went silent), 0x13 the peer, 0x16 this side, 0x3e a link that
+     * never established. */
+    printf("bt: %s disconnected, reason 0x%02x\n", bd_addr_to_str(addr), reason);
+    {
+        bt_device_t *e = bt_registry_find(addr, BT_TRANSPORT_LE);
+        static char json[800];
+        int n = e ? bt_device_json(e, json, sizeof json - 24) : 0;
+        if (n <= 1 || n >= (int)sizeof json - 24 || json[n - 1] != '}') {
+            n = snprintf(json, sizeof json, "{\"addr\":\"%02X:%02X:%02X:%02X:%02X:%02X\"}",
+                         addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+        }
+        snprintf(json + n - 1, sizeof json - (size_t)(n - 1), ",\"reason\":%u}", (unsigned)reason);
+        api_emit("dev.disconnected", json);
+    }
     LE_PEX(17, addr, -1, NULL, 0, 0);
 }
 
@@ -1130,6 +1145,12 @@ bool le_connect(const uint8_t *addr, uint8_t addr_type) {
     scan_radio_off();
     s_connecting = true;
     s_connect_deadline_ms = now_ms() + 15000;
+    /* BTstack's defaults, except the supervision timeout: 5 s (as Android)
+     * instead of 720 ms. A peer that erases flash when it accepts an OTA
+     * image (NXP OTAP) goes quiet for longer than 720 ms, and the link was
+     * dropped under it. 5 s > (1 + latency 4) x 30 ms x 2. */
+    gap_set_connection_parameters(0x0060, 0x0030, 0x0008, 0x0018, 4,
+                                  LE_SUPERVISION_TIMEOUT_10MS, 0, 0);
     gap_connect((uint8_t *)addr, (bd_addr_type_t)addr_type);
     return true;
 }
@@ -1144,7 +1165,7 @@ bool le_disconnect(const uint8_t *addr) {
          * is gone (or never was). Tear it down here -- no event will. */
         printf("bt: %s: handle 0x%04x unknown to the controller; dropping the link\n",
                bd_addr_to_str((uint8_t *)addr), d->con_handle);
-        le_on_disconnected(d->con_handle);
+        le_on_disconnected(d->con_handle, ERROR_CODE_CONNECTION_TERMINATED_BY_LOCAL_HOST);
     }
     return true;
 }

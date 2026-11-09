@@ -280,7 +280,8 @@ static void hci_handler(uint8_t type, uint16_t ch, uint8_t *pkt, uint16_t size) 
             }
             break;
         case HCI_EVENT_DISCONNECTION_COMPLETE:
-            le_on_disconnected(hci_event_disconnection_complete_get_connection_handle(pkt));
+            le_on_disconnected(hci_event_disconnection_complete_get_connection_handle(pkt),
+                               hci_event_disconnection_complete_get_reason(pkt));
             break;
         default:
             /* Not acted on anywhere in this firmware -- say so rather than
