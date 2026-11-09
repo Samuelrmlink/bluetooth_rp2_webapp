@@ -110,6 +110,9 @@ static sess_t S[2];
  * link events are delivered after the tick, so they share this object. A
  * separate 48-entry table would grow RW past the bytes reserved at boot. */
 #define ANKER_SCAN_MAX 48
+/* While a station is missing: a 25 s scan burst once a minute (low priority). */
+#define ANKER_SCAN_BURST_MS  25000u
+#define ANKER_SCAN_PERIOD_MS 60000u
 static union {
     pex_bt_dev_t dev[ANKER_SCAN_MAX];
     uint8_t dec[640];
@@ -1426,9 +1429,13 @@ static int tick(void *arg) {
     for (int i = 0; i < 2; i++) {
         if (S[i].on && S[i].st == ST_HUNT) { want = 1; }
     }
+    /* Low priority: finding a station a minute late is fine, and a burst
+     * every minute leaves the radio to modules that need its throughput.
+     * The same request each tick keeps its schedule; the firmware holds it
+     * off during another module's quiet slot and gives it a burst after. */
     if (want) {
-        if (!pex_bt_scanning()) { pex_bt_scan(0, 1); }
-    } else if (pex_bt_scanning()) {
+        pex_bt_scan_periodic(ANKER_SCAN_BURST_MS, ANKER_SCAN_PERIOD_MS, 1);
+    } else if (pex_bt_scan_state() != PEX_BT_SCAN_NONE) {
         pex_bt_scan_stop();
     }
     return PEX_TASK_AGAIN;

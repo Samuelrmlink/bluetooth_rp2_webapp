@@ -16,7 +16,7 @@ pex_add_module(anker
     MODEL reloc
     KIND app
     LUA
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "Anker SOLIX / Prime driver"
     OUTPUT_DIR ${PEX_DRIVER_OUT})
 
