@@ -21,7 +21,7 @@
 #include "pico/stdlib.h"
 
 #define LISTENERS 8
-#define QDEPTH 8
+#define QDEPTH 8           /* a power of two: the indices wrap modulo it */
 /* ATT value ceiling on this build: HCI_ACL_PAYLOAD_SIZE minus the 4-byte
  * L2CAP header minus the 3-byte ATT header, which is 252. The C1000's
  * report fragments are that long. A 244-byte slot clipped them, the
@@ -47,9 +47,47 @@ static int nlisteners(void) {
     return n;
 }
 
+/* Does any listener want events for addr? A zero address (a connect
+ * timeout) goes to everyone. */
+static bool wanted(const uint8_t *addr) {
+    static const uint8_t zero[6];
+    for (int i = 0; i < LISTENERS; i++) {
+        if (!s_l[i].fn) { continue; }
+        if (s_l[i].any || !addr || memcmp(addr, zero, 6) == 0 || memcmp(s_l[i].addr, addr, 6) == 0) { return true; }
+    }
+    return false;
+}
+
+/* Link up, down, and connect-failed: a module that misses one keeps acting
+ * on a link that is gone (or never came). These are never the ones dropped. */
+static bool is_link_event(uint8_t kind) { return kind == 16 || kind == 17 || kind == 19; }
+
 void le_pex_event(int kind, const uint8_t *addr, int chr, const uint8_t *data, uint16_t len, int status) {
     if (!s_q || !nlisteners()) { return; }
-    if (s_qhead - s_qtail >= QDEPTH) { s_qtail++; s_dropped++; }     /* drop the oldest */
+    /* Events for a device nobody listens to (another module's telemetry,
+     * say) are filtered here, not at delivery: in the queue they pushed out
+     * the events a listener was waiting for. */
+    if (!wanted(addr)) { return; }
+    if (s_qhead - s_qtail >= QDEPTH) {
+        /* Full: drop the oldest value or write completion. If every entry is
+         * a link event, the incoming one is dropped only if it is not one. */
+        uint32_t victim = s_qhead;
+        for (uint32_t i = s_qtail; i != s_qhead; i++) {
+            if (!is_link_event(s_q[i % QDEPTH].ev.kind)) { victim = i; break; }
+        }
+        if (victim == s_qhead) {
+            if (!is_link_event((uint8_t)kind)) { s_dropped++; return; }
+            victim = s_qtail;
+        }
+        for (uint32_t i = victim; i != s_qtail; i--) {         /* close the gap */
+            s_q[i % QDEPTH] = s_q[(i - 1) % QDEPTH];
+        }
+        s_qtail++;
+        s_dropped++;
+        if ((s_dropped & (s_dropped - 1)) == 0) {
+            printf("pex: bt event queue full, %lu dropped so far\n", (unsigned long)s_dropped);
+        }
+    }
     qent_t *e = &s_q[s_qhead++ % QDEPTH];
     memset(&e->ev, 0, sizeof e->ev);
     if (addr) { memcpy(e->ev.addr, addr, 6); }

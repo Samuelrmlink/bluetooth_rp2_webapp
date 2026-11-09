@@ -1434,7 +1434,17 @@ static const char *op_kind_name(uint8_t kind) {
  * trust -- an out-of-range index read past the end of db.chr[]. */
 static int op_link_for(const uint8_t *addr, uint8_t chr_i, le_link_t **out) {
     bt_device_t *d = bt_registry_find(addr, BT_TRANSPORT_LE);
-    if (!d || !d->connected) { return -1; }
+    if (!d || !d->connected) {
+        /* Logged: a module told "not connected" while it believes the link
+         * is up needs to see which address it asked about. */
+        static uint32_t last;
+        if (now_ms() - last > 1000) {
+            last = now_ms();
+            printf("bt: op on %s refused: %s\n", bd_addr_to_str((uint8_t *)addr),
+                   d ? "not connected" : "not in the registry");
+        }
+        return -1;
+    }
     le_link_t *l = link_by_handle(d->con_handle);
     if (!l || !l->db.ready) { return -2; }
     if (chr_i >= l->db.n_chr) { return -2; }
